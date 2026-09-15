@@ -323,6 +323,9 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
 
   String _tmuxDetail(EnvironmentReadiness state) {
     const base = 'Required for every terminal session';
+    if (state.windowsHost) {
+      return '$base · inside the selected WSL2 distribution';
+    }
     final steps = state.planFor(EnvironmentStep.tmux);
     if (steps.isEmpty) {
       return Platform.isLinux ? '$base · tmux, ps' : base;
@@ -553,8 +556,8 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
             ? widget.notifier.retryEnvironmentSetup
             : widget.notifier.startEnvironmentSetup;
       case EnvironmentSetupPhase.failed:
-        label = 'Retry';
-        action = manual
+        label = state.windowsHost ? 'Recheck' : 'Retry';
+        action = manual || state.windowsHost
             ? widget.notifier.retryEnvironmentSetup
             : widget.notifier.startEnvironmentSetup;
       case EnvironmentSetupPhase.ready:

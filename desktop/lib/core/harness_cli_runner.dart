@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import '../logging/cli_transcript.dart';
+import 'wsl_runtime.dart';
 
 /// Runs the Harness CLI owned by this desktop app without depending on a
 /// terminal shell, its rc files, or Finder's inherited PATH.
@@ -12,9 +13,31 @@ import '../logging/cli_transcript.dart';
 /// absolute paths beneath [harnessHome], launching Harness from Finder and from
 /// Terminal have identical runtime behavior; PATH never enters into it.
 ///
-/// Behind that come the installed `~/.local/bin/harness` launcher and finally
-/// bare `harness` on PATH, which cover a developer-managed install and the
-/// window before the first provisioning run has finished.
+/// On macOS and Linux, behind that come the installed
+/// `~/.local/bin/harness` launcher and finally bare `harness` on PATH, which
+/// cover a developer-managed install and the window before the first
+/// provisioning run has finished.
+///
+/// ## Windows
+///
+/// **The CLI runs in WSL2.** Its managed runtime is published for
+/// macOS and Linux only and its installer is a POSIX script, so a Windows host
+/// runs the CLI inside a named development distro and Windows 11 forwards
+/// loopback into it (see [WslRuntime]). This resolves to
+/// `wsl.exe -d <distro> -- bash -lc 'exec "$HOME/.local/bin/harness" "$@"' …`
+/// rather than to a native managed runtime, launcher, or bare name. The CLI's
+/// only supported terminal backend is tmux, which is unavailable natively on
+/// Windows, so a native executable answering `version` is not a usable desktop
+/// backend.
+///
+/// **A bare `harness` must never be spawned on Windows.** CreateProcess
+/// searches the CALLING EXECUTABLE'S OWN DIRECTORY before PATH, so a release
+/// build named `harness.exe` asking for `harness` starts a copy of itself —
+/// observed here as a spawn storm of a dozen app instances, each one running
+/// the same provisioning probe that spawned the last. Windows resolution
+/// therefore returns either an explicit `wsl.exe` invocation or a name that
+/// cannot exist — a clean `ProcessException`, which every caller already treats
+/// as \"the CLI is not there\".
 class HarnessCliRunner {
   final Directory harnessHome;
   final Map<String, String> environment;
@@ -30,6 +53,17 @@ class HarnessCliRunner {
     Map<String, String>? environment,
   })
   _startProcess;
+  final WslRuntime _wsl;
+  final bool _isWindows;
+
+  /// A name no install can produce. Spawning it fails as a `ProcessException`
+  /// on the first call instead of starting this application again.
+  static const String windowsMissingCliExecutable = 'harness-cli-not-installed';
+
+  WslHarnessProbe? _wslProbe;
+  DateTime? _wslMissCheckedAt;
+  final Duration _wslProbeMissTtl;
+  final DateTime Function() _now;
 
   HarnessCliRunner({
     Directory? harnessHome,
@@ -46,8 +80,16 @@ class HarnessCliRunner {
       Map<String, String>? environment,
     })?
     startProcess,
+    WslRuntime? wslRuntime,
+    Duration? wslProbeMissTtl,
+    DateTime Function()? now,
+    bool? isWindows,
   }) : environment = environment ?? Platform.environment,
        harnessHome = harnessHome ?? Directory(_defaultHarnessHome()),
+       _wsl = wslRuntime ?? WslRuntime(runProcess: runProcess),
+       _wslProbeMissTtl = wslProbeMissTtl ?? const Duration(seconds: 5),
+       _now = now ?? DateTime.now,
+       _isWindows = isWindows ?? Platform.isWindows,
        _runProcess = runProcess ?? Process.run,
        _startProcess = startProcess ?? Process.start;
 
@@ -76,6 +118,11 @@ class HarnessCliRunner {
   /// Builds the direct invocation used by [run] and [start]. Public for
   /// focused tests and diagnostics; callers should generally call [run].
   Future<HarnessCliInvocation> resolve(List<String> arguments) async {
+    // Windows has one supported runtime: the CLI and tmux in WSL2. Check it
+    // before looking at host-side managed files left by an old prototype;
+    // those files can answer `version` but cannot start this tmux-only daemon.
+    if (_isWindows) return _resolveWindows(arguments);
+
     final node = await _managedNode();
     if (node != null && await _cliFile.exists()) {
       return HarnessCliInvocation(
@@ -109,6 +156,54 @@ class HarnessCliRunner {
     );
   }
 
+  /// Windows resolution: the CLI inside WSL2, then the failing name that keeps
+  /// this application from spawning itself when no supported runtime exists.
+  Future<HarnessCliInvocation> _resolveWindows(List<String> arguments) async {
+    final probe = await _wslHarness();
+    if (probe != null && probe.found) {
+      return HarnessCliInvocation(
+        executable: WslRuntime.executable,
+        arguments: _wsl.cliArguments(probe, arguments),
+        environment: _commandEnvironment(),
+        source: HarnessCliSource.wsl,
+        wslDistro: probe.distro,
+      );
+    }
+
+    return HarnessCliInvocation(
+      executable: windowsMissingCliExecutable,
+      arguments: arguments,
+      environment: _commandEnvironment(),
+      source: HarnessCliSource.path,
+    );
+  }
+
+  /// The CLI inside WSL2.
+  ///
+  /// A probe that found NOTHING is retried after [_wslProbeMissTtl]: "no distro
+  /// answered yet" is often transient (WSL is still starting, a distro was just
+  /// installed, `wsl --install` finished between two polls), and caching that
+  /// miss for the life of the runner is what used to force a restart before the
+  /// app could see a CLI that had just appeared. A hit is cached for good.
+  Future<WslHarnessProbe?> _wslHarness() async {
+    final now = _now();
+    if (_wslProbe != null && _wslProbe!.found) return _wslProbe;
+    if (_wslMissCheckedAt != null &&
+        now.difference(_wslMissCheckedAt!) < _wslProbeMissTtl) {
+      return null;
+    }
+    _wslMissCheckedAt = now;
+    try {
+      final probe = await _wsl.findHarness();
+      _wslProbe = probe.found ? probe : null;
+    } on ProcessException {
+      _wslProbe = null;
+    }
+    return _wslProbe;
+  }
+
+  WslHarnessProbe? get wslProbe => _wslProbe;
+
   Future<ProcessResult> run(List<String> arguments) async {
     final invocation = await resolve(arguments);
     return logProcessRun(
@@ -116,6 +211,43 @@ class HarnessCliRunner {
       () => _runProcess(
         invocation.executable,
         invocation.arguments,
+        environment: invocation.environment,
+      ),
+    );
+  }
+
+  /// Runs the CLI with a deadline and requests child termination when it expires.
+  ///
+  /// [run] cannot do this: `Process.run` gives no handle to kill, so a `harness`
+  /// that never answers — a distro still booting, a CLI blocking on its own
+  /// startup — left the first-run check waiting forever. On the managed and WSL
+  /// paths that is a real child of ours, so termination is requested (exit code
+  /// 124, the shell's timeout convention) rather than leaving an unbounded wait.
+  ///
+  /// An injected process hook (a test's fake) is used as-is: it is the caller's
+  /// seam, and there is no real child to stop.
+  Future<ProcessResult> runBounded(
+    List<String> arguments, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final invocation = await resolve(arguments);
+    if (_runProcess != Process.run) {
+      return logProcessRun(
+        _displayLine(arguments),
+        () => _runProcess(
+          invocation.executable,
+          invocation.arguments,
+          environment: invocation.environment,
+        ),
+      );
+    }
+    return logProcessRun(
+      _displayLine(arguments),
+      () => runOwnedProcessBounded(
+        executable: invocation.executable,
+        arguments: invocation.arguments,
+        startProcess: _startProcess,
+        timeout: timeout,
         environment: invocation.environment,
       ),
     );
@@ -170,7 +302,7 @@ class HarnessCliRunner {
     final path = environment['PATH'] ?? '';
     // PATH is ';'-separated on Windows. Joining with ':' there does not just fail to prepend the
     // launcher directory — it welds it onto the first real entry and destroys that one too.
-    final pathSeparator = Platform.isWindows ? ';' : ':';
+    final pathSeparator = _isWindows ? ';' : ':';
     final commandEnvironment = <String, String>{
       ...environment,
       if (launcherDirectory != null)
@@ -194,7 +326,7 @@ class HarnessCliRunner {
   }
 }
 
-enum HarnessCliSource { managed, launcher, path }
+enum HarnessCliSource { managed, launcher, path, wsl }
 
 class HarnessCliInvocation {
   final String executable;
@@ -202,10 +334,15 @@ class HarnessCliInvocation {
   final Map<String, String> environment;
   final HarnessCliSource source;
 
+  /// The WSL2 distro the CLI was found in, when [source] is
+  /// [HarnessCliSource.wsl]. Null means the default distro.
+  final String? wslDistro;
+
   const HarnessCliInvocation({
     required this.executable,
     required this.arguments,
     required this.environment,
     required this.source,
+    this.wslDistro,
   });
 }

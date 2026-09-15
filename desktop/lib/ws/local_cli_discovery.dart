@@ -9,6 +9,7 @@ import '../core/config.dart';
 import '../core/harness_cli_runner.dart';
 import '../core/harness_file_store.dart';
 import '../core/models.dart';
+import '../core/wsl_runtime.dart';
 
 const localWsProtocolVersion = 1;
 const localTerminalProtocolVersion = 3;
@@ -37,11 +38,40 @@ class LocalMachineIdentity {
   final File computerIdFile;
   final Map<String, String> environment;
 
-  LocalMachineIdentity({File? computerIdFile, Map<String, String>? environment})
-    : environment = environment ?? Platform.environment,
-      computerIdFile =
-          computerIdFile ??
-          File(defaultComputerIdPath(environment: environment));
+  /// Whether the selected Windows CLI runs in WSL2. Kept separate from reading
+  /// its id because an explicit `ADAPTER_COMPUTER_ID` still needs the selected
+  /// backend's filesystem truth.
+  final Future<bool> Function()? wslSelected;
+
+  /// Where to read the selected WSL2 CLI's identity. See [computerId].
+  final Future<String?> Function()? wslComputerId;
+
+  /// How long a MISS is remembered. A hit is cached for the life of this
+  /// object; a miss is retried after this — see [computerId].
+  final Duration wslIdMissTtl;
+  final DateTime Function() now;
+
+  String? _cachedWslId;
+  DateTime? _wslMissCheckedAt;
+  bool _usesWsl = false;
+
+  /// Filesystem belonging to the identity returned by [computerId]. A newly
+  /// installed launcher does not change the identity of an existing daemon.
+  bool get usesWsl => _usesWsl;
+
+  LocalMachineIdentity({
+    File? computerIdFile,
+    Map<String, String>? environment,
+    this.wslSelected,
+    this.wslComputerId,
+    Duration? wslIdMissTtl,
+    DateTime Function()? now,
+  }) : environment = environment ?? Platform.environment,
+       wslIdMissTtl = wslIdMissTtl ?? const Duration(seconds: 5),
+       now = now ?? DateTime.now,
+       computerIdFile =
+           computerIdFile ??
+           File(defaultComputerIdPath(environment: environment));
 
   static String defaultComputerIdPath({Map<String, String>? environment}) {
     final desktopDirectory = HarnessFileStore.defaultDirectoryPath(
@@ -51,15 +81,63 @@ class LocalMachineIdentity {
     return _joinPath(harnessHome, 'computer-id');
   }
 
+  /// This computer's Harness identity.
+  ///
+  /// On macOS and Linux that is `~/.harness/computer-id`, written by the CLI
+  /// this app talks to. On Windows the supported CLI runs inside WSL2 and writes
+  /// its identity in the distro's home. The selected WSL identity is therefore
+  /// consulted before a stale host-side file from an older prototype. The id is
+  /// the CLI's either way; it is never invented here.
+  ///
+  /// A miss is not remembered forever. `LocalCliDiscovery` keeps one identity
+  /// for the life of the app, and a distro that has not written its id yet — WSL
+  /// still starting, the CLI signing in right now — used to poison that object
+  /// with a permanent null. A miss is re-read after [wslIdMissTtl], so the first
+  /// successful read is picked up by the next poll.
   Future<String?> computerId() async {
     final pinned = _normalizeComputerId(environment['ADAPTER_COMPUTER_ID']);
+
+    if (Platform.isWindows && await _selectedWsl()) {
+      _usesWsl = true;
+      if (pinned != null) return pinned;
+      if (_cachedWslId != null) return _cachedWslId;
+      final checkedAt = _wslMissCheckedAt;
+      if (checkedAt != null && now().difference(checkedAt) < wslIdMissTtl) {
+        return null;
+      }
+      _wslMissCheckedAt = now();
+      _cachedWslId = await _fromWsl();
+      return _cachedWslId;
+    }
+
+    _usesWsl = false;
+    // Production Windows discovery supplies the backend selector. A transient
+    // WSL miss must wait for that backend, not adopt an old host-side identity.
+    if (Platform.isWindows && wslSelected != null) return null;
     if (pinned != null) return pinned;
     try {
       final id = (await computerIdFile.readAsString()).trim();
-      return _normalizeComputerId(id);
+      final normalized = _normalizeComputerId(id);
+      if (normalized != null) return normalized;
     } catch (_) {
-      return null;
+      // No identity file here means no identity yet.
     }
+    return null;
+  }
+
+  Future<bool> _selectedWsl() async {
+    final selected = wslSelected;
+    if (selected != null) return selected();
+    // Existing injected identity seams supplied only a WSL reader. Such a
+    // reader identifies the selected filesystem as well as reading its id.
+    return wslComputerId != null;
+  }
+
+  Future<String?> _fromWsl() async {
+    final reader = wslComputerId;
+    if (reader != null) return _normalizeComputerId(await reader());
+    // No reader wired means there is nothing to ask.
+    return null;
   }
 }
 
@@ -169,7 +247,17 @@ class LocalCliProbe {
 class LocalCliDiscovery {
   final AppConfig config;
   final Dio _dio;
-  final LocalMachineIdentity identity;
+  final LocalMachineIdentity? _injectedIdentity;
+
+  /// The identity source, built on first use so it can depend on the CLI this
+  /// discovery resolved (`late final` initializers may read `this`).
+  late final LocalMachineIdentity identity =
+      _injectedIdentity ??
+      LocalMachineIdentity(
+        wslSelected: _resolvedCliUsesWsl,
+        wslComputerId: _wslComputerId,
+      );
+
   final Future<void> Function() _spawnCommand;
 
   LocalCliDiscovery({
@@ -177,7 +265,7 @@ class LocalCliDiscovery {
     Dio? dio,
     LocalMachineIdentity? identity,
     Future<void> Function()? spawnCommand,
-  }) : identity = identity ?? LocalMachineIdentity(),
+  }) : _injectedIdentity = identity,
        _spawnCommand = spawnCommand ?? _defaultSpawnCommand,
        _dio =
            dio ??
@@ -251,6 +339,51 @@ class LocalCliDiscovery {
     }
     return last;
   }
+
+  /// One runner kept for resolution questions, so [usesWslCli] does not spawn a
+  /// fresh probe on every call. Its own miss-TTL still applies.
+  late final HarnessCliRunner _probeRunner = HarnessCliRunner();
+  String? _identityWslDistro;
+
+  /// The selected WSL distribution's identity. [_resolvedCliUsesWsl] runs first
+  /// and leaves the resolved distro on [_probeRunner].
+  Future<String?> _wslComputerId() async {
+    final distro = _probeRunner.wslProbe?.distro;
+    if (distro == null) return null;
+    final id = await WslRuntime().computerId(distro: distro);
+    if (id != null) _identityWslDistro = distro;
+    return id;
+  }
+
+  /// True when the CLI behind this app's local machine runs inside WSL2.
+  ///
+  /// This is a filesystem question, not a connectivity one. The machine is
+  /// still "this computer" — the app reaches its daemon over loopback — but a
+  /// path the Windows GUI produces (`C:\work\project`) names nothing in the
+  /// distribution, so the UI must not hand one over as an agent's cwd or a Codex
+  /// profile folder. False on macOS and Linux, where the app and its CLI share
+  /// one filesystem.
+  Future<bool> usesWslCli() async {
+    await computerId();
+    return identity.usesWsl;
+  }
+
+  Future<bool> _resolvedCliUsesWsl() async {
+    if (!Platform.isWindows) return false;
+    try {
+      final invocation = await _probeRunner.resolve(const ['version']);
+      if (invocation.source != HarnessCliSource.wsl) return false;
+      _identityWslDistro = invocation.wslDistro;
+      return true;
+    } on ProcessException {
+      return false;
+    } on StateError {
+      return false;
+    }
+  }
+
+  /// The WSL distribution the CLI runs in, when [usesWslCli] is true.
+  String? get wslDistro => identity.usesWsl ? _identityWslDistro : null;
 
   /// Keeps the local daemon alive for as long as the returned [Timer] runs: polls [probe] every
   /// [checkInterval] and, when the port has gone quiet, spawns `harness start` and gives it a short

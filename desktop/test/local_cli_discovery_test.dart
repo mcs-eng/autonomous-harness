@@ -28,6 +28,73 @@ void main() {
     expect(path, '/Users/tester/.harness/computer-id');
   }, skip: Platform.isWindows);
 
+  test('selected WSL identity ignores a stale host identity', () async {
+    final identityFile = File('${scratch.path}/computer-id');
+    var reads = 0;
+    final identity = LocalMachineIdentity(
+      computerIdFile: identityFile,
+      environment: const {},
+      wslComputerId: () async {
+        reads++;
+        return '0123456789abcdef0123456789abcdef';
+      },
+    );
+    final discovery = LocalCliDiscovery(
+      config: AppConfig.dev,
+      identity: identity,
+    );
+    expect(await discovery.computerId(), '0123456789abcdef0123456789abcdef');
+    expect(await discovery.usesWslCli(), isTrue);
+    expect(reads, 1);
+    // A host-side file from an old native prototype is not the selected
+    // daemon's identity and must not change its filesystem decision.
+    identityFile.writeAsStringSync('fedcba9876543210fedcba9876543210');
+    expect(await discovery.computerId(), '0123456789abcdef0123456789abcdef');
+    expect(await discovery.usesWslCli(), isTrue);
+    expect(reads, 1);
+  }, skip: !Platform.isWindows);
+
+  test('a WSL miss never adopts a stale or pinned host identity', () async {
+    final staleId = 'fedcba9876543210fedcba9876543210';
+    final identityFile = File('${scratch.path}/computer-id')
+      ..writeAsStringSync(staleId);
+    for (final environment in [
+      <String, String>{},
+      {'ADAPTER_COMPUTER_ID': staleId},
+    ]) {
+      final identity = LocalMachineIdentity(
+        computerIdFile: identityFile,
+        environment: environment,
+        wslSelected: () async => false,
+      );
+      expect(await identity.computerId(), isNull);
+      expect(identity.usesWsl, isFalse);
+    }
+  }, skip: !Platform.isWindows);
+
+  test('a pinned id retains the selected WSL filesystem', () async {
+    var idReads = 0;
+    final identity = LocalMachineIdentity(
+      computerIdFile: File('${scratch.path}/computer-id'),
+      environment: const {
+        'ADAPTER_COMPUTER_ID': '0123456789abcdef0123456789abcdef',
+      },
+      wslSelected: () async => true,
+      wslComputerId: () async {
+        idReads++;
+        return 'fedcba9876543210fedcba9876543210';
+      },
+    );
+    final discovery = LocalCliDiscovery(
+      config: AppConfig.dev,
+      identity: identity,
+    );
+
+    expect(await discovery.computerId(), '0123456789abcdef0123456789abcdef');
+    expect(await discovery.usesWslCli(), isTrue);
+    expect(idReads, 0, reason: 'the explicit id does not need a second read');
+  }, skip: !Platform.isWindows);
+
   test('discovers only an exact-computer loopback endpoint', () async {
     const computerId = '0123456789abcdef0123456789abcdef';
     final identityFile = File('${scratch.path}/computer-id')
@@ -464,6 +531,7 @@ void main() {
 
   test('runHarnessStart treats a non-zero exit as a failed spawn', () async {
     final failing = HarnessCliRunner(
+      isWindows: false,
       runProcess: (exe, args, {environment}) async =>
           ProcessResult(1, 1, '', 'daemon spawn lock is held'),
     );
@@ -472,6 +540,7 @@ void main() {
       throwsA(isA<ProcessException>()),
     );
     final fine = HarnessCliRunner(
+      isWindows: false,
       runProcess: (exe, args, {environment}) async =>
           ProcessResult(1, 0, 'already running', ''),
     );

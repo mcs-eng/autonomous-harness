@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show exit, pid;
+import 'dart:io' show Platform, exit, pid;
 import 'dart:math' show Random;
 
 import 'package:dio/dio.dart';
@@ -16,6 +16,7 @@ import '../auth/auth_session.dart';
 import '../auth/cli_link.dart';
 import '../auth/cli_login.dart';
 import '../bootstrap/environment_provisioner.dart';
+import '../core/backend_path.dart';
 import '../core/config.dart';
 import '../core/agent_preference.dart';
 import '../core/engine_availability.dart';
@@ -304,6 +305,22 @@ class AppNotifier extends ChangeNotifier {
   /// default. Touch it earlier and it freezes the wrong `localCliBaseUrl`.
   late final LocalCliDiscovery _discovery =
       localCliDiscovery ?? LocalCliDiscovery(config: config);
+
+  /// Set by `_refreshMachines` from the resolved CLI. On Windows the CLI may run
+  /// inside WSL2, where a Windows path is not a path it can open — see
+  /// [machineSharesGuiFilesystem] and [backendFolderFor].
+  bool _localCliInWsl = false;
+
+  /// Pins the "the local CLI runs in WSL2" fact for a widget/unit test, which
+  /// otherwise has to spawn a real `wsl.exe` to learn it.
+  @visibleForTesting
+  void debugSetLocalCliInWsl(bool value) {
+    _localCliInWsl = value;
+  }
+
+  /// Pins the distribution name reported for that CLI, for the same reason.
+  @visibleForTesting
+  String? debugLocalCliWslDistro;
   final EnvironmentProvisioner? environmentProvisioner;
   final DesktopUpdater? desktopUpdater;
   @visibleForTesting
@@ -1132,6 +1149,62 @@ class AppNotifier extends ChangeNotifier {
   static const agentSyncInterval = Duration(seconds: 60);
 
   MachineState? stateOf(String machineId) => machineStates[machineId];
+
+  /// True when the CLI on [machineId] runs inside WSL2 while this GUI runs on
+  /// Windows — the one case where "this is my computer" does NOT mean "we share
+  /// a filesystem" (see [machineSharesGuiFilesystem]).
+  bool _localMachineRunsInWsl(String machineId) {
+    if (!Platform.isWindows) return false;
+    final state = machineStates[machineId];
+    if (state == null || !state.isLocalMachine) return false;
+    return _localCliInWsl;
+  }
+
+  /// Whether a folder chosen by the GUI's own picker can be opened by the CLI on
+  /// [machineId].
+  ///
+  /// The dialogs ask this instead of `isLocalMachine`, because a native panel on
+  /// Windows browses THIS filesystem and a WSL2 CLI cannot open a Windows path.
+  /// Where it is false the app browses the backend's filesystem over the
+  /// daemon's `fs_list_dir` RPC — the flow that already exists for remote
+  /// machines — and any GUI path that still arrives is converted or refused by
+  /// [backendFolderFor].
+  bool machineSharesGuiFilesystem(String machineId) {
+    final state = machineStates[machineId];
+    if (state == null || !state.isLocalMachine) return false;
+    return !_localMachineRunsInWsl(machineId);
+  }
+
+  /// The path to hand the CLI for [folder] on [machineId], or an error sentence.
+  ///
+  /// This is the single choke point for the GUI-filesystem question: an agent's
+  /// `cwd` and a Codex profile folder both go through it, so either can only
+  /// ever send a path the selected backend can open. `error` is non-null exactly
+  /// when the path cannot be expressed on the backend.
+  ({String? path, String? error}) backendFolderFor(
+    String machineId,
+    String? folder,
+  ) {
+    if (folder == null) return (path: null, error: null);
+    if (!_localMachineRunsInWsl(machineId)) {
+      return (path: folder, error: null);
+    }
+    final distro = debugLocalCliWslDistro ?? _discovery.wslDistro;
+    final converted = BackendPath.toBackend(
+      folder,
+      backendIsWsl: true,
+      distro: distro,
+    );
+    if (converted != null) return (path: converted, error: null);
+    return (
+      path: null,
+      error:
+          'That folder is on Windows, but the Harness CLI on this machine runs '
+          'inside WSL2${distro == null ? '' : ' ($distro)'}. Choose a folder '
+          'inside the distribution, or enter a path it can open — for example '
+          '/home/<user>/project or /mnt/c/Users/<user>/project.',
+    );
+  }
 
   // ── the grid ────────────────────────────────────────────────────────────────────────────────────
 
@@ -2790,6 +2863,7 @@ class AppNotifier extends ChangeNotifier {
     // status endpoint is trusted only when it advertises that same identity.
     final localComputerId = await discovery.computerId();
     if (!_authWorkCurrent(revision)) return;
+    _localCliInWsl = discovery.identity.usesWsl;
     final localFuture = discovery.discover(expectedComputerId: localComputerId);
     // The two legs stay independent. The loopback probe reads a local file and asks 127.0.0.1, so it
     // cannot fail for a network reason — but awaiting it BEHIND the backend call meant a cloud outage
@@ -4033,7 +4107,7 @@ class AppNotifier extends ChangeNotifier {
   ) async {
     final machine = machineStates[machineId];
     if (machine == null) return {'error': 'UNAVAILABLE'};
-    if (machine.isLocalMachine) {
+    if (machineSharesGuiFilesystem(machineId)) {
       return readLocalProjectPreview(path).timeout(
         const Duration(seconds: 4),
         onTimeout: () => {'error': 'UNAVAILABLE'},
@@ -4082,11 +4156,15 @@ class AppNotifier extends ChangeNotifier {
     String machineId,
     String path,
   ) async {
+    // A profile folder is a path on the CLI's own filesystem, exactly like an
+    // agent's cwd: a Windows path cannot be one when the CLI runs in WSL2.
+    final resolved = backendFolderFor(machineId, path);
+    if (resolved.error != null) return {'error': resolved.error};
     final connection = _conn(machineId);
     try {
       return await connection.request(
         'codex_profile_link',
-        payload: {'path': path},
+        payload: {'path': resolved.path},
         timeout: const Duration(seconds: 10),
       );
     } catch (error) {
@@ -4198,7 +4276,7 @@ class AppNotifier extends ChangeNotifier {
     var launchChoices = choices;
     if (!creation.awaitingConfirmation &&
         choices['projectSource'] != null &&
-        machine.isLocalMachine) {
+        machineSharesGuiFilesystem(machineId)) {
       try {
         final repository = choices['repositoryUrl'];
         final project = repository is String
@@ -4218,7 +4296,7 @@ class AppNotifier extends ChangeNotifier {
       if (placementError != null) return creation._complete(placementError);
       if (_disposed ||
           machineStates[machineId] != machine ||
-          !machine.isLocalMachine) {
+          !machineSharesGuiFilesystem(machineId)) {
         return creation._complete(
           'The selected machine changed. Choose the machine again.',
         );
@@ -4227,6 +4305,16 @@ class AppNotifier extends ChangeNotifier {
         ..remove('projectSource')
         ..remove('repositoryUrl')
         ..['cwd'] = creation._preparedFolder;
+    }
+    if (!creation.awaitingConfirmation) {
+      launchChoices = Map.of(launchChoices);
+      for (final key in ['cwd', 'codexHome']) {
+        final value = launchChoices[key];
+        if (value is! String) continue;
+        final resolved = backendFolderFor(machineId, value);
+        if (resolved.error != null) return creation._complete(resolved.error);
+        launchChoices[key] = resolved.path;
+      }
     }
     final operation = creation.awaitingConfirmation
         ? 'agent_create_status'

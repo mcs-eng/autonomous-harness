@@ -31,6 +31,7 @@ void main() {
       final invocation = await HarnessCliRunner(
         harnessHome: harnessHome,
         environment: {'HOME': home.path, 'PATH': '/usr/bin'},
+        isWindows: false,
       ).resolve(['link', 'create']);
 
       expect(invocation.source, HarnessCliSource.managed);
@@ -52,6 +53,7 @@ void main() {
     final harnessHome = Directory('${home.path}/.harness')..createSync();
     final invocation = await HarnessCliRunner(
       harnessHome: harnessHome,
+      isWindows: false,
       environment: {
         'HOME': home.path,
         'PATH': '/usr/bin',
@@ -72,6 +74,7 @@ void main() {
     final invocation = await HarnessCliRunner(
       harnessHome: harnessHome,
       environment: {'HOME': home.path, 'PATH': '/usr/bin'},
+      isWindows: false,
     ).resolve(['start']);
 
     expect(invocation.source, HarnessCliSource.launcher);
@@ -96,6 +99,7 @@ void main() {
       runner: HarnessCliRunner(
         harnessHome: harnessHome,
         environment: {'HOME': home.path, 'PATH': '/usr/bin'},
+        isWindows: false,
         runProcess: (command, argv, {environment}) async {
           executable = command;
           arguments = argv;

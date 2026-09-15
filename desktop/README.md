@@ -1,18 +1,16 @@
 # Harness Desktop
 
 Harness Desktop is the native Flutter client for browsing Harness machines and
-interacting with their terminal-backed agents. It runs natively on **macOS
-and Linux (Ubuntu)** and includes an unexercised Windows runner.
+interacting with their terminal-backed agents. macOS and Linux (Ubuntu) are released upstream targets. This fork adds a **Windows 11 x64 prototype**, with a native desktop interface and a WSL2 CLI backend.
 
 ## Development
 
-Install a compatible Flutter SDK, then run the project from this repository
-root:
+Install a compatible Flutter SDK, then run the project from `desktop/`:
 
 ```bash
 flutter pub get
 flutter test
-flutter run -d macos   # or: flutter run -d linux
+flutter run -d macos   # or: flutter run -d linux, or: flutter run -d windows
 ```
 
 Useful validation commands:
@@ -21,8 +19,39 @@ Useful validation commands:
 dart analyze
 flutter build macos --debug
 flutter build macos --release
-flutter build linux --release   # must run on an Ubuntu host — no cross-compiling
+flutter build linux --release     # must run on an Ubuntu host — no cross-compiling
+flutter build windows --release   # must run on a Windows 11 x64 host
 ```
+
+## Windows prototype
+
+The desktop interface runs natively on Windows 11 x64. The supported integration target runs the Harness CLI, managed Node runtime, and tmux terminals in a named WSL2 development distribution. The desktop connects to the daemon over loopback; that connection still requires validation on the installed WSL networking configuration.
+
+Windows setup requires a WSL2 distribution with the CLI and tmux. A native Windows launcher answering `version` does not satisfy that requirement: the CLI's terminal backend requires tmux. Docker Desktop's `docker-desktop` and `docker-desktop-data` distributions are excluded from selection, probes, and installation. WSL commands always name their distribution and pass user arguments as separate arguments.
+
+When prerequisites are missing, setup shows the relevant commands. Recheck inspects readiness; installation uses the explicit automatic setup action or the displayed manual command. Installing a development distribution and creating its Linux user remains an attended Windows setup step. For Ubuntu, the Windows PowerShell command is:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Complete any Windows restart and Ubuntu user creation requested by that installer. Recheck in Harness, then follow the setup command shown for that distribution. Windows folders sent to WSL are converted to the conventional `/mnt/<drive>/...` path; installations using custom drive mounts should select an existing folder with the backend browser. WSL UNC paths require the matching identified distribution. Network shares and ambiguous relative paths are refused.
+
+### Build an unsigned Windows bundle
+
+Use Flutter 3.47 or newer, the Visual Studio Desktop development with C++ workload, and the Windows SDK. From `desktop/`, in Git Bash:
+
+```bash
+bash scripts/build-windows-release.sh
+```
+
+The script runs dependency resolution, analysis, tests, and a Windows release build. It packages the entire `Release/` directory, app-local MSVC runtime files, and license notices under `dist/`, then checks the portable SHA-256 file and archive contents. Keep the executable, DLLs, and `data/` directory together when extracting it.
+
+For investigating a known failing baseline, `ALLOW_TEST_FAILURES=1` permits packaging after test failures and returns a nonzero result. Such a bundle is a prototype, not a passed test run. Analysis and native import-inspection failures remain visible. The script does not sign, upload, or publish the bundle.
+
+### Current limits
+
+The migration's checks and remaining work are recorded in [WINDOWS_PORT.md](WINDOWS_PORT.md). A release build alone does not establish a completed WSL setup, signed-in agent session, terminal reconnect, or compatibility on macOS and Linux. Windows self-update is not implemented. Most application shortcuts still use the Meta/Windows key, which conflicts with some Windows system shortcuts; Ctrl+Tab and Ctrl+Shift+Tab remain available for switching panes.
 
 The terminal core is vendored at `third_party/xterm`. Do not replace it with an
 upstream package upgrade without preserving the local rendering and IME fixes.
