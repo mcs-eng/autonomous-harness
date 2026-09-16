@@ -354,10 +354,14 @@ void main() {
     expect(script, contains('if [ "\$(id -u)" -eq 0 ]'));
     expect(script, contains('terminal.log'));
     expect(script, contains('tmux -V'));
-    expect(
-      (await Process.run('/bin/bash', ['-n', terminalScript!])).exitCode,
-      0,
-    );
+    // `bash -n` needs a POSIX host; the generated script is Linux shell, and
+    // this check can only run where that shell exists.
+    if (!Platform.isWindows) {
+      expect(
+        (await Process.run('/bin/bash', ['-n', terminalScript!])).exitCode,
+        0,
+      );
+    }
   });
 
   test(
@@ -403,10 +407,14 @@ void main() {
         lessThan(script.indexOf('timedatectl set-ntp true')),
       );
       expect(script, isNot(contains('apt_as_root update || true')));
-      expect(
-        (await Process.run('/bin/bash', ['-n', terminalScript!])).exitCode,
-        0,
-      );
+      // `bash -n` needs a POSIX host; the generated script is Linux shell, and
+      // this check can only run where that shell exists.
+      if (!Platform.isWindows) {
+        expect(
+          (await Process.run('/bin/bash', ['-n', terminalScript!])).exitCode,
+          0,
+        );
+      }
     },
   );
 
@@ -781,10 +789,14 @@ void main() {
         contains('This window will close automatically in 5 seconds.'),
       );
       expect(script, contains('sleep 5'));
-      expect(
-        (await Process.run('/bin/bash', ['-n', terminalScript!])).exitCode,
-        0,
-      );
+      // `bash -n` needs a POSIX host; the generated script is Linux shell, and
+      // this check can only run where that shell exists.
+      if (!Platform.isWindows) {
+        expect(
+          (await Process.run('/bin/bash', ['-n', terminalScript!])).exitCode,
+          0,
+        );
+      }
     },
   );
 

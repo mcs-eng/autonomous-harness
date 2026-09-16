@@ -36,6 +36,23 @@ The initial native build attempts were affected by the validation environment: l
 
 The final command was `ALLOW_TEST_FAILURES=1 bash scripts/build-windows-release.sh`, with the pinned Flutter tool and Python provided through the documented environment overrides. It produced `dist/harness-desktop-windows-x64-1.0.0.zip` and its portable `.sha256` file. The archive has 51 entries, including 37 under `Release/data/`. `dumpbin` verified the MSVC-family imports of the executable and bundled DLLs. Its exit code 2 preserves the failed test result; it is not a green release verdict.
 
+### 2026-09-15 follow-up session (Windows 11 host)
+
+Toolchain brought up per this document's constraints: Flutter 3.47.2 / Dart 3.13.2 extracted to a short path (`C:\flutter`), VS Build Tools 18.10 with the C++ workload already present under `Program Files (x86)`, WSL 2.7.13 with Ubuntu 24.04 installed (Docker's distributions present and excluded by design). The native release build needed no workaround on this host — `flutter build windows --release` exited 0 on the first attempt.
+
+| Check | This session |
+| --- | --- |
+| Dependency resolution | Exit 0 |
+| `flutter analyze` | Exit 1: the same 12 informational notices, 0 errors, 0 warnings |
+| `flutter test` | Exit 1: 1,641 passed, 13 skipped, 62 failed (baseline: 1,580 / 13 / 64) |
+| `flutter build windows --release` | Exit 0 |
+| Packaging + bundle verification | 51 entries (37 `Release/data/`), portable sha256 checked, contents and MSVC import closure verified; script exit 2 with `ALLOW_TEST_FAILURES=1` (suite not green) |
+| Release exe smoke test | Launched, stayed up, exited cleanly |
+
+Two Windows test-harness fixes were made this session, both in `desktop/test/`: `support/real_fonts.dart` gained `%WINDIR%\Fonts` candidates (arial/cour, with segoeui/consola fallbacks) after the macOS/Linux candidates, which lets ten render-test files start on Windows; and three `environment_provisioner_test.dart` assertions that syntax-check generated Linux scripts via `/bin/bash -n` are now skipped where that interpreter cannot exist. macOS/Linux candidate precedence and the POSIX checks themselves are unchanged. The change was reviewed independently by `gpt-6-astra` through `codex exec --sandbox read-only` (ChatGPT subscription seat), returning passed with no security or logic findings under the fail-closed contract.
+
+Accounting for the failure-count change: the two fixes removed 14 named failures. One flaky timing test (`terminal input batches…`) passed on this run and is not claimed as a fix. Letting the font-loading files run revealed 12 deeper failures in `entry_surfaces_render_test.dart` (palette/text-scale matrix). The bulk of the remaining 62 names fail at this commit on any OS: they still assert the pre-redesign New Agent dialog (`new-agent-folder` InkWell, `⌘N` add-agent binding) that upstream commits `bd147b9`–`86ad284` replaced with choice tiles. They are upstream test debt, and reproducing them on macOS remains the way to confirm that.
+
 One test run was invalidated by a concurrent move of its generated build directory; another was stopped before completion to include the last identity fix. Neither partial run contributes to the final counts above. The reported full suite ran with exclusive ownership of the build directory.
 
 ## Remaining work
