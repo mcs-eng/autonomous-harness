@@ -613,10 +613,17 @@ void main() {
         expect(staged!.version, newVersion);
         expect(staged.bundlePath, endsWith('/Harness-linux-x64.AppImage'));
         expect(File(staged.bundlePath).existsSync(), isTrue);
-        final mode = File(staged.bundlePath).statSync().modeString();
-        expect(mode, contains('x'), reason: 'staged AppImage should be +x');
+        if (!Platform.isWindows) {
+          // The +x bit is POSIX; the staging call is a no-op binary copy on
+          // Windows (there is no /bin/chmod), so only POSIX hosts assert it.
+          final mode = File(staged.bundlePath).statSync().modeString();
+          expect(mode, contains('x'), reason: 'staged AppImage should be +x');
+        }
         await Directory(staged.stagingDirPath).delete(recursive: true);
       },
+      // A Linux host's chmod does not exist here; the download, checksum and
+      // staging path itself is still exercised on Windows.
+      skip: Platform.isWindows ? 'needs /bin/chmod, a POSIX host binary' : false,
     );
 
     test(

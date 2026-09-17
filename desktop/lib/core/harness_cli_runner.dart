@@ -277,9 +277,19 @@ class HarnessCliRunner {
     try {
       final raw = (await _currentNodeFile.readAsString()).trim();
       if (raw.isEmpty) return null;
-      final runtimeRoot =
-          '${_runtimeDirectory.absolute.path}${Platform.pathSeparator}';
-      if (!raw.startsWith(runtimeRoot)) return null;
+      // Windows accepts both separators, so `current-node` written with
+      // forward slashes (or a home built with them) must not be rejected by
+      // a comparison that assumes backslashes. Normalize both sides to the
+      // host separator before the containment check; the file itself is
+      // still opened with the path as written. This is the HOST's filesystem
+      // reality, not the resolution tier — Platform, not _isWindows.
+      String normalize(String path) =>
+          Platform.isWindows ? path.replaceAll('/', Platform.pathSeparator) : path;
+      final root = normalize(_runtimeDirectory.absolute.path);
+      final rootWithSeparator = root.endsWith(Platform.pathSeparator)
+          ? root
+          : '$root${Platform.pathSeparator}';
+      if (!normalize(raw).startsWith(rootWithSeparator)) return null;
       final node = File(raw);
       return await node.exists() ? node : null;
     } on FileSystemException {

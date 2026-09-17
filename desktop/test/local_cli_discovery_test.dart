@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/harness_cli_runner.dart';
@@ -18,7 +19,18 @@ void main() {
   tearDown(() async {
     await server?.close(force: true);
     server = null;
-    if (await scratch.exists()) await scratch.delete(recursive: true);
+    // Windows holds a deleted-but-open handle briefly after socket-backed
+    // probes and timed-out connects; a first delete can lose that race.
+    // Retry a few times, then leave the directory for the OS temp cleaner
+    // rather than failing the test that just ran.
+    for (var attempt = 0; attempt < 5; attempt++) {
+      try {
+        if (await scratch.exists()) await scratch.delete(recursive: true);
+        return;
+      } on FileSystemException {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
   });
 
   test('uses the stable Harness computer id path', () {
@@ -270,6 +282,19 @@ void main() {
     config: AppConfig(
       apiBaseUrl: 'https://harness-api.autonomous.ai',
       localCliBaseUrl: 'http://127.0.0.1:$port',
+    ),
+    // Windows can take longer than the production 400ms to surface a
+    // refusal on a closed loopback port — the probe then spends the whole
+    // default timeout learning what macOS learns in under a millisecond,
+    // and the supervisor's millisecond-scale test windows never see a
+    // spawn. A loopback connect that has not answered in 40ms is DOWN for
+    // the purposes of these tests; live daemons answer in single digits.
+    dio: Dio(
+      BaseOptions(
+        connectTimeout: const Duration(milliseconds: 40),
+        receiveTimeout: const Duration(milliseconds: 40),
+        sendTimeout: const Duration(milliseconds: 40),
+      ),
     ),
     identity: LocalMachineIdentity(computerIdFile: identityFile),
     spawnCommand: spawnCommand,
@@ -623,7 +648,11 @@ void main() {
     );
     addTearDown(timer.cancel);
 
-    await Future.delayed(const Duration(milliseconds: 120));
+    // Two down-probes must land before the spawn (spawnAfter: 2); on a host
+    // whose closed-port connects do not refuse instantly each probe can cost
+    // its whole timeout, so the window is sized for two full probes plus the
+    // spawn, not for macOS-class instant refusals.
+    await Future.delayed(const Duration(milliseconds: 400));
     expect(spawnCount, 1);
     expect(server, isNotNull);
 
@@ -734,6 +763,16 @@ void main() {
         apiBaseUrl: 'https://harness-api.autonomous.ai',
         localCliBaseUrl: 'http://127.0.0.1:$closedPort',
       ),
+      // Same fast probe timeouts as discoveryFor: a closed loopback port
+      // must read as DOWN inside these millisecond-scale test windows on
+      // every host, not just the ones that refuse instantly.
+      dio: Dio(
+        BaseOptions(
+          connectTimeout: const Duration(milliseconds: 40),
+          receiveTimeout: const Duration(milliseconds: 40),
+          sendTimeout: const Duration(milliseconds: 40),
+        ),
+      ),
       identity: LocalMachineIdentity(computerIdFile: identityFile),
       spawnCommand: () async {
         spawnCount++;
@@ -776,6 +815,16 @@ void main() {
         config: AppConfig(
           apiBaseUrl: 'https://harness-api.autonomous.ai',
           localCliBaseUrl: 'http://127.0.0.1:$closedPort',
+        ),
+        // Same fast probe timeouts as discoveryFor: a closed loopback port
+        // must read as DOWN inside these millisecond-scale test windows on
+        // every host, not just the ones that refuse instantly.
+        dio: Dio(
+          BaseOptions(
+            connectTimeout: const Duration(milliseconds: 40),
+            receiveTimeout: const Duration(milliseconds: 40),
+            sendTimeout: const Duration(milliseconds: 40),
+          ),
         ),
         identity: LocalMachineIdentity(computerIdFile: identityFile),
         spawnCommand: () async {
@@ -822,6 +871,16 @@ void main() {
         config: AppConfig(
           apiBaseUrl: 'https://harness-api.autonomous.ai',
           localCliBaseUrl: 'http://127.0.0.1:$closedPort',
+        ),
+        // Same fast probe timeouts as discoveryFor: a closed loopback port
+        // must read as DOWN inside these millisecond-scale test windows on
+        // every host, not just the ones that refuse instantly.
+        dio: Dio(
+          BaseOptions(
+            connectTimeout: const Duration(milliseconds: 40),
+            receiveTimeout: const Duration(milliseconds: 40),
+            sendTimeout: const Duration(milliseconds: 40),
+          ),
         ),
         identity: LocalMachineIdentity(computerIdFile: identityFile),
         spawnCommand: () async {
