@@ -90,7 +90,7 @@ function processEntrypoint(args: string): string {
     }
     command = basename(tokens[index] ?? '').toLowerCase()
   }
-  if (!/^(?:node|nodejs|bun|deno|python(?:\d+(?:\.\d+)*)?|bash|zsh|sh)$/.test(command)) return tokens[index] ?? ''
+  if (!/^(?:node|nodejs|bun|deno|python(?:\d+(?:\.\d+)*)?|bash|zsh|sh)(?:\.exe)?$/.test(command)) return tokens[index] ?? ''
 
   index++
   const optionsWithValue = new Set(['-r', '--require', '--loader', '--import', '--conditions', '--inspect-port'])
@@ -156,15 +156,56 @@ export function parseProcessRow(line: string): ProcessRow | null {
  * `/proc/<pid>/cmdline` on a 63-process container: 0.48ms, so even the degenerate case is free.
  *
  * No-op off Linux: macOS has no /proc and does not substitute in the first place.
+ *
+ * WSL interop rows (`/init` relaying a Windows binary): an engine resolved through
+ * interop — a Windows npm shim found by `command -v` in the pane shell — shows `comm=node.exe`,
+ * `/proc/pid/exe → /init`, and the true interpreter/script in `/proc/pid/cmdline`
+ * (`/init \0 C:\...\node.exe \0 C:\...\codex.js`). The engine matcher cannot score that row:
+ * `node.exe` is not in the interpreter set and the entrypoint reduces to `/init`, so a perfectly
+ * healthy TUI never "exposes an engine process" — the launch is marked failed and the terminal
+ * refuses input while the engine visibly runs (observed live on a Windows host + Ubuntu distro).
+ * When `/init` is argv[0], `/proc` IS the mangled view: rewrite the row from `cmdline` so the
+ * interpreter (`node.exe`) and the real entrypoint (`.../codex.js`) are visible to matching.
  */
 function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
   if (process.platform !== 'linux') return rows
   return rows.map((row) => {
-    if (!row.executable.includes('?') && !row.args.includes('?')) return row
-    // cmdline is NUL-separated; node's process.title rewrite space-pads the tail of the argv region.
-    const args = readProcField(row.pid, 'cmdline')?.replace(/\0/g, ' ').trimEnd()
-    const executable = readProcField(row.pid, 'comm')?.trimEnd()
-    return { ...row, ...(executable && { executable }), ...(args && { args }) }
+    if (row.executable.includes('?') || row.args.includes('?')) {
+      // cmdline is NUL-separated; node's process.title rewrite space-pads the tail of the argv region.
+      const args = readProcField(row.pid, 'cmdline')?.replace(/\0/g, ' ').trimEnd()
+      const executable = readProcField(row.pid, 'comm')?.trimEnd()
+      return { ...row, ...(executable && { executable }), ...(args && { args }) }
+    }
+    // WSL interop relay: the relayed argv begins with `/init` (WSL's exe launcher) — visible at the
+    // head of `ps args`, while `comm` is already the Windows binary (`node.exe`). `/proc/pid/exe`
+    // points back at `/init`, so file-identity evidence is unavailable by construction; cmdline
+    // carries the relayed Windows argv. Dropping the `/init` prefix keeps `ps args` from
+    // double-listing it and puts the interpreter (`node.exe`) first, where `processEntrypoint`
+    // walks past it to the real entrypoint (`.../@openai/codex/bin/codex.js`).
+    const argv = (readProcField(row.pid, 'cmdline') ?? '')
+      .split('\0')
+      .filter(Boolean)
+    if (argv[0] !== '/init') return row
+    // `/init <program> <args…>` — without the relayed program there is nothing to expose.
+    if (argv.length < 2) return row
+    // Node rewrites its argv when it sets process.title: [interpPath, interpName, script, …].
+    // The bare duplicate would otherwise become the "entrypoint" the walk stops on, so drop it
+    // when token 2 is the same file name as the resolved interpreter path in token 1.
+    if (argv.length >= 3 && basename(argv[1]).toLowerCase() === argv[2].toLowerCase()) {
+      argv.splice(2, 1)
+    }
+    // Re-join for the `args` field. Elements may contain spaces (Windows install paths do), and
+    // argvTokens() re-splits this string on whitespace, honouring double quotes — so quote any
+    // element that carries one. Without this, `C:\Program Files\nodejs\node.exe` re-splits into
+    // two tokens and the entrypoint walk never reaches the engine script.
+    const quote = (token: string): string =>
+      /[\s"]/.test(token) ? `"${token.replace(/"/g, '\\"')}"` : token
+    const args = argv.slice(1).map(quote).join(' ')
+    const comm = readProcField(row.pid, 'comm')?.trimEnd()
+    const relayed = comm && comm !== '/init' && comm !== 'init'
+      ? comm
+      : basename(argv[1])
+    return { ...row, args, executable: relayed }
   })
 }
 

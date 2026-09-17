@@ -87,6 +87,31 @@ describe('tmux process primitives', () => {
     expect(engineProcessMatchScore({ executable: '/Users/demo/.grok/bin/grok', args: 'grok' }, 'grok')).toBe(3)
   })
 
+  /**
+   * WSL interop: an engine resolved from a distro pane through `command -v` can be a WINDOWS binary
+   * relayed by `/init` — live on Windows 11 + Ubuntu: `comm=node.exe`,
+   * `args="/init \0 C:\...\node.exe \0 node.exe \0 C:\...\@openai\codex\bin\codex.js"` (node's
+   * process.title rewrite duplicates the interpreter after the script path). The matcher used to see
+   * `node.exe` + entrypoint `/init` and score 0, so the TUI ran fine while the launch stayed "failed"
+   * and the terminal refused input. processRows() rewrites the row from /proc cmdline; the interpreter
+   * regex now accepts `.exe`. These pins hold the two halves apart — an unchanged `ps args` row with
+   * `/init` first must NOT be rewritten (no /proc evidence to back it), the repaired row must score.
+   */
+  it('scores a WSL-interop engine relayed through /init', () => {
+    const psRow = parseProcessRow(
+      ' 1037  1036 node.exe Thu Sep 17 08:20:11 2026 /init C:\\Program Files\\nodejs\\node.exe node.exe'
+        + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js')
+    // parseProcessRow alone cannot expose the engine: interpreter is `node.exe`, entrypoint `/init`.
+    expect(engineProcessMatchScore(psRow!, 'codex')).toBe(0)
+
+    // processRows() swaps in the /proc cmdline argv (leading /init dropped, duplicate node.exe
+    // title-rewrite token removed, space-bearing paths double-quoted) — the same shape
+    // engineProcessMatch is scored on here.
+    const repairedArgs = '"C:\\Program Files\\nodejs\\node.exe"'
+      + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
+    expect(engineProcessMatchScore({ executable: 'node.exe', args: repairedArgs }, 'codex')).toBe(2)
+  })
+
   it.each([
     ['codex', 'codex-aarch64-apple-darwin'],
     ['codex', 'codex-x86_64-unknown-linux-musl'],
