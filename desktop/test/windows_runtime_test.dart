@@ -114,7 +114,7 @@ void main() {
       expect(arguments, [
         '-d',
         'Ubuntu',
-        '--',
+        '-e',
         'bash',
         '-lc',
         'exec harness "\$@"',
@@ -132,7 +132,7 @@ void main() {
       expect(WslRuntime().buildArguments(distro: 'Ubuntu', script: 'true'), [
         '-d',
         'Ubuntu',
-        '--',
+        '-e',
         'bash',
         '-lc',
         'true',

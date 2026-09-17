@@ -296,6 +296,15 @@ class WslRuntime {
   /// a machine name or an agent name with a space in it must not become two
   /// argv entries, and `bash -lc 'script' name arg…` is exactly that contract.
   ///
+  /// The command is delivered with `wsl -e`, NOT `wsl --`. `--` hands the
+  /// remainder to the distro's default shell for a second round of parsing,
+  /// which eats the quoting around the `-c` script and then EXPANDS the
+  /// script's `$0`/`$@` references itself: observed as `harness version`
+  /// running with zero arguments — every CLI call degraded to the help banner,
+  /// with exit 0, while every injected-fake test passed. `-e` executes the
+  /// named command directly (CreateProcess-style argv passthrough), so the
+  /// script and its `$0`-trailing arguments reach bash exactly as listed.
+  ///
   /// [distro] is REQUIRED and must be a named, usable distribution. The app
   /// never runs anything in the implicit default distro: on a Docker-heavy
   /// machine the default can BE `docker-desktop`, and "no `-d`" would silently
@@ -309,7 +318,7 @@ class WslRuntime {
   }) => [
     '-d',
     distro,
-    '--',
+    '-e',
     'bash',
     '-lc',
     script,
