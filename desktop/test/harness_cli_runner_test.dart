@@ -74,6 +74,7 @@ void main() {
     final harnessHome = Directory('${home.path}/.harness')..createSync();
     final launcher = File('${home.path}/.local/bin/harness')
       ..createSync(recursive: true);
+    assert(launcher.path.isNotEmpty);
 
     final invocation = await HarnessCliRunner(
       harnessHome: harnessHome,
@@ -101,6 +102,7 @@ void main() {
       ..writeAsStringSync('${node.path}\n');
     final cli = File('${harnessHome.path}/cli/cli.js')
       ..createSync(recursive: true);
+    assert(cli.path.isNotEmpty);
     String? executable;
     List<String>? arguments;
 
