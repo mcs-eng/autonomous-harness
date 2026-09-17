@@ -59,6 +59,24 @@ One test run was invalidated by a concurrent move of its generated build directo
 
 The next functional milestone is an attended session using a development distribution: finish setup, sign in, create a project and agent, exchange terminal input/output, reconnect, and verify that files are created in the selected backend. That complete workflow has not been established by this migration's unit and widget tests.
 
+### 2026-09-17 session — attended live loop completed (this milestone)
+
+The functional milestone above was executed end to end on the Windows 11 host with the `Ubuntu` (26.04) distro. Every step ran through the shipping product paths; the only human steps were the SSO browser approval and one model-switch confirmation.
+
+| Step | Result |
+| --- | --- |
+| Setup / distro selection | `Ubuntu` selected (Docker distributions excluded per scope); CLI installed to `/root/.local/bin/harness` |
+| Sign in | `harness login --force --json` → loopback callback caught from the browser SSO flow (2m24s, attended) |
+| Daemon | `harness start` → connected (self-updated v0.2.43 → v0.2.55 mid-flight; later replaced by the patched local build below); `/api/status` reachable from Windows loopback; machine/computer IDs bound |
+| Project + agent creation | New Agent dialog → engine probe against "Arya · This machine" → backend folder `/root/harnesses/codex-2026-09-17-08-20` created, tmux session `harness-codex-1789647626896` registered |
+| Terminal output | xterm renders the live Codex TUI (v0.154.0) streamed by the daemon over the local WS; keyframe/output flow verified by wire capture |
+| Terminal input | Keystrokes delivered, executed, and answered by the agent ("harness wsl input works" turn completed; session auto-titled "Verify WSL terminal input"); model switched astra→luna via the `/model` TUI over the same path |
+| Reconnect | `harness stop` + `harness start` with the app open → app returned to home without crashing; agent reopened, session state intact (Take control → controlling) |
+
+**Product bug found and fixed — engines resolved through WSL interop were invisible to the daemon (`deddb44`).** With interop on, the pane shell's `command -v codex` resolves to the Windows npm shim, so the engine runs as Windows `node.exe` relaid under `/init` (`comm=node.exe`, `/proc/pid/exe → /init`, entrypoint `…/@openai/codex/bin/codex.js`). `lookupPaneEngineProcess` scored that row 0, the launch stayed `failed` ("did not expose an engine process"), and `acceptsInput` stayed false — the terminal **silently refused every keystroke while the TUI visibly ran**. Root cause was confirmed by a loopback wire capture (only `terminal_ack`/`terminal_alive` frames during typing; zero HTRL input frames) plus direct `/proc` inspection. The fix rewrites interop rows in `repairMangledRows` from `/proc/<pid>/cmdline` (drops `/init`, de-duplicates node's `process.title` rewrite, quotes space-bearing Windows paths so `argvTokens` re-splits them) and lets `processEntrypoint`'s interpreter set accept `.exe`. A regression test pins both halves: the raw `ps` row still scores 0, the repaired shape scores 2 via the codex package entrypoint. CLI vitest on this host: 2,002 passed / 252 failed / 77 skipped vs a clean-tree baseline of 259 failed — the fix flips 7 previously-failing specs and breaks none; the remainder are pre-existing POSIX-host artifacts.
+
+**Known limitation (client-side, open):** physical keyboard → xterm delivery on Windows is unreliable when the window is not foreground, and UIA/PostMessage automation cannot reach the Flutter xterm at all. The daemon input path itself is proven good (the protocol-level driver above exercised the exact binary input protocol the app uses). The single-controller lease also shows "Take control" whenever another client (or a second window) holds the pane — clicking it hands the lease over; keystrokes are refused silently until then.
+
 Windows release installation, signing, self-update, and a clean-machine launch remain separate work. Windows shortcut conflicts, media paths, and other filesystem-sensitive features need platform validation. Drive conversion assumes WSL's conventional `/mnt/<drive>` mounts; use the backend folder browser for custom mounts.
 
 macOS and Linux builds and their native integration tests have not been run on their respective operating systems during this migration. Retaining their source paths is not evidence of passing those platform checks.
