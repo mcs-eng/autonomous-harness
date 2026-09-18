@@ -228,7 +228,13 @@ export class TerminalAgentReconciler {
       this.deps.onProbeStatus?.({ ready: true, error: probeError })
       return
     }
-    this.hints.clear()
+    // Consume exactly the hints this pass copied. A hint that ARRIVED during the
+    // probe await (triggerHint fires trigger() while a pass is in flight) belongs
+    // to the next pass — clear() here used to drop it before any pass read it —
+    // and a hint OVERWRITTEN during the await keeps its newer engine.
+    for (const [key, engine] of hints) {
+      if (this.hints.get(key) === engine) this.hints.delete(key)
+    }
 
     const observedKeys = new Set(probe.agents.map((agent) => processIdentityKey(agent.engine, agent.processIdentity)))
     for (const key of [...this.suppressed]) if (!observedKeys.has(key)) this.suppressed.delete(key)
