@@ -10,6 +10,7 @@ interface Overrides {
   respawn?: RestartAgentDeps['respawn']
   waitForProcess?: RestartAgentDeps['waitForProcess']
   buildArgv?: RestartAgentDeps['buildArgv']
+  prepareResume?: RestartAgentDeps['prepareResume']
 }
 
 /** Every primitive records its own call, even when overridden — so `calls` always reflects the real
@@ -23,6 +24,7 @@ function deps(over: Overrides = {}): RestartAgentDeps & { calls: string[] } {
   const buildArgvImpl = over.buildArgv ?? (() => ['claude'])
   return {
     calls,
+    ...(over.prepareResume ? { prepareResume: async () => { calls.push('prepareResume'); await over.prepareResume!() } } : {}),
     holdOpen: async () => { calls.push('holdOpen'); return holdOpenImpl() },
     terminate: async (checkAfterMs) => { calls.push('terminate'); return terminateImpl(checkAfterMs) },
     respawn: async (argv) => { calls.push('respawn'); return respawnImpl(argv) },
@@ -33,6 +35,35 @@ function deps(over: Overrides = {}): RestartAgentDeps & { calls: string[] } {
 }
 
 describe('restartAgent', () => {
+  it('prepares history after its writer stops and before the resume launch', async () => {
+    const d = deps({ prepareResume: vi.fn() })
+    await restartAgent({ engine: 'codex', sessionId: 's1' }, false, d)
+    expect(d.calls).toEqual(['holdOpen', 'terminate', 'prepareResume', 'buildArgv', 'respawn', 'waitForProcess'])
+  })
+
+  it('never prepares history while the old writer may still be alive', async () => {
+    const prepareResume = vi.fn()
+    const d = deps({ terminate: async () => 'failed', prepareResume })
+    await restartAgent({ engine: 'codex', sessionId: 's1' }, false, d)
+    expect(prepareResume).not.toHaveBeenCalled()
+  })
+
+  it('does not fall back to a fresh conversation if preparing history fails', async () => {
+    const d = deps({ prepareResume: () => { throw new Error('rollout changed') } })
+    const outcome = await restartAgent({ engine: 'codex', sessionId: 's1' }, false, d)
+    expect(outcome).toEqual({ ok: false, detail: 'could not prepare codex session for resume: rollout changed' })
+    expect(d.calls).toEqual(['holdOpen', 'terminate', 'prepareResume'])
+  })
+
+  it('does not prepare a fresh launch or repeat preparation on the fresh fallback', async () => {
+    const prepareResume = vi.fn()
+    const d = deps({ prepareResume, waitForProcess: async () => null })
+    await restartAgent({ engine: 'codex', sessionId: '' }, false, d)
+    expect(prepareResume).not.toHaveBeenCalled()
+    await restartAgent({ engine: 'codex', sessionId: 's1' }, false, d)
+    expect(prepareResume).toHaveBeenCalledTimes(1)
+  })
+
   it('holds the pane open, kills, respawns, and verifies — in that order', async () => {
     const d = deps()
     const outcome = await restartAgent({ engine: 'claude', sessionId: 's1' }, false, d)

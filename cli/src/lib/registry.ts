@@ -13,6 +13,10 @@
  * Module singleton (like the ws `clients` set) — imported by routes + reaper.
  */
 
+import { DSH_ID_RE } from '../dsh/manifest.js'
+import { AGENT_NAME_RE } from './engineLaunch.js'
+import { namingTitle } from './sessionTitle.js'
+import { automaticAgentName, engineLabel, isAutomaticName } from './agentNames.js'
 import {
   closeSync,
   constants,
@@ -34,9 +38,9 @@ import { join, basename, dirname, relative } from 'path'
 import { hostname, uptime } from 'os'
 import { env } from '../config/env.js'
 import { readCodexRolloutMeta, resolveCodexRollout } from '../engines/codex/rollout.js'
-import { ENGINES, type AgentEngine } from '../engines/types.js'
+import { ENGINES, isTerminalEngine, type AgentEngine } from '../engines/types.js'
 import type { GridAssignment } from './gridAssignment.js'
-import { parseGridLaunchOverride, type GridLaunchOverride } from './gridLaunch.js'
+import { parseGridLaunchOverride, type GridLaunchOverride, type GridLaunchRecord, type GridWebSearchStatus } from './gridLaunch.js'
 import { commandcodeTranscriptPath } from '../engines/commandcode/transcript.js'
 import { agyTranscriptPath } from '../engines/agy/session.js'
 import { copilotTranscriptPath } from '../engines/copilot/session.js'
@@ -112,6 +116,24 @@ export interface RegisteredSession {
    */
   gridLaunch?: GridLaunchOverride | null
   /**
+   * What `gridLaunch` decided about web search — `on`, `unavailable` or `unsupported` — as the app
+   * shows it (`grid.webSearch` on the frame). Written with the launch and cleared with it, never
+   * re-derived: the launch builder decided it from the machine as it was at launch, and that is what
+   * the pane actually got. Null on a vendor-login agent and on a discovered grid agent (no launch was
+   * built, so there is nothing to say); absent on a row written before this field existed.
+   */
+  gridWebSearch?: GridWebSearchStatus | null
+  /**
+   * The engine's OWN model this agent was on immediately before it moved to a grid.
+   *
+   * Captured at the moment of leaving, because that is the only moment it is still observable: once
+   * the pane is on a grid, the engine reports the GRID's model and the previous one exists nowhere.
+   * Re-selected when the agent moves back, so coming home does not mean landing on whatever default
+   * the vendor would otherwise pick. Null when the agent has never left, or was on no particular
+   * model when it did.
+   */
+  subscriptionModel?: string | null
+  /**
    * The CODEX_HOME folder this agent was launched against, if one was chosen instead of `~/.codex`.
    * Codex only. Unlike `grid`, this is chosen once at creation and never re-derived from the live
    * process — a running agent cannot be moved to a different profile the way it can be retargeted
@@ -119,17 +141,56 @@ export interface RegisteredSession {
    */
   codexHome?: string | null
   /**
+   * The domain-specific harness this agent was created as (`autonomous/copper`), or null for a plain
+   * engine. NOT a second engine: `engine` stays the base (`claude`, `codex`, …) and every normalizer,
+   * probe and install path keys on that. Chosen at creation, carried forward, and re-read off the
+   * live process's `HARNESS_DSH` by discovery so a pane the daemon did not create (or had to mint
+   * again after a restart) is still labelled. Fill-only, like `codexHome`. See `src/dsh/`.
+   */
+  dsh?: string | null
+  /**
+   * The engine's own named agent this pane was opened as (`agent_create`'s `agent`; opencode
+   * `--agent <name>`), or null for a general session. Chosen at creation and carried into every
+   * relaunch (`launchOverrides.ts`), so a pane opened as `harness-compute` comes back as `harness-compute`.
+   * Like `codexHome`, never re-derived from the live process.
+   */
+  agent?: string | null
+  /**
    * Whether the engine was launched with its permission prompts bypassed (`--dangerously-skip-permissions`
    * and friends, `BYPASS_PERMISSION_FLAGS`). Recorded at launch because it is otherwise only readable
    * off a LIVE process's argv — and a pane that has to be recreated after a reboot has no live process
    * to read it from. Like `codexHome`, chosen at launch and carried forward, never re-derived.
    */
   bypassPermission?: boolean
+  /**
+   * The permission mode picked in New Harness (`PERMISSION_MODES` in engineLaunch.ts: `auto`, `ask`,
+   * `acceptEdits`, `plan`, `readOnly`, `full`). Recorded at launch and reapplied on every relaunch, so
+   * an agent started in Plan stays in Plan across a restart. Absent on rows from before the choice
+   * existed and on agents Harness did not launch; those relaunch from `bypassPermission`.
+   */
+  permissionMode?: string
+  /**
+   * The pane was opened as a terminal (engine `terminal`, the desktop's New Terminal) rather than
+   * for an engine. Set once at creation and kept for the row's whole life, whichever engine is
+   * running in it now: this is what tells the reconciler that an engine exiting means "back to a
+   * shell" (`releaseEngine`) rather than "dormant", and what tells `restoreAgents` to bring back
+   * a shell rather than a `claude`. Not a type — `engine` still says what the pane IS right now.
+   */
+  terminalHost?: boolean
+  /**
+   * The agent this one was FORKED from (`agent_fork`): a new session opened with the source's whole
+   * history, the source left as it was. Recorded once at creation so the pane can say "forked from X"
+   * and link back; `name` is the source's name at that moment, kept because the source may be renamed
+   * or gone by the time anyone reads it. Absent on every other agent.
+   */
+  forkedFrom?: { agentId: string; name: string } | null
   /** Legacy launcher-owned snapshots may still contain this field. New records never write it. */
   launcherId?: string
   transcriptPath: string | null
   projectDir: string
-  /** Stable default for agents created by Harness; discovered agents keep their existing names. */
+  /** Stable default for agents created by Harness — `<agent> harness M-D H:MM` (agentNames.ts), or the
+   *  name the creator asked for (`agent_create`'s `name`). Rows from earlier daemons carry `harness-N`.
+   *  Discovered agents keep their existing names. */
   defaultName?: string
   cwd: string | null
   /** Authoritative backend-neutral terminal placements for this one process-owned agent. */
@@ -170,10 +231,22 @@ export interface RegisterInput {
 }
 
 /** Display name for a session's "project" tab/tile. A user rename (persisted override) is
- *  authoritative and FIXED. Harness-created agents start with a numbered name;
- *  discovered sessions retain their title/folder fallback. */
+ *  authoritative and FIXED. Until there is one, a session is called what its engine calls it — the
+ *  conversation title Claude Code puts on its terminal, Codex's thread name (sessionTitle.ts) — which
+ *  moves as the engine retitles it, and says what the agent is doing. The name a harness is created
+ *  with ("Codex harness 9-17 15:26") stands in until the engine has a title, a name its creator chose
+ *  is kept like a rename, and a discovered session falls back to its folder. */
 export function projectDisplayName(s: RegisteredSession): string {
-  return NAME_OVERRIDES.get(s.sessionId) || NAME_OVERRIDES.get(s.agentId) || s.defaultName || titleDisplayName(s.title) || defaultProjectDisplayName(s)
+  // A name the creator chose ("Local model") is fixed like a rename; only a name Harness gave gives way.
+  const chosen = s.defaultName && !isAutomaticName(s.defaultName) ? s.defaultName : null
+  return NAME_OVERRIDES.get(s.sessionId) || NAME_OVERRIDES.get(s.agentId) || chosen
+    || sessionDisplayTitle(s) || s.defaultName || defaultProjectDisplayName(s)
+}
+
+
+/** The engine's own name for this session, or null while it has none worth showing. */
+export function sessionDisplayTitle(s: RegisteredSession): string | null {
+  return namingTitle(titleDisplayName(s.title), { engine: s.engine, cwd: s.cwd, defaultName: s.defaultName })
 }
 
 const FILE = join(env.ADAPTER_DATA_DIR, 'registry.json')
@@ -186,6 +259,38 @@ const NAME_OVERRIDES = new Map<string, string>()
 const PANE_RE = /^%\d+$/
 const GROK_SESSION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const AGENT_ENGINES: ReadonlySet<string> = new Set(ENGINES)
+
+/**
+ * A persisted `defaultName`, or undefined for anything that is not one.
+ *
+ * Used to be `agent-N` only. A creator can now name the agent (`agent_create`'s `name`), and a row
+ * validated against the numbered shape alone dropped that name on the next load — the pane came
+ * back titled `agent-3` after a daemon restart. Trimmed and bounded, so a row cannot carry a name
+ * the header would draw as nothing, or one long enough to be a document.
+ */
+const MAX_DEFAULT_NAME_CHARS = 200
+function normalizedDefaultName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const name = value.trim()
+  return name && name.length <= MAX_DEFAULT_NAME_CHARS ? name : undefined
+}
+
+/** A persisted DSH id, or null for anything that is not one (older rows have no field at all). */
+function normalizedDshId(value: unknown): string | null {
+  return typeof value === 'string' && DSH_ID_RE.test(value) ? value : null
+}
+
+/** A persisted named agent, or null for anything that is not one — the same shape `agent_create`
+ *  accepts, so a hand-edited row cannot put a path or prose into the relaunch argv. */
+function normalizedAgentName(value: unknown): string | null {
+  return typeof value === 'string' && AGENT_NAME_RE.test(value) ? value : null
+}
+
+/** A persisted permission mode, or null. Only its shape is checked here — the launch looks it up per
+ *  engine (`permissionModeFlags`), and a name the engine lacks launches as `bypassPermission` says. */
+function permissionModeName(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z]{1,24}$/.test(value)
+}
 
 function normalizedAgentEngine(value: unknown): AgentEngine {
   return typeof value === 'string' && AGENT_ENGINES.has(value)
@@ -372,8 +477,9 @@ function strictPersistedRow(value: unknown): RegisteredSession | null {
     engine: row.engine as AgentEngine,
     transcriptPath: typeof row.transcriptPath === 'string' ? row.transcriptPath : null,
     projectDir: row.projectDir,
-    defaultName: typeof row.defaultName === 'string' && /^agent-[1-9]\d*$/.test(row.defaultName)
-      ? row.defaultName : undefined,
+    defaultName: normalizedDefaultName(row.defaultName),
+    agent: normalizedAgentName((row as { agent?: unknown }).agent),
+    ...(normalizedForkedFrom((row as { forkedFrom?: unknown }).forkedFrom)),
     cwd: typeof row.cwd === 'string' ? row.cwd : null,
     runtimes,
     primaryRuntimeKey: normalizedPrimary,
@@ -383,11 +489,20 @@ function strictPersistedRow(value: unknown): RegisteredSession | null {
     model: modelString(row.model),
     cliVersion: typeof row.cliVersion === 'string' ? row.cliVersion : null,
     processIdentity: row.processIdentity ?? null,
+    ...(row.terminalHost === true || row.engine === 'terminal' ? { terminalHost: true } : {}),
     registeredAt: typeof row.registeredAt === 'number' ? row.registeredAt : Date.now(),
     updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : Date.now(),
     lastHookAt: typeof row.lastHookAt === 'number' ? row.lastHookAt : Date.now(),
     lastTranscriptAt: typeof row.lastTranscriptAt === 'number' ? row.lastTranscriptAt : Date.now(),
   }
+}
+
+/** `forkedFrom` as written by this daemon, or nothing: a row from before the field, or a hand-edited one. */
+function normalizedForkedFrom(value: unknown): { forkedFrom: { agentId: string; name: string } } | Record<string, never> {
+  if (!value || typeof value !== 'object') return {}
+  const v = value as { agentId?: unknown; name?: unknown }
+  if (typeof v.agentId !== 'string' || !v.agentId) return {}
+  return { forkedFrom: { agentId: v.agentId, name: typeof v.name === 'string' ? v.name.slice(0, 120) : '' } }
 }
 
 function normalizedLaunch(value: unknown): AgentLaunch | undefined {
@@ -751,11 +866,22 @@ class Registry {
           gateway: raw.gateway === 'ori' ? 'ori' : null,
           grid: normalizedGridAssignment(raw.grid),
           codexHome: typeof rawCodexHome === 'string' && rawCodexHome ? rawCodexHome : null,
+          dsh: normalizedDshId((raw as { dsh?: unknown }).dsh),
+          agent: normalizedAgentName((raw as { agent?: unknown }).agent),
           ...(rawGridLaunch !== undefined ? { gridLaunch: rawGridLaunch } : {}),
+          ...(rawGridLaunch ? { gridWebSearch: normalizedGridWebSearch(raw?.gridWebSearch) } : {}),
+          // ⚠️ Rehydrated EXPLICITLY, like every field above it. A row is rebuilt from this list on
+          // load, so a field added to the type and the setter but not to this list is written to
+          // disk and then silently dropped by the next load — which is exactly what happened, and
+          // it looks like "the setter never ran" rather than like a missing line here.
+          ...(typeof raw?.subscriptionModel === 'string' && raw.subscriptionModel
+            ? { subscriptionModel: raw.subscriptionModel }
+            : {}),
           ...(raw.bypassPermission === true ? { bypassPermission: true } : {}),
+          ...(permissionModeName(raw.permissionMode) ? { permissionMode: raw.permissionMode } : {}),
+          ...(raw.terminalHost === true || engine === 'terminal' ? { terminalHost: true } : {}),
           transcriptPath,
-          defaultName: typeof raw.defaultName === 'string' && /^agent-[1-9]\d*$/.test(raw.defaultName)
-            ? raw.defaultName : undefined,
+          defaultName: normalizedDefaultName(raw.defaultName),
           title: titleDisplayName(typeof raw.title === 'string' ? raw.title : null),
           sessionId: bound ? rawSessionId : '',
           projectDir: !repairedCodexTranscript && typeof raw.projectDir === 'string' && raw.projectDir
@@ -845,6 +971,8 @@ class Registry {
     /** Codex only: the CODEX_HOME the process was launched under, read off its environment. Fills a
      *  row that does not know its profile yet; never overwrites one that does (see `codexHome`). */
     codexHome?: string | null
+    /** The DSH read off the process's `HARNESS_DSH`, if any. Fill-only, like `codexHome`. */
+    dsh?: string | null
   }):
     {
       entry: RegisteredSession
@@ -896,6 +1024,7 @@ class Registry {
       if (input.gateway !== undefined) existing.gateway = input.gateway
       if (input.grid !== undefined) existing.grid = input.grid
       if (input.codexHome && !existing.codexHome) existing.codexHome = input.codexHome
+      if (input.dsh && !existing.dsh) existing.dsh = input.dsh
       existing.updatedAt = Date.now()
       this.index(existing)
       this.terminalAvailableAgents.add(existing.agentId)
@@ -936,7 +1065,12 @@ class Registry {
       grid: input.grid ?? null,
       // A discovered grid agent has no credential the daemon ever saw: it can be observed, not relaunched.
       gridLaunch: null,
+      gridWebSearch: null,
       codexHome: input.codexHome ?? null,
+      dsh: input.dsh ?? null,
+      // A discovered pane's named agent is only visible in its argv; nothing here reads it, so the
+      // row cannot relaunch it as one. Fill-only, like `dsh`.
+      agent: null,
       transcriptPath: null,
       projectDir: basename(input.cwd ?? '') || agentId,
       cwd: input.cwd ?? null,
@@ -966,9 +1100,20 @@ class Registry {
     primaryRuntimeKey?: string
     cwd?: string | null
     grid?: GridAssignment | null
-    gridLaunch?: GridLaunchOverride | null
+    /** The grid launch this pane was opened with and what it decided — the pair `setGridLaunch` keeps. */
+    gridLaunchRecord?: GridLaunchRecord | null
     codexHome?: string | null
+    dsh?: string | null
+    /** The engine's named agent the pane was opened as (`agent_create`'s `agent`), validated upstream. */
+    agent?: string | null
     bypassPermission?: boolean
+    permissionMode?: string | null
+    /** The name the creator asked for. Blank or absent means Harness names it (agentNames.ts). */
+    defaultName?: string | null
+    /** Who the agent is, for the name Harness gives it: a DSH's own name ("Blender"); the engine's by default. */
+    label?: string | null
+    /** The agent this one is a fork of — see RegisteredSession.forkedFrom. */
+    forkedFrom?: { agentId: string; name: string } | null
   }): RegisteredSession | null {
     if (this.writeBlocked) return null
     const runtimes = normalizedRuntimes(input.runtimes)
@@ -980,16 +1125,22 @@ class Registry {
       schemaVersion: 2,
       active: true,
       launch: { state: 'starting' },
-      defaultName: this.nextAgentName(),
+      defaultName: normalizedDefaultName(input.defaultName) ?? this.automaticName(input.label?.trim() || engineLabel(input.engine), new Date(now)),
       agentId,
       sessionId: '',
       boundAt: null,
       engine: input.engine,
       gateway: null,
       grid: input.grid ?? null,
-      gridLaunch: input.gridLaunch ?? null,
+      gridLaunch: input.gridLaunchRecord?.override ?? null,
+      gridWebSearch: input.gridLaunchRecord?.webSearch ?? null,
       codexHome: input.codexHome ?? null,
+      dsh: input.dsh ?? null,
+      agent: normalizedAgentName(input.agent),
       ...(input.bypassPermission ? { bypassPermission: true } : {}),
+      ...(permissionModeName(input.permissionMode) ? { permissionMode: input.permissionMode } : {}),
+      ...(isTerminalEngine(input.engine) ? { terminalHost: true } : {}),
+      ...(input.forkedFrom ? { forkedFrom: { agentId: input.forkedFrom.agentId, name: input.forkedFrom.name } } : {}),
       transcriptPath: null,
       projectDir: basename(input.cwd ?? '') || agentId,
       cwd: input.cwd ?? null,
@@ -1012,17 +1163,21 @@ class Registry {
     return entry
   }
 
-  private nextAgentName(): string {
-    let next = 1n
-    const names = [
+  /** Every name an agent on this machine answers to: default names, project names, renames. */
+  agentNamesInUse(): string[] {
+    return [
       ...this.list().flatMap(agent => [agent.defaultName, projectDisplayName(agent)]),
       ...NAME_OVERRIDES.values(),
-    ]
-    for (const name of names) {
-      const match = name && /^agent-([1-9]\d*)$/.exec(name)
-      if (match && BigInt(match[1]!) >= next) next = BigInt(match[1]!) + 1n
-    }
-    return `agent-${next}`
+    ].filter((name): name is string => typeof name === 'string' && name.length > 0)
+  }
+
+  /**
+   * "Codex harness 9-17 15:26", or with the seconds when that name is already taken — two of the same
+   * agent started in one minute. Nothing is counted, so nothing can drift.
+   */
+  private automaticName(label: string, at: Date): string {
+    const name = automaticAgentName(label, at)
+    return this.agentNamesInUse().includes(name) ? automaticAgentName(label, at, true) : name
   }
 
   /** Discovered process agents that have no engine session bound yet. */
@@ -1069,6 +1224,14 @@ class Registry {
       ? this.byProcess(engine, input.processIdentity)
       : undefined)
       ?? inputRuntimes.map((runtime) => this.byRuntimeEngine(runtime, engine)).find(Boolean)
+      // An engine started by hand inside a terminal, whose SessionStart hook beat the reconciler to
+      // it: the terminal at that route is the agent, and it becomes this engine's here and now —
+      // the same flip the reconciler would make a scan later (cli.ts `onObserved`).
+      ?? (isTerminalEngine(engine) ? undefined : inputRuntimes
+        .map((runtime) => this.byRuntimeTerminal(runtime))
+        .filter((agent): agent is RegisteredSession => !!agent)
+        .map((agent) => this.adoptEngine(agent.agentId, engine, validProcessIdentity(input.processIdentity) ? input.processIdentity : null))
+        .find((agent): agent is RegisteredSession => !!agent))
     const agentId = processAgent?.agentId ?? ''
     if (
       !sessionId
@@ -1148,6 +1311,13 @@ class Registry {
       grid: existing?.grid ?? null,
       // The credential-bearing launch. Like codexHome: written once, carried forward, never re-derived.
       gridLaunch: existing?.gridLaunch ?? null,
+      // What that launch decided — it travels with the launch, or it is lost at the first hook.
+      gridWebSearch: existing?.gridWebSearch ?? null,
+      // ⚠️ Carried forward for the same reason, and it was missed once: a bind REBUILDS the row from
+      // named fields, so a field the rebuild does not name survives on disk and vanishes from
+      // memory the moment the engine reports in. The symptom is a move back to the engine's own
+      // login landing on a house default — the remembered model was there, then a hook bind ate it.
+      ...(existing?.subscriptionModel ? { subscriptionModel: existing.subscriptionModel } : {}),
       defaultName: existing?.defaultName,
       transcriptPath: effectiveTranscriptPath,
       projectDir: engine === 'grok' || engine === 'agy' || engine === 'copilot'
@@ -1167,7 +1337,11 @@ class Registry {
       // re-reads off the live process on every discovery) — a hook-triggered bind must carry it
       // forward or the very first SessionStart hook would silently wipe the agent's chosen profile.
       codexHome: existing?.codexHome ?? null,
+      dsh: existing?.dsh ?? null,
+      agent: existing?.agent ?? null,
       ...(existing?.bypassPermission ? { bypassPermission: true } : {}),
+      ...(existing?.permissionMode ? { permissionMode: existing.permissionMode } : {}),
+      ...(existing?.terminalHost ? { terminalHost: true } : {}),
       processIdentity: validProcessIdentity(input.processIdentity) ? input.processIdentity : existing?.processIdentity ?? null,
       registeredAt: existing?.registeredAt ?? now,
       updatedAt: now,
@@ -1237,6 +1411,76 @@ class Registry {
   byProcess(engine: AgentEngine, identity: ProcessIdentity): RegisteredSession | undefined {
     const agentId = this.processIndex.get(processIdentityKey(engine, identity))
     return agentId ? this.agents.get(agentId) : undefined
+  }
+
+  /** The terminal (engine `terminal`, nobody running in it yet) that owns this route, if that is what owns it. */
+  byRuntimeTerminal(runtime: TerminalRuntimeRef): RegisteredSession | undefined {
+    return this.byRuntimeEngine(runtime, 'terminal')
+  }
+
+  /**
+   * An engine CLI was started inside a terminal: the row becomes that engine's agent, in place.
+   *
+   * Same agentId, same pane, same tile — the desktop only sees `engine` change on the next
+   * `agent_synced`. The process identity is indexed under the NEW engine (the key is engine-scoped),
+   * which is what lets the hook that follows (`register`, `byProcess(engine, …)`) land on this row
+   * rather than mint another. `terminalHost` stays set so the exit is recognised (`releaseEngine`).
+   * Refused for anything but a terminal: an agent already running one engine is never re-labelled.
+   */
+  adoptEngine(agentId: string, engine: AgentEngine, processIdentity?: ProcessIdentity | null): RegisteredSession | null {
+    const entry = this.agents.get(agentId)
+    if (!entry || !isTerminalEngine(entry.engine) || isTerminalEngine(engine)) return null
+    this.drop(entry)
+    entry.engine = engine
+    entry.terminalHost = true
+    entry.launch = { state: 'ready' }
+    entry.active = true
+    if (validProcessIdentity(processIdentity)) entry.processIdentity = processIdentity
+    entry.updatedAt = Date.now()
+    this.index(entry)
+    this.terminalAvailableAgents.add(entry.agentId)
+    this.save()
+    return entry
+  }
+
+  /**
+   * The engine in this pane has exited and the pane is a shell now: the row is a terminal.
+   *
+   * For every agent, not only one that began as a terminal — an engine the app launched runs
+   * inside its pane's shell too (engineLaunch.ts `harness_engine`), and `/exit` or Ctrl-C leaves
+   * that shell at its prompt with the engine's last screen above it.
+   *
+   * What goes is what described the PROCESS and its session — session id, transcript, pid,
+   * gateway, grid assignment, model, title — because the next thing typed into this shell may be a
+   * different engine, and `unboundRouteOwner` only claims a route for a row with no session. What
+   * stays is what describes the PANE's launch — `gridLaunch`, `codexHome`, `dsh`, `agent`, the
+   * permission choice: the tmux session's environment still carries the grid endpoint and the
+   * Codex profile, the workspace is still that harness's, and a restart or a relaunch after a
+   * reboot puts the same engine back with the same shape. Dropping `gridLaunch` in particular made
+   * a released grid agent unrestorable ("credential not persisted"). The row itself, its id, its
+   * pane and its name stay: this is the opposite of dormant, the terminal is live. `terminalHost`
+   * is set from here on, since that is what the pane now is.
+   */
+  releaseEngine(agentId: string): RegisteredSession | null {
+    const entry = this.agents.get(agentId)
+    if (!entry || isTerminalEngine(entry.engine)) return null
+    this.drop(entry)
+    this.releaseBinding(entry)
+    entry.engine = 'terminal'
+    entry.terminalHost = true
+    entry.processIdentity = null
+    entry.launch = { state: 'ready' }
+    entry.active = true
+    entry.gateway = null
+    entry.grid = null
+    entry.subscriptionModel = null
+    entry.model = null
+    entry.title = null
+    entry.updatedAt = Date.now()
+    this.index(entry)
+    this.terminalAvailableAgents.add(entry.agentId)
+    this.save()
+    return entry
   }
 
   updateRuntimes(agentId: string, runtimes: readonly TerminalRuntimeRef[], primaryRuntimeKey?: string): boolean {
@@ -1353,12 +1597,39 @@ class Registry {
     return true
   }
 
-  /** Record the launch an agent was last put onto a grid with (`agent_create` / `agent_retarget`), or
-   *  null once it was moved back to the engine's own login. */
-  setGridLaunch(agentId: string, gridLaunch: GridLaunchOverride | null): boolean {
+  /** Fill in the DSH a row did not know (discovery read `HARNESS_DSH` off the live process). Never
+   *  replaces one it already has — the harness is chosen once, at creation. */
+  setDsh(agentId: string, dsh: string): boolean {
+    const session = this.agents.get(agentId)
+    if (!session || session.dsh || !DSH_ID_RE.test(dsh)) return false
+    session.dsh = dsh
+    session.updatedAt = Date.now()
+    this.save()
+    return true
+  }
+
+  /**
+   * Record the launch an agent was last put onto a grid with (`agent_create` / `agent_retarget`) and
+   * what it decided about web search — or null for both once the agent was moved back to the engine's
+   * own login. One call for the pair on purpose: a status without its launch, or a launch without its
+   * status, is a row the app would read wrongly.
+   */
+  setGridLaunch(agentId: string, launch: GridLaunchRecord | null): boolean {
     const session = this.agents.get(agentId)
     if (!session) return false
-    session.gridLaunch = gridLaunch
+    session.gridLaunch = launch?.override ?? null
+    session.gridWebSearch = launch?.webSearch ?? null
+    session.updatedAt = Date.now()
+    this.save()
+    return true
+  }
+
+  /** Remember the engine's own model an agent is leaving behind, so a later move back can restore it.
+   *  Kept even while the agent is on a grid — it is the only record that the previous choice existed. */
+  setSubscriptionModel(agentId: string, model: string | null): boolean {
+    const session = this.agents.get(agentId)
+    if (!session) return false
+    session.subscriptionModel = model
     session.updatedAt = Date.now()
     this.save()
     return true
@@ -1610,7 +1881,7 @@ const SELF_NAMES: ReadonlySet<string> = (() => {
  * about the machine, not the engine, so it is refused by what it SAYS rather than by who sent it —
  * any engine that adopts the same convention is covered without a table to keep in step.
  */
-function titleDisplayName(title: string | null | undefined): string | null {
+export function titleDisplayName(title: string | null | undefined): string | null {
   const cleaned = title
     ?.trim()
     .replace(/^[\s\p{Mark}\p{Punctuation}\p{Symbol}]+/u, '')
@@ -1633,6 +1904,12 @@ function normalizedGridLaunch(value: unknown): GridLaunchOverride | null | undef
   if (value === undefined) return undefined
   const parsed = parseGridLaunchOverride(value)
   return parsed.state === 'ok' ? parsed.override : null
+}
+
+/** What a persisted launch said about web search. Anything but the three known words is "nothing to
+ *  say" — a row from a daemon that knew a fourth would otherwise have the app print it verbatim. */
+function normalizedGridWebSearch(value: unknown): GridWebSearchStatus | null {
+  return value === 'on' || value === 'unavailable' || value === 'unsupported' ? value : null
 }
 
 /** A persisted grid assignment. Lenient on `model` on purpose: a row that only knows WHERE it pointed

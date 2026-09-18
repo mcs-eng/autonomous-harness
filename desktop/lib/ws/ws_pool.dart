@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'relay_codec.dart';
+import 'terminal_transport_plugin.dart';
+
 import '../core/models.dart';
 import 'ws_conn.dart';
 
@@ -7,6 +10,13 @@ import 'ws_conn.dart';
 class WsPool {
   final String wsBaseUrl;
   final String autonomousEnv;
+
+  /// Handed to every relay connection — a viewer build's E2EE sessions (see [RelayCodec]).
+  final RelayCodecFactory? relayCodecs;
+
+  /// Handed to every relay connection beside [relayCodecs] — a viewer build's second
+  /// wire to the machine (see [TerminalTransportPlugin]).
+  final TerminalTransportPluginFactory? transportPlugins;
   final AccessTokenProvider accessTokenProvider;
   final void Function(String message) onAuthFailure;
   final void Function(String machineId, int code, String reason)?
@@ -20,6 +30,8 @@ class WsPool {
   WsPool({
     required this.wsBaseUrl,
     required this.autonomousEnv,
+    this.relayCodecs,
+    this.transportPlugins,
     required this.accessTokenProvider,
     required this.onAuthFailure,
     this.onLocalFailure,
@@ -33,9 +45,12 @@ class WsPool {
     Uri? localWsUri,
     String? localApiKey,
     int localProtocolVersion = 1,
+    Duration? fixedReconnectDelay,
   }) {
+    // The reconnect policy is part of the key: a row that turns out to be this computer's after its
+    // socket was made gets a new socket with the flat delay, not the old backoff.
     final desiredKey = transportKind == WsTransportKind.localPlaintext
-        ? 'local:${localWsUri.toString()}'
+        ? 'local:${localWsUri.toString()}:${fixedReconnectDelay?.inMilliseconds ?? 'backoff'}'
         : 'cloud:$wsBaseUrl:$autonomousEnv';
     final current = _conns[machineId];
     if (current != null &&
@@ -47,6 +62,12 @@ class WsPool {
     final conn = WsConn(
       wsBaseUrl: wsBaseUrl,
       autonomousEnv: autonomousEnv,
+      relayCodecs: transportKind == WsTransportKind.cloudE2ee
+          ? relayCodecs
+          : null,
+      transportPlugins: transportKind == WsTransportKind.cloudE2ee
+          ? transportPlugins
+          : null,
       machineId: machineId,
       accessTokenProvider: accessTokenProvider,
       onAuthFailure: onAuthFailure,
@@ -59,6 +80,7 @@ class WsPool {
       localWsUri: localWsUri,
       localApiKey: localApiKey,
       localProtocolVersion: localProtocolVersion,
+      fixedReconnectDelay: fixedReconnectDelay,
     );
     _conns[machineId] = conn;
     unawaited(conn.connect());

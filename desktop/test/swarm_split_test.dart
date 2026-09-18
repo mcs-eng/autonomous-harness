@@ -255,8 +255,8 @@ void main() {
       expect(
         find.text(
           axis == PaneResizeAxis.x
-              ? 'New Agent to the right'
-              : 'New Agent below',
+              ? 'New Harness to the right'
+              : 'New Harness below',
         ),
         findsOneWidget,
       );
@@ -434,7 +434,7 @@ void main() {
           isTrue,
         );
         if (change != 'switch') {
-          expect(app.lastError, contains('agent was created'));
+          expect(app.lastError, contains('harness was created'));
         }
         expect(connection.calls, isNot(contains('agent_delete')));
         await tester.pumpWidget(const SizedBox());
@@ -474,7 +474,7 @@ void main() {
     expect(find.byType(AlertDialog), findsNothing);
     await chord(tester, LogicalKeyboardKey.keyN);
     await tester.pump();
-    expect(find.text('New Agent to the right'), findsOneWidget);
+    expect(find.text('New Harness to the right'), findsOneWidget);
     expect(
       find.descendant(
         of: find.byKey(const Key('new-agent-project-browse')),

@@ -38,7 +38,10 @@ d('OpencodeReader (sqlite3 CLI)', () => {
   let dir = ''
   let db = ''
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'oc-reader-')); db = join(dir, 'opencode.db'); schema(db) })
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+  // maxRetries: a reader poll (sqlite3 CLI writing its journal) can still be touching the directory
+  // when the test ends, and a bare rmSync then dies with ENOTEMPTY — seen on CI (ubuntu-latest),
+  // where it made an unrelated PR red. Node retries the removal on exactly that class of error.
+  afterEach(() => { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) })
 
   /**
    * Attaching mid-turn must still open the turn.

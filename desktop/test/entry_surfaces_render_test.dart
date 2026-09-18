@@ -28,7 +28,7 @@ class _RenderApp extends AppNotifier {
     for (final id in ['local', 'remote']) {
       final machine = Machine(
         machineId: id,
-        name: id == 'local' ? 'MacBook Pro' : 'Workshop',
+        name: id == 'local' ? 'MacBook Pro' : 'Solid',
         authMode: MachineAuthMode.remote,
       );
       machines.add(machine);
@@ -213,6 +213,19 @@ void main() {
               .renderObject<RenderParagraph>(find.text(label))
               .didExceedMaxLines) {
             issues.add('$label is truncated when choosing an agent');
+          }
+        }
+        // The agent bar's pill names the chosen agent: never cut short.
+        for (final paragraph in tester.renderObjectList<RenderParagraph>(
+          find.descendant(
+            of: find.byKey(const Key('new-agent-agent-choice')),
+            matching: find.byType(RichText),
+          ),
+        )) {
+          if (paragraph.didExceedMaxLines) {
+            issues.add(
+              '${paragraph.text.toPlainText()} is truncated in the agent bar',
+            );
           }
         }
         expect(issues, isEmpty);

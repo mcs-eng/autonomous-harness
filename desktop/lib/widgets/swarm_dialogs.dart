@@ -8,8 +8,7 @@ import '../shared/widgets/app_dialog.dart';
 import '../shared/widgets/app_select_field.dart';
 import '../state/app_state.dart';
 import '../state/swarm_catalog.dart';
-import 'link_machine_dialog.dart';
-import 'link_machine_screen.dart';
+import 'link_another_machine_dialog.dart';
 import 'remote_folder_picker.dart';
 import 'clone_repository_dialog.dart';
 
@@ -33,7 +32,7 @@ class _RenameSwarmDialogState extends State<_RenameSwarmDialog> {
   late final _text = TextEditingController(
     text: widget.name,
   )..selection = TextSelection(baseOffset: 0, extentOffset: widget.name.length);
-  final _focus = FocusNode(debugLabel: 'Rename Harness name');
+  final _focus = FocusNode(debugLabel: 'Rename Tab name');
 
   @override
   void initState() {
@@ -68,7 +67,7 @@ class _RenameSwarmDialogState extends State<_RenameSwarmDialog> {
     return ListenableBuilder(
       listenable: _text,
       builder: (context, _) => AlertDialog(
-        title: const Text('Rename Harness'),
+        title: const Text('Rename Tab'),
         titleTextStyle: Theme.of(context).textTheme.titleMedium,
         content: SizedBox(
           width: 360,
@@ -313,83 +312,8 @@ class _ProjectDialogState extends State<_ProjectDialog> {
   );
 }
 
-Future<void> showSwarmLinkDialog(
-  BuildContext context,
-  AppNotifier notifier,
-) async {
-  final selected = await showAppDialog<String>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Link machine'),
-      content: SizedBox(
-        width: 480,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'On the other machine, sign in to Harness and start the daemon:',
-              ),
-              const SizedBox(height: 14),
-              const SelectableText(
-                'harness login\nharness start',
-                style: TextStyle(fontFamily: 'monospace', fontSize: 13),
-              ),
-              const SizedBox(height: 18),
-              const Text(
-                'Use the same account. Set a remote password on that machine, then choose it here to connect.',
-                style: TextStyle(fontSize: 12, color: Colors.white60),
-              ),
-              const SizedBox(height: 12),
-              ListenableBuilder(
-                listenable: notifier,
-                builder: (_, _) => Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    for (final machine in notifier.machineStates.values.where(
-                      (m) => !m.isLocalMachine,
-                    ))
-                      ListTile(
-                        leading: const Icon(Icons.computer, size: 18),
-                        title: Text(machine.machine.displayName),
-                        subtitle: Text(
-                          machine.needsLink
-                              ? 'Link required'
-                              : machine.nodeOnline == false
-                              ? 'Offline'
-                              : 'Linked',
-                        ),
-                        onTap: () =>
-                            Navigator.pop(context, machine.machine.machineId),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: notifier.refreshMachines,
-          child: const Text('Refresh'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, 'local-access'),
-          child: const Text('This machine’s remote password'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Done'),
-        ),
-      ],
-    ),
-  );
-  if (!context.mounted || selected == null) return;
-  if (selected == 'local-access') {
-    await showLinkMachineDialog(context, notifier);
-  } else {
-    await showLinkMachineScreenDialog(context, notifier, selected);
-  }
-}
+/// Link another machine. The dialog itself lives in
+/// `link_another_machine_dialog.dart`; this name is what every caller — the
+/// Machines menu, ⌘ commands, the machines manager — has always used.
+Future<void> showSwarmLinkDialog(BuildContext context, AppNotifier notifier) =>
+    showLinkAnotherMachineDialog(context, notifier);

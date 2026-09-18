@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+
 import '../../core/app_version.dart';
 import '../../core/build_identity.dart';
 import '../../shared/theme/app_theme.dart' as grid;
@@ -84,7 +85,7 @@ class _AboutSectionState extends State<AboutSection> {
               ),
               const SizedBox(height: 12),
               Text(
-                'Harness checks for a newer build when it starts, and every '
+                'OpenHarness checks for a newer build when it starts, and every '
                 'six hours after that.',
                 style: TextStyle(
                   color: grid.AppPalette.textFaint,

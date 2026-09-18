@@ -174,11 +174,11 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Create Agent…'), findsOneWidget);
+    expect(find.text('New Harness…'), findsOneWidget);
     expect(find.text('no running agents'), findsNothing);
     // The old button read "New agent" flat, and it is the ellipsis that promises a dialog rather than an
     // agent appearing on the spot.
-    expect(find.text('Create Agent'), findsNothing);
+    expect(find.text('New Harness'), findsNothing);
   });
 
   testWidgets('a machine that HAS agents is offered the same row, last', (
@@ -198,9 +198,9 @@ void main() {
     await tester.pump();
 
     expect(find.text('backend-api'), findsOneWidget);
-    expect(find.text('Create Agent…'), findsOneWidget);
+    expect(find.text('New Harness…'), findsOneWidget);
     // …and LAST, because a row that would create the next agent has to stand where the next agent would.
-    final rowY = tester.getTopLeft(find.text('Create Agent…')).dy;
+    final rowY = tester.getTopLeft(find.text('New Harness…')).dy;
     for (final name in ['backend-api', 'future-worker', 'herdr-session']) {
       expect(
         tester.getTopLeft(find.text(name)).dy,

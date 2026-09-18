@@ -79,25 +79,33 @@ class _MachinesManagerState extends State<_MachinesManager> {
                         subtitle: Text(
                           [
                             if (machines[i].isLocalMachine) 'This computer',
-                            if (machines[i].needsLink)
-                              'Link required'
+                            // Presence and link state are independent segments,
+                            // the same split the Machines menu and rail use: an
+                            // unlinked machine whose node is up reads
+                            // "Online · Link required" rather than the link
+                            // state hiding that the computer is reachable.
+                            // "Connecting…" only when presence is genuinely
+                            // unknown and there is no link prompt to show.
+                            if (machines[i].nodeOnline == true)
+                              'Online'
                             else if (machines[i].nodeOnline == false)
                               'Offline'
-                            else if (machines[i].nodeOnline == true)
-                              'Online'
-                            else
+                            else if (!machines[i].needsLink)
                               'Connecting…',
+                            if (machines[i].needsLink) 'Link required',
                           ].join(' · '),
                         ),
-                        trailing: TextButton(
-                          onPressed: () => showMachineRenameDialog(
-                            context,
-                            widget.notifier,
-                            machines[i].machine.machineId,
-                            machines[i].machine.displayName,
-                          ),
-                          child: const Text('Rename'),
-                        ),
+                        trailing: machines[i].machine.isShared
+                            ? const Text('View only')
+                            : TextButton(
+                                onPressed: () => showMachineRenameDialog(
+                                  context,
+                                  widget.notifier,
+                                  machines[i].machine.machineId,
+                                  machines[i].machine.displayName,
+                                ),
+                                child: const Text('Rename'),
+                              ),
                       ),
                     ],
                   ],

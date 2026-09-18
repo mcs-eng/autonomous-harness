@@ -87,12 +87,16 @@ function makeHost(over: Partial<CableHost> = {}) {
     appName: () => 'harness',
     voiceLang: () => 'en',
     listAgents: async () => AGENTS,
+    agentTotal: () => AGENTS.length,
+    activeSwarm: () => 't1',
+    describe: (id) => { const a = AGENTS.find((x) => x.id === id); return a ? { name: a.name, engine: a.engine ?? '', machine: a.machine ?? '' } : undefined },
     sendTurn: vi.fn(),
     stopTurn: vi.fn(),
     scrolled: vi.fn(),
     answer: vi.fn(),
     focus: vi.fn(),
     openAgent: vi.fn(),
+    forkAgent: async (id) => ({ ok: true as const, agentId: `${id}-fork` }),
     updateAgent: vi.fn(),
     listModels: async () => ['runtime-v1:s1:claude:opus@high', 'runtime-v1:s1:claude:sonnet@low'],
     recentSummaries: async () => [],
@@ -550,6 +554,34 @@ describe('cable session', () => {
     await session.stop()
   })
 
+  it('sends the focus without waiting for the new machine\'s history', async () => {
+    // THE BUG, measured on the desk: clicking from a local agent to a remote one left the dial on the old
+    // tile for 1.5 s. `selectMachine` awaited `pushRestores`, and a restore asks every agent's own machine
+    // what it was last doing — one cloud round trip per remote agent, in a serial loop, ahead of the one
+    // frame the person was actually waiting for. History is `restore: true`; it can land afterwards.
+    let releaseHistory!: () => void
+    const history = new Promise<void>((resolve) => { releaseHistory = resolve })
+    let selected = 'mac-local'
+    const host = makeHost({
+      selectedMachine: () => selected,
+      selectMachine: vi.fn(async (machineId: string) => { selected = machineId; return { ok: true as const } }),
+      listAgents: async () => [{ id: 'r1', name: 'Remote Claude', engine: 'claude' }],
+      recentSummaries: async () => { await history; return [{ recap: 'shipped it', text: 'shipped it' }] },
+    })
+    const { session, port } = await connect(host)
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+    await settle()
+
+    await session.followApp('remote-machine', 'r1')
+
+    expect(port.sent.filter((m) => m.t === 'focus').map((m) => m.agentId)).toContain('r1')
+    expect(port.types()).not.toContain('summary')   // nothing of the history has been waited on
+
+    releaseHistory()
+    await vi.waitFor(() => expect(port.types()).toContain('summary'))
+    await session.stop()
+  })
+
   it('does not bounce a local app selection back to the previous remote agent', async () => {
     let selected = 'remote-machine'
     let finishSelection!: () => void
@@ -847,18 +879,70 @@ describe('cable session', () => {
     await session.stop()
   })
 
-  it('says how many of the agents it just sent are on the carousel', async () => {
-    // The dial walks the first N and merely knows the rest. A firmware that
-    // predates the field ignores it and walks them all, exactly as before.
-    const agents: CableAgent[] = [
-      { id: 'a1', name: 'one' },
-      { id: 'a2', name: 'two', offRing: true },
-    ]
-    const { session, port } = await connect(makeHost({ listAgents: async () => agents }))
+  it('sends the account-wide count and the tab beside the list, not the rows behind them', async () => {
+    // The dial draws one number on the overview; the seventy rows behind it stay here. And `tab` is what
+    // tells a shut window from an empty tab when both send zero agents.
+    const { session, port } = await connect(makeHost({ agentTotal: () => 71, activeSwarm: () => 'tab-9' }))
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
     await session.pushAgents()
 
-    expect(port.sent.filter((m) => m.t === 'agents.end').at(-1)).toMatchObject({ ring: 1 })
+    expect(port.sent.filter((m) => m.t === 'agents.end').at(-1)).toMatchObject({ total: 71, tab: 'tab-9' })
+    expect(port.sent.filter((m) => m.t === 'agents.end').at(-1)).not.toHaveProperty('ring')
+    await session.stop()
+  })
+
+  it('pushes the same zero rows again when the window shuts, and not when only the tab changes', async () => {
+    // Empty tab → shut app is a change the dial draws ("Nothing on this tab" → "Run OpenHarness"); empty
+    // tab A → empty tab B is not — the `swarms` frame carries the tab's name — and pushing on it made
+    // every tab switch cost two list pushes.
+    let tab = 'a'
+    const { session, port } = await connect(makeHost({ listAgents: async () => [], activeSwarm: () => tab }))
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+    await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+    port.sent.length = 0
+
+    tab = 'b'
+    await session.syncAgents()
+    expect(port.types().filter((t) => t === 'agents.end')).toEqual([])
+    tab = ''
+    await session.syncAgents()
+    expect(port.sent.filter((m) => m.t === 'agents.end').at(-1)).toMatchObject({ tab: '' })
+    await session.stop()
+  })
+
+  it('forks on the dial\'s agent.fork and toasts only a refusal', async () => {
+    const forkAgent = vi.fn(async (id: string) => id === 'a1'
+      ? { ok: true as const, agentId: 'a1-fork' }
+      : { ok: false as const, error: 'AGENT_BUSY', detail: 'Wait for it to finish, then fork.' })
+    const { session, port } = await connect(makeHost({ forkAgent }))
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+    await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+    port.sent.length = 0
+
+    port.say({ t: 'agent.fork', agentId: 'a1' })
+    await vi.waitFor(() => expect(forkAgent).toHaveBeenCalledWith('a1'))
+    await new Promise((r) => setTimeout(r, 20))
+    // The window is told through the host (`opened`); the dial hears nothing on success.
+    expect(port.types().filter((t) => t === 'toast')).toEqual([])
+
+    port.say({ t: 'agent.fork', agentId: 'a2' })
+    await vi.waitFor(() => expect(port.sent.find((m) => m.t === 'toast')).toMatchObject({ text: 'Wait for it to finish, then fork.' }))
+    await session.stop()
+  })
+
+  it('names the agent on every summary and question, for one the dial does not hold', async () => {
+    const { session, port } = await connect(makeHost({}))
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+
+    await session.summary('a2', 'recap', 'body')
+    await session.question('a1', 'q1', [{ key: 'k' }])
+    // An id this daemon never listed: the fields travel empty rather than the frame being withheld.
+    await session.summary('ghost', 'recap', 'body')
+
+    expect(port.sent.find((m) => m.t === 'summary' && m.agentId === 'a2'))
+      .toMatchObject({ name: 'Device firmware voice', engine: 'codex', machine: '' })
+    expect(port.sent.find((m) => m.t === 'question')).toMatchObject({ name: 'Fix login screen', engine: 'claude', id: 'q1' })
+    expect(port.sent.find((m) => m.t === 'summary' && m.agentId === 'ghost')).toMatchObject({ name: '', engine: '' })
     await session.stop()
   })
 
@@ -1018,10 +1102,12 @@ describe('cable session', () => {
     await session.stop()
   })
 
-  it('sends the new list even when it hashes identically to the old one', async () => {
-    // Two machines whose agents share names and engines produce an EQUAL agentsKey. Without resetting it
-    // on a switch, the dial would keep the previous machine's tiles and nothing would ever correct it.
-    const twin: CableAgent[] = [...AGENTS]
+  it('re-sends neither the list nor the history when a select changes neither', async () => {
+    // The carousel spans every machine: `listAgentsFlat` reads the same agents whichever row wears the ✓,
+    // so moving the ✓ changes the machine wheel and nothing else. This used to force both pushes anyway —
+    // 55 frames of a list and a history the dial already had, down a cable the `focus` the person just
+    // clicked has to share. Measured on the desk: the focus was written in 20 ms and landed 1.7 s later.
+    const everywhere: CableAgent[] = [...AGENTS]
     let selected = 'mac-local'
     const host = makeHost({
       listMachines: async () => ({
@@ -1030,16 +1116,46 @@ describe('cable session', () => {
       }),
       selectedMachine: () => selected,
       selectMachine: async (id: string) => { selected = id; return { ok: true as const } },
-      listAgents: async () => twin,
+      listAgents: async () => everywhere,
+      recentSummaries: async () => [{ recap: 'shipped it', text: 'shipped it' }],
     })
     const { session, port } = await connect(host)
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
     await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+    await vi.waitFor(() => expect(port.types()).toContain('summary'))   // the attach DOES restore
     port.sent.length = 0
 
     port.say({ t: 'machine.select', machineId: 'm2' })
-    await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
-    expect(port.sent.filter((m) => m.t === 'agent')).toHaveLength(2)
+    await vi.waitFor(() => expect(port.types()).toContain('machine.selected'))
+    await settle()
+
+    expect(port.types()).toContain('machines.end')    // the ✓ moved, so the wheel is re-sent
+    expect(port.types()).not.toContain('agent')       // the tiles did not
+    expect(port.types()).not.toContain('summary')     // nor the history behind them
+    await session.stop()
+  })
+
+  it('restores a tile that appears after the attach, and only that one', async () => {
+    // A remote machine's agents reach the cache seconds after the greeting, so the attach's restore ran
+    // before they existed. They must still arrive with their history — without dragging every tile that
+    // already has one back down the cable behind them.
+    let agents: CableAgent[] = [{ id: 'a1', name: 'one' }]
+    const asked: string[] = []
+    const { session, port } = await connect(makeHost({
+      listAgents: async () => agents,
+      recentSummaries: async (agentId: string) => { asked.push(agentId); return [{ recap: 'shipped it', text: '' }] },
+    }))
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+    await vi.waitFor(() => expect(port.types()).toContain('summary'))
+    port.sent.length = 0
+    asked.length = 0
+
+    agents = [...agents, { id: 'r1', name: 'the remote one' }]   // that machine's list just landed
+    await session.syncAgents()
+    await vi.waitFor(() => expect(port.types()).toContain('summary'))
+
+    expect(asked).toEqual(['r1'])
+    expect(port.sent.filter((m) => m.t === 'summary').map((m) => m.agentId)).toEqual(['r1'])
     await session.stop()
   })
 

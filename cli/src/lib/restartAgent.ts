@@ -28,6 +28,9 @@ export interface RestartAgentDeps {
   respawn: (argv: string[]) => Promise<{ ok: boolean; reason?: string }>
   /** Poll the pane for a recognizable engine process, up to an internal budget. Null on timeout. */
   waitForProcess: () => Promise<ProcessIdentity | null>
+  /** Prepare persisted history only once the old writer is confirmed stopped. A failure must
+   * preserve the conversation, not enter the fresh-session fallback. */
+  prepareResume?: () => void | Promise<void>
   buildArgv: (opts: { bypassPermission: boolean; resumeSessionId?: string }) => string[]
   log: (message: string) => void
 }
@@ -52,6 +55,11 @@ export async function restartAgent(
   }
 
   const resumeSessionId = session.sessionId || undefined
+  if (resumeSessionId && deps.prepareResume) {
+    try { await deps.prepareResume() } catch (error) {
+      return { ok: false, detail: `could not prepare ${session.engine} session for resume: ${error instanceof Error ? error.message : error}` }
+    }
+  }
   const spawnAndWait = async (withResume: boolean): Promise<ProcessIdentity | null> => {
     const argv = deps.buildArgv({
       bypassPermission,

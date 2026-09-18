@@ -1,3 +1,5 @@
+import '../sharing/share_harness_dialog.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -31,6 +33,7 @@ import '../terminal/terminal_viewport.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../theme/app_theme.dart';
 import 'engine_identity.dart';
+import 'grid_model_picker.dart';
 import 'pane_header_actions.dart';
 
 /// The pane header's own horizontal inset.
@@ -46,6 +49,9 @@ class TerminalPanel extends StatefulWidget {
   /// where there is nothing to close it back to.
   final VoidCallback? onClose;
   final VoidCallback? onRestart;
+
+  /// Forks this harness — a second agent with its history (fork_agent_dialog.dart).
+  final VoidCallback? onFork;
   final VoidCallback? onDelete;
 
   final VoidCallback? onToggleZoom;
@@ -57,12 +63,24 @@ class TerminalPanel extends StatefulWidget {
   /// Only the focused grid tile may claim keyboard focus on mount/rebuild.
   final bool focused;
   final bool visible;
+
+  /// Coalesces streaming output for an unfocused tile without delaying input.
+  final Duration? outputRepaintInterval;
   final Size? viewportSize;
 
   /// A shared terminal can move to another tab without being remounted.
   final (String, int)? paneLocation;
   final (int, int, int?)? layoutRequest;
   final bool compactHeader;
+
+  /// The tile's own header strip — engine, title, status, pin, close — and
+  /// whether it is built at all. False on the phone, where [PhoneHeader] already
+  /// names the agent above this panel, there is no tile to pin, close or drag,
+  /// and the pane takes the full remaining height (`phone/terminal_page.dart`
+  /// in the mobile package). Find has no way in there — every
+  /// [TerminalFindAction] caller lives in the desktop screens — so the row's
+  /// Find overlay goes with it.
+  final bool showHeader;
   final int focusRequest;
 
   /// Whether this tile's composer textbox is showing. Only consulted for a remote machine.
@@ -87,10 +105,12 @@ class TerminalPanel extends StatefulWidget {
     required this.session,
     required this.focused,
     this.visible = true,
+    this.outputRepaintInterval,
     this.viewportSize,
     this.paneLocation,
     this.layoutRequest,
     this.compactHeader = false,
+    this.showHeader = true,
     this.focusRequest = 0,
     this.composerVisible = false,
     this.readOnly = false,
@@ -98,6 +118,7 @@ class TerminalPanel extends StatefulWidget {
     this.onToggleComposer,
     this.onClose,
     this.onRestart,
+    this.onFork,
     this.onDelete,
     this.onToggleZoom,
     this.zoomed = false,
@@ -325,6 +346,28 @@ class _TerminalPanelState extends State<TerminalPanel>
   void _onSessionChanged() {
     if (!mounted) return;
     _syncCursorBlink();
+    // A pane can open BEFORE its screen exists: over the relay it mounts empty
+    // and the retained scrollback is replayed a moment later, so the jump in
+    // `_afterTerminalMounted` lands on nothing and the screen then fills in
+    // above the reader. xterm does not close this — its own `_scrollToBottom`
+    // answers typing and the keyboard opening, never new output.
+    //
+    // Gated on [_followTail], which is kept as "the view is showing its end",
+    // so a pane the reader has scrolled up in — or one restored to a saved
+    // position — is not at the end, and is never followed.
+    // Visible only. A parked pane holds the offset it was left at while output
+    // arrives behind it — `swarm_screen_test` pins that — and comes back to the
+    // end through `_afterTerminalMounted`, which is where returning is handled.
+    if (_followTail && widget.visible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !widget.visible) return;
+        if (!_followTail || !_scrollController.hasClients) return;
+        final position = _scrollController.position;
+        if (position.pixels != position.maxScrollExtent) {
+          position.jumpTo(position.maxScrollExtent);
+        }
+      });
+    }
     if (!_composerFocusPending) return;
     if (!widget.focused || !_showsComposer) {
       _composerFocusPending = false;
@@ -1131,73 +1174,80 @@ class _TerminalPanelState extends State<TerminalPanel>
         color: grid.AppPalette.windowBg,
         child: Column(
           children: [
-            Stack(
-              children: [
-                Visibility(
-                  visible: _find == null,
-                  maintainSize: true,
-                  maintainAnimation: true,
-                  maintainState: true,
-                  child: _buildHeader(context),
-                ),
-                // Attach the focused pane's input before Find is requested.
-                // Hidden/unfocused panes need no dormant editor or index.
-                if (_find != null || (widget.visible && widget.focused))
-                  Positioned.fill(
-                    child: Offstage(
-                      offstage: _find == null,
-                      child: LayoutBuilder(
-                        builder: (context, constraints) => Row(
-                          children: [
-                            if (constraints.maxWidth > 520)
-                              Expanded(
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: _stripPadding,
-                                  ),
-                                  child: Text(
-                                    session.agentName,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 13,
-                                      color: Colors.white70,
+            if (widget.showHeader)
+              Stack(
+                children: [
+                  Visibility(
+                    visible: _find == null,
+                    maintainSize: true,
+                    maintainAnimation: true,
+                    maintainState: true,
+                    child: _buildHeader(context),
+                  ),
+                  // Attach the focused pane's input before Find is requested.
+                  // Hidden/unfocused panes need no dormant editor or index.
+                  if (_find != null || (widget.visible && widget.focused))
+                    Positioned.fill(
+                      child: Offstage(
+                        offstage: _find == null,
+                        child: LayoutBuilder(
+                          builder: (context, constraints) => Row(
+                            children: [
+                              if (constraints.maxWidth > 520)
+                                Expanded(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: _stripPadding,
+                                    ),
+                                    child: Text(
+                                      session.agentName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        color: Colors.white70,
+                                      ),
                                     ),
                                   ),
-                                ),
-                              )
-                            else
-                              const Spacer(),
-                            SizedBox(
-                              width: math.min(constraints.maxWidth, 380),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 4,
-                                ),
-                                child: TerminalFindBar(
-                                  key: _findBarKey,
-                                  search: _find,
-                                  initialQuery: _lastFindQuery,
-                                  initialCaseSensitive: _lastFindCaseSensitive,
-                                  readOnly:
-                                      widget.readOnly || !session.acceptsInput,
-                                  onQuery: _queryFind,
-                                  onStep: _stepFind,
-                                  onClose: _closeFind,
-                                  onFocus: () => widget.onRendererFocus?.call(),
+                                )
+                              else
+                                const Spacer(),
+                              SizedBox(
+                                width: math.min(constraints.maxWidth, 380),
+
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 4,
+                                  ),
+                                  child: TerminalFindBar(
+                                    key: _findBarKey,
+                                    search: _find,
+                                    initialQuery: _lastFindQuery,
+                                    initialCaseSensitive:
+                                        _lastFindCaseSensitive,
+                                    readOnly:
+                                        widget.readOnly ||
+                                        !session.acceptsInput,
+                                    onQuery: _queryFind,
+                                    onStep: _stepFind,
+                                    onClose: _closeFind,
+                                    onFocus: () =>
+                                        widget.onRendererFocus?.call(),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-              ],
-            ),
+                ],
+              ),
 
-            Divider(height: 1, color: AppColors.border),
+            // Goes with the row above it: the phone draws its own rule under
+            // [PhoneHeader], and keeping this one would stack two.
+            if (widget.showHeader) Divider(height: 1, color: AppColors.border),
             Expanded(
               child: Stack(
                 children: [
@@ -1214,9 +1264,10 @@ class _TerminalPanelState extends State<TerminalPanel>
                           session.terminal,
                           key: _terminalViewKey,
                           controller: _controller,
-                          autoResize: widget.visible,
+                          autoResize: widget.visible && !session.readOnly,
                           resizeBuffer: false,
                           renderingEnabled: widget.visible,
+                          outputRepaintInterval: widget.outputRepaintInterval,
                           scrollController: _scrollController,
                           focusNode: _focusNode,
                           autofocus: widget.focused && !showComposer,
@@ -1337,10 +1388,15 @@ class _TerminalPanelState extends State<TerminalPanel>
       machine: machine?.machine,
       local: machine?.isLocalMachine,
       agent: agent,
+      // Named on its own even though `agent` is already here: an Agent has no
+      // equality, so a frame that changed nothing but the verdict must still
+      // be seen as a change by the one field that can say so.
+      verdict: agent?.verdict,
       project: agent == null ? null : machine?.projectOf(agent),
       compact: widget.compactHeader,
       close: widget.onClose != null,
       restart: widget.onRestart != null,
+      fork: widget.onFork != null,
       delete: widget.onDelete != null,
       composer: widget.composerVisible,
       toggleComposer: widget.onToggleComposer != null,
@@ -1365,6 +1421,7 @@ class _TerminalPanelState extends State<TerminalPanel>
         onRestart: widget.onRestart == null
             ? null
             : () => widget.onRestart?.call(),
+        onFork: widget.onFork == null ? null : () => widget.onFork?.call(),
         onDelete: widget.onDelete == null
             ? null
             : () => widget.onDelete?.call(),
@@ -1386,6 +1443,7 @@ class _TerminalHeader extends StatelessWidget {
   final bool readOnly;
   final VoidCallback? onClose;
   final VoidCallback? onRestart;
+  final VoidCallback? onFork;
 
   /// Ends the agent (with a confirmation), as the rail's row menu does. Null
   /// where the pane cannot name a live agent to end.
@@ -1413,6 +1471,7 @@ class _TerminalHeader extends StatelessWidget {
     this.readOnly = false,
     this.onClose,
     this.onRestart,
+    this.onFork,
     this.onDelete,
     this.compact = false,
     this.onToggleZoom,
@@ -1487,23 +1546,39 @@ class _TerminalHeader extends StatelessWidget {
       if (profile != null) 'Codex profile: $profile',
       'Double-click to rename',
     ].join('\n');
-    final remoteComposer = machine != null && !machine.isLocalMachine
+    // A terminal has no prompt to compose a message for — a shell reads keys,
+    // and the composer's Enter-to-send would be a line nobody asked for.
+    final remoteComposer =
+        machine != null &&
+            !machine.isLocalMachine &&
+            !isTerminalEngine(session.engineId)
         ? onToggleComposer
         : null;
-    final actionsWidth = remoteComposer == null ? 118.0 : 148.0;
+    // The icon cluster, plus the model picker that now sits at its left — without the extra the
+    // constraint clips the picker rather than the details it was measured for. Zero on an engine
+    // that gets no picker, so those headers keep the width they always had.
+    final showModelPicker =
+        status == null && !readOnly && modelPickerSupports(session.engineId);
+    final pickerWidth = showModelPicker ? 72.0 : 0.0;
+    final actionsWidth = (remoteComposer == null ? 118.0 : 148.0) + pickerWidth;
     final folder =
         project?.cwd
             .split(RegExp(r'[/\\]'))
             .where((part) => part.isNotEmpty)
             .lastOrNull ??
         project?.name;
+    // A fork says so first: "forked from X" is the one fact about this pane
+    // that the folder and the branch — shared with its source — cannot tell.
+    final forkedFrom = agent?.forkedFrom;
     final details = [
+      if (forkedFrom != null) 'forked from ${forkedFrom.name}',
       if (folder?.isNotEmpty == true) folder!,
       if (project?.branch?.trim().isNotEmpty == true) project!.branch!,
       machineName,
     ];
+    final forkIndex = forkedFrom != null ? 0 : null;
     final branchIndex = project?.branch?.trim().isNotEmpty == true
-        ? (folder?.isNotEmpty == true ? 1 : 0)
+        ? (forkedFrom != null ? 1 : 0) + (folder?.isNotEmpty == true ? 1 : 0)
         : null;
     final strip = PaneHeaderHover(
       child: SizedBox(
@@ -1513,7 +1588,13 @@ class _TerminalHeader extends StatelessWidget {
           child: LayoutBuilder(
             builder: (context, constraints) => Row(
               children: [
-                EngineMark(engine: session.engineId, size: 17),
+                if (agent != null)
+                  EngineMark.forAgent(agent, size: 17)
+                else
+                  EngineMark(engine: session.engineId, size: 17),
+                // Icon and name, the same as every other pane (owner,
+                // 2026-09-15): a harness agent is its harness here, and the
+                // engine it runs on is the dialog's and the tooltip's to say.
                 const SizedBox(width: 10),
                 Expanded(
                   child: Row(
@@ -1629,15 +1710,85 @@ class _TerminalHeader extends StatelessWidget {
                     ),
                   ),
                   child: PaneHeaderActions(
+                    // Where this agent runs, with the controls rather than beside the name — the
+                    // header has room for one of the two, and this is the half you only read while
+                    // reaching for it. Absent while a notice is showing: a header asking to
+                    // reconnect is not the moment to offer a menu.
+                    modelPicker: showModelPicker
+                        ? GridModelPicker(
+                            notifier: notifier,
+                            machineId: session.machineId,
+                            currentModel: agent?.gridModel,
+                            webSearch: agent?.gridWebSearch,
+                            engineLabel: session.engineId,
+                            onSelected: (model) => unawaited(
+                              notifier.retargetAgentToGridModel(
+                                session.machineId,
+                                session.agentId,
+                                model.id,
+                                gridName: model.grid,
+                              ),
+                            ),
+                            onUseOwnLogin: () => unawaited(
+                              notifier.clearAgentGrid(
+                                session.machineId,
+                                session.agentId,
+                              ),
+                            ),
+                            // The pane's own context, because the door opens New Agent — and
+                            // the pane's own MACHINE, because a picker on a remote agent's pane
+                            // is asking about the models that computer can serve, not this one's.
+                            onRunLocalModel: () => unawaited(
+                              notifier.runLocalModel(
+                                context,
+                                machineId: session.machineId,
+                              ),
+                            ),
+                          )
+                        : null,
+                    onShare:
+                        readOnly ||
+                            notifier
+                                    .stateOf(session.machineId)
+                                    ?.machine
+                                    .isShared ==
+                                true
+                        ? null
+                        : () => showShareHarnessDialog(
+                            context,
+                            notifier,
+                            session.machineId,
+                            session.agentId,
+                            session.agentName,
+                          ),
                     zoomed: zoomed,
                     onZoom: onToggleZoom,
                     onRestart: onRestart,
+                    onFork: onFork,
                     onDelete: onDelete,
                     onClose: onClose,
+                    terminal: isTerminalEngine(session.engineId),
                     onToggleComposer: remoteComposer,
                     composerVisible: composerVisible,
+                    // A harness agent's viewer, shown or hidden from the
+                    // pane it belongs to.
+                    onToggleViewer:
+                        agent?.viewerUrl == null && agent?.viewerError == null
+                        ? null
+                        : () => notifier.toggleViewerPane(
+                            session.machineId,
+                            agent!.id,
+                          ),
+                    viewerVisible:
+                        agent != null &&
+                        notifier.viewerPaneShown(session.machineId, agent.id),
+                    viewerColor: agent == null
+                        ? null
+                        : agentIdentity(agent).color,
                     details: Tooltip(
                       message: [
+                        if (forkedFrom != null)
+                          'Forked from ${forkedFrom.name}',
                         if (project != null) project.cwd,
                         if (project?.branch?.isNotEmpty == true)
                           'Branch: ${project!.branch}',
@@ -1662,6 +1813,14 @@ class _TerminalHeader extends StatelessWidget {
                                   if (i == branchIndex) ...[
                                     Icon(
                                       LucideIcons.gitBranch300,
+                                      size: 12,
+                                      color: AppColors.mutedStrong,
+                                    ),
+                                    const SizedBox(width: 4),
+                                  ],
+                                  if (i == forkIndex) ...[
+                                    Icon(
+                                      LucideIcons.gitFork300,
                                       size: 12,
                                       color: AppColors.mutedStrong,
                                     ),
@@ -1715,6 +1874,12 @@ class _TerminalHeader extends StatelessWidget {
   }
 }
 
+/// A domain harness's verdict on the agent's workspace, in one word or one count.
+///
+/// Green "Ready" is the harness's one machine fact — fab-ready, every gate passed. Red carries the
+/// error count, amber the warning count when nothing blocks, grey "Checked" a clean run that the
+/// harness still would not call ready. The summary rides in the tooltip; the findings themselves
+/// live in the harness's own viewer, which is the pane beside this one.
 /// The pane header's transport badge: a compact topology for the path carrying terminal bytes.
 ///
 /// The three shapes describe one hop, an intermediate hop, and a central server respectively. That

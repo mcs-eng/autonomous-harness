@@ -8,12 +8,35 @@ import 'terminal_pane.dart';
 /// Shared agents reuse the same pane/session across swarms, so the daemon has
 /// exactly one controller and switching tabs cannot take over our own stream.
 class Swarm {
-  Swarm({required this.id, String name = defaultName})
+  Swarm({required this.id, String name = defaultName, this.kind = 'harness'})
     : name = normalizeName(name);
 
-  static const defaultName = 'New Harness';
+  /// What the tab holds: `harness` — panes of agents (the default); `store` —
+  /// the Harness Store, no panes. A store tab is a tab like any other —
+  /// switched to, closed, restored — so browsing never covers the strip; it
+  /// just is not somewhere a pane can land. Mutable because the store takes
+  /// over the New Tab it was opened from, the way a first agent does.
+  String kind;
+  bool get isStore => kind == 'store';
+  bool get isOrchestrator =>
+      kind == 'orchestrator' &&
+      orchestratorId != null &&
+      orchestratorMachineId != null;
+  String? orchestratorId, orchestratorMachineId;
+  static const storeName = 'Harness Store';
+
+  static const defaultName = 'New Tab';
+  // 'New Harness' was the default until 2026-09-15 and 'New Agent' for a day
+  // after; a layout saved then still carries one, and it must read as the same
+  // fresh tab.
   static String normalizeName(String name) =>
-      const {'New swarm', 'New tab', 'New Tab', 'New Agent'}.contains(name)
+      const {
+        'New swarm',
+        'New tab',
+        'New Tab',
+        'New Harness',
+        'New Agent',
+      }.contains(name)
       ? defaultName
       : name;
 
@@ -48,6 +71,13 @@ class Swarm {
     if (index < 0) return;
     final manual = manualLayout;
     panes.removeAt(index);
+    // Layouts are kept per pane count, so the harness split for a viewer and
+    // its terminal would otherwise wait for the next two tiles of any kind.
+    // Only the split Harness itself made goes; one the user dragged is theirs.
+    if (panes.length == 1 &&
+        identical(manual, PaneArrangement.viewerBesideTerminal)) {
+      paneSizes.remove('2:manual');
+    }
     if (manual != null && panes.length > 1) {
       final next = manual.remove(index);
       if (next == null) {
@@ -78,6 +108,9 @@ class Swarm {
     return {
       'id': id,
       'name': name,
+      if (kind != 'harness') 'kind': kind,
+      if (isOrchestrator) 'orchestratorId': orchestratorId,
+      if (isOrchestrator) 'orchestratorMachineId': orchestratorMachineId,
       'focus': agents.indexWhere((p) => p.id == focusedPaneId),
       'previousFocus': agents.indexWhere((p) => p.id == previousPaneId),
       'zoom': agents.indexWhere((p) => p.id == zoomedPaneId),
@@ -147,6 +180,9 @@ class ClosedSwarm extends ClosedWork {
     this.engine,
   }) : id = swarm.id,
        name = swarm.name,
+       kind = swarm.kind,
+       orchestratorId = swarm.orchestratorId,
+       orchestratorMachineId = swarm.orchestratorMachineId,
        gridColumns = swarm.gridColumns,
        focus = swarm.panes.indexWhere((p) => p.id == swarm.focusedPaneId),
        previousFocus = swarm.panes.indexWhere(
@@ -168,6 +204,10 @@ class ClosedSwarm extends ClosedWork {
 
   final String id;
   final String name;
+
+  /// So a closed store tab reopens as the store, not as an empty harness tab.
+  final String kind;
+  final String? orchestratorId, orchestratorMachineId;
   final String? engine;
   final int index;
   final int? gridColumns;

@@ -1,3 +1,5 @@
+import '../sharing/shared_harness_panel.dart';
+
 import 'dart:typed_data';
 
 import 'package:desktop_drop/desktop_drop.dart';
@@ -7,6 +9,8 @@ import 'package:xterm/xterm.dart';
 import 'window_chrome.dart';
 
 import '../clipboard/image_bytes.dart';
+import '../core/dsh_catalog.dart' show DshEntry;
+import '../core/models.dart' show Agent;
 import '../clipboard/native_clipboard.dart';
 import '../shared/theme/app_theme.dart' as grid;
 // `hide TerminalKey`: this file's own shortcut-label class, unused here, collides with xterm's
@@ -24,8 +28,10 @@ import 'agent_drag.dart';
 import 'harness_join_guide_screen.dart';
 import 'new_agent_dialog.dart';
 import 'delete_agent_dialog.dart';
+import 'fork_agent_dialog.dart';
 import 'restart_agent_action.dart';
 import 'terminal_panel.dart';
+import 'web_pane_panel.dart';
 import 'pane_resize_handle.dart';
 import 'pane_split_edges.dart';
 
@@ -1262,13 +1268,57 @@ class _PaneContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final machine = notifier.stateOf(pane.machineId);
+    void close() => notifier.closePane(pane.id);
+    if (pane.sharedHarness case final grant?) {
+      return SharedHarnessPanel(
+        key: ValueKey('shared-pane-${pane.id}'),
+        notifier: notifier,
+        pane: pane,
+        grant: grant,
+        visible: visible,
+        onClose: close,
+        hasAccess:
+            machine?.machine.sharedHarnesses.any((s) => s.id == grant.id) ==
+            true,
+      );
+    }
+
+    // A harness's viewer: the one tile that is not a terminal and not about a
+    // machine. Decided first, before anything below reads `agentId` — which a
+    // viewer keeps null on purpose (see TerminalPane.ownerAgentId).
+    if (pane.isWeb) {
+      final owner = machine?.agents
+          .where((agent) => agent.id == pane.ownerAgentId)
+          .firstOrNull;
+      return WebPanePanel(
+        key: ValueKey('web-pane-${pane.id}'),
+        notifier: notifier,
+        pane: pane,
+        title: viewerPaneName(owner, machine?.dsh.entries ?? const []),
+        ownerName: owner?.name ?? pane.ownerAgentId ?? 'Viewer',
+        ownerEngine: owner?.identityEngine,
+        ownerDisplayName: owner?.identityDisplayName,
+        verdict: owner?.verdict,
+        working:
+            owner != null &&
+            notifier.agentIsProcessing(pane.machineId, owner.id),
+        onClose: close,
+        compactHeader: swarmMode,
+        zoomed: notifier.zoomedPaneId == pane.id,
+        onToggleZoom: swarmMode && (!single || notifier.zoomedPaneId == pane.id)
+            ? () {
+                notifier.focusPane(pane.id);
+                notifier.toggleZoomPane();
+              }
+            : null,
+      );
+    }
     final session = pane.session;
     final wantedAgentId = pane.agentId;
     final agent = machine?.agents
         .where((agent) => agent.id == wantedAgentId)
         .firstOrNull;
     final agentName = agent?.name;
-    void close() => notifier.closePane(pane.id);
     final needsLink =
         machine != null &&
         machine.isRemote &&
@@ -1282,6 +1332,20 @@ class _PaneContent extends StatelessWidget {
     // Availability changes the header and input permission, never the renderer's
     // ancestry. Retained output, selection, scroll and Find stay in this view.
     if (session != null) {
+      // A software renderer (notably WSLg's llvmpipe) cannot keep up when
+      // every visible terminal schedules a full text layout for every output
+      // chunk. Keep the active tile realtime and coalesce background output
+      // only once the grid has three terminal panes. The buffer remains live,
+      // so the next paint contains every intervening chunk.
+      final terminalPaneCount = notifier.panes
+          .where((candidate) => candidate.session != null)
+          .length;
+      final throttleBackgroundOutput =
+          swarmMode &&
+          visible &&
+          !notifier.isPaneFocused(pane.id) &&
+          notifier.zoomedPaneId == null &&
+          terminalPaneCount >= 3;
       final TerminalNotice? notice;
       if (machine == null) {
         notice = (
@@ -1334,6 +1398,9 @@ class _PaneContent extends StatelessWidget {
             notifier.zoomedPaneId,
           ),
           focused: visible && notifier.isPaneFocused(pane.id),
+          outputRepaintInterval: throttleBackgroundOutput
+              ? const Duration(milliseconds: 80)
+              : null,
           focusRequest: notifier.isPaneFocused(pane.id)
               ? notifier.paneFocusRequest
               : 0,
@@ -1348,6 +1415,16 @@ class _PaneContent extends StatelessWidget {
               ? null
               : () =>
                     restartHarness(context, notifier, pane.machineId, agent.id),
+          onFork: agent == null || offline || needsLink || !agent.canFork
+              ? null
+              : () => forkHarness(
+                  context,
+                  notifier,
+                  pane.machineId,
+                  agent.id,
+                  agent.name,
+                  engine: agent.engine,
+                ),
           // The same confirmation the rail's row menu opens. Only for an
           // agent the machine still lists — a pane whose agent is already
           // gone has nothing to end.
@@ -1359,6 +1436,7 @@ class _PaneContent extends StatelessWidget {
                   pane.machineId,
                   agent.id,
                   agent.name,
+                  engine: agent.engine,
                 ),
           zoomed: notifier.zoomedPaneId == pane.id,
           onToggleZoom:
@@ -2103,7 +2181,7 @@ class _EmptyGrid extends StatelessWidget {
                 FilledButton.icon(
                   key: const ValueKey('empty-grid-new-agent'),
                   icon: const Icon(Icons.add, size: 16),
-                  label: const Text('Create Agent'),
+                  label: const Text('New Harness'),
                   onPressed: () => showNewAgentDialog(
                     context,
                     notifier,
@@ -2131,4 +2209,23 @@ class _EmptyGrid extends StatelessWidget {
       ),
     );
   }
+}
+
+/// What a harness's viewer pane is called, so the harness's name is not printed twice beside its
+/// terminal. The daemon's answer first; from a daemon that predates it, the shared viewer's name
+/// from this machine's catalog ("3D Viewer"); else the harness's name and "Viewer"; else "Viewer".
+String viewerPaneName(Agent? owner, Iterable<DshEntry> catalog) {
+  if (owner == null) return 'Viewer';
+  if (owner.viewerName case final name?) return name;
+  final entry = catalog.where((e) => e.id == owner.dsh).firstOrNull;
+  final used = entry?.viewerUse;
+  if (used != null) {
+    final viewer = catalog.where((e) => e.id == used).firstOrNull;
+    if (viewer != null && viewer.name.trim().isNotEmpty)
+      return viewer.name.trim();
+  }
+  final harness = owner.dshName ?? entry?.name;
+  return harness == null || harness.trim().isEmpty
+      ? 'Viewer'
+      : '${harness.trim()} Viewer';
 }

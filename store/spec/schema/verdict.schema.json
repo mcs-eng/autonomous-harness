@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness.autonomous.ai/dsh/spec/1/verdict.schema.json",
+  "title": "Domain-specific harness verdict (.harness/verdict.json), spec 1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "spec",
+    "ready"
+  ],
+  "properties": {
+    "spec": {
+      "const": 1
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "The one machine fact: fab.ready, all gates passed, exam passed."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One line for the pane header."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "severity",
+          "message"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "severity": {
+            "enum": [
+              "error",
+              "warning",
+              "info"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "Open set; never switched on by Harness."
+          },
+          "message": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string",
+            "description": "What it is about: a part, a gate, a file."
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "string",
+      "description": "Workspace-relative path of the primary thing to view."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "phases": {
+      "type": "array",
+      "maxItems": 12,
+      "description": "Where the work is, for the pane header's phase strip: the phases in order, each with a state. Optional; a harness with one phase writes none.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "state": {
+            "enum": [
+              "done",
+              "active",
+              "pending",
+              "failed"
+            ],
+            "default": "pending"
+          },
+          "artifact": {
+            "type": "string",
+            "description": "Workspace-relative path of what this phase produced, when it has one."
+          }
+        }
+      }
+    }
+  }
+}

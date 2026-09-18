@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ENGINES } from '../engines/types.js'
 import type { RegisteredSession } from './registry.js'
 import { TerminalStreamManager, terminalEngineCapabilities, UPLOAD_CHUNK_BYTES } from './terminalStreamManager.js'
-import { TERMINAL_ACTION_SUCCEEDED, type TerminalStreamHandle, type TerminalStreamSink } from './terminalTypes.js'
+import {
+  TERMINAL_ACTION_SUCCEEDED,
+  terminalActionPossiblyExecuted,
+  type TerminalActionResult,
+  type TerminalStreamHandle,
+  type TerminalStreamSink,
+} from './terminalTypes.js'
 import type { TerminalBackendCoordinator } from './terminalBackendCoordinator.js'
 import { TerminalBinaryKind, TERMINAL_LOCAL_IMAGE_PASTE_MAX_PAYLOAD_BYTES, type TerminalBinaryClear } from './terminalBinary.js'
 import { writeImageToOsClipboard, type OsClipboardImageResult } from './osClipboard.js'
@@ -34,7 +40,14 @@ class FakeStream implements TerminalStreamHandle {
     return { state: 'succeeded', value: { bytes: this.snapshotBytes, cols: 120, rows: 40 } }
   }
   endSnapshot() { this.snapshotEnds++; this.onEndSnapshot?.() }
-  async writeRaw(bytes: Uint8Array) { this.writes.push(bytes); return TERMINAL_ACTION_SUCCEEDED }
+  /** When set, every writeRaw parks on it instead of answering at once — a tmux that is slow to `%end`. */
+  pendingWrites: Array<(result: TerminalActionResult) => void> = []
+  holdWrites = false
+  async writeRaw(bytes: Uint8Array): Promise<TerminalActionResult> {
+    this.writes.push(bytes)
+    if (!this.holdWrites) return TERMINAL_ACTION_SUCCEEDED
+    return new Promise((resolve) => { this.pendingWrites.push(resolve) })
+  }
   async pasteRaw(text: string) { this.pastes.push(text); return TERMINAL_ACTION_SUCCEEDED }
   async resize(size: { cols: number; rows: number }) { this.sizes.push(size); return TERMINAL_ACTION_SUCCEEDED }
   async scroll(direction: 'up' | 'down', lines: number) { this.scrolls.push({ direction, lines }); return TERMINAL_ACTION_SUCCEEDED }
@@ -59,6 +72,18 @@ describe('TerminalStreamManager', () => {
   let manager: TerminalStreamManager
   let agents: Map<string, RegisteredSession>
   let outputBeforeOpen: Uint8Array | null
+  let terminals: TerminalBackendCoordinator
+
+  const newManager = (extra: { isLoopback?: (connId: string) => boolean } = {}): TerminalStreamManager =>
+    new TerminalStreamManager({
+      terminals,
+      resolveAgent: (id) => agents.get(id),
+      sendTarget: (connId, type, payload) => { sent.push({ connId, type, payload }); return true },
+      sendBinaryTarget: (connId, frame) => { binarySent.push({ connId, frame }); return true },
+      streamingAvailable: true,
+      now: () => Date.now(),
+      ...extra,
+    })
 
   beforeEach(() => {
     vi.useFakeTimers()
@@ -68,21 +93,14 @@ describe('TerminalStreamManager', () => {
     binarySent = []
     outputBeforeOpen = null
     agents = new Map([['agent-1', session()]])
-    const terminals = {
+    terminals = {
       openStream: async (_session: RegisteredSession, _size: unknown, nextSink: TerminalStreamSink) => {
         sink = nextSink
         if (outputBeforeOpen) nextSink.onData(outputBeforeOpen)
         return { state: 'succeeded' as const, value: stream }
       },
     } as unknown as TerminalBackendCoordinator
-    manager = new TerminalStreamManager({
-      terminals,
-      resolveAgent: (id) => agents.get(id),
-      sendTarget: (connId, type, payload) => { sent.push({ connId, type, payload }); return true },
-      sendBinaryTarget: (connId, frame) => { binarySent.push({ connId, frame }); return true },
-      streamingAvailable: true,
-      now: () => Date.now(),
-    })
+    manager = newManager()
     vi.mocked(writePasteImageFile).mockReset().mockResolvedValue('/fake/paste-images/fake.png')
     vi.mocked(writePasteDropFile).mockReset().mockImplementation(async (filename: string) => `/fake/paste-drops/id-${filename}`)
     vi.mocked(writeImageToOsClipboard).mockReset().mockResolvedValue({ state: 'written' })
@@ -197,6 +215,65 @@ describe('TerminalStreamManager', () => {
     await manager.handleFrame('web-1', 'terminal_scroll', { streamId, direction: 'down', lines: 0 })
     expect(stream.scrolls).toHaveLength(1)
     expect(sent.at(-1)?.payload.code).toBe('TERMINAL_SCROLL_INVALID')
+  })
+
+  it('pipelines keystrokes to tmux instead of waiting for each %end, and still reports a late failure', async () => {
+    await manager.handleFrame('web-1', 'terminal_open', {
+      requestId: 'open-pipeline', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40,
+    })
+    const streamId = sent[0].payload.streamId as string
+    stream.holdWrites = true
+
+    const input = (seq: number, text: string): TerminalBinaryClear => ({
+      kind: TerminalBinaryKind.input, streamId, seq, compressed: false, bytes: Buffer.from(text),
+    })
+    // Neither handleBinary resolves against tmux's reply: the second keystroke reaches the control
+    // client while the first is still unanswered. Before, the local socket's dispatch chain sat on
+    // that reply for every character typed.
+    await manager.handleBinary('web-1', input(0, 'a'))
+    await manager.handleBinary('web-1', input(1, 'b'))
+    expect(stream.writes.map((bytes) => Buffer.from(bytes).toString())).toEqual(['a', 'b'])
+    expect(stream.pendingWrites).toHaveLength(2)
+    expect(sent.filter((frame) => frame.type === 'terminal_error')).toHaveLength(0)
+
+    // A reply that arrives after the fact still carries its consequence: an uncertain write gets a
+    // keyframe so the client can see what tmux actually did.
+    const keyframesBefore = binarySent.filter(({ frame }) => frame.kind === TerminalBinaryKind.keyframe).length
+    stream.pendingWrites[0](TERMINAL_ACTION_SUCCEEDED)
+    stream.pendingWrites[1](terminalActionPossiblyExecuted('tmux raw input stopped after a partial write'))
+    await vi.advanceTimersByTimeAsync(50)
+    const errors = sent.filter((frame) => frame.type === 'terminal_error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].payload).toMatchObject({ code: 'TERMINAL_INPUT_FAILED', streamId })
+    expect(binarySent.filter(({ frame }) => frame.kind === TerminalBinaryKind.keyframe)).toHaveLength(keyframesBefore + 1)
+  })
+
+  it('never compresses output for a loopback client, whatever it asked for', async () => {
+    const big = Buffer.alloc(8 * 1024, 0x61)   // well over the 1 KiB floor, and trivially compressible
+
+    await manager.stop()
+    manager = newManager({ isLoopback: (connId) => connId.startsWith('local:') })
+    await manager.handleFrame('local:desktop', 'terminal_open', {
+      requestId: 'open-local', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40, compression: ['zlib', 'none'],
+    })
+    sink!.onData(big)
+    await vi.advanceTimersByTimeAsync(8)
+    const local = binarySent.at(-1)!.frame
+    expect(local.kind).toBe(TerminalBinaryKind.output)
+    expect(local.compressed).toBe(false)
+    expect(local.bytes).toHaveLength(big.length)
+
+    // The same request from anything that is NOT loopback keeps zlib: those frames cross the
+    // internet through the relay, where it still pays.
+    await manager.handleFrame('web-1', 'terminal_open', {
+      requestId: 'open-web', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40, compression: ['zlib', 'none'],
+    })
+    sink!.onData(big)
+    await vi.advanceTimersByTimeAsync(8)
+    const remote = binarySent.at(-1)!.frame
+    expect(remote.kind).toBe(TerminalBinaryKind.output)
+    expect(remote.compressed).toBe(true)
+    expect(remote.bytes.length).toBeLessThan(big.length)
   })
 
   it('routes a binary paste kind to pasteRaw as one unit, never through writeRaw', async () => {

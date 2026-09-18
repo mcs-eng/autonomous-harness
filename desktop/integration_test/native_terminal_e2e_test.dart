@@ -118,10 +118,10 @@ void main() {
     await tester.pump();
     session.scroll(0, 0, 0);
     session.scroll(1, 10, 0);
-    await tester.pump(const Duration(milliseconds: 12));
+    await tester.pump(const Duration(milliseconds: 25));
     expect(
-      utf8.decode([for (final frame in inputs) ...frame.bytes]),
-      contains('\x1b[A'),
+      controls.where((frame) => frame.type == 'terminal_scroll').last.payload,
+      containsPair('direction', 'up'),
     );
     await session.handleBinary(
       TerminalBinaryFrame(

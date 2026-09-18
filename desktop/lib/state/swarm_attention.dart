@@ -71,7 +71,7 @@ SwarmAttentionEntry _entry(
       current: view?.current ?? false,
       machineId: question.machineId,
       agentId: question.agentId,
-      engine: view?.engine ?? agent?.engine,
+      engine: view?.engine ?? agent?.identityEngine,
       searchFields: [
         ...?view?.fields.skip(1),
         if (view == null) machine?.machine.displayName ?? question.machineId,

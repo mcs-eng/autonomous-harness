@@ -41,7 +41,7 @@ void main() {
     (const Size(600, 680), 2.0),
   ]) {
     testWidgets(
-      'Open Agent shows results separately from New Agent at $size, $scale',
+      'Open Harness shows results separately from New Harness at $size, $scale',
       (tester) async {
         tester.view.devicePixelRatio = 1;
         tester.view.physicalSize = size;
@@ -80,9 +80,9 @@ void main() {
         expect(find.byKey(const ValueKey('harness-picker-open')), findsNothing);
         expect(
           tester.widget<TextField>(field).decoration!.hintText,
-          'Find an agent',
+          'Find a harness',
         );
-        expect(find.text('Find an agent'), findsOneWidget);
+        expect(find.text('Find a harness'), findsOneWidget);
         expect(find.byKey(const ValueKey('create-agent-submit')), findsNothing);
         final before = tester.getRect(field);
         final controller = tester.widget<TextField>(field).controller;

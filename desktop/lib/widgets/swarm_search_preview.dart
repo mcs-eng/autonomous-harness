@@ -299,7 +299,11 @@ class _AgentPreview extends StatelessWidget {
           children: [
             Padding(
               padding: const EdgeInsets.only(top: 2),
-              child: EngineMark(engine: agent.engine, size: compact ? 18 : 22),
+              child: EngineMark(
+                engine: agent.identityEngine,
+                displayName: agent.identityDisplayName,
+                size: compact ? 18 : 22,
+              ),
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -348,10 +352,9 @@ class _AgentPreview extends StatelessWidget {
               ),
               Text(
                 [
-                  engineIdentity(
-                    agent.engine,
-                    displayName: agent.engineDisplayName,
-                  ).label,
+                  // Its harness when it has one, the way every other mark
+                  // draws it — a Circuit agent is Circuit here too.
+                  agentIdentity(agent).label,
                   machine.machine.name,
                 ].join(' · '),
                 style: _muted,

@@ -196,4 +196,96 @@ void main() {
     expect(find.byIcon(LucideIcons.server), findsOneWidget);
     expect(tester.getCenter(find.byIcon(LucideIcons.server)), position);
   });
+
+  // ── the harness verdict chip ─────────────────────────────────────────────
+
+  Future<AppNotifier> pumpWithAgent(
+    WidgetTester tester,
+    TerminalSession session,
+    Agent agent, {
+    AppNotifier? app,
+  }) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final notifier =
+        app ??
+        AppNotifier(
+          config: AppConfig.dev,
+          authSession: AuthSession(),
+          configStore: null,
+        );
+    if (app == null) addTearDown(notifier.dispose);
+    notifier.machineStates['local'] = MachineState(
+      const Machine(
+        machineId: 'local',
+        authMode: MachineAuthMode.remote,
+        name: 'This Mac',
+      ),
+    )..agents = [agent];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 900,
+            height: 320,
+            child: TerminalPanel(
+              notifier: notifier,
+              session: session,
+              focused: true,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    return notifier;
+  }
+
+  Agent agentWith(AgentVerdict? verdict) => Agent(
+    id: 'agent-1',
+    name: 'a',
+    engine: 'claude',
+    dsh: 'autonomous/autonomous-circuit',
+    dshName: 'Autonomous Circuit',
+    terminalAvailable: true,
+    verdict: verdict,
+  );
+
+  testWidgets(
+    'a harness agent is drawn as its harness, with no chip of its own',
+    (tester) async {
+      final chip = find.byKey(const ValueKey('pane-verdict-chip'));
+      final session = sessionNamed('a');
+      addTearDown(session.dispose);
+      final notifier = await pumpWithAgent(
+        tester,
+        session,
+        agentWith(
+          const AgentVerdict(ready: true, summary: 'Board is fab-ready'),
+        ),
+      );
+      // Its harness — icon and name, like every other pane; no second mark
+      // for the engine underneath (owner, 2026-09-15).
+      expect(
+        find.byKey(const ValueKey('engine-icon-autonomous/autonomous-circuit')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('pane-header-base-engine')),
+        findsNothing,
+      );
+      // The verdict is the viewer pane's to show (owner, 2026-09-15): the
+      // terminal header carries none, before or after a verdict arrives.
+      expect(chip, findsNothing);
+      await pumpWithAgent(
+        tester,
+        session,
+        agentWith(const AgentVerdict(ready: false, errors: 2)),
+        app: notifier,
+      );
+      expect(chip, findsNothing);
+      expect(find.text('2 errors'), findsNothing);
+    },
+  );
 }

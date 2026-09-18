@@ -2,12 +2,13 @@ import type { AgentEngine } from '../engines/types.js'
 import {
   agentAliasOwner,
   agentCommandOwnershipSnapshot,
-  ENGINES,
+  PROCESS_ENGINES,
   type AgentCommandOwnershipSnapshot,
 } from './engineBin.js'
 import { probeGatewayRuntime } from './gatewayRuntime.js'
 import { probeGridAssignment, type GridAssignment } from './gridAssignment.js'
 import { probeCodexHome } from './codexHomeProbe.js'
+import { probeDsh } from '../dsh/probe.js'
 import type { TerminalBackend } from './terminalBackend.js'
 import {
   ambiguousAgentProcess,
@@ -65,6 +66,12 @@ export interface DiscoveredTerminalAgent {
    * process, and the registry keeps what it already knows. See `codexHomeProbe.ts`.
    */
   codexHome?: string | null
+  /**
+   * The domain-specific harness this process was launched as, read off its `HARNESS_DSH`. null = a
+   * plain engine; undefined = the probe could not read the process, and the registry keeps what it
+   * already knows. See `src/dsh/probe.ts`.
+   */
+  dsh?: string | null
 }
 
 export interface TerminalTargetProbe {
@@ -125,7 +132,7 @@ function rootOwner(
     const current = queue.shift()!
     const row = byPid.get(current.pid)
     if (row && !excluded.has(row.pid)) {
-      for (const engine of ENGINES) {
+      for (const engine of PROCESS_ENGINES) {
         const score = engineProcessMatchScore(row, engine, ownership)
         if (score > 0) matches.push({ row, engine, depth: current.depth, score })
       }
@@ -265,6 +272,8 @@ export async function probeTerminalAgents(
     agent.grid = await probeGridAssignment(agent.processIdentity, agent.engine, agent.args)
     // And, for Codex, the profile it runs under — a fact about the process the row cannot otherwise learn.
     agent.codexHome = await probeCodexHome(agent.processIdentity, agent.engine)
+    // And the DSH it was created as — same read, so a pane the daemon did not create is labelled too.
+    agent.dsh = await probeDsh(agent.processIdentity)
   }))
   return { processTableAvailable: true, targets, ...discovered }
 }

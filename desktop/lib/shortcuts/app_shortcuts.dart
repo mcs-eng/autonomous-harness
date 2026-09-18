@@ -53,7 +53,12 @@ enum ShortcutAction {
 
   closePane,
   newAgent,
+
+  /// A plain shell in a pane, like a native terminal's new tab — the daemon
+  /// treats whatever engine is later typed into it as the pane's agent.
+  newTerminal,
   routeTask,
+  orchestrate,
   reload,
   showLayout,
   pinPane,
@@ -280,13 +285,19 @@ const List<AppShortcut> kAppShortcuts = [
   AppShortcut(
     action: ShortcutAction.newAgent,
     activator: SingleActivator(LogicalKeyboardKey.keyN, meta: true),
-    label: 'New Agent',
+    label: 'New Harness',
     group: ShortcutGroup.actions,
   ),
   AppShortcut(
     action: ShortcutAction.routeTask,
     activator: SingleActivator(LogicalKeyboardKey.keyB, meta: true),
     label: 'Describe a task, and let it pick the agent',
+    group: ShortcutGroup.actions,
+  ),
+  AppShortcut(
+    action: ShortcutAction.orchestrate,
+    activator: SingleActivator(LogicalKeyboardKey.keyP, meta: true),
+    label: 'Create with the orchestrator',
     group: ShortcutGroup.actions,
   ),
   AppShortcut(
@@ -342,7 +353,7 @@ const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.addAgent,
     activator: SingleActivator(LogicalKeyboardKey.keyO, meta: true),
-    label: 'Open Agent',
+    label: 'Open Harness',
     group: ShortcutGroup.actions,
   ),
   AppShortcut(
@@ -354,23 +365,26 @@ const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.newSwarm,
     activator: SingleActivator(LogicalKeyboardKey.keyT, meta: true),
-    label: 'New Harness',
+    label: 'New Tab',
     group: ShortcutGroup.navigate,
   ),
+  // ⌘⇧T is New Terminal, as it is in a terminal app. "Reopen last closed
+  // harness" used to sit on it; it lives on in the History menu, the ⌘⇧P
+  // command palette and `keybindings.jsonc`, without a default chord.
   AppShortcut(
-    action: ShortcutAction.reopenClosedSwarm,
+    action: ShortcutAction.newTerminal,
     activator: SingleActivator(
       LogicalKeyboardKey.keyT,
       meta: true,
       shift: true,
     ),
-    label: 'Reopen last closed agent',
-    group: ShortcutGroup.navigate,
+    label: 'New Terminal',
+    group: ShortcutGroup.actions,
   ),
   AppShortcut(
     action: ShortcutAction.closeSwarm,
     activator: SingleActivator(LogicalKeyboardKey.keyW, meta: true),
-    label: 'Close Harness',
+    label: 'Close Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(
@@ -380,7 +394,7 @@ const kSwarmShortcuts = [
       meta: true,
       shift: true,
     ),
-    label: 'Rename Harness',
+    label: 'Rename Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(

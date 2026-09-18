@@ -14,6 +14,14 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
+	<!-- What people see is OpenHarness; the bundle, its executable, its identifier and every path
+	     the updater and the scripts rely on stay Harness. The Dock and Finder show a name other than
+	     the file's only as a LOCALIZED display name: this non-localized one must match the file name
+	     (Harness.app), and en.lproj/InfoPlist.strings supplies "OpenHarness". -->
+	<key>CFBundleDisplayName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>LSHasLocalizedDisplayName</key>
+	<true/>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

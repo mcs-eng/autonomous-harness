@@ -32,6 +32,9 @@ class _Connection extends WsConn {
     Duration timeout = const Duration(seconds: 20),
   }) {
     final result = Completer<Map<String, dynamic>>();
+    // New Harness asks the machine for its harnesses on every open; that read is not what these
+    // tests are about, so it answers at once with none and is not recorded.
+    if (type == 'dsh_list') return Future.value(const {'dsh': []});
     calls.add((type, payload, result));
     return result.future;
   }
@@ -59,14 +62,20 @@ class _App extends AppNotifier {
       name: 'Studio',
       authMode: MachineAuthMode.remote,
     );
-    machineStates['m'] = MachineState(machine)..localOnly = local;
+    machineStates['m'] = MachineState(machine)
+      ..localOnly = local;
   }
   final prepared = <ProjectFolderRequest>[];
+  final labels = <String>[];
   @override
   Future<void> probeEngines(String machineId, {bool force = false}) async {}
   @override
-  Future<String> prepareLocalProjectFolder(ProjectFolderRequest request) async {
+  Future<String> prepareLocalProjectFolder(
+    ProjectFolderRequest request, {
+    String label = 'harness',
+  }) async {
     prepared.add(request);
+    labels.add(label);
     return '/local/Harness Projects/project-test';
   }
 }
@@ -152,6 +161,10 @@ void main() {
         );
         expect(connection.calls.last.$2.containsKey('projectSource'), isFalse);
         expect(app.prepared.length, local && !wsl ? 1 : 0);
+        if (local && !wsl) {
+          expect(app.labels.single, 'Claude',
+              reason: 'the folder is named after who the harness is');
+        }
         connection.fail();
         await tester.pumpAndSettle();
       },

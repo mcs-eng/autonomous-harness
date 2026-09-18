@@ -10,7 +10,8 @@ import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/core/models.dart';
-import 'package:harness/main.dart';
+import 'package:harness/app_shell.dart';
+import 'package:harness/screens/swarm_screen.dart';
 import 'package:harness/settings/config_store.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/terminal_pane.dart';
@@ -37,8 +38,8 @@ AppNotifier makeNotifier(AppStatus status) {
   app.status = status;
   app.currentUser = const CurrentUserProfile(
     id: 'user-1',
-    name: 'Diego',
-    email: 'diego@autonomous.ai',
+    name: 'Sam',
+    email: 'sam@example.com',
   );
   return app;
 }
@@ -492,7 +493,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     // `pump`, not `pumpAndSettle`: the sign-in screen's diagram and aurora
@@ -502,7 +503,7 @@ void main() {
 
     // The card leads with what the app does for you, not with its own name —
     // the wordmark left when the screen stopped being a logo over a button.
-    expect(find.text('All your agents, on one screen'), findsOneWidget);
+    expect(find.text('Your agents, wherever they run'), findsOneWidget);
     expect(find.text('Sign in'), findsOneWidget);
     expect(find.byIcon(Icons.login), findsOneWidget);
   });
@@ -514,7 +515,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -524,8 +525,8 @@ void main() {
     // covered as well as the standalone screen's presentation tests.
     expect(find.byType(BootstrappingScreen), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(find.text('Getting Harness ready'), findsOneWidget);
-    expect(find.text('Opening Harness…'), findsOneWidget);
+    expect(find.text('Getting OpenHarness ready'), findsOneWidget);
+    expect(find.text('Opening OpenHarness…'), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
   });
 
@@ -535,7 +536,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -560,7 +561,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: _swarm),
         ),
       );
 
@@ -600,7 +601,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: _swarm),
         ),
       );
       await tester.pump();
@@ -608,7 +609,7 @@ void main() {
       expect(find.text('Finish setup in Terminal'), findsOneWidget);
       expect(find.text('Managed Node 20+ & Harness CLI'), findsOneWidget);
       expect(find.text('Recheck now'), findsOneWidget);
-      expect(find.text('Harness cannot see your password'), findsOneWidget);
+      expect(find.text('OpenHarness cannot see your password'), findsOneWidget);
     },
   );
 
@@ -628,7 +629,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -680,7 +681,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: _swarm),
         ),
       );
       await tester.pump();
@@ -712,7 +713,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -751,7 +752,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -780,7 +781,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: _swarm),
         ),
       );
       await tester.pump();
@@ -810,7 +811,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -832,11 +833,11 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: _swarm),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('New Agent'), findsWidgets);
+      expect(find.text('New Harness'), findsWidgets);
       expect(
         tester
             .widget<TextField>(
@@ -849,8 +850,12 @@ void main() {
       expect(find.byKey(const ValueKey('harness-start-open')), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('harness-start-new')));
       await tester.pumpAndSettle();
-      expect(find.text('harness login\nharness start'), findsOneWidget);
-      await tester.tap(find.text('Done'));
+      // With no machine to open an agent on, the start page's New goes to
+      // linking one — the fork between a computer and a server, first.
+      expect(find.text('Link another machine'), findsOneWidget);
+      expect(find.text('A computer with a screen'), findsOneWidget);
+      expect(find.text('A server over SSH'), findsOneWidget);
+      await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
       expect(app.panes, isEmpty);
       await tester.pumpWidget(const SizedBox());
@@ -865,7 +870,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pumpAndSettle();
@@ -873,8 +878,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Account'));
     await tester.pumpAndSettle();
-    expect(find.text('Diego'), findsOneWidget);
-    expect(find.text('diego@autonomous.ai'), findsOneWidget);
+    expect(find.text('Sam'), findsOneWidget);
+    expect(find.text('sam@example.com'), findsOneWidget);
     await tester.tap(find.byKey(const Key('settings-sign-out-button')));
     // The login relay diagram keeps animating after sign-out.
     await tester.pump();
@@ -900,13 +905,13 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     // Endless animation on the sign-in screen underneath; pump instead.
     await tester.pump(const Duration(milliseconds: 200));
 
-    expect(find.text('Harness 1.2.3 is available'), findsOneWidget);
+    expect(find.text('OpenHarness 1.2.3 is available'), findsOneWidget);
     expect(find.byKey(const Key('install-update-button')), findsOneWidget);
     expect(find.byKey(const Key('skip-update-button')), findsOneWidget);
   });
@@ -981,7 +986,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: _swarm),
         ),
       );
       await tester.pump();
@@ -1033,7 +1038,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     // The link screen now arrives as a popup (a post-frame callback pushes a showDialog route
@@ -1089,7 +1094,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -1175,7 +1180,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [appStateProvider.overrideWithValue(app)],
-        child: const DesktopApp(),
+        child: HarnessApp(authenticatedScreen: _swarm),
       ),
     );
     await tester.pump();
@@ -1206,3 +1211,7 @@ void main() {
     app.dispose();
   });
 }
+
+/// The screen the desktop app mounts once signed in — the argument `HarnessApp`
+/// now takes, so the shell itself does not have to know about either app.
+Widget _swarm(AppNotifier app) => SwarmScreen(notifier: app);

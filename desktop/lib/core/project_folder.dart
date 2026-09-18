@@ -18,9 +18,16 @@ class ProjectFolderRequest {
     if (repository != null) 'repositoryUrl': repository!.url,
   };
 
+  /// A new project is named after who it is for and when: [label] ("Codex", "Blender") and the
+  /// local time, `codex-2026-09-03-09-05`, every part two digits so a folder listing sorts in the
+  /// order harnesses were made. Nothing is counted — `harness-N` folders numbered apart from agent
+  /// names drifted from them. Two in the same minute take the seconds, then a suffix. The daemon
+  /// names remote projects the same way (cli/src/lib/agentNames.ts).
   Future<String> prepareLocal({
     String? projectHome,
     RepositoryClone Function()? createClone,
+    String label = 'harness',
+    DateTime Function()? now,
   }) async {
     final home =
         Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
@@ -38,17 +45,18 @@ class ProjectFolderRequest {
           root.path,
         );
       }
-      var next = BigInt.one;
-      await for (final entry in root.list(followLinks: false)) {
-        final match = RegExp(r'^agent-([1-9]\d*)$')
-            .firstMatch(p.basename(entry.path));
-        if (match == null) continue;
-        final number = BigInt.parse(match.group(1)!);
-        if (number >= next) next = number + BigInt.one;
-      }
-      for (;;) {
-        final folder = p.join(root.path, 'agent-$next');
-        next += BigInt.one;
+      final at = (now ?? DateTime.now)();
+      final base = projectFolderName(label, at);
+      final precise = projectFolderName(label, at, withSeconds: true);
+      for (var attempt = 0; ; attempt++) {
+        final folder = p.join(
+          root.path,
+          attempt == 0
+              ? base
+              : attempt == 1
+              ? precise
+              : '$precise-$attempt',
+        );
         // Directory.create accepts an existing directory. The platform mkdir
         // command reserves it exclusively, so concurrent creates never share
         // a workspace. Paths are arguments, never shell text.
@@ -69,4 +77,20 @@ class ProjectFolderRequest {
       );
     }
   }
+}
+
+/// `codex-2026-09-03-09-05`: [label] in lowercase words, then the local date and time.
+String projectFolderName(
+  String label,
+  DateTime at, {
+  bool withSeconds = false,
+}) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  final slug = label
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '');
+  final time =
+      '${two(at.hour)}-${two(at.minute)}${withSeconds ? '-${two(at.second)}' : ''}';
+  return '${slug.isEmpty ? 'harness' : slug}-${at.year}-${two(at.month)}-${two(at.day)}-$time';
 }

@@ -18,10 +18,12 @@ class AppChoicePicker<T> extends StatefulWidget {
     this.moreKey,
     this.moreLeading,
     this.preferredValues = const [],
+    this.overflowFirst,
     this.showDetails = false,
     this.wrap = true,
     this.compact = false,
     this.tileSize,
+    this.notifyOnReselect = false,
   });
 
   final T value;
@@ -32,10 +34,22 @@ class AppChoicePicker<T> extends StatefulWidget {
   final Key? moreKey;
   final Widget? moreLeading;
   final List<T> preferredValues;
+
+  /// The options the overflow menu lists FIRST, ahead of the rest.
+  ///
+  /// Separate from [preferredValues], which names individual values and is
+  /// what decides the direct tiles; this is a KIND of option — the agent
+  /// picker's domain harnesses against its plain engines. The tiles are
+  /// unaffected: this only sorts what is left over, so the short list of
+  /// things a person came here for is not buried under fourteen engines that
+  /// differ from the three on the tiles only by name.
+  final bool Function(T value)? overflowFirst;
+
   final bool showDetails;
   final bool wrap;
   final bool compact;
   final Size? tileSize;
+  final bool notifyOnReselect;
 
   @override
   State<AppChoicePicker<T>> createState() => _AppChoicePickerState<T>();
@@ -93,6 +107,19 @@ class _AppChoicePickerState<T> extends State<AppChoicePicker<T>> {
     _overflowChoice = choice == null ? null : (value: choice.value);
   }
 
+  /// [options] with the kind [AppChoicePicker.overflowFirst] names at the
+  /// head, each group keeping the order it arrived in.
+  List<SelectOption<T>> _overflowOrder(Iterable<SelectOption<T>> options) {
+    final first = widget.overflowFirst;
+    if (first == null) return options.toList();
+    final head = <SelectOption<T>>[];
+    final tail = <SelectOption<T>>[];
+    for (final option in options) {
+      (first(option.value) ? head : tail).add(option);
+    }
+    return [...head, ...tail];
+  }
+
   List<SelectOption<T>> get _visibleOptions => [
     ..._orderedOptions.take(2),
     if (_thirdChoice != null)
@@ -100,7 +127,9 @@ class _AppChoicePickerState<T> extends State<AppChoicePicker<T>> {
   ];
 
   void _choose(T next) {
-    if (next != widget.value) widget.onChanged(next);
+    // Clicking the current choice is still explicit intent. Callers may need
+    // to pin it against an asynchronous discovery/default update.
+    if (next != widget.value || widget.notifyOnReselect) widget.onChanged(next);
   }
 
   @override
@@ -206,8 +235,9 @@ class _AppChoicePickerState<T> extends State<AppChoicePicker<T>> {
                 child: AppSelectField<T>(
                   key: widget.moreKey,
                   value: widget.value,
-                  options: widget.options,
+                  options: _overflowOrder(widget.options),
                   onChanged: _choose,
+                  filterable: true,
                   width: moreWidth,
                   height: controlHeight,
                   trigger: Icon(
@@ -242,8 +272,8 @@ class _AppChoicePickerState<T> extends State<AppChoicePicker<T>> {
     final selectedExtra = extra != null && extra.value == widget.value;
     final size = widget.tileSize!;
     return Wrap(
-      spacing: 10,
-      runSpacing: 10,
+      spacing: AppChoiceTile.gap,
+      runSpacing: AppChoiceTile.gap,
       children: [
         for (final option in ordered.take(3))
           AppChoiceTile(
@@ -262,16 +292,18 @@ class _AppChoicePickerState<T> extends State<AppChoicePicker<T>> {
             child: AppSelectField<T>(
               key: widget.moreKey,
               value: widget.value,
-              options: ordered.skip(3).toList(),
+              options: _overflowOrder(ordered.skip(3)),
               onChanged: _choose,
+              filterable: true,
               width: size.width,
               height: size.height,
+              padding: AppChoiceTile.padding,
               selected: selectedExtra,
               fillColor: selectedExtra
                   ? AppPalette.swarmAccent.withValues(alpha: .16)
                   : AppSurface.recess,
               trigger: AppChoiceTileContent(
-                label: extra?.label ?? 'More',
+                label: extra?.label ?? widget.moreLabel,
                 detail: extra?.detail,
                 leading: extra == null
                     ? widget.moreLeading
@@ -381,6 +413,9 @@ class _AppChoicePickerState<T> extends State<AppChoicePicker<T>> {
 
 /// A shared tile keeps engine, machine and project rows on the same grid.
 class AppChoiceTile extends StatelessWidget {
+  static const double gap = 12;
+  static const padding = EdgeInsets.symmetric(horizontal: 18, vertical: 16);
+
   const AppChoiceTile({
     super.key,
     required this.size,
@@ -415,7 +450,7 @@ class AppChoiceTile extends StatelessWidget {
               backgroundColor: selected
                   ? AppPalette.swarmAccent.withValues(alpha: .16)
                   : AppSurface.recess,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              padding: padding,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(AppControl.radius),
               ),
@@ -450,48 +485,116 @@ class AppChoiceTileContent extends StatelessWidget {
   final String? detail;
   final Widget? leading, trailing;
 
+  /// The name's type, and the detail's under it. Written down because the tile
+  /// height is arithmetic over exactly these numbers — see [linesFor] and the
+  /// New Harness dialog's `tileSize`.
+  static const double labelSize = 16;
+  static const double detailSize = 14;
+  static const double lineHeight = 1.25;
+  static const double lineGap = 4;
+
+  /// How many lines of each the tile has room for, at [room] points of height.
+  ///
+  /// ⚠️ The tile is a FIXED box, so this is not cosmetic: a column that asks
+  /// for more than it was given overflows, which in a test is an exception and
+  /// on screen is a striped bar. Both lines want two and most tiles can afford
+  /// three between them, so one of them spends its second — and it is the
+  /// DETAIL that gets it when the name fits on one line, because "Documents ·
+  /// Typst GmbH" is the string that was arriving as "Documents · Typst Gm…".
+  /// A name that genuinely wraps keeps its second line, and the detail gives
+  /// its own up: a truncated name is the worse of the two.
+  static ({int label, int detail}) linesFor({
+    required double room,
+    required bool labelWraps,
+    required bool hasDetail,
+    required TextScaler scaler,
+  }) {
+    if (!hasDetail) return (label: 2, detail: 0);
+    final labelLine = scaler.scale(labelSize) * lineHeight;
+    final detailLine = scaler.scale(detailSize) * lineHeight;
+    bool fits(int label, int detail) =>
+        !room.isFinite ||
+        label * labelLine + lineGap + detail * detailLine <= room;
+    for (final lines
+        in labelWraps
+            ? const [(2, 2), (2, 1), (1, 2)]
+            : const [(2, 2), (1, 2), (2, 1)]) {
+      if (fits(lines.$1, lines.$2)) {
+        return (label: lines.$1, detail: lines.$2);
+      }
+    }
+    return (label: 1, detail: 1);
+  }
+
   @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      if (leading != null) ...[leading!, const SizedBox(width: 10)],
-      Expanded(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: AppFont.sans,
-                fontFamilyFallback: AppFont.sansFallback,
-                fontSize: 14,
-                height: 1.25,
-                fontWeight: FontWeight.w500,
-                color: AppPalette.textPrimary,
-              ),
-            ),
-            if (detail != null) ...[
-              const SizedBox(height: 2),
-              Text(
-                detail!,
+  Widget build(BuildContext context) {
+    final labelStyle = TextStyle(
+      fontFamily: AppFont.sans,
+      fontFamilyFallback: AppFont.sansFallback,
+      fontSize: labelSize,
+      height: lineHeight,
+      fontWeight: AppFont.medium,
+      color: AppPalette.textPrimary,
+    );
+    return Row(
+      children: [
+        if (leading != null) ...[leading!, const SizedBox(width: 12)],
+        Expanded(
+          // Inside the Expanded, so the constraints are the text column's own:
+          // the width the name is measured against and the height the two of
+          // them have to share.
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final scaler = MediaQuery.textScalerOf(context);
+              final painter = TextPainter(
+                text: TextSpan(text: label, style: labelStyle),
+                textDirection: Directionality.of(context),
+                textScaler: scaler,
                 maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: AppFont.sans,
-                  fontFamilyFallback: AppFont.sansFallback,
-                  fontSize: 12,
-                  height: 1.25,
-                  color: AppPalette.textSecondary,
-                ),
-              ),
-            ],
-          ],
+              )..layout(maxWidth: constraints.maxWidth);
+              final labelWraps = painter.didExceedMaxLines;
+              painter.dispose();
+              final lines = linesFor(
+                room: constraints.maxHeight,
+                labelWraps: labelWraps,
+                hasDetail: detail != null,
+                scaler: scaler,
+              );
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    maxLines: lines.label,
+                    overflow: TextOverflow.ellipsis,
+                    style: labelStyle,
+                  ),
+                  if (detail != null) ...[
+                    const SizedBox(height: lineGap),
+                    Text(
+                      detail!,
+                      maxLines: lines.detail,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: AppFont.sans,
+                        fontFamilyFallback: AppFont.sansFallback,
+                        fontSize: detailSize,
+                        height: lineHeight,
+                        color: AppPalette.textSecondary,
+                      ),
+                    ),
+                  ],
+                ],
+              );
+            },
+          ),
         ),
-      ),
-      const SizedBox(width: 8),
-      SizedBox(width: 18, child: trailing),
-    ],
-  );
+        if (trailing != null) ...[
+          const SizedBox(width: 8),
+          SizedBox(width: 18, child: trailing),
+        ],
+      ],
+    );
+  }
 }

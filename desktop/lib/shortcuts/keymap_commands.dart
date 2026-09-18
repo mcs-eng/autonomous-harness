@@ -56,21 +56,24 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'swarm.new',
-    'New Harness',
+    'New Tab',
     ShortcutGroup.navigate,
     action: ShortcutAction.newSwarm,
     nativeAction: 'new',
   ),
   const HarnessCommand(
     'swarm.close',
-    'Close Harness',
+    'Close Tab',
     ShortcutGroup.navigate,
     action: ShortcutAction.closeSwarm,
     nativeAction: 'closeActive',
   ),
+  // The live table binds no chord to it any more (⌘⇧T is New Terminal), so
+  // `keys` comes back empty: a palette and menu command a person may give a
+  // key of their own in keybindings.jsonc.
   const HarnessCommand(
     'swarm.reopen',
-    'Reopen last closed agent',
+    'Reopen last closed harness',
     ShortcutGroup.navigate,
     action: ShortcutAction.reopenClosedSwarm,
     nativeAction: 'reopen',
@@ -93,7 +96,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'swarm.rename',
-    'Rename Harness',
+    'Rename Tab',
     ShortcutGroup.actions,
     action: ShortcutAction.renameSwarm,
     nativeAction: 'renameActive',
@@ -272,17 +275,24 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'agent.add',
-    'Open Agent',
+    'Open Harness',
     ShortcutGroup.actions,
     action: ShortcutAction.addAgent,
     nativeAction: 'addAgent',
   ),
   const HarnessCommand(
     'agent.new',
-    'New Agent',
+    'New Harness',
     ShortcutGroup.actions,
     action: ShortcutAction.newAgent,
     nativeAction: 'newAgent',
+  ),
+  const HarnessCommand(
+    'terminal.new',
+    'New Terminal',
+    ShortcutGroup.actions,
+    action: ShortcutAction.newTerminal,
+    nativeAction: 'newTerminal',
   ),
   const HarnessCommand(
     'machines.manage',
@@ -314,6 +324,12 @@ final harnessCommands = <HarnessCommand>[
     'Boss mode: route a task',
     ShortcutGroup.actions,
     action: ShortcutAction.routeTask,
+  ),
+  const HarnessCommand(
+    'project.orchestrate',
+    'Create with the orchestrator',
+    ShortcutGroup.actions,
+    action: ShortcutAction.orchestrate,
   ),
   const HarnessCommand(
     'app.settings',

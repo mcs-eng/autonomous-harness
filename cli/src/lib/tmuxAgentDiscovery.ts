@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process'
 import {
   agentAliasOwner,
   agentCommandOwnershipSnapshot,
-  ENGINES,
+  PROCESS_ENGINES,
   type AgentCommandOwnershipSnapshot,
 } from './engineBin.js'
 import type { AgentEngine } from '../engines/types.js'
@@ -18,6 +18,7 @@ import { probeGatewayRuntime } from './gatewayRuntime.js'
 import { probeGridAssignment, type GridAssignment } from './gridAssignment.js'
 import { probeCodexHome } from './codexHomeProbe.js'
 import { isHarnessSession } from './harnessSessionLabel.js'
+import { psEnv } from './childLocale.js'
 import type { ProcessIdentity, RegisteredSession } from './registry.js'
 import {
   ambiguousAgentProcess,
@@ -83,9 +84,25 @@ export interface TmuxAgentDiscoveryDeps {
 
 const MISS_LIMIT = 2
 
-function execText(command: string, args: string[], timeout: number): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
+/**
+ * `tmux list-panes` exits non-zero before the first server exists. That is an
+ * empty inventory, not a missing tmux binary or an unusable backend: the
+ * first `tmux new-session` starts the server itself. Keeping the distinction
+ * here prevents daemon startup from publishing a scary, and inaccurate,
+ * "tmux unavailable" state on a fresh machine.
+ */
+export function isNoTmuxServerError(error: string): boolean {
+  return /no server running on\s+\S+/i.test(error)
+}
+
+function execText(
+  command: string,
+  args: string[],
+  timeout: number,
+  env?: NodeJS.ProcessEnv,
+): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
   return new Promise((resolve) => {
-    execFile(command, args, { timeout }, (err, stdout) => {
+    execFile(command, args, { timeout, ...(env && { env }) }, (err, stdout) => {
       if (err) { resolve({ ok: false, error: err.message }); return }
       resolve({ ok: true, stdout })
     })
@@ -128,7 +145,13 @@ export async function listTmuxPanes(): Promise<TmuxPaneInventory> {
   // Printable delimiters survive tmux's POSIX-locale output sanitiser. Split only the three fixed
   // separators so a legitimate `|` in pane_current_path remains part of the path.
   const result = await execText('tmux', ['list-panes', '-a', '-F', '#{pane_id}|#{pane_pid}|#{session_name}|#{pane_current_path}'], 2_000)
-  if (!result.ok) return result
+  if (!result.ok) {
+    // A server does not exist until the first Harness agent (or a user) opens
+    // a tmux session. Treating this as unavailable made a clean WSL install
+    // look broken even though create() can start that server normally.
+    if (isNoTmuxServerError(result.error)) return { ok: true, panes: [] }
+    return result
+  }
   return { ok: true, panes: parsePanes(result.stdout).filter((pane) => isHarnessSession(pane.tmuxSessionName)) }
 }
 
@@ -179,7 +202,7 @@ function paneOwner(
     const current = queue.shift()!
     const row = byPid.get(current.pid)
     if (row && !excluded.has(row.pid)) {
-      for (const engine of ENGINES) {
+      for (const engine of PROCESS_ENGINES) {
         const score = engineProcessMatchScore(row, engine, ownership)
         if (score > 0) matches.push({ row, engine, depth: current.depth, score })
       }
@@ -249,7 +272,9 @@ export async function probeTmuxAgents(
 ): Promise<TmuxAgentProbe> {
   const [tmux, ps] = await Promise.all([
     listTmuxPanes(),
-    execText('ps', ['-axo', 'pid=,ppid=,comm=,lstart=,args='], 3_000),
+    // parseProcessRow below anchors on the `lstart` column, which only has its documented shape
+    // under LC_TIME=C — see psEnv (lib/childLocale.ts).
+    execText('ps', ['-axo', 'pid=,ppid=,comm=,lstart=,args='], 3_000, psEnv()),
   ])
   if (!tmux.ok) return { ok: false, error: `tmux list-panes failed: ${tmux.error}` }
   if (!ps.ok) return { ok: false, error: `process table failed: ${ps.error}` }

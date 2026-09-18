@@ -54,6 +54,20 @@ describe('agentFrame', () => {
       .toMatchObject({ selectedModel: 'opus', terminal: { available: false, primary: 'tmux/%1' } })
   })
 
+  it('carries the viewer pane’s name with the harness, and null for a plain engine', async () => {
+    const withViewer = await agentFrame(session(null), {
+      selectedModel: null, terminalAvailable: true,
+      dsh: { id: 'autonomous/blender', name: 'Blender', viewerUrl: 'http://127.0.0.1:4100/', viewerName: '3D Viewer', verdict: null },
+    })
+    expect(withViewer).toMatchObject({ dsh: 'autonomous/blender', dshName: 'Blender', viewerName: '3D Viewer' })
+    const older = await agentFrame(session(null), {
+      selectedModel: null, terminalAvailable: true,
+      dsh: { id: 'autonomous/blender', name: 'Blender', viewerUrl: null, verdict: null },
+    })
+    expect(older).toHaveProperty('viewerName', null)
+    expect(await agentFrame(session(null), { selectedModel: null, terminalAvailable: true })).toHaveProperty('viewerName', null)
+  })
+
   it('reports launch state and defaults legacy agents to ready', async () => {
     const legacy = session(null)
     expect(await agentFrame(legacy, { selectedModel: null, terminalAvailable: true }))

@@ -62,13 +62,18 @@ void main() {
       await tester.tap(
         find.descendant(
           of: controls,
-          matching: find.byTooltip('Restart Agent'),
+          matching: find.byTooltip('Restart Harness'),
         ),
       );
       await tester.pump();
-      expect(connection.calls, hasLength(1));
-      expect(connection.calls.single.$1, 'agent_restart');
-      expect(connection.calls.single.$2, {'agentId': 'a0'});
+      // Each pane header's model picker also asks for grid_models_list as it mounts; the restart is
+      // the one request that is not that.
+      final sent = connection.calls
+          .where((call) => call.$1 != 'grid_models_list')
+          .toList();
+      expect(sent, hasLength(1));
+      expect(sent.single.$1, 'agent_restart');
+      expect(sent.single.$2, {'agentId': 'a0'});
       expect(app.panes, [first, second]);
       expect(first.session, same(session));
       expect(find.byType(AlertDialog), findsNothing);
@@ -85,7 +90,7 @@ void main() {
           of: controls,
           matching: find.byWidgetPredicate(
             (widget) =>
-                widget is IconButton && widget.tooltip == 'Restart Agent',
+                widget is IconButton && widget.tooltip == 'Restart Harness',
           ),
         ),
       );

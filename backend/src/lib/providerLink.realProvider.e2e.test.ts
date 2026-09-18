@@ -1,4 +1,4 @@
-// The WHOLE chain, across both repositories:
+// The WHOLE chain, across the backend and provider packages:
 //
 //   client frame → providerLink → HTTP/SSE → the real reference-provider → frames back
 //
@@ -16,8 +16,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 const ENABLED = process.env.PROVIDER_E2E === '1'
 const HERE = dirname(fileURLToPath(import.meta.url))
-/** The published contract lives in a sibling checkout. */
-const PROVIDER_DIR = resolve(HERE, '../../../../../autonomous-harness/provider/reference-provider')
+/** Exercise the reference implementation shipped in this monorepo. */
+const PROVIDER_DIR = resolve(HERE, '../../../provider/reference-provider')
 
 const published = vi.hoisted(() => [] as Array<{ machineId: string; frame: { type?: string; payload?: Record<string, unknown> } }>)
 const binding = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }))
@@ -49,7 +49,8 @@ let baseUrl = ''
  */
 async function bootPublishedProvider(): Promise<string> {
   return new Promise<string>((ok, reject) => {
-    const proc = spawn('npx', ['tsx', 'src/server.ts'], {
+    // Own the server process directly; killing npx leaves its tsx/server children running.
+    const proc = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
       cwd: PROVIDER_DIR,
       // A small per-step pause, not zero. A turn that completes inside one tick cannot be cancelled
       // mid-flight, and the cancel path is the one thing here that only exists for a RUNNING turn.
@@ -64,6 +65,7 @@ async function bootPublishedProvider(): Promise<string> {
       if (match) { clearTimeout(timer); ok(match[0]) }
     })
     proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+    proc.once('error', (error) => { clearTimeout(timer); reject(error) })
     proc.on('exit', (code) => { clearTimeout(timer); reject(new Error(`reference-provider exited ${code}: ${stderr.slice(0, 500)}`)) })
   })
 }
@@ -81,13 +83,21 @@ describeIf('the real chain, against the published reference-provider', () => {
     if (!existsSync(PROVIDER_DIR)) {
       throw new Error(
         `PROVIDER_E2E=1 but the published provider is not at ${PROVIDER_DIR}. `
-        + 'Check out autonomous-ai/autonomous-harness beside this repository, or unset PROVIDER_E2E.',
+        + 'Install dependencies in provider/reference-provider before running this suite.',
       )
     }
     baseUrl = await bootPublishedProvider()
   }, 90_000)
 
-  afterAll(() => { child?.kill('SIGKILL') })
+  afterAll(async () => {
+    const proc = child
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return
+    await new Promise<void>((done) => {
+      const timer = setTimeout(() => proc.kill('SIGKILL'), 2_000)
+      proc.once('close', () => { clearTimeout(timer); done() })
+      proc.kill('SIGTERM')
+    })
+  })
 
   beforeEach(() => {
     published.length = 0

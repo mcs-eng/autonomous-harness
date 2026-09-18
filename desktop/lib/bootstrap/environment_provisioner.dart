@@ -1,3 +1,4 @@
+import '../core/host_platform.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -400,7 +401,7 @@ class EnvironmentProvisioner {
     if (home != null && home.isNotEmpty) return home;
     final profile = Platform.environment['USERPROFILE'];
     if (profile != null && profile.isNotEmpty) return profile;
-    return null;
+    return containerHome;
   }
 
   static String _defaultHarnessHome() {
@@ -629,7 +630,7 @@ class EnvironmentProvisioner {
       if (!await _hasWritableHome()) {
         const failure = EnvironmentFailure(
           title: 'Home directory is not writable',
-          detail: 'Harness needs to write ~/.harness and ~/.local/bin.',
+          detail: 'OpenHarness needs to write ~/.harness and ~/.local/bin.',
         );
         emit(
           message: failure.detail,
@@ -678,7 +679,7 @@ class EnvironmentProvisioner {
         emit(
           message: _isLinux && probe.aptPackages.isNotEmpty
               ? 'Linux host packages required: ${probe.aptPackages.join(', ')}.'
-              : 'Review what Harness will install before continuing.',
+              : 'Review what OpenHarness will install before continuing.',
           phase: EnvironmentSetupPhase.review,
         );
         return state;
@@ -770,7 +771,7 @@ class EnvironmentProvisioner {
             emit(step: step, status: EnvironmentStepStatus.needsTerminal);
           }
           emit(
-            message: 'Complete the visible Linux package prompts in Terminal. Harness never sees your password.',
+            message: 'Complete the visible Linux package prompts in Terminal. OpenHarness never sees your password.',
             output: backgroundInstall == null
                 ? 'Terminal opened to install Linux host dependencies.'
                 : 'Background install was incomplete; Terminal opened to finish Linux host dependencies.',
@@ -1434,7 +1435,7 @@ class EnvironmentProvisioner {
     if (exitCode == _linuxAptUpdateFailureExitCode) {
       return const EnvironmentFailure(
         title: 'Package repository refresh failed',
-        detail: 'Ubuntu could not refresh its package indexes, so Harness stopped instead of retrying with stale package data.',
+        detail: 'Ubuntu could not refresh its package indexes, so OpenHarness stopped instead of retrying with stale package data.',
         command: 'sudo apt-get update',
         exitCode: _linuxAptUpdateFailureExitCode,
       );
@@ -1526,7 +1527,7 @@ refresh_package_indexes() {
     return 0
   fi
   rm -f "\$apt_update_log"
-  echo 'Package repository refresh failed. Harness will not retry with stale package indexes.' >&2
+  echo 'Package repository refresh failed. OpenHarness will not retry with stale package indexes.' >&2
   return $_linuxAptUpdateFailureExitCode
 }
 install_linux_packages() {

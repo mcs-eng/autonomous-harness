@@ -1,32 +1,19 @@
 name: CI
 
-# Modelled on autonomous-harness-desktop's ci.yml, with ONE deliberate difference: that one has no
-# `pull_request` trigger and this one does.
+# Modelled on autonomous-harness-desktop's ci.yml. Like that one, this runs ON DEMAND only.
 #
-# The desktop repo is private, and everything that reaches its main branch was pushed by a
-# maintainer who could run the suite locally; a per-commit run there is the same verdict paid for
-# twice. THIS repo is public, takes fork PRs (CONTRIBUTING.md walks through it), and until this file
-# existed said so out loud: "there is no CI on pull requests yet. Nothing runs automatically when
-# you push, so what you report is what a reviewer starts from." A contributor's own report is not a
-# verdict — it is a claim about a machine nobody else can see — and a maintainer pulling every
-# branch to find out is the manual step CI exists to delete.
+# It used to run on every pull request as well (2026-09-10 → 2026-09-16). That was switched off
+# deliberately: the suite is timing-sensitive on the shared ubuntu runner (real tmux server, shell
+# scripts, sqlite3 polls), so a red check on a PR said more about the runner than about the change,
+# and every contributor had to read the log to find out which. The verdict on a branch is still one
+# click away — Actions -> CI -> Run workflow, pick the branch — which is what a reviewer does when
+# they want it. If per-PR CI comes back, use `pull_request`, never `pull_request_target`: a fork's PR
+# must run with a read-only token and no secrets, since this job executes the contributor's code.
 #
-# `pull_request`, never `pull_request_target`: a fork's PR runs with a read-only token and no access
-# to secrets, and this job wants neither. It checks out and runs the contributor's code, which is
-# exactly why it must not be handed a writable token.
-#
-# There is still no `push` trigger. Nobody pushes to main directly (CONTRIBUTING.md step 2) and
-# merges are squashed, so a push run would re-test the commit the PR run just cleared.
+# There is no `push` trigger either. Nobody pushes to main directly (CONTRIBUTING.md step 2) and
+# merges are squashed, so a push run would re-test a commit somebody already ran by hand.
 on:
-  pull_request:
-    branches: [main]
-  # Deliberately unfiltered by `paths`. A docs-only PR running the CLI suite is 90 seconds of noise;
-  # a `paths` filter that makes the check never REPORT is a PR nobody can merge the day somebody
-  # turns on branch protection. The cheap failure is the better one, and public repos do not pay for
-  # standard runners.
-  #
-  # It is also the escape hatch for a verdict on any branch without opening a PR:
-  # Actions -> CI -> Run workflow.
+  # The only way this runs on its own: Actions -> CI -> Run workflow, on any branch.
   workflow_dispatch:
   # Callable as a reusable workflow. release.yml used to gate on this and take the Node pin from
   # its output; it no longer does (see the note above `publish` there) and pins the same version
@@ -42,14 +29,12 @@ permissions:
 
 concurrency:
   group: cli-ci-${{ github.workflow }}-${{ github.ref }}
-  # A second push to an open PR makes the first run's verdict worthless, so that one is cancelled.
-  # Everything else — a release's gate, a run somebody started by hand — is the record of whether a
-  # commit was green, and is never killed to make room.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Every run here was started by a person or by a release, and is the record of whether that commit
+  # was green — never killed to make room for a newer one.
+  cancel-in-progress: false
 
 jobs:
-  # `make cli-test`, exactly: typecheck then the vitest suite. Nothing else — the repo has no lint
-  # or format gate, and inventing one here would fail on code no reviewer ever agreed to.
+  # Typecheck, the full suite, and the package updater's complete-coverage gate.
   typecheck-test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -115,3 +100,6 @@ jobs:
       # need a live tmux, Herdr or Cursor are gated behind RUN_* env vars and stay skipped here —
       # `npm run test:tmux-real` and friends are how those are run, on a machine that has them.
       - run: npx vitest run
+
+      - name: Require complete harness updater coverage
+        run: npm run test:dsh-updates

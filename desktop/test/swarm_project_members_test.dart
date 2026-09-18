@@ -24,8 +24,8 @@ void main() {
         protocolVersion: 1,
         terminalProtocolVersion: 3,
         agentProjects: const {
-          'a0': AgentProject(name: 'Workshop', cwd: '/work/workshop'),
-          'a1': AgentProject(name: 'Workshop', cwd: '/work/workshop'),
+          'a0': AgentProject(name: 'Solid', cwd: '/work/workshop'),
+          'a1': AgentProject(name: 'Solid', cwd: '/work/workshop'),
         },
       );
       app.machineStates['remote'] =
@@ -71,7 +71,7 @@ void main() {
         find.byWidgetPredicate(
           (w) =>
               w is TextField &&
-              w.decoration?.hintText == 'Find an agent or machine',
+              w.decoration?.hintText == 'Find a harness or machine',
         ),
         'Chess Set',
       );
@@ -96,17 +96,17 @@ void main() {
       await tester.pump();
       await tester.enterText(
         find.byKey(const ValueKey('swarm-search-input')),
-        'Workshop',
+        'Solid',
       );
       await tester.pump();
-      await tester.tap(find.widgetWithText(ListTile, 'Workshop'));
+      await tester.tap(find.widgetWithText(ListTile, 'Solid'));
       await tester.pump(const Duration(milliseconds: 100));
       expect(app.panes.map((p) => (p.machineId, p.agentId)), [
         ('m', 'a0'),
         ('m', 'a1'),
         ('remote', 'chess'),
       ]);
-      expect(app.activeSwarm.name, 'Workshop');
+      expect(app.activeSwarm.name, 'Solid');
       await tester.pumpWidget(const SizedBox());
       app.dispose();
       projects.dispose();

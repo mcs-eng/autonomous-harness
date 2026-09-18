@@ -97,7 +97,7 @@ void main() {
       final catalog = swarmDestinations(app);
       expect(
         catalog.singleWhere((row) => row.agentId == 'auth').detail,
-        'Payments · fix-login · Test host · Offline',
+        'Code · Payments · fix-login · Test host · Offline',
       );
       for (final query in [
         'HOST auth',
@@ -132,7 +132,7 @@ void main() {
     expect(rows, hasLength(1));
     expect(rows.single.swarmId, app.activeSwarmId);
     expect(rows.single.current, isTrue);
-    expect(rows.single.detail, 'Test host · Offline');
+    expect(rows.single.detail, 'Code · Test host · Offline');
   });
 
   for (final status in [

@@ -1,6 +1,17 @@
 import 'package:flutter/widgets.dart';
 
 import '../terminal/terminal_session.dart';
+import '../core/models.dart' show SharedHarness;
+
+/// What a tile shows.
+///
+/// A [web] tile is a domain harness's viewer — the board, the part, the
+/// episode — served on the agent's machine and drawn beside that agent's
+/// terminal. It is DERIVED from the agent (the daemon says where the viewer
+/// is, and the tile follows) and never persisted: a restored layout re-opens
+/// it from the agent's next frame, so a stale URL from a previous run can
+/// never be loaded.
+enum PaneKind { terminal, web }
 
 /// One tile in the terminal grid.
 ///
@@ -12,7 +23,32 @@ import '../terminal/terminal_session.dart';
 /// machine going offline and coming back without the grid reshuffling around
 /// it.
 class TerminalPane {
-  TerminalPane({required this.id, required this.machineId, this.agentId});
+  TerminalPane({
+    required this.id,
+    required this.machineId,
+    this.agentId,
+    this.kind = PaneKind.terminal,
+    this.url,
+    this.viewerError,
+    this.ownerAgentId,
+  }) : assert(
+         kind == PaneKind.terminal || (agentId == null && ownerAgentId != null),
+         'a web tile belongs to an agent through ownerAgentId, never agentId',
+       );
+
+  final PaneKind kind;
+  bool get isWeb => kind == PaneKind.web;
+
+  /// [PaneKind.web] only: what the tile loads. Changes when the agent's frame
+  /// names a new viewer URL; the panel navigates rather than remounts.
+  String? url;
+  String? viewerError;
+
+  /// [PaneKind.web] only: the agent whose viewer this is. Kept OFF [agentId]
+  /// on purpose — everything that attaches a terminal, persists a layout or
+  /// remembers a closed agent keys on [agentId] being set, and none of that
+  /// applies to a viewer.
+  final String? ownerAgentId;
 
   /// Stable for the tile's whole life, including across a machine going away
   /// and returning. Widget keys hang off this: keying on the agent id instead
@@ -31,6 +67,8 @@ class TerminalPane {
   String? agentId;
 
   TerminalSession? session;
+  SharedHarness? sharedHarness;
+  String? sharedOwnerName;
 
   /// Last visible geometry, retained while this controller is parked off screen.
   Size? lastViewSize;

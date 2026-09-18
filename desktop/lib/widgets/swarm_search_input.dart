@@ -25,6 +25,8 @@ class SwarmSearchInput extends StatelessWidget {
     this.outlined = false,
     this.fillColor,
     this.trailing,
+    this.height,
+    this.fontSize = 16,
   });
 
   final Key inputKey;
@@ -43,6 +45,13 @@ class SwarmSearchInput extends StatelessWidget {
   final bool outlined;
   final Color? fillColor;
   final Widget? trailing;
+
+  /// The input's height, when it is not the start page's 56 or 64: New
+  /// Harness sizes its agent search to the tiles under it.
+  final double? height;
+
+  /// The typed text and the hint; the search glyph grows with it.
+  final double fontSize;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
@@ -79,18 +88,23 @@ class SwarmSearchInput extends StatelessWidget {
       onTapAlwaysCalled: true,
       onTapOutside: onTapOutside == null ? null : (_) => onTapOutside!(),
       onChanged: onChanged,
-      style: const TextStyle(fontSize: 16, color: Colors.white),
+      style: TextStyle(fontSize: fontSize, color: Colors.white),
       cursorColor: grid.AppPalette.swarmAccent,
       textAlignVertical: TextAlignVertical.center,
       decoration: InputDecoration(
         hintText: search?.isCommandMode == true
             ? search!.hint
-            : hintText ?? search?.hint ?? 'Find an agent',
-        hintStyle: const TextStyle(fontSize: 16, color: Colors.white60),
-        prefixIcon: const Icon(Icons.search, size: 20, color: Colors.white60),
+            : hintText ?? search?.hint ?? 'Find a harness',
+        hintStyle: TextStyle(fontSize: fontSize, color: Colors.white60),
+        hintMaxLines: 1,
+        prefixIcon: Icon(
+          Icons.search,
+          size: fontSize + 4,
+          color: Colors.white60,
+        ),
         prefixIconConstraints: BoxConstraints(
-          minWidth: 52,
-          minHeight: prominent ? 64 : 56,
+          minWidth: fontSize >= 20 ? 64 : 52,
+          minHeight: height ?? (prominent ? 64 : 56),
         ),
         suffixIcon: showClose || trailing != null
             ? Padding(
@@ -120,7 +134,9 @@ class SwarmSearchInput extends StatelessWidget {
         hoverColor: Colors.transparent,
         contentPadding: EdgeInsets.symmetric(
           horizontal: 18,
-          vertical: prominent ? 22 : 18,
+          vertical: height == null
+              ? (prominent ? 22 : 18)
+              : ((height! - fontSize * 1.2) / 2).clamp(0, double.infinity),
         ),
         isDense: true,
         border: border,

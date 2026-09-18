@@ -263,12 +263,8 @@ void main() {
       expect(chordsFor(ShortcutAction.lastPane), contains('⌘;'));
       expect(chordsFor(ShortcutAction.newSwarm), ['⌘T']);
       expect(chordsFor(ShortcutAction.showLayout), ['⌘S']);
-      expect(
-        appShortcuts().where((s) => describeShortcut(s.activator) == '⌘P'),
-        isEmpty,
-      );
-      // The pre-redesign catalog bound ⌘N to the Add picker; upstream's
-      // New Agent redesign gave ⌘N to newAgent and ⌘O to addAgent.
+      expect(chordsFor(ShortcutAction.orchestrate), ['⌘P']);
+      expect(chordsFor(ShortcutAction.routeTask), ['⌘B']);
       expect(chordsFor(ShortcutAction.addAgent), ['⌘O']);
       expect(chordsFor(ShortcutAction.newAgent), ['⌘N']);
       expect(chordsFor(ShortcutAction.showAttention), ['⇧⌘I']);
@@ -322,7 +318,9 @@ void main() {
 
     test('the digits are one row, at the end of their own group', () {
       final rows = shortcutRows();
-      final digits = rows.indexWhere((row) => row.label == 'Select harnesses 1–9');
+      final digits = rows.indexWhere(
+        (row) => row.label == 'Select harnesses 1–9',
+      );
       expect(digits, isNot(-1));
       expect(rows[digits].chords, [
         ['⌘', '1 – 9'],

@@ -33,6 +33,18 @@ a retina display.
 | `copilot.png` | GitHub's official Copilot octicon, <https://raw.githubusercontent.com/primer/octicons/main/icons/copilot-48.svg>, fetched 2026-08-19 — rendered white, see the note below | 48 (SVG) | `d94b7a94a4c23816b02285f53eca6386429b67522271483fa0f18ab3596617dc` |
 | `agy.png` | Antigravity's official gradient "A" mark — the logo the site itself declares, <https://antigravity.google/assets/image/antigravity-logo.png>, fetched 2026-08-18 | 200 | `8f0b95d2d21dbf930b4d100e2fdc4505673e900a731aa56ea633a4b59c312799` |
 
+## Harness marks
+
+The domain harnesses' tiles. Two are Harness's own; Marp's is Marp's.
+
+| File | Source | Source px |
+|---|---|---|
+| `autonomous-circuit.png` | Autonomous Circuit's mark (drawn as Copper's), a copper trace on a board-brown tile; the 512px render the app's `desktop/assets/engine-icons/autonomous-circuit.png` was reduced from | 512 |
+| `autonomous-workshop.png` | Autonomous Workshop's mark (drawn as Solid's, then Toymaker's), a white cube on an indigo tile; same origin as Autonomous Circuit's | 512 |
+| `marp.png` | Marp's official mark — the `marp-team` GitHub organisation avatar at `?size=512`, fetched 2026-09-16; upstream SHA-256 `bb98b851038e212421c1d6f6c24a9002afbb010d83ba759e315368c11ed0045f`. Nominative use, as for the engine marks above | 460 |
+
+Autonomous Circuit and Autonomous Workshop are opaque tiles. Marp's is a transparent glyph in Marp's own blue (71% transparent, ink `(103,184,227)`), dark enough to read on the light ground, so it needs no tile; the contrast check above passes all three. The app's own Marp tile (`desktop/assets/engine-icons/marp.png`) is a stand-in drawn for the picker, not this mark.
+
 Open items, recorded rather than left implicit:
 
 - **`copilot.png` is a monochrome icon, not a logo, and it needs the same tile Grok needed.** GitHub

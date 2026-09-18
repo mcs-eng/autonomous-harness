@@ -26,6 +26,11 @@ model User {
   // Which Autonomous account plane this user signs in against. Existing rows are backfilled to
   // staging because they were created while the app used staging globally; new users default prod.
   autonomousEnv  String   @default("prod") // prod | stag
+  // The user's private harness grid, minted on first ask and never rewritten (see routes/grid.ts).
+  // Deliberately NOT @unique: on MongoDB a unique index counts nulls as values, so every user
+  // without a grid would collide with every other. Global uniqueness is the grid control plane's
+  // rule to enforce; ours is only one name per user, which the conditional write in the route gives.
+  gridName       String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -421,10 +426,15 @@ model AnalyticsMachineState {
 }
 
 /// Presence/remote-usage tracking — separate from the Analytics family above (not opt-in, not
-/// collector-reported; derived directly from the web-ws relay in src/lib/webWs.ts).
+/// collector-reported; derived directly from the relays: web-ws in src/lib/webWs.ts, device-ws in
+/// src/lib/deviceWs.ts, adapter-ws in src/lib/adapterWs.ts).
 
-/// Per-day record of whether a user's desktop app was connected to the web-ws relay. One row per
-/// (user, UTC day). A connection spanning midnight produces a row for each day it touches.
+/// Per-day record of whether a user had the desktop app open. One row per (user, UTC day). The
+/// source is the local `harness` daemon reporting its own loopback clients over adapter-ws
+/// (`app_presence`, src/lib/adapterWs.ts) — NOT the web-ws upgrade, which the app never performs
+/// itself (only the daemon does, per foreign machine it relays) and which therefore missed every
+/// single-machine user. `connections` = times a window attached to the daemon that day; a session
+/// spanning midnight produces a row for each day it touches with `connections: 0`.
 model UserDailyPresence {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   userId      String
@@ -474,4 +484,97 @@ model UserDailyDevicePresence {
   @@unique([userId, deviceId, dayUtc])
   @@index([userId, dayUtc])
   @@map("user_daily_device_presence")
+}
+
+/// Per-day record of whether a MACHINE's `harness` daemon was connected to the adapter-ws relay
+/// (src/lib/adapterWs.ts). One row per (machine, UTC day); a connection spanning midnight produces a
+/// row for each day it touches. `lastSeenAt` is refreshed on connect, on close, and at most every
+/// MACHINE_PRESENCE_WRITE_MS while the socket is open, so it lags real liveness by ≤ that interval.
+/// Redis `machine:{id}:mgr` remains the "online right now" answer; this is the history.
+/// `turnsStarted` is the usage signal on top of liveness: every `turn_started` up-frame the daemon
+/// relays bumps it (adapterWs hub tap). A row can legitimately read `connections: 0, turnsStarted: 0`
+/// — a session that spanned midnight and sat idle.
+model MachineDailyPresence {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  machineId    String // Machine.machineId
+  userId       String // owner at connect time (Machine.userId), for per-user rollups
+  dayUtc       DateTime
+  connections  Int      @default(0)
+  turnsStarted Int      @default(0) // `turn_started` up-frames the daemon sent that day (adapterWs tap)
+  firstSeenAt  DateTime
+  lastSeenAt   DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([machineId, dayUtc])
+  @@index([userId, dayUtc])
+  @@map("machine_daily_presence")
+}
+
+/// Per-day record of an AGENT being driven: one row per (machine, agent, UTC day), created and
+/// bumped by every `turn_started` the machine's daemon relays through adapter-ws
+/// (src/lib/adapterWs.ts). There is no "connect" for an agent — a turn is the presence signal —
+/// so unlike the machine/user/device rows there is no `connections` column. `agentId` is the
+/// plaintext correlation id on the frame; the turn's content stays E2EE and is never read here.
+model AgentDailyPresence {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  machineId    String // Machine.machineId — agentId is only unique within a machine
+  agentId      String // MachineAgent.agentId (may be gone from machine_agents later — keep the history)
+  userId       String // owner at the time of the turn
+  dayUtc       DateTime
+  turnsStarted Int      @default(0)
+  firstSeenAt  DateTime
+  lastSeenAt   DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([machineId, agentId, dayUtc])
+  @@index([machineId, dayUtc])
+  @@index([userId, dayUtc])
+  @@map("agent_daily_presence")
+}
+
+/// One person's review of one harness in the Harness Store — a star rating and, optionally, a title
+/// and some words. One row per (harness, user): writing again replaces it, so a rating cannot be
+/// stacked. `harnessId` is the registry id (`owner/name`), never validated against the registry here
+/// — the registry lives in the CLI, and a review of a harness the backend has not heard of is still a
+/// review. `authorName` is a snapshot of the user's name at write time; the store shows it, never
+/// the email.
+model HarnessReview {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  harnessId  String
+  userId     String // User.id
+  authorName String
+  rating     Int // 1..5
+  title      String?
+  body       String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([harnessId, userId])
+  @@index([harnessId])
+  @@map("harness_reviews")
+}
+
+/// Discovery metadata for one account-bound, view-only invitation. Content remains on the owner
+/// daemon, which independently authorizes every observer against its durable local grant list.
+model HarnessShare {
+  id             String    @id @map("_id")
+  ownerId        String
+  machineId      String
+  agentId        String
+  recipientEmail String
+  autonomousEnv  String
+  name           String
+  engine         String?
+  ownerPublicKey String
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([machineId, agentId, recipientEmail])
+  @@index([recipientEmail, autonomousEnv, expiresAt])
+  @@index([ownerId, machineId])
+  @@map("harness_shares")
 }

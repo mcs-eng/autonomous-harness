@@ -38,7 +38,7 @@ class HarnessCustomizePane extends StatelessWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          'Customize Harness',
+                          'Customize OpenHarness',
                           style: Theme.of(context).textTheme.titleMedium
                               ?.copyWith(fontWeight: FontWeight.w600),
                         ),

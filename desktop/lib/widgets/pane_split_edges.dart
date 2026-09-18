@@ -135,7 +135,7 @@ class _PaneSplitEdgesState extends State<PaneSplitEdges> {
     required bool available,
   }) {
     final right = axis == PaneResizeAxis.x;
-    final action = create ? 'New Agent' : 'Open Agent';
+    final action = create ? 'New Harness' : 'Open Harness';
     final direction = right ? 'right' : 'down';
     final callback = create ? widget.onNewSplit : widget.onSplit;
     return IconButton(

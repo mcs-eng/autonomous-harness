@@ -22,6 +22,7 @@ class NewAgentProjectPicker extends StatefulWidget {
     required this.tileSize,
     required this.onSelected,
     required this.onBrowse,
+    this.terminal = false,
     this.initialFolder,
     this.locked = false,
   });
@@ -31,6 +32,11 @@ class NewAgentProjectPicker extends StatefulWidget {
   final FocusNode focusNode;
   final Size tileSize;
   final bool locked;
+
+  /// The choice is for a terminal, not an agent: the first tile is the home
+  /// folder (a shell opens there, nothing is prepared), and there is no Git
+  /// tile — a terminal does not clone.
+  final bool terminal;
   final void Function(String? folder, GitHubRepository? repository) onSelected;
   final Future<String?> Function() onBrowse;
 
@@ -53,6 +59,13 @@ class _NewAgentProjectPickerState extends State<NewAgentProjectPicker> {
   late String? _folder = widget.initialFolder;
   GitHubRepository? _repository;
   bool _chosen = false, _browsing = false;
+  final _localFocus = FocusNode();
+
+  @override
+  void dispose() {
+    _localFocus.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -153,6 +166,7 @@ class _NewAgentProjectPickerState extends State<NewAgentProjectPicker> {
 
   Future<void> _browse() async {
     if (_browsing || widget.locked) return;
+    final restoreFocus = _localFocus.hasFocus;
     _chosen = true;
     setState(() => _browsing = true);
     try {
@@ -161,7 +175,14 @@ class _NewAgentProjectPickerState extends State<NewAgentProjectPicker> {
         _select(_ProjectSource.local, folder: path);
       }
     } finally {
-      if (mounted) setState(() => _browsing = false);
+      if (mounted) {
+        setState(() => _browsing = false);
+        if (restoreFocus) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && !widget.locked) _localFocus.requestFocus();
+          });
+        }
+      }
     }
   }
 
@@ -187,15 +208,18 @@ class _NewAgentProjectPickerState extends State<NewAgentProjectPicker> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Wrap(
-          spacing: 10,
-          runSpacing: 10,
+          spacing: AppChoiceTile.gap,
+          runSpacing: AppChoiceTile.gap,
           children: [
             AppChoiceTile(
               key: const Key('new-agent-folder-newProject'),
               size: widget.tileSize,
               focusNode: widget.focusNode,
-              label: 'New project',
-              leading: const Icon(LucideIcons.folderPlus, size: 18),
+              label: widget.terminal ? 'Home' : 'New project',
+              leading: Icon(
+                widget.terminal ? LucideIcons.house : LucideIcons.folderPlus,
+                size: 22,
+              ),
               selected: _source == _ProjectSource.newProject,
               onPressed: widget.locked
                   ? null
@@ -204,23 +228,25 @@ class _NewAgentProjectPickerState extends State<NewAgentProjectPicker> {
             AppChoiceTile(
               key: const Key('new-agent-project-browse'),
               size: widget.tileSize,
-              label: 'Local',
+              focusNode: _localFocus,
+              label: 'Existing folder',
               detail: _source == _ProjectSource.local && _folder != null
                   ? p.basename(_folder!)
                   : null,
-              leading: const Icon(LucideIcons.folderOpen, size: 18),
+              leading: const Icon(LucideIcons.folderOpen, size: 22),
               selected: _source == _ProjectSource.local,
               onPressed: widget.locked || _browsing ? null : _browse,
             ),
-            AppChoiceTile(
-              key: const Key('new-agent-project-git'),
-              size: widget.tileSize,
-              label: 'Git',
-              detail: _repository?.name,
-              leading: const Icon(LucideIcons.gitBranch, size: 18),
-              selected: _source == _ProjectSource.git,
-              onPressed: widget.locked ? null : _git,
-            ),
+            if (!widget.terminal)
+              AppChoiceTile(
+                key: const Key('new-agent-project-git'),
+                size: widget.tileSize,
+                label: 'Git',
+                detail: _repository?.name,
+                leading: const Icon(LucideIcons.gitBranch, size: 22),
+                selected: _source == _ProjectSource.git,
+                onPressed: widget.locked ? null : _git,
+              ),
             Semantics(
               selected: selectedRecent,
               inMutuallyExclusiveGroup: true,
@@ -229,7 +255,14 @@ class _NewAgentProjectPickerState extends State<NewAgentProjectPicker> {
                 value: selectedRecent ? _folder ?? '' : '',
                 options: recent,
                 width: widget.tileSize.width,
+                // Twice the tile: recent projects share a parent folder, and
+                // the path under each name is what tells them apart (owner,
+                // 2026-09-17: "all folders look the same"). Opens leftward
+                // from the row's last tile.
+                menuWidth: widget.tileSize.width * 2,
+                menuAlignedToEnd: true,
                 height: widget.tileSize.height,
+                padding: AppChoiceTile.padding,
                 selected: selectedRecent,
                 fillColor: selectedRecent
                     ? grid.AppPalette.swarmAccent.withValues(alpha: .16)
@@ -242,7 +275,7 @@ class _NewAgentProjectPickerState extends State<NewAgentProjectPicker> {
                   detail: selectedRecent && _folder != null
                       ? p.basename(_folder!)
                       : null,
-                  leading: const Icon(LucideIcons.history, size: 18),
+                  leading: const Icon(LucideIcons.history, size: 22),
                   trailing: const Icon(Icons.keyboard_arrow_down, size: 18),
                 ),
               ),

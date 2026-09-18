@@ -1,10 +1,13 @@
 import * as esbuild from 'esbuild'
 import { readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
+import { readDshRegistry } from './scripts/lib/dshRegistry.mjs'
 
 // Bake the version in so `node dist/cli.js version` works in the dev/per-file build too (parity with
 // build-bundle.mjs). The bundle build overrides this from ADAPTER_VERSION at release time.
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version
+// The bundled registry (the store/ folders and store/registry at the repo root) — see src/dsh/registry.ts.
+const dshRegistry = JSON.stringify(readDshRegistry(join('..', 'store')))
 
 function getAllTsFiles(dir, fileList = []) {
   const files = readdirSync(dir)
@@ -33,7 +36,10 @@ try {
     target: 'node20',
     sourcemap: true,
     outExtension: { '.js': '.js' },
-    define: { __ADAPTER_VERSION__: JSON.stringify(version) },
+    define: {
+      __ADAPTER_VERSION__: JSON.stringify(version),
+      __DSH_REGISTRY__: JSON.stringify(dshRegistry),
+    },
     logLevel: 'info',
   })
 

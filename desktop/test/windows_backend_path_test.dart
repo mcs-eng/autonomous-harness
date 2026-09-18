@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/auth/auth_session.dart';
@@ -8,7 +9,7 @@ import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/backend_path.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/models.dart';
-import 'package:harness/main.dart';
+import 'package:harness/app_shell.dart';
 import 'package:harness/state/app_state.dart';
 
 /// The GUI-filesystem boundary: what path the app hands its CLI, and what the
@@ -266,7 +267,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: (_) => const SizedBox.shrink()),
         ),
       );
       await tester.pump();
@@ -334,7 +335,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
-          child: const DesktopApp(),
+          child: HarnessApp(authenticatedScreen: (_) => const SizedBox.shrink()),
         ),
       );
       await tester.pump();

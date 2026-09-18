@@ -3,14 +3,14 @@ import 'package:flutter/services.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
+import '../widgets/login_fleet_map.dart';
 import '../widgets/login_relay_diagram.dart';
-import '../widgets/welcome_workspace_preview.dart';
 
 /// The sign-in screen.
 ///
-/// Lead with the work: real agents together in one workspace. A static
-/// example explains a swarm before sign-in; the privacy guarantee stays in the
-/// quiet footer. The preview never creates agents or sends them a task.
+/// Lead with the reach: your machines, wherever they are, feeding this one
+/// window — the picture is [LoginFleetMap], and it moves only where a packet
+/// moves. The privacy guarantee stays in the quiet footer.
 ///
 /// **All four states live here**, in one card, rather than the two screens this
 /// used to be. Pressing Sign in swapped the whole window for
@@ -78,19 +78,19 @@ class LoginScreen extends StatelessWidget {
                       const _AppMark(),
                       SizedBox(height: gap),
                       Text(
-                        'All your agents, on one screen',
+                        'Your agents, wherever they run',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.titleLarge,
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Work with Claude Code, Codex and other agents side by side. '
-                        'Start with one agent and add panes as your work grows.',
+                        'At home, at the office, in the cloud — every machine you '
+                        'sign in to becomes part of one desk, here.',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                       SizedBox(height: gap),
-                      const WelcomeWorkspacePreview(),
+                      const LoginFleetMap(),
                       SizedBox(height: gap),
                       _Action(notifier: notifier, waiting: waiting),
                       if (notifier.lastError != null) ...[

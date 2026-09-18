@@ -59,10 +59,15 @@ class FakeCreateAgentNotifier extends AppNotifier {
   Future<String?> createAgent(
     String machineId, {
     required String engine,
-    required String folder,
+    required String? folder,
     ProjectFolderRequest? projectFolder,
     bool bypassPermission = false,
+    String? permissionMode,
     String? codexHome,
+    String? dsh,
+    String? prompt,
+    String? name,
+    String? agent,
     String? swarmId,
     PaneSplitRequest? split,
     AgentCreationAttempt? attempt,
@@ -175,16 +180,18 @@ void main() {
       );
       await tester.tap(find.widgetWithText(FilledButton, 'Select this folder'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
       await tester.pumpAndSettle();
     }
 
     testWidgets('carries the engine and the bypass flag', (tester) async {
       await create(tester);
 
+      // Auto-approve unless the person picks another mode.
       expect(tracked.paramsOf('agent_created'), {
         'engine': 'claude',
-        'bypass_permission': false,
+        'bypass_permission': true,
+        'permission_mode': 'auto',
       });
     });
 

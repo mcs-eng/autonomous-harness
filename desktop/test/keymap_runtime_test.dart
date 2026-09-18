@@ -13,6 +13,7 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/terminal/terminal_binary.dart';
+import 'package:harness/widgets/agent_picker.dart';
 import 'package:harness/widgets/swarm_switcher.dart';
 import 'package:xterm/xterm.dart';
 
@@ -177,7 +178,7 @@ void main() {
     map.dispose();
   });
 
-  testWidgets('Command-T opens New Harness and Command-S opens Layout', (
+  testWidgets('Command-T opens New Tab and Command-S opens Layout', (
     tester,
   ) async {
     final app = createApp();
@@ -358,7 +359,7 @@ void main() {
 
   for (final inline in [false, true]) {
     testWidgets(
-      'configured picker actions and hints stay in ${inline ? 'start-page' : 'Open Agent'} search',
+      'configured picker actions and hints stay in ${inline ? 'start-page' : 'Open Harness'} search',
       (tester) async {
         final map = MemoryKeymap()
           ..apply('''{"bindings":[
@@ -614,16 +615,13 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsOneWidget);
         expect(find.byType(SwarmSearchResults), findsNothing);
-        // The folder focus opens on the New project tile: the dialog's first
-        // actionable control since the choices became tiles.
-        final newProjectTile = find
-            .descendant(
-              of: find.byKey(const Key('new-agent-folder-newProject')),
-              matching: find.byType(TextButton),
-            )
-            .first;
+        // The form opens with focus on its agent bar, and Escape there still
+        // closes the form.
         expect(
-          tester.widget<TextButton>(newProjectTile).focusNode!.hasPrimaryFocus,
+          tester
+              .widget<AgentPicker>(find.byType(AgentPicker))
+              .focusNode!
+              .hasPrimaryFocus,
           isTrue,
         );
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);

@@ -14,6 +14,7 @@ import {
   type AgentCommandOwnershipSnapshot,
 } from './engineBin.js'
 import { BYPASS_PERMISSION_FLAGS } from './engineLaunch.js'
+import { psEnv } from './childLocale.js'
 
 function cleanPaneTitle(title: string): string | null {
   const cleaned = title
@@ -195,7 +196,13 @@ function agentAliasCandidate(row: Pick<ProcessRow, 'executable' | 'args'>): bool
  * PID-reuse guard that startMarker exists for.
  *
  * So anchor on `lstart` instead — it is the one field with a fixed shape (`DOW MON DD HH:MM:SS YYYY`) —
- * and let comm be lazy. The day/month names stay unconstrained so a non-English `LC_TIME` still parses.
+ * and let comm be lazy.
+ *
+ * That shape is only fixed because every `ps` whose output reaches this parser is spawned under
+ * `LC_TIME=C` (`psEnv`, lib/childLocale.ts). The day and month names are left unconstrained as a
+ * courtesy to a locale that merely renames them — NOT as support for one. A locale that REORDERS the
+ * fields parses zero rows here, and most of them do: `Tue 15 Sep` (en_GB, en_AU), `Di. 15 Sep.`
+ * (de_DE), `火  9/15` (ja_JP), `вторник, 15 сентября 2026 г.` (ru_RU). That is what `psEnv` prevents.
  */
 export function parseProcessRow(line: string): ProcessRow | null {
   const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s+(\S+\s+\S+\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s*(.*)$/.exec(line)
@@ -419,7 +426,7 @@ function readProcField(pid: number, field: 'cmdline' | 'comm'): string | null {
 /** The process table, or null when `ps` itself failed — "we could not look" is not "nothing is there". */
 export async function processRows(): Promise<ProcessRow[] | null> {
   const rows = await new Promise<ProcessRow[] | null>((resolve) => {
-    execFile('ps', ['-axo', 'pid=,ppid=,comm=,lstart=,args='], { timeout: 3000 }, (err, stdout) => {
+    execFile('ps', ['-axo', 'pid=,ppid=,comm=,lstart=,args='], { timeout: 3000, env: psEnv() }, (err, stdout) => {
       if (err) { resolve(null); return }
       const rows: ProcessRow[] = []
       for (const line of stdout.split('\n')) {
@@ -631,6 +638,9 @@ export const ENGINE_PROCESS_SIGNATURES: Readonly<Record<RegisteredSession['engin
     basenames: [/^copilot$/],
     entrypoints: [/@github[\/\\]copilot[\/\\](?:npm-loader\.js|index\.js|bin[\/\\]copilot)$/],
   },
+  // A terminal is a shell, and a shell is what every pane starts as — so nothing matches it, ever.
+  // Discovery walks PROCESS_ENGINES and never asks; this entry exists for the Record's sake.
+  terminal: { basenames: [], entrypoints: [] },
 }
 
 function heuristicEngineProcessMatchScore(
@@ -859,7 +869,18 @@ export function bypassPermissionActiveFromArgv(
   const tokens = argvTokens(args)
   const terminator = tokens.indexOf('--')
   const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
-  return flags.every((flag) => optionTokens.includes(flag))
+  // The flags in order, as launch writes them (`--permission-mode auto` is two tokens, and "auto"
+  // alone elsewhere in argv is not the mode) — or `--flag=value` as one.
+  const inOrder = (want: readonly string[]): boolean => optionTokens.some((_, i) => want.every((flag, j) => optionTokens[i + j] === flag))
+    || (want.length === 2 && optionTokens.includes(`${want[0]}=${want[1]}`))
+  // An agent launched before the auto modes carried the old skip-everything flag; it still counts as
+  // approving on its own, and a relaunch brings it back in the auto mode.
+  return inOrder(flags) || (LEGACY_BYPASS_FLAGS[engine] ?? []).some((legacy) => inOrder(legacy))
+}
+
+const LEGACY_BYPASS_FLAGS: Partial<Record<RegisteredSession['engine'], string[][]>> = {
+  claude: [['--dangerously-skip-permissions']],
+  codex: [['--dangerously-bypass-approvals-and-sandbox']],
 }
 
 /**
@@ -1039,8 +1060,16 @@ export async function resolvePaneEngineProcess(
   return found.ok ? found.identity : null
 }
 
-/** A whole `lstart` stamp — `DOW MON DD HH:MM:SS YYYY` — and nothing else. */
-const LSTART_MARKER_RE = /^\S+\s+\S+\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}$/
+/**
+ * A whole C-locale `lstart` stamp — `DOW MON DD HH:MM:SS YYYY` — and nothing else.
+ *
+ * The names are spelled out rather than left as `\S+` so this also rejects a stamp recorded while `ps`
+ * still ran under the user's own `LC_TIME` (`K szept. 15 …` parsed fine before `psEnv` landed). Such a
+ * stamp can never equal the C-locale one read back for the same process, so without this it would fail
+ * the identity comparison below and evict a live pane once per session on upgrade.
+ */
+export const LSTART_MARKER_RE =
+  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}$/
 
 /** Pane + engine process validation. A saved identity prevents PID reuse from reviving a stale entry. */
 export async function validateSessionRuntime(session: RegisteredSession): Promise<boolean> {
@@ -1071,8 +1100,9 @@ export async function checkSessionRuntime(session: RegisteredSession): Promise<R
   if (!found.ok) return { state: found.unknown ? 'unknown' : 'gone', reason: found.reason }
   const live = found.identity
   const saved = session.processIdentity
-  // A persisted identity whose startMarker is not an lstart stamp was written by the pre-fix parser (see
-  // parseProcessRow) — its fields are shifted, so it can NEVER match the corrected ones again. Adopt the
+  // A persisted identity whose startMarker is not a C-locale lstart stamp was written either by the
+  // pre-fix parser (see parseProcessRow), with its fields shifted, or by a `ps` that still inherited the
+  // user's LC_TIME (see psEnv). Either way it can NEVER match the corrected ones again. Adopt the
   // corrected identity instead of failing: the pane still has a matching engine process, and failing here
   // would drop a live session for good (Command Code, the only engine affected, does not re-register on
   // its Stop hook). One-time, per session.
@@ -1155,11 +1185,21 @@ export function setPaneWindowStyle(pane: string, style: string): Promise<boolean
 }
 
 /** What tmux knows about a pane right now. See `agentCreateDiagnosis.ts` for why this is read. */
+/**
+ * The pane option an engine's launch wrapper sets when the engine exits and the pane falls back to
+ * a shell (engineLaunch.ts, `harness_engine`): the engine's exit status. Empty/absent while the
+ * wrapper is still running the engine — and for the whole life of the fallback shell after that,
+ * once something reads it, so `respawn` clears it before every new launch in the same pane.
+ */
+export const ENGINE_EXIT_PANE_OPTION = '@harness_engine_exit'
+
 export interface TmuxPaneState {
   dead: boolean
   /** Exit status once the process is gone; null while it is still running. */
   exitStatus: number | null
   command: string
+  /** The engine's exit status once its launch wrapper handed the pane to a shell; null before. */
+  engineExit: number | null
 }
 
 /**
@@ -1170,18 +1210,20 @@ export interface TmuxPaneState {
  */
 export function tmuxPaneState(pane: string): Promise<TmuxPaneState | null> {
   return new Promise((resolve) => {
-    const format = '#{pane_dead}|#{pane_dead_status}|#{pane_current_command}'
+    const format = `#{pane_dead}|#{pane_dead_status}|#{${ENGINE_EXIT_PANE_OPTION}}|#{pane_current_command}`
     execFile('tmux', ['display-message', '-p', '-t', pane, format], { timeout: 2_000 }, (err, stdout) => {
       if (err) { resolve(null); return }
       const fields = stdout.trim().split('|')
-      if (fields.length < 3) { resolve(null); return }
+      if (fields.length < 4) { resolve(null); return }
       const status = Number(fields[1])
+      const engineExit = Number(fields[2])
       resolve({
         dead: fields[0] === '1',
         exitStatus: fields[1] !== '' && Number.isSafeInteger(status) ? status : null,
+        engineExit: fields[2] !== '' && Number.isSafeInteger(engineExit) ? engineExit : null,
         // A command name cannot contain `|`, but rejoining costs nothing and keeps a surprising
         // one from silently truncating the field.
-        command: fields.slice(2).join('|'),
+        command: fields.slice(3).join('|'),
       })
     })
   })

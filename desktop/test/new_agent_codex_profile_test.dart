@@ -18,6 +18,8 @@ import 'package:harness/widgets/new_agent_dialog.dart';
 import 'package:harness/shared/widgets/app_choice_picker.dart';
 import 'package:harness/shared/widgets/app_select_field.dart';
 
+import 'support/agent_picker.dart';
+
 class _Folders extends FileSelectorPlatform {
   @override
   Future<String?> getDirectoryPath({
@@ -124,10 +126,15 @@ class _Notifier extends AppNotifier {
   Future<String?> createAgent(
     String machineId, {
     required String engine,
-    required String folder,
+    required String? folder,
     ProjectFolderRequest? projectFolder,
     bool bypassPermission = false,
+    String? permissionMode,
     String? codexHome,
+    String? dsh,
+    String? prompt,
+    String? name,
+    String? agent,
     String? swarmId,
     PaneSplitRequest? split,
     AgentCreationAttempt? attempt,
@@ -199,10 +206,7 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     if (!revealOptions) return n;
-    final codex = find.byKey(const ValueKey('new-agent-quick-codex'));
-    await tester.ensureVisible(codex);
-    await tester.pumpAndSettle();
-    await tester.tap(codex);
+    await chooseAgent(tester, 'codex');
     await tester.pumpAndSettle();
     // The profile lives behind the fold now: it and the bypass flag are the two
     // settings most people never touch, so they are off the path of somebody who
@@ -266,7 +270,7 @@ void main() {
     expect(find.text('Add'), findsOneWidget);
     await browseNewAgentProject(tester);
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+    await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
     await tester.pumpAndSettle();
     expect(notifier.calls.single['codexHome'], isNull);
   });
@@ -287,7 +291,7 @@ void main() {
     expect(find.text('Add'), findsOneWidget);
     await browseNewAgentProject(tester);
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+    await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
     await tester.pumpAndSettle();
     expect(notifier.calls.single['codexHome'], '/custom/work-login');
     expect(tester.takeException(), isNull);
@@ -306,8 +310,8 @@ void main() {
         find.byKey(const Key('new-agent-machine-field')),
       );
       expect(machineField.options.single.label, 'This Mac');
-      expect(machineField.options.single.detail, isNull);
-      expect(find.widgetWithText(FilledButton, 'Create'), findsOneWidget);
+      expect(machineField.options.single.detail, 'Remote');
+      expect(find.byKey(const ValueKey('create-agent-submit')), findsOneWidget);
       expect(find.byKey(const Key('new-agent-project-recent')), findsOneWidget);
       expect(
         find.byKey(const Key('new-agent-codex-profile-field')),
@@ -361,7 +365,7 @@ void main() {
     final searchFocus = tester.widget<TextButton>(newProject).focusNode!;
     searchFocus.requestFocus();
     await tester.pump();
-    final createButton = find.widgetWithText(FilledButton, 'Create');
+    final createButton = find.byKey(const ValueKey('create-agent-submit'));
     expect(tester.widget<FilledButton>(createButton).onPressed, isNull);
     expect(searchFocus.hasPrimaryFocus, isTrue);
     expect(notifier.calls, isEmpty);
@@ -402,7 +406,7 @@ void main() {
     expectProfile(tester, 'codex1');
     await browseNewAgentProject(tester);
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+    await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
     await tester.pumpAndSettle();
     expect(notifier.calls.single['codexHome'], '/accounts/codex1');
   });
@@ -439,7 +443,7 @@ void main() {
       expectProfile(tester, 'Default profile');
       await browseNewAgentProject(tester);
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
       await tester.pumpAndSettle();
       expect(notifier.calls.single['codexHome'], isNull);
     },
@@ -453,7 +457,7 @@ void main() {
     expectProfile(tester, 'codex2');
     await browseNewAgentProject(tester);
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+    await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
     await tester.pumpAndSettle();
     expect(notifier.calls, [
       {'engine': 'codex', 'codexHome': '/accounts/codex2', 'folder': '/work'},
@@ -526,10 +530,7 @@ void main() {
   testWidgets('changing engines clears the selected account', (tester) async {
     final notifier = await open(tester);
     await selectSecond(tester);
-    final claude = find.byKey(const ValueKey('new-agent-quick-claude'));
-    await tester.ensureVisible(claude);
-    await tester.pumpAndSettle();
-    await tester.tap(claude);
+    await chooseAgent(tester, 'claude');
     await tester.pumpAndSettle();
     expect(
       find.byKey(const Key('new-agent-codex-profile-field')),
@@ -537,7 +538,7 @@ void main() {
     );
     await browseNewAgentProject(tester);
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+    await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
     await tester.pumpAndSettle();
     expect(notifier.calls.single['codexHome'], isNull);
     expect(notifier.calls.single['engine'], 'claude');
@@ -557,7 +558,7 @@ void main() {
       );
       await browseNewAgentProject(tester);
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.tap(find.byKey(const ValueKey('create-agent-submit')));
       await tester.pumpAndSettle();
       expect(notifier.calls.single['codexHome'], isNull);
     },

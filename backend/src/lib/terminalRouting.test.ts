@@ -6,6 +6,11 @@ const bus = vi.hoisted(() => ({
   publishDown: vi.fn(async () => 1),
 }))
 
+// These are remote machines; provider routing and its database lookup have their own suite.
+vi.mock('./providerLink.js', () => ({
+  routeDown: async (_machine: string, _down: unknown, fallback: () => Promise<number>) => fallback(),
+}))
+
 vi.mock('./bus.js', () => ({
   subscribeUp: async () => () => undefined,
   subscribeTerminalUp: async () => () => undefined,

@@ -144,7 +144,7 @@ const envSchema = z.object({
   HARNESS_DEVICE_TIMEZONE_DEFAULT: z.string().default('Asia/Saigon'),
   // DEV ONLY. A `provider` machine dials a URL its owner typed, so plain http:// and loopback are
   // refused (see lib/providerUrl.ts). This flag lifts the scheme check so a developer can point a
-  // machine at a local example-provider (autonomous-ai/autonomous-harness). Setting it in production
+  // machine at a local example-provider (autonomous-ai/openharness). Setting it in production
   // disables an SSRF control — boot
   // logs a FATAL-level warning if it is on there.
   PROVIDER_ALLOW_INSECURE_URLS: z.coerce.boolean().default(false),

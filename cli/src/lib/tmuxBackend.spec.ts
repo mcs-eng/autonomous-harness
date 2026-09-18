@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TmuxBackend, clearEnvArgs } from './tmuxBackend.js'
 
 const originalPath = process.env.PATH
@@ -58,6 +58,7 @@ esac
     writeFileSync(tmux, `#!/bin/sh
 printf '%s\\n' "$*" >> "$TMUX_BACKEND_CALLS"
 case "$1" in
+  set-option) sleep 0.05 ;;
   new-session) printf '%%7\\n' ;;
   list-panes) printf '%%7|100|harness-codex-1|/tmp/work\\n%%9|101|harness-claude-2|/tmp/other\\n' ;;
 esac
@@ -74,17 +75,18 @@ esac
     await backend.inventory()
     theme = { background: '#300a24', foreground: '#ffffff' }
     await backend.inventory()
-    await new Promise((resolve) => setTimeout(resolve, 50))
-
-    const styleCalls = readFileSync(calls, 'utf8').trim().split('\n').filter((line) => line.includes('window-style'))
-    expect(styleCalls).toEqual([
+    const styleCalls = () => readFileSync(calls, 'utf8').trim().split('\n').filter((line) => line.includes('window-style'))
+    await vi.waitFor(() => expect(styleCalls()).toEqual([
       'new-session -d -P -F #{pane_id} -c /tmp/work -s harness-codex-1 ; set-option -w remain-on-exit on ; set-option -w window-style bg=#171b29,fg=#f5f5f5',
       // The pane this daemon did not create is styled on the first scan; %7 already was.
       'set-option -w -t %9 window-style bg=#171b29,fg=#f5f5f5',
       // The app changed its palette: every live pane, once.
       'set-option -w -t %7 window-style bg=#300a24,fg=#ffffff',
       'set-option -w -t %9 window-style bg=#300a24,fg=#ffffff',
-    ])
+    ]))
+    await backend.inventory()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(styleCalls()).toHaveLength(4)
   })
 
   it('carries tmux\'s own refusal into the failure reason', async () => {
@@ -166,6 +168,25 @@ esac
     ])
   })
 
+  it('treats a fresh tmux installation with no server as an available empty inventory', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-backend-no-server-'))
+    dirs.push(dir)
+    const tmux = join(dir, 'tmux')
+    writeFileSync(tmux, `#!/bin/sh
+if [ "$1" = list-panes ]; then
+  printf 'no server running on /tmp/tmux-1000/default\\n' >&2
+  exit 1
+fi
+`)
+    chmodSync(tmux, 0o700)
+    process.env.PATH = `${dir}${delimiter}${originalPath ?? ''}`
+
+    await expect(new TmuxBackend().inventory()).resolves.toEqual({
+      state: 'available',
+      roots: [],
+    })
+  })
+
   it('respawns a pane in place with -k, an optional cwd, and the exact argv, no shell', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'tmux-backend-respawn-'))
     dirs.push(dir)
@@ -187,8 +208,8 @@ printf '%s\\n' "$*" >> "$TMUX_BACKEND_CALLS"
       .resolves.toEqual({ state: 'succeeded', dispatch: 'executed' })
     expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
       // The `;` inside an argv element is never shell-interpreted — it lands as one literal token.
-      'set-option -w -t %9 remain-on-exit on ; respawn-pane -k -c /tmp/work -t %9 claude --resume abc; rm -rf /',
-      'set-option -w -t %9 remain-on-exit on ; respawn-pane -k -t %9 claude',
+      'set-option -w -t %9 remain-on-exit on ; set-option -p -t %9 @harness_engine_exit  ; respawn-pane -k -c /tmp/work -t %9 claude --resume abc; rm -rf /',
+      'set-option -w -t %9 remain-on-exit on ; set-option -p -t %9 @harness_engine_exit  ; respawn-pane -k -t %9 claude',
     ])
   })
 
@@ -267,7 +288,7 @@ printf '%s\\n' "$*" >> "$TMUX_BACKEND_CALLS"
     // `remain-on-exit` is chained BEFORE the respawn, not after: an engine handed a rejected key can
     // exit before a follow-up call lands, taking its own error message down with it.
     expect(readFileSync(calls, 'utf8').trim()).toBe(
-      'set-option -w -t %42 remain-on-exit on ; respawn-pane -k -c /tmp/work'
+      'set-option -w -t %42 remain-on-exit on ; set-option -p -t %42 @harness_engine_exit  ; respawn-pane -k -c /tmp/work'
       + ' -e ANTHROPIC_BASE_URL=https://relay.example/relay -e ANTHROPIC_MODEL=GLM-4.7-Flash'
       + ' -t %42 /bin/zsh -lic exec "$@" harness-engine claude --resume sess-1',
     )

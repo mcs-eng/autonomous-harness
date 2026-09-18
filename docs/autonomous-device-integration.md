@@ -77,6 +77,13 @@ The CLI then removes that exact device identity and its reconnect metadata. A so
 this request remains `offline`, rather than being treated as a revoke, so transient LAN failures do
 not unpair the device.
 
+Revoke is bidirectional. When the app removes the device (`harness unpair`, `harness unpair --all`,
+`harness autonomous-device revoke`, or the dashboard) while the device's direct session is open, the
+CLI seals `{type:"pair.revoke",machineId:<this computer's machineId>}` as an `autonomous_device_event`
+over that same E2EE session, then closes the socket gracefully and deletes local trust. It is
+best-effort: a send failure never blocks local removal. A device that is offline at that moment
+learns it on reconnect, when its pinned `e2e_hello` is answered with `e2e_denied` (`unpaired`).
+
 ## Existing encrypted wire, unchanged
 
 Client identity and session use `cli/src/lib/e2ee/core.ts` and `manager.ts` exactly:
@@ -127,6 +134,8 @@ a duplicate may return any retained receipt state. Supported operations:
 |---|---|---|
 | `focus.ensure` | none | Same snapshot as `focus.get`; enable-time first-agent fallback acknowledged by Desktop |
 | `focus.get` | none | `focus:null\|{machineId,agentId,name?},focusRevision` |
+| `focus.step` | `direction:"next"\|"previous",idempotencyKey,focusRevision` | Same snapshot as `focus.get`, after Desktop acknowledged the new agent — see *Stepping focus* |
+| `scroll` | `phase:"down"\|"move"\|"up",dy?,velocity?` | none — see *Scrolling the focused terminal* |
 | `agents.list` | none | `machineId,agents:[{machineId,agentId,name,engine,state,recap?}]` — `recap` is the agent's newest turn headline (≤200 chars, the same string `recap` returns as `turns[0].recap`); absent until a turn has been summarised |
 | `status` | `machineId,agentId` | `machineId,agentId,state,openQuestion:null\|{requestId,questions}` |
 | `recap` | `machineId,agentId,n?` (default 3, integer 1–5) | `machineId,agentId,turns:[{kind,text,recap?,fullText?}]` |
@@ -226,7 +235,7 @@ delivered/started/completed means adopt; rejected means report; unknown/null mea
 before resending. Never automatically replay mutations on reconnect.
 
 Application errors include `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`, `MISSING_TARGET`,
-`MACHINE_MISMATCH`, `AGENT_NOT_FOUND`, `FOCUS_CHANGED`, `PAYLOAD_TOO_LARGE`, `QUESTION_STALE`,
+`MACHINE_MISMATCH`, `AGENT_NOT_FOUND`, `NO_AGENTS`, `FOCUS_UNAVAILABLE`, `FOCUS_CHANGED`, `PAYLOAD_TOO_LARGE`, `QUESTION_STALE`,
 `IDEMPOTENCY_CONFLICT`, `BACKPRESSURE`, `RATE_LIMITED`, `REVOKED`, `INTERNAL`.
 A per-relay-connection token bucket permits burst 20, refilling one request/second, with at most four async
 requests in flight; a new relay connection starts a new quota. Excess returns an error result.
@@ -263,3 +272,64 @@ so a delayed request cannot open a pane after the wait. This operation is for en
 never for recovering a missing target during an utterance. Older CLIs without this capability require
 an explicit app selection. `focus.get`, events, pairing, and normal turn dispatch remain unchanged.
 The automatic app acknowledgment carries its original focus revision; CLI discards it if a newer explicit selection arrived while the request was in flight.
+
+### Stepping focus
+
+`focus.step` is one tick of the USB dial's carousel, requested by the paired device instead of a thumb:
+
+```json
+{"type":"focus.step","requestId":"<uuid>","idempotencyKey":"<uuid per gesture>","direction":"next","focusRevision":"<from focus.get>"}
+```
+
+`direction` is `next` or `previous`; `idempotencyKey` matches `[A-Za-z0-9_-]{1,64}`; `focusRevision`
+is required. Success is the same `{focus,focusRevision}` snapshot `focus.get` returns, read **after**
+Desktop acknowledged the new selection through its ordinary `app_focus` frame; a `focus.changed` event
+carries the same snapshot, as for any other change. No headless target is invented.
+
+The walk is the dial's: the Desktop window's open tiles in tile order (with no window, every agent in
+rail order — this computer first, then other machines in wheel order), wrapping at both ends. Agents
+without a tile are never stepped onto. With nothing focused, `next` starts at the first tile and
+`previous` at the last. A desk of one agent answers with the current snapshot at once; nothing moves.
+The move itself is the same `dial_focus` forward the cable dial uses, so the app decides what a
+selection means exactly as it does for the dial.
+
+Order of checks: a retained result for `(deviceId,idempotencyKey)` is returned first, success or
+error, so a retried gesture is one tick, never two (same key with a different `direction` or
+`focusRevision` → `IDEMPOTENCY_CONFLICT`). Only a new key is then checked against the current
+revision: a stale `focusRevision` returns `FOCUS_CHANGED` and nothing moves. Retained results are
+RAM-only, capped at 512 per daemon, evicted oldest first, and cleared by revoke like receipts.
+
+Errors: `NO_AGENTS` when the walk is empty; `FOCUS_UNAVAILABLE` when no Desktop window is connected
+or it did not acknowledge within two seconds (the daemon does not retry — read `focus.get` before
+sending again); `INVALID_REQUEST` for a bad direction, key or revision.
+
+Target limits are unchanged. The walk may step onto a tile that belongs to another machine, because
+the window can show one; the local daemon then reports the app's focus leaving this machine
+(`focus:null`, new revision, or the remote target if Desktop announces it here), and `turn.send`
+to that target still returns `MACHINE_MISMATCH`. The OS remains responsible for showing that a
+remote target is not supported for dispatch. Pairing, transport, credentials and task dispatch are
+untouched; older CLIs do not list `focus.step` in hello capabilities.
+
+### Scrolling the focused terminal
+
+`scroll` is one report of a finger on the paired device's glass, forwarded to the terminal Desktop
+has in front — the same `dial_scroll` frame the USB dial sends, so the app treats both alike:
+
+```json
+{"type":"scroll","requestId":"<uuid>","phase":"move","dy":-24}
+{"type":"scroll","requestId":"<uuid>","phase":"up","dy":-3,"velocity":-900}
+```
+
+The device is a touchpad here: it reports **movement**, not a position, because it cannot know how
+tall the terminal is; the terminal owns the scrollback and does the arithmetic. A stroke is sent in
+pieces — `down` when the finger lands (the window stops any coasting), `move`s carrying `dy` device
+pixels travelled since the last report (positive = down the glass), and `up` when it lifts, whose
+`velocity` (device px/s, signed like `dy`) becomes the fling. `dy` and `velocity` default to 0 and
+must be integers within ±4096 and ±100000. Send `up` for every `down`: a stroke that never closes
+holds a drag open on the app side until the next `down`.
+
+A stroke is a stream, not a mutation: there is no `idempotencyKey`, no receipt, nothing retained, and
+nothing to retry — a lost `move` is a shorter scroll. Success is an empty `scroll_result`. Only the
+terminal Desktop has focused scrolls; a viewer pane does not. Errors: `FOCUS_UNAVAILABLE` when no
+Desktop window is connected; `INVALID_REQUEST` for a bad phase, a non-integer or out-of-range value,
+or any other field. Older CLIs do not list `scroll` in hello capabilities.

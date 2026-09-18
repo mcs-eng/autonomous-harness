@@ -28,7 +28,7 @@ void main() {
     expect(fieldRect.right, panelRect.right);
     await chord(tester, LogicalKeyboardKey.keyN);
     expect(find.byType(AlertDialog), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Create'), findsOneWidget);
+    expect(find.byKey(const ValueKey('create-agent-submit')), findsOneWidget);
     expect(results, findsNothing);
     expect(find.text('Back to Search'), findsNothing);
     expect(app.panes, [pane]);
@@ -68,7 +68,7 @@ void main() {
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('swarm-row-action')),
-          matching: find.text('Open Agent'),
+          matching: find.text('Open Harness'),
         ),
         findsOneWidget,
       );

@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 
 void main() {
+  _dshTests();
   test('uses explicit terminal availability from a new CLI', () {
     final dormantPane = Agent.fromJson({
       'id': 'agent-1',
@@ -59,4 +60,143 @@ void main() {
     expect(agent.launchError, 'ENGINE_DID_NOT_START');
     expect(agent.launchDetail, 'Engine exited see terminal');
   });
+
+  group('web search on a Local model', () {
+    Agent onGrid(Map<String, Object?> grid) => Agent.fromJson({
+      'id': 'agent-1',
+      'name': 'Local',
+      'engine': 'claude',
+      'grid': {'baseUrl': 'https://grid.example/grid-abc/relay', ...grid},
+    });
+
+    test('reads the status off the grid block', () {
+      expect(onGrid({'model': 'qwen', 'webSearch': 'on'}).gridWebSearch, GridWebSearch.on);
+      expect(
+        onGrid({'model': 'qwen', 'webSearch': 'unavailable'}).gridWebSearch,
+        GridWebSearch.unavailable,
+      );
+      expect(
+        onGrid({'model': 'qwen', 'webSearch': 'unsupported'}).gridWebSearch,
+        GridWebSearch.unsupported,
+      );
+    });
+
+    test('has nothing to say when the daemon said nothing, or said a word it does not know', () {
+      // An older daemon, or a grid agent the daemon merely discovered: no field at all.
+      expect(onGrid({'model': 'qwen'}).gridWebSearch, isNull);
+      // A newer daemon with a fourth word: not printed verbatim, not guessed at.
+      expect(onGrid({'model': 'qwen', 'webSearch': 'throttled'}).gridWebSearch, isNull);
+      expect(onGrid({'model': 'qwen', 'webSearch': 7}).gridWebSearch, isNull);
+    });
+
+    test('has nothing to say off a grid', () {
+      final own = Agent.fromJson({'id': 'agent-2', 'name': 'Own', 'grid': null});
+      expect(own.gridModel, isNull);
+      expect(own.gridWebSearch, isNull);
+    });
+
+    test('each degraded status is one sentence; on is none', () {
+      expect(GridWebSearch.unavailable.sentence, 'Web search unavailable');
+      expect(
+        GridWebSearch.unsupported.sentence,
+        'Web search not supported by this engine',
+      );
+      expect(GridWebSearch.on.sentence, isNull);
+    });
+  });
+}
+
+// ── domain-specific harness fields ────────────────────────────────────────────
+
+void _dshTests() {
+  test('parses the harness, viewer and verdict off an agent frame', () {
+    final agent = Agent.fromJson({
+      'id': 'agent-1',
+      'name': 'Board',
+      'engine': 'claude',
+      'dsh': 'autonomous/autonomous-circuit',
+      'dshName': 'Autonomous Circuit',
+      'viewerUrl': 'http://127.0.0.1:4179/?workspace=1',
+      'verdict': {
+        'ready': false,
+        'summary': '2 errors, 1 warning',
+        'errors': 2,
+        'warnings': 1,
+        'artifact': 'boards/main.board.json',
+        'updatedAt': '2026-09-14T20:00:00Z',
+      },
+    });
+    expect(agent.engine, 'claude');
+    expect(agent.dsh, 'autonomous/autonomous-circuit');
+    expect(agent.dshName, 'Autonomous Circuit');
+    expect(agent.identityEngine, 'autonomous/autonomous-circuit');
+    expect(agent.identityDisplayName, 'Autonomous Circuit');
+    expect(agent.viewerUrl, 'http://127.0.0.1:4179/?workspace=1');
+    final verdict = agent.verdict!;
+    expect(verdict.ready, isFalse);
+    expect(verdict.summary, '2 errors, 1 warning');
+    expect(verdict.errors, 2);
+    expect(verdict.warnings, 1);
+    expect(verdict.artifact, 'boards/main.board.json');
+    expect(verdict.updatedAt, DateTime.utc(2026, 9, 14, 20));
+    expect(agent.copyWith(name: 'Renamed').verdict, verdict);
+    expect(agent.copyWith(name: 'Renamed').dsh, 'autonomous/autonomous-circuit');
+  });
+
+  test('a plain engine agent has none of them and draws as its engine', () {
+    final agent = Agent.fromJson({
+      'id': 'agent-1',
+      'name': 'a',
+      'engine': 'codex',
+    });
+    expect(agent.dsh, isNull);
+    expect(agent.viewerUrl, isNull);
+    expect(agent.verdict, isNull);
+    expect(agent.identityEngine, 'codex');
+  });
+
+  test(
+    'refuses a harness id, viewer URL or verdict outside the spec shape',
+    () {
+      Agent parse(Map<String, dynamic> extra) =>
+          Agent.fromJson({'id': 'agent-1', 'name': 'a', ...extra});
+      // The id is owner/name; a bare word, a deeper path, or an upper-case one is not.
+      expect(parse({'dsh': 'circuit'}).dsh, isNull);
+      expect(parse({'dsh': 'a/b/c'}).dsh, isNull);
+      expect(parse({'dsh': 'Autonomous/Circuit'}).dsh, isNull);
+      expect(parse({'dsh': 'autonomous/../etc'}).dsh, isNull);
+      // The viewer URL lands in a webview: http(s) with a host, no whitespace, no control bytes.
+      expect(parse({'viewerUrl': 'file:///etc/passwd'}).viewerUrl, isNull);
+      expect(parse({'viewerUrl': 'javascript:alert(1)'}).viewerUrl, isNull);
+      expect(
+        parse({'viewerUrl': 'http://127.0.0.1:4179/a b'}).viewerUrl,
+        isNull,
+      );
+      expect(parse({'viewerUrl': 'http://\n127.0.0.1/'}).viewerUrl, isNull);
+      expect(
+        parse({'viewerUrl': 'https://viewer.local/x'}).viewerUrl,
+        'https://viewer.local/x',
+      );
+      // A verdict without the one required fact is no verdict; counts never go negative or absurd.
+      expect(
+        parse({
+          'verdict': {'summary': 'x'},
+        }).verdict,
+        isNull,
+      );
+      expect(parse({'verdict': 'ready'}).verdict, isNull);
+      final odd = parse({
+        'verdict': {
+          'ready': true,
+          'errors': -3,
+          'warnings': 1e9,
+          'summary': 'ok\u0000\u0001',
+        },
+      }).verdict!;
+      expect(odd.errors, 0);
+      expect(odd.warnings, 9999);
+      expect(odd.summary, 'ok');
+      expect(odd.updatedAt, isNull);
+    },
+  );
 }

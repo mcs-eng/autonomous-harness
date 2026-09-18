@@ -60,12 +60,36 @@ class _RenameAgentDialog extends StatefulWidget {
 
 class _RenameAgentDialogState extends State<_RenameAgentDialog> {
   late final _controller = TextEditingController(text: widget.currentName);
+  final _focus = FocusNode(debugLabel: 'rename-agent-name');
 
   /// The CLI's refusal, shown under the field. Null until one arrives.
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    // Typing replaces the name, the way a rename works everywhere else on
+    // the Mac. Claimed after the first frame, and once more a beat later:
+    // the terminal under the dialog autofocuses on its own rebuilds, and
+    // `autofocus: true` on the field lost that race (owner, 2026-09-15).
+    void claim() {
+      if (!mounted) return;
+      _focus.requestFocus();
+      _controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _controller.text.length,
+      );
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      claim();
+      Future<void>.delayed(const Duration(milliseconds: 120), claim);
+    });
+  }
+
+  @override
   void dispose() {
+    _focus.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -88,7 +112,7 @@ class _RenameAgentDialogState extends State<_RenameAgentDialog> {
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
     return AlertDialog(
-      title: const Text('Rename Agent'),
+      title: const Text('Rename Harness'),
       content: SizedBox(
         width: 360,
         child: Column(
@@ -97,6 +121,7 @@ class _RenameAgentDialogState extends State<_RenameAgentDialog> {
           children: [
             TextField(
               controller: _controller,
+              focusNode: _focus,
               autofocus: true,
               style: grid.kFieldTextStyle,
               onSubmitted: (_) => _submit(),

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show listEquals, setEquals;
 
 import '../core/fuzzy_match.dart';
 import '../core/models.dart';
+import '../widgets/engine_identity.dart';
 import 'app_state.dart';
 import 'pane_arrangement.dart';
 import 'session_preview.dart';
@@ -111,6 +112,7 @@ class SwarmNavigationHistory {
       for (final swarm in app.swarms) ...[
         swarm.id,
         swarm.name,
+        swarm.kind,
         for (final pane in swarm.panes)
           (
             pane.id,
@@ -120,7 +122,7 @@ class SwarmNavigationHistory {
             pane.session?.engineId,
           ),
       ],
-      for (final machine in app.machineStates.values)
+      for (final machine in app.machineStates.values) ...[
         (
           machine.machine,
           machine.nodeOnline,
@@ -129,6 +131,8 @@ class SwarmNavigationHistory {
           machine.localEndpoint?.agentProjects,
           machine.localProjects,
         ),
+        ...machine.dsh.byId.values,
+      ],
     ];
     if (listEquals(_menuPresentation, presentation)) return _menuDestinations;
     _menuPresentation = presentation;
@@ -168,11 +172,19 @@ class SwarmDestination {
     this.projectId,
     this.previewKey,
     this.members = const {},
+    this.isStore = false,
     Iterable<String?> searchFields = const [],
+    int titleFields = 1,
   }) : fields = [
          title.toLowerCase(),
          ...searchFields.whereType<String>().map((s) => s.toLowerCase()),
-       ];
+       ],
+       titleFieldCount = titleFields;
+
+  /// How many leading [fields] are "the name of the thing" rather than
+  /// metadata: the row's title, plus the agent's own title when it has one.
+  /// A match there outranks any match in a folder, a machine or a recap.
+  final int titleFieldCount;
 
   final String id, title, detail, machineLabel;
 
@@ -189,6 +201,10 @@ class SwarmDestination {
   final String? projectId;
   final SessionPreviewKey? previewKey;
   final Set<String> members;
+
+  /// The Harness Store's tab, open or recently closed. It holds no agents, so
+  /// without this it would be drawn as an empty group; it wears the app icon.
+  final bool isStore;
   final bool current;
   final List<String> fields;
   bool get isProject => projectId != null;
@@ -201,24 +217,32 @@ class SwarmDestination {
 enum SwarmSearchAction { open, addHere }
 
 ({String text, int? branchOffset}) _harnessDetail(
+  String? type,
   AgentProject? project,
   String machine,
   bool offline,
 ) {
-  final name = project?.name;
+  final prefix = [
+    type,
+    project?.name,
+  ].whereType<String>().where((part) => part.isNotEmpty).join(' · ');
   final branch = project?.branch;
   return (
     text: [
-      name,
+      prefix,
       branch,
       machine,
       if (offline) 'Offline',
     ].whereType<String>().where((part) => part.isNotEmpty).join(' · '),
     branchOffset: branch?.isNotEmpty == true
-        ? (name?.isNotEmpty == true ? name!.length + 3 : 0)
+        ? (prefix.isNotEmpty ? prefix.length + 3 : 0)
         : null,
   );
 }
+
+String? _harnessType(MachineState? machine, String? engine) =>
+    (engine == null ? null : machine?.dsh[engine]?.category) ??
+    engineIdentity(engine).category;
 
 class SwarmSearchSelection {
   const SwarmSearchSelection(
@@ -248,6 +272,7 @@ List<Object?> _catalogPresentation(
   for (final swarm in app.swarms) ...[
     swarm.id,
     swarm.name,
+    swarm.kind,
     for (final pane in swarm.panes)
       (
         pane.id,
@@ -257,7 +282,7 @@ List<Object?> _catalogPresentation(
         pane.session?.engineId,
       ),
   ],
-  for (final machine in app.machineStates.values)
+  for (final machine in app.machineStates.values) ...[
     (
       machine.machine,
       machine.nodeOnline,
@@ -267,6 +292,8 @@ List<Object?> _catalogPresentation(
       machine.localEndpoint?.agentProjects,
       machine.localProjects,
     ),
+    ...machine.dsh.byId.values,
+  ],
 ];
 
 /// One catalog for all search entry points. Terminal output leaves these
@@ -284,7 +311,15 @@ class SwarmSearchCatalog {
     final presentation = _catalogPresentation(app, projects, recent: recent);
     if (listEquals(_presentation, presentation)) return _entries;
     _presentation = presentation;
-    final entries = swarmDestinations(app, recent: recent);
+    final groups = swarmProjects(app, projects);
+    final entries = swarmDestinations(
+      app,
+      recent: recent,
+      projectGroups: groups,
+    );
+    // A one-harness tab is another view of that harness, not another result.
+    // Its name remains an alias on the harness, including after a tab rename.
+    entries.removeWhere((entry) => entry.isSwarm && entry.members.length == 1);
     final agentsById = {
       for (final entry in entries)
         if (entry.agentId != null) entry.id: entry,
@@ -293,7 +328,6 @@ class SwarmSearchCatalog {
     for (final entry in agentsById.values) {
       (machineMembers[entry.machineId!] ??= {}).add(entry.id);
     }
-    final groups = swarmProjects(app, projects);
     for (final machine in app.machineStates.values) {
       final id = machine.machine.machineId;
       final members = machineMembers[id] ?? const <String>{};
@@ -303,7 +337,7 @@ class SwarmSearchCatalog {
           title: machine.machine.displayName,
           detail: [
             'Machine',
-            _agentCountLabel(members),
+            _countLabel(members.length, 'harness'),
             if (machine.needsLink)
               'Link required'
             else if (machine.nodeOnline == false)
@@ -329,7 +363,7 @@ class SwarmSearchCatalog {
           id: 'project:${group.id}',
           projectId: group.id,
           title: group.name,
-          detail: 'Project · ${_agentCountLabel(members)}',
+          detail: 'Project · ${_countLabel(members.length, 'harness')}',
           swarmId: null,
           current: false,
           members: Set.unmodifiable(members),
@@ -402,6 +436,7 @@ class SwarmLocationCatalog {
       machineLabel: machineLabel,
       swarmId: swarm.id,
       swarmName: swarm.name,
+      isStore: swarm.isStore,
       current: swarm.id == app.activeSwarmId,
       searchFields: [machineLabel],
     );
@@ -416,8 +451,9 @@ class SwarmLocationCatalog {
     final machine = app.machineStates[pane.machineId];
     final project = agent == null ? null : machine?.projectOf(agent);
     final machineLabel = machine?.machine.displayName ?? pane.machineId;
-    final engine = agent?.engine ?? pane.session?.engineId;
+    final engine = agent?.identityEngine ?? pane.session?.engineId;
     final detail = _harnessDetail(
+      _harnessType(machine, engine),
       project,
       machineLabel,
       machine?.nodeOnline == false,
@@ -436,7 +472,10 @@ class SwarmLocationCatalog {
       previewKey: agent == null ? null : app.previewKey(pane.machineId, agent),
       engine: engine,
       current: swarm.id == app.activeSwarmId && pane.id == app.focusedPaneId,
-      searchFields: [detail.text, project?.cwd, engine, swarm.name],
+      // The agent's own title first, ranked like the name: "board fab check"
+      // finds the agent whose work that is, not whichever recap mentions fab.
+      searchFields: [agent?.title, detail.text, project?.cwd, engine, swarm.name],
+      titleFields: agent?.title == null ? 1 : 2,
     );
   }
 }
@@ -662,13 +701,8 @@ bool canOpenSwarmGroup(
   SwarmDestination destination, {
   required String destinationSwarmId,
 }) =>
-    destination.isGroup &&
-    destination.members.length <= AppNotifier.maxPanes &&
-    (_matchingGroupSwarm(app, destination) != null ||
-        app.swarms.any(
-          (swarm) => swarm.id == destinationSwarmId && swarm.panes.isEmpty,
-        ) ||
-        app.swarms.length < AppNotifier.maxSwarms);
+    // With no tab cap a group always has somewhere to open; only its size is bounded.
+    destination.isGroup && destination.members.length <= AppNotifier.maxPanes;
 
 Swarm? _matchingGroupSwarm(AppNotifier app, SwarmDestination destination) {
   bool matches(Swarm swarm) =>
@@ -694,6 +728,11 @@ String _agentCountLabel(Iterable<String?> ids) {
   return '$count ${count == 1 ? 'agent' : 'agents'}';
 }
 
+String _countLabel(int count, String noun) {
+  final plural = noun == 'harness' ? 'harnesses' : '${noun}s';
+  return '$count ${count == 1 ? noun : plural}';
+}
+
 String _swarmMachineLabel(AppNotifier app, Iterable<String> machineIds) {
   final ids = machineIds.toSet();
   if (ids.isEmpty) return '';
@@ -710,6 +749,7 @@ List<SwarmDestination> closedWorkDestinations(AppNotifier app) => [
         closedId: entry.historyId,
         title: entry.name,
         engine: entry.engine,
+        isStore: entry.kind == 'store',
         members: {
           for (final pane in entry.panes)
             if (pane.agentId != null)
@@ -746,11 +786,19 @@ List<SwarmDestination> swarmDestinations(
   AppNotifier app, {
   List<String> recent = const [],
   bool openOnly = false,
+  List<SwarmProjectGroup> projectGroups = const [],
 }) {
   final owners = <String, List<Swarm>>{};
   final agents = <String, (MachineState, Agent)>{};
   final result = <SwarmDestination>[];
   final recency = {for (var i = 0; i < recent.length; i++) recent[i]: i};
+  final projectsByAgent = <String, Set<String>>{};
+  for (final group in projectGroups) {
+    for (final entry in group.agents) {
+      final id = agentDestinationId(entry.machineId, entry.agent.id);
+      (projectsByAgent[id] ??= {}).add(group.id);
+    }
+  }
   for (final machine in app.machineStates.values) {
     for (final agent in machine.agents) {
       agents[agentDestinationId(machine.machine.machineId, agent.id)] = (
@@ -761,43 +809,49 @@ List<SwarmDestination> swarmDestinations(
   }
   for (final swarm in app.swarms) {
     final context = <String?>[];
-    for (final pane in swarm.panes) {
-      if (pane.agentId == null) continue;
+    final panes = swarm.panes.where((pane) => pane.agentId != null).toList();
+    final members = <String>{};
+    final projects = <String>{};
+    final machines = <String>{};
+    for (final pane in panes) {
       final id = agentDestinationId(pane.machineId, pane.agentId!);
+      members.add(id);
+      machines.add(pane.machineId);
       (owners[id] ??= []).add(swarm);
       final row = agents[id];
       final project = row?.$1.projectOf(row.$2);
+      if (project != null) projects.add(project.identity(pane.machineId));
+      projects.addAll(projectsByAgent[id] ?? const {});
       context.addAll([
         row?.$1.machine.displayName,
         row?.$2.name ?? pane.session?.agentName,
         project?.name,
         project?.branch,
         project?.cwd,
+        _harnessType(row?.$1, row?.$2.identityEngine ?? pane.session?.engineId),
       ]);
     }
     result.add(
       SwarmDestination(
         id: swarmDestinationId(swarm.id),
         title: swarm.name,
-        engine: swarm.panes.length == 1
+        engine: panes.length == 1
             ? agents[agentDestinationId(
-                        swarm.panes.single.machineId,
-                        swarm.panes.single.agentId ?? '',
+                        panes.single.machineId,
+                        panes.single.agentId!,
                       )]
                       ?.$2
-                      .engine ??
-                  swarm.panes.single.session?.engineId
+                      .identityEngine ??
+                  panes.single.session?.engineId
             : null,
-        machineLabel: _swarmMachineLabel(app, [
-          for (final pane in swarm.panes)
-            if (pane.agentId != null) pane.machineId,
-        ]),
-        detail: _agentCountLabel(swarm.panes.map((pane) => pane.agentId)),
-        members: {
-          for (final pane in swarm.panes)
-            if (pane.agentId != null)
-              agentDestinationId(pane.machineId, pane.agentId!),
-        },
+        machineLabel: _swarmMachineLabel(app, machines),
+        detail: [
+          _countLabel(members.length, 'harness'),
+          if (projects.isNotEmpty) _countLabel(projects.length, 'project'),
+          if (machines.isNotEmpty) _countLabel(machines.length, 'machine'),
+        ].join(' · '),
+        members: members,
+        isStore: swarm.isStore,
         swarmId: swarm.id,
         current: swarm.id == app.activeSwarmId,
         searchFields: context.toSet(),
@@ -834,8 +888,10 @@ List<SwarmDestination> swarmDestinations(
     final machine = app.machineStates[machineId];
     final project = row?.$1.projectOf(row.$2);
     final machineName = machine?.machine.displayName ?? machineId;
-    final engine = row?.$2.engine ?? pane?.session?.engineId;
+    final engine = row?.$2.identityEngine ?? pane?.session?.engineId;
+    final type = _harnessType(machine, engine);
     final detail = _harnessDetail(
+      type,
       project,
       machineName,
       machine?.nodeOnline == false,
@@ -854,7 +910,12 @@ List<SwarmDestination> swarmDestinations(
         engine: engine,
         current:
             owner?.id == app.activeSwarmId && pane?.id == app.focusedPaneId,
+        // The agent's own title is ranked like its name (see titleFields):
+        // "board fab check" finds the agent whose work that is, never the
+        // one whose folder or recap happens to mention fab.
         searchFields: [
+          row?.$2.title,
+          type,
           machineName,
           project?.name,
           project?.branch,
@@ -862,6 +923,7 @@ List<SwarmDestination> swarmDestinations(
           engine,
           ...memberships.map((s) => s.name),
         ],
+        titleFields: row?.$2.title == null ? 1 : 2,
       ),
     );
   }
@@ -907,7 +969,7 @@ List<SwarmDestination> rankSwarmDestinations(
   final recency = {for (var i = 0; i < recent.length; i++) recent[i]: i};
   final ranked = <({SwarmDestination entry, int score, bool content})>[];
   for (final entry in all) {
-    if (entry.fields.first == needle) {
+    if (entry.fields.take(entry.titleFieldCount).contains(needle)) {
       ranked.add((entry: entry, score: -1, content: false));
       continue;
     }
@@ -918,7 +980,11 @@ List<SwarmDestination> rankSwarmDestinations(
       int? best;
       for (var i = 0; i < entry.fields.length; i++) {
         final field = entry.fields[i];
-        final score = swarmFieldMatchScore(field, term, title: i == 0);
+        final score = swarmFieldMatchScore(
+          field,
+          term,
+          title: i < entry.titleFieldCount,
+        );
         if (score == null) continue;
         if (best == null || score < best) best = score;
         // Every remaining field is metadata, whose best possible score is 64.
