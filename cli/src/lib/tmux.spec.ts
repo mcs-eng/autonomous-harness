@@ -161,6 +161,8 @@ describe('tmux process primitives', () => {
    * entrypoint walk stopped on the bare duplicate.
    */
   describe('repairInteropRowFromCmdline', () => {
+    const NUL = String.fromCharCode(0)
+
     const windowsArgv = '/init\0C:\\Program Files\\nodejs\\node.exe\0node.exe'
       + '\0C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
 
@@ -183,13 +185,33 @@ describe('tmux process primitives', () => {
     })
 
     it('prefers a real comm name over the relayed interpreter basename', () => {
-      expect(repairInteropRowFromCmdline('/init\0/home/demo/.local/bin/claude', 'claude'))
+      expect(repairInteropRowFromCmdline(['/init', '/home/demo/.local/bin/claude'].join(NUL), 'claude'))
         .toEqual({ args: '/home/demo/.local/bin/claude', executable: 'claude' })
-      // The relay itself is never an engine name.
-      expect(repairInteropRowFromCmdline('/init\0/home/demo/.local/bin/claude', '/init'))
-        .toEqual({ args: '/home/demo/.local/bin/claude', executable: 'claude' })
-      expect(repairInteropRowFromCmdline('/init\0/home/demo/.local/bin/claude', 'init'))
-        .toEqual({ args: '/home/demo/.local/bin/claude', executable: 'claude' })
+      // Review cycle-3 P2: `comm` naming the RELAY (`init`/`/init`) ties the cmdline to nothing —
+      // a native docker-init row can carry it too — so it never qualifies a rewrite on its own.
+      expect(repairInteropRowFromCmdline(['/init', '/home/demo/.local/bin/claude'].join(NUL), '/init'))
+        .toEqual({})
+      expect(repairInteropRowFromCmdline(['/init', '/home/demo/.local/bin/claude'].join(NUL), 'init'))
+        .toEqual({})
+    })
+
+    /**
+     * Review cycle-3 P2: `comm` is 15-byte capped on Linux, so it may qualify as a TRUNCATION of
+     * the relayed basename — but only a strict one: comm shorter than the basename AND a prefix of
+     * it AND exactly 15 bytes. An arbitrary short prefix like `co` over `codex` establishes
+     * nothing about interop and must leave the row untouched.
+     */
+    it('qualifies comm only as an exact name or a 15-byte truncation of the basename', () => {
+      // Arbitrary prefix: not a truncation, no qualification.
+      expect(repairInteropRowFromCmdline(['/init', '/usr/local/bin/codex', '--version'].join(NUL), 'co')).toEqual({})
+      // Genuine 15-byte truncation (measured shape on Ubuntu 24.04) qualifies.
+      expect(repairInteropRowFromCmdline(
+        ['/init', '/opt/a-very-long-engine-name-binary', '--version'].join(NUL),
+        'a-very-long-eng',
+      )).toEqual({ args: '/opt/a-very-long-engine-name-binary --version', executable: 'a-very-long-eng' })
+      // A comm SHORTER than 15 bytes that merely prefixes the basename is not evidence of
+      // truncation — it could be any unrelated short name.
+      expect(repairInteropRowFromCmdline(['/init', '/usr/local/bin/codex', '--version'].join(NUL), 'cod')).toEqual({})
     })
 
     /**
@@ -387,7 +409,7 @@ describe('tmux process primitives', () => {
     expect(bypassPermissionActive('codex', relayedArgs)).toBe(false)
   })
 
-  it('argvTokens treats \\\" inside a double-quoted token as a literal quote', () => {
+  it('argvTokens treats \\" inside a double-quoted token as a literal quote', () => {
     expect(argvTokens('codex "say \\"hi\\" now"')).toEqual(['codex', 'say "hi" now'])
     // Unchanged behaviour for the plain cases the matcher relies on.
     expect(argvTokens('codex "hello world" --flag')).toEqual(['codex', 'hello world', '--flag'])
@@ -396,6 +418,56 @@ describe('tmux process primitives', () => {
     // A Windows path with spaces stays one token, and backslashes are not escapes outside quotes.
     expect(argvTokens('"C:\\Program Files\\nodejs\\node.exe" --version'))
       .toEqual(['C:\\Program Files\\nodejs\\node.exe', '--version'])
+  })
+
+  /**
+   * Review cycle-3 P1 (security): the relayed argv round trip — quote() inside
+   * repairInteropRowFromCmdline -> argvTokens() — must be token-faithful for EVERY element, or
+   * prompt/argument text re-tokenizes into standalone flags and bypassPermissionActive() flips.
+   * Two shapes closed the loop beyond cycle-2's escaped-double-quote repro:
+   *   1. a token carrying SINGLE quotes around a flag was serialized bare-with-single-quotes;
+   *      argvTokens stripped them and the flag stood alone.
+   *   2. a token ending in a backslash emitted `...\"`, whose escape rule swallowed the closing
+   *      quote and exposed the NEXT argument's flag text as standalone tokens.
+   * Each case pins the round trip itself: repair -> re-split must return the ORIGINAL argv.
+   */
+  it('preserves argv boundaries through the repair quoting round trip', () => {
+    const NUL = String.fromCharCode(0)
+    const relayout = (elements: string[]) =>
+      repairInteropRowFromCmdline(['/init', ...elements].join(NUL), 'node.exe')
+    const interpreterPath = 'C:\\Program Files\\nodejs\\node.exe'
+
+    // 1. Single-quoted flag argument: quote() double-quotes the whole element, the inner single
+    //    quotes are literal content, and the flag NEVER stands alone as its own token.
+    const singleQuoted = relayout([interpreterPath, "'--dangerously-bypass-approvals-and-sandbox'"])
+    expect(argvTokens(singleQuoted.args!))
+      .toEqual([interpreterPath, "'--dangerously-bypass-approvals-and-sandbox'"])
+    expect(bypassPermissionActive('codex', singleQuoted.args!)).toBe(false)
+
+    // 2. A prompt argument with embedded double quotes escapes as \" and round-trips exactly.
+    const promptArg = 'Explain " --dangerously-bypass-approvals-and-sandbox " please'
+    const relayed = relayout([interpreterPath, promptArg])
+    expect(bypassPermissionActive('codex', relayed.args!)).toBe(false)
+    expect(argvTokens(relayed.args!)).toEqual([interpreterPath, promptArg])
+
+    // 3. Trailing-backslash token: backslashes double before the closing quote, so the quote
+    //    survives as a boundary and no neighbouring text merges into the token.
+    const backslashTail = relayout([interpreterPath, 'C:\\Dir\\', 'plain'])
+    expect(argvTokens(backslashTail.args!)).toEqual([interpreterPath, 'C:\\Dir\\', 'plain'])
+
+    // 4. The reviewer's repro shape: a space-bearing token ending in a backslash followed by a
+    //    prompt whose text contains the flag — boundaries must hold so it stays prompt text.
+    const repro = relayout([
+      interpreterPath,
+      'C:\\Dir With Space\\',
+      'explain --dangerously-bypass-approvals-and-sandbox please',
+    ])
+    expect(bypassPermissionActive('codex', repro.args!)).toBe(false)
+    expect(argvTokens(repro.args!)).toEqual([
+      interpreterPath,
+      'C:\\Dir With Space\\',
+      'explain --dangerously-bypass-approvals-and-sandbox please',
+    ])
   })
 
   it('reads false when the confirmed flag is absent', () => {

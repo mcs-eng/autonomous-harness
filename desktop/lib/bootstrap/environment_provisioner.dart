@@ -1002,6 +1002,12 @@ class EnvironmentProvisioner {
       harnessHome: harnessHome,
       runProcess: _runWasInjected ? _run : null,
       environment: _platformEnvironment,
+      // Forward the injected platform override: a test (or embedder) forcing
+      // isWindows on a non-Windows host must drive the runner's WINDOWS
+      // resolution — the WSL2 bridge — not the native path this host would
+      // otherwise pick (review cycle-3, P2; the fixtures reject native
+      // invocations, so without this the readiness assertions fail off-Windows).
+      isWindows: _isWindows,
     );
     final wsl =
         _wslRuntime ?? WslRuntime(runProcess: _runWasInjected ? _run : null);

@@ -9,6 +9,10 @@ import 'package:harness/core/wsl_runtime.dart';
 /// codec first, so a non-ASCII distro name failed or corrupted inside the
 /// decoder and the swallowed stream error yielded an EMPTY inventory while
 /// `wsl.exe` exited 0.
+///
+/// Review cycle-3 P2 adds two pins: a BOM is decisive wide evidence on its
+/// own (a non-Latin-dominant buffer fails the NUL census but still starts
+/// with 0xFF 0xFE), and a CJK-dominant buffer with NO ASCII prefix round-trips.
 
 void main() {
   group('Utf16LeProbeEncoding (byte-level, review cycle-2 P2)', () {
@@ -32,6 +36,29 @@ void main() {
       final bytes = utf16le('$name\r\n');
       final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
       expect(text.replaceAll('\r\n', '\n').trim(), name);
+    });
+
+    test('a BOM forces the wide decode even for a CJK-dominant inventory (review cycle-3 P2)', () {
+      // A non-Latin-dominant buffer fails the NUL census - for one short line of
+      // Japanese only 2 of 5 high bytes are NUL - so before this fix the decoder
+      // fell through to the byte-mapped single-byte path and produced mojibake.
+      // wsl.exe's BOM (0xFF 0xFE) is decisive wide evidence on its own, and real
+      // wide console output always begins with one. No ASCII prefix here: the old
+      // 'Ubuntu-X' shape masked the failure with its Latin head.
+      const name = '日本語';
+      final bytes = <int>[0xff, 0xfe]..addAll(utf16le('$name\r\n'));
+      final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
+      expect(text.replaceAll('\r\n', '\n').trim(), name);
+    });
+
+    test('a CJK inventory with mixed lines decodes through the BOM path (review cycle-3 P2)', () {
+      final bytes = <int>[0xff, 0xfe]
+        ..addAll(utf16le('日本語\r\nUbuntu-24.04\r\n'));
+      final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
+      expect(
+        text.replaceAll('\r\n', '\n').split('\n').where((l) => l.trim().isNotEmpty).toList(),
+        ['日本語', 'Ubuntu-24.04'],
+      );
     });
 
     test('decodes ASCII wide output (NUL high bytes) with a BOM', () {

@@ -43,15 +43,21 @@ class _Utf16LeProbeDecoder extends Converter<List<int>, String> {
   /// ASCII text is `[byte, 0]` pairs. Requiring the pattern through most of
   /// the buffer keeps a binary blob that merely contains short ASCII runs
   /// from flipping into a wide decode.
+  ///
+  /// A BOM (0xFF 0xFE = U+FEFF little-endian) is DECISIVE on its own and
+  /// short-circuits the census: `wsl.exe` emits it on wide console output and
+  /// a single-byte inventory does not begin with one. The census alone
+  /// rejects a non-Latin-dominant inventory — for a CJK name like
+  /// `日` + `本` + `語` followed by CRLF, only 2 of 5
+  /// high bytes are NUL — which used to decode those names as byte-mapped
+  /// mojibake (review cycle-3, P2).
   static bool _looksUtf16Le(List<int> bytes) {
     final len = bytes.length;
+    if (len >= 4 && bytes[0] == 0xff && bytes[1] == 0xfe) return true;
     if (len < 6) return false;
-    var start = 0;
-    // Skip a BOM (0xFF 0xFE = U+FEFF little-endian).
-    if (bytes[0] == 0xff && bytes[1] == 0xfe) start = 2;
     var oddNulls = 0;
     var oddTotal = 0;
-    for (var i = start + 1; i < len; i += 2) {
+    for (var i = 1; i < len; i += 2) {
       oddTotal++;
       if (bytes[i] == 0) oddNulls++;
     }
@@ -396,8 +402,13 @@ class WslRuntime {
   /// String-level wide-output sniff for the injected seam: NULs between every
   /// byte pair (every second code unit is NUL) and at least two of them — a
   /// single stray NUL at the edge should not flip a plain string into a wide
-  /// decode.
+  /// decode. A BOM prefix is decisive wide evidence on its own, exactly as at
+  /// the byte level: without this, a non-Latin-dominant inventory fails the
+  /// NUL census and decodes as mojibake (review cycle-3, P2).
   static bool _looksUtf16LeString(String s) {
+    if (s.length >= 2 && s.codeUnitAt(0) == 0xff && s.codeUnitAt(1) == 0xfe) {
+      return true;
+    }
     final len = s.length;
     if (len < 6) return false;
     var oddNulls = 0;
@@ -550,16 +561,13 @@ class WslRuntime {
   /// The executable itself is expanded inside a QUOTED position: the managed
   /// launcher is `"$HOME/.local/bin/harness"`, and a Linux home with a space
   /// in it passed the quoted probe but SPLIT at execution when the expansion
-  /// was bare (review cycle-2, P2). `"\$@"` is already quoted.
-  List<String> cliArguments(WslHarnessProbe probe, List<String> arguments) {
-    final probeExecutable = probe.executable;
-    return buildArguments(
-      distro: probe.distro!,
-      script: 'exec "$probeExecutable" ' + String.fromCharCode(34) + r'\$@'
-          + String.fromCharCode(34),
-      scriptArguments: arguments,
-    );
-  }
+  /// was bare (review cycle-2, P2). `"\$@"` stays quoted throughout.
+  List<String> cliArguments(WslHarnessProbe probe, List<String> arguments) =>
+      buildArguments(
+        distro: probe.distro!,
+        script: 'exec "${probe.executable}" "\$@"',
+        scriptArguments: arguments,
+      );
 
   /// This computer's identity, read from the CLI that owns the daemon.
   ///

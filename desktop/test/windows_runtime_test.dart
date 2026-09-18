@@ -125,6 +125,31 @@ void main() {
       ]);
     });
 
+    test('cliArguments keeps the launcher quoted and forwards every argument '
+        '(review cycle-3 P1)', () {
+      // The script must carry a REAL "$@" expansion: the cycle-3 shape emitted
+      // an escaped dollar, bash received ONE literal '$@' argument, and every
+      // CLI call (version checks, daemon startup) ran argument-less.
+      final runtime = WslRuntime();
+      const probe = WslHarnessProbe(
+        distro: 'Ubuntu',
+        viaPath: false,
+        executable: r'$HOME/.local/bin/harness',
+      );
+      final arguments = runtime.cliArguments(probe, ['version']);
+
+      expect(arguments, [
+        '-d',
+        'Ubuntu',
+        '-e',
+        'bash',
+        '-lc',
+        'exec "\$HOME/.local/bin/harness" "\$@"',
+        'harness',
+        'version',
+      ]);
+    });
+
     test('every distro call names the distro explicitly', () {
       // Never `wsl -- …`: on a Docker-heavy machine the implicit default can BE
       // docker-desktop, and an unnamed call is a call into a distro the app may

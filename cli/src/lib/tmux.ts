@@ -68,11 +68,14 @@ export interface ProcessRow extends ProcessIdentity {
 }
 
 export function argvTokens(args: string): string[] {
-  // Escape-aware split, Windows-CRT style inside double quotes: `\"` is a literal quote, not a
-  // boundary. The WSL-interop repair (repairInteropRowFromCmdline) re-quotes relayed argv exactly
-  // this way, and a naive quote-aware split let one escaped `\"` inside a relayed PROMPT argument
-  // close the token early — the flag tail after it re-tokenized as standalone CLI flags, and
-  // bypassPermissionActive() flipped to true from prompt text alone (review cycle-2, P1 security).
+  // Escape-aware split, symmetric with the repair's quote() (review cycle-2/3, P1 security).
+  // Inside DOUBLE quotes: `\\` is one literal backslash, `\"` is a literal quote (never a
+  // boundary), and a bare `"` closes the token. quote() emits exactly this dialect — every
+  // backslash doubled, every embedded quote escaped — so repair -> re-split round-trips
+  // token-for-token for ANY argv element. The naive split let one escaped `\"` inside a relayed
+  // PROMPT argument close the token early: the flag tail after it re-tokenized as standalone CLI
+  // flags and bypassPermissionActive() flipped to true from prompt text alone. Single-quoted
+  // shells treat backslashes literally, so the single-quote branch does not.
   const tokens: string[] = []
   let index = 0
   while (index < args.length) {
@@ -83,15 +86,19 @@ export function argvTokens(args: string): string[] {
       index++
       let token = ''
       while (index < args.length && args[index] !== close) {
-        // Only inside DOUBLE quotes is `\"` an escaped literal quote (what quote() emits);
-        // single-quoted shells treat backslashes literally.
-        if (close === '"' && args[index] === '\\' && args[index + 1] === '"') {
-          token += '"'
-          index += 2
-        } else {
-          token += args[index]
-          index++
+        if (close === '"' && args[index] === '\\') {
+          const next = args[index + 1]
+          if (next === '\\' || next === '"') {
+            token += next
+            index += 2
+          } else {
+            token += args[index]
+            index++
+          }
+          continue
         }
+        token += args[index]
+        index++
       }
       if (index < args.length) index++ // consume the closing quote
       tokens.push(token)
@@ -269,19 +276,25 @@ export function repairInteropRowFromCmdline(
   // WSL-interop qualification, not just an `/init` head. On a native Linux host `/init` is a real
   // program (docker-init, systemd's shim) whose cmdline can name ANY child —
   // `/init\0/usr/local/bin/codex\0--version` under comm=`docker-init` scored as Codex here and let a
-  // genuine Linux relay be selected as the engine instead of its child (review cycle-2, P2). A real
-  // interop relay ties the cmdline to the process, and only three things do that: `comm` naming the
-  // relayed program itself (Linux sets comm from the executable the relay runs, e.g. `node.exe`),
-  // `comm` being the relay (`init`/`/init` — no tie evidence, basename fallback applies), or an
-  // unambiguously WINDOWS argv (drive-letter path / `.exe`). Anything else keeps its untouched row.
+  // genuine Linux relay be selected as the engine instead of its child (review cycle-2, P2).
+  // A real interop relay ties the cmdline to the process, and only two things do that:
+  //   1. `comm` naming the relayed program itself — Linux sets comm from the executable the relay
+  //      runs (e.g. `node.exe`). Linux caps comm at 15 bytes, so the name can only ever arrive as
+  //      an EXACT match or a TRUNCATION: comm may be a strict prefix of the basename, never an
+  //      arbitrary-prefix hit like comm=`co` over basename=`codex` (review cycle-3, P2).
+  //   2. An unambiguously WINDOWS argv (drive-letter path / `.exe`).
+  // `comm` naming the relay (`init`/`/init`) ties the cmdline to NOTHING — a docker-init row can
+  // carry it too — so it never qualifies on its own; when the argv IS Windows-shaped, the relay
+  // name is still preferred as `executable` below. Anything else keeps its untouched row.
   const relayedBase = basename(argv[1]).toLowerCase()
   const trimmedComm = comm?.trimEnd().toLowerCase() ?? ''
-  const commIsRelay = trimmedComm === 'init' || trimmedComm === '/init'
-  // comm is 15-byte capped on Linux, so an exact basename can arrive truncated.
   const commMatchesRelayed = trimmedComm !== ''
-    && (relayedBase === trimmedComm || relayedBase.startsWith(trimmedComm))
+    && (relayedBase === trimmedComm
+      || (Buffer.byteLength(trimmedComm) === 15
+        && relayedBase.length > trimmedComm.length
+        && relayedBase.startsWith(trimmedComm)))
   const looksWindowsArgv = /^[A-Za-z]:[\\/]/.test(argv[1]) || /\.exe$/i.test(argv[1])
-  if (!commIsRelay && !commMatchesRelayed && !looksWindowsArgv) return {}
+  if (!commMatchesRelayed && !looksWindowsArgv) return {}
   // Node rewrites its argv when it sets process.title: [interpPath, interpName, script, …].
   // The bare duplicate would otherwise become the "entrypoint" the walk stops on, so drop it
   // when token 2 is the same file name as the resolved interpreter path in token 1.
@@ -291,11 +304,33 @@ export function repairInteropRowFromCmdline(
     argv.splice(2, 1)
   }
   // Re-join for the `args` field. Elements may contain spaces (Windows install paths do), and
-  // argvTokens() re-splits this string on whitespace, honouring double quotes — so quote any
-  // element that carries one. Without this, `C:\Program Files\nodejs\node.exe` re-splits into
-  // two tokens and the entrypoint walk never reaches the engine script.
-  const quote = (token: string): string =>
-    /[\s"]/.test(token) ? `"${token.replace(/"/g, '\\"')}"` : token
+  // argvTokens() re-splits this string on whitespace, honouring double quotes — so quote every
+  // element that could change shape on re-split. The quoting follows the Windows CRT rules
+  // argvTokens() parses by, so the round trip is byte-faithful for ANY element:
+  //   - a token carrying a SINGLE quote is quoted bare-with-single-quotes today; argvTokens strips
+  //     those quotes and the inner flag text stands alone — `'--dangerously-bypass…'` flipped
+  //     bypassPermissionActive() to true from prompt text (review cycle-3, P1).
+  //   - a token ending in a backslash emitted `…\"`: the parser swallows the closing quote and the
+  //     NEXT argument's flag text is exposed as standalone tokens (review cycle-3, P1).
+  //   - an embedded double quote escapes as `\"`, doubling the backslash run before it (CRT strips
+  //     pairs before a quote).
+  // Plain tokens (bare flags, unspaced paths) stay unquoted — the `args` shape every caller and
+  // test already relies on.
+  const quote = (token: string): string => {
+    if (!/[\s"']/.test(token) && !token.endsWith('\\')) return token
+    // argvTokens()' dialect, emitted: double-quote the element, escape every embedded quote
+    // as `\"`, and double any backslash run that would touch a quote or the end of the token —
+    // argvTokens collapses `\\` and turns `\"` into a literal quote, so the round trip is
+    // token-faithful for ANY element. Backslashes elsewhere stay single, keeping the emitted
+    // `args` byte-identical to the pre-repair shapes for plain quoted paths. Without this,
+    // single-quoted flag text re-split as a bare flag (bypassPermissionActive flipped from
+    // prompt text) and a trailing backslash swallowed the closing quote, exposing the NEXT
+    // argument's flags (review cycle-3, P1 security).
+    const escaped = token
+      .replace(/(\\*)"/g, (_, run) => '\\'.repeat(2 * run.length) + '\\"')
+      .replace(/\\+$/, ($) => '\\'.repeat(2 * $.length))
+    return `"${escaped}"`
+  }
   const args = argv.slice(1).map(quote).join(' ')
   const relayed = trimmedComm && trimmedComm !== '/init' && trimmedComm !== 'init'
     ? comm!.trimEnd()
