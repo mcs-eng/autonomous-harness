@@ -11,6 +11,7 @@ import '../core/harness_cli_runner.dart';
 import '../core/harness_file_store.dart';
 import '../core/models.dart';
 import '../core/wsl_runtime.dart';
+import 'session_project_paths.dart';
 
 const localWsProtocolVersion = 1;
 const localTerminalProtocolVersion = 3;
@@ -666,7 +667,7 @@ class LocalCliDiscovery {
             ? machineId
             : null,
         backendOnline: backendOnline,
-        agentProjects: _localAgentProjects(
+        agentProjects: localAgentProjects(
           body['sessions'],
           identity.environment,
           // The daemon may run inside WSL2 while the GUI runs on Windows: its session
@@ -680,15 +681,6 @@ class LocalCliDiscovery {
   }
 }
 
-/// Which path dialect a daemon's session cwds arrive in.
-enum _DaemonPathPlatform {
-  /// Windows drive/UNC paths (`C:\work`, `\\server\share`) and `\`-relative `~` forms.
-  windows,
-
-  /// POSIX paths (`/home/user/project`) — macOS, Linux, or a WSL2 daemon.
-  posix,
-}
-
 /// The platform whose path rules validate the daemon's session cwds.
 ///
 /// The daemon may not share the GUI's platform: on Windows the supported CLI runs inside
@@ -696,97 +688,15 @@ enum _DaemonPathPlatform {
 /// Windows drive/UNC regex silently dropped, removing project-folder metadata for agents
 /// without structured project information (review cycle-6, P2). `LocalMachineIdentity`
 /// already answers which filesystem the selected CLI lives on.
-_DaemonPathPlatform _daemonPathPlatform(LocalMachineIdentity identity) {
-  if (!Platform.isWindows) return _DaemonPathPlatform.posix;
+DaemonPathPlatform _daemonPathPlatform(LocalMachineIdentity identity) {
+  if (!Platform.isWindows) return DaemonPathPlatform.posix;
   // An identity resolution failure must not silently fall back to Windows rules — the
   // selected CLI is still the WSL one the moment it answers. Any Windows-rooted doubt
   // resolves POSIX: a `C:\...` cwd simply fails the POSIX check and is dropped, while the
   // reverse mistake dropped every real WSL project folder.
   return identity.usesWsl || identity.wslSelected != null || identity.wslComputerId != null
-      ? _DaemonPathPlatform.posix
-      : _DaemonPathPlatform.windows;
-}
-
-Map<String, AgentProject> _localAgentProjects(
-  Object? sessions,
-  Map<String, String> environment,
-  _DaemonPathPlatform pathPlatform,
-) {
-  if (sessions is! List) return const {};
-  final projects = <String, AgentProject>{};
-  final home = resolveHomeDirectory(environment);
-  for (final session in sessions) {
-    if (session is! Map || session['id'] is! String) continue;
-    final id = session['id'] as String;
-    final rawCwd = session['cwd'];
-    if (id.isEmpty ||
-        rawCwd is! String ||
-        rawCwd.isEmpty ||
-        rawCwd.length > 4096 ||
-        RegExp(r'[\x00-\x1f\x7f]').hasMatch(rawCwd)) {
-      continue;
-    }
-    String cwd = rawCwd;
-    if (cwd == '~' ||
-        cwd.startsWith('~/') ||
-        (pathPlatform == _DaemonPathPlatform.windows && cwd.startsWith(r'~\'))) {
-      if (home == null || home.isEmpty) continue;
-      cwd = '$home${cwd.substring(1)}';
-    }
-    // Validate against the DAEMON's path dialect, not the GUI host's.
-    final absolute = pathPlatform == _DaemonPathPlatform.windows
-        ? RegExp(r'^[A-Za-z]:[\\/]|^\\\\').hasMatch(cwd)
-        : cwd.startsWith('/');
-    if (!absolute) continue;
-    try {
-      if (pathPlatform == _DaemonPathPlatform.posix) {
-        // NO host File/Uri normalization: `toFilePath()` is host-relative — on a Windows GUI it
-        // renders a POSIX path with backslashes and a drive-relative leading `\`, Uri parsing
-        // throws ArgumentError (not FormatException) on a `:` in a segment, and a literal
-        // backslash in a Linux file name silently becomes a separator (review cycle-7, P2). The
-        // daemon's cwds stay in the daemon's dialect; dot segments are resolved by hand.
-        cwd = _normalizePosixPath(cwd);
-      } else {
-        cwd = File(cwd).uri.normalizePath().toFilePath();
-      }
-      // Directory paths in the status may carry a trailing separator.
-      final separator = pathPlatform == _DaemonPathPlatform.windows
-          ? r'\'
-          : '/';
-      while (cwd.length > 1 &&
-          cwd.endsWith(separator) &&
-          !(pathPlatform == _DaemonPathPlatform.windows &&
-              RegExp(r'^[A-Za-z]:\\$').hasMatch(cwd))) {
-        cwd = cwd.substring(0, cwd.length - 1);
-      }
-      final parts = cwd.split(separator).where((part) => part.isNotEmpty);
-      final project = AgentProject.fromJson({
-        'name': parts.isEmpty ? cwd : parts.last,
-        'cwd': cwd,
-      });
-      if (project != null) projects[id] = project;
-    } on FormatException {
-      // A malformed status row must not prevent discovery of the daemon.
-    }
-  }
-  return Map.unmodifiable(projects);
-}
-
-/// Resolve `.`/`..` segments of an ABSOLUTE POSIX path textually — no host filesystem, no Uri
-/// parsing, no host dialect conversion. `/a/b/../c` is `/a/c`; `..` above the root stays at
-/// the root. A trailing separator is preserved for the caller's trim loop.
-String _normalizePosixPath(String path) {
-  final trailing = path.length > 1 && path.endsWith('/') ? '/' : '';
-  final parts = <String>[];
-  for (final part in path.split('/')) {
-    if (part.isEmpty || part == '.') continue;
-    if (part == '..') {
-      if (parts.isNotEmpty) parts.removeLast();
-      continue;
-    }
-    parts.add(part);
-  }
-  return '/${parts.join('/')}$trailing';
+      ? DaemonPathPlatform.posix
+      : DaemonPathPlatform.windows;
 }
 
 String? _normalizeComputerId(Object? raw) {

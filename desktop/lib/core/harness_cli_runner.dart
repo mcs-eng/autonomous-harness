@@ -4,6 +4,7 @@ import 'dart:io';
 
 import '../logging/cli_transcript.dart';
 import 'backend_path.dart';
+import 'bounded_process.dart';
 import 'wsl_runtime.dart';
 
 /// Runs the Harness CLI owned by this desktop app without depending on a
