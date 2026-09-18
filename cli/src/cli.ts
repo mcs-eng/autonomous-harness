@@ -2344,7 +2344,11 @@ async function runForeground(session: AuthSession): Promise<void> {
       return
     }
 
-    let sessionId = observed.resumeSessionId
+    // A resume id read from flattened `ps` text is prompt-supplied, not engine-supplied: the
+    // token scan cannot help when the string itself has no faithful boundaries (review cycle-7,
+    // P1 security). Without /proc-reconstructed argv the session stays unbound and repair
+    // falls through to `findLiveSession` below, exactly like a resume flag that names nothing.
+    let sessionId = observed.argsBoundaryFaithful ? observed.resumeSessionId : null
     let transcriptPath: string | undefined
     let source = 'terminal-resume'
     if (sessionId) {

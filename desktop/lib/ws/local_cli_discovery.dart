@@ -718,13 +718,15 @@ Map<String, AgentProject> _localAgentProjects(
         : cwd.startsWith('/');
     if (!absolute) continue;
     try {
-      cwd = File(cwd).uri.normalizePath().toFilePath();
-      if (pathPlatform == _DaemonPathPlatform.posix && Platform.isWindows) {
-        // `toFilePath()` is host-relative: on a Windows GUI it renders a POSIX path with
-        // backslashes and a leading drive-relative `\`. The daemon's cwds must stay in the
-        // daemon's dialect, so re-normalize the URI path text instead.
-        final posix = Uri.parse('file://${Uri(path: cwd.replaceAll(r'\', '/')).path}');
-        cwd = posix.normalizePath().toFilePath(windows: false);
+      if (pathPlatform == _DaemonPathPlatform.posix) {
+        // NO host File/Uri normalization: `toFilePath()` is host-relative — on a Windows GUI it
+        // renders a POSIX path with backslashes and a drive-relative leading `\`, Uri parsing
+        // throws ArgumentError (not FormatException) on a `:` in a segment, and a literal
+        // backslash in a Linux file name silently becomes a separator (review cycle-7, P2). The
+        // daemon's cwds stay in the daemon's dialect; dot segments are resolved by hand.
+        cwd = _normalizePosixPath(cwd);
+      } else {
+        cwd = File(cwd).uri.normalizePath().toFilePath();
       }
       // Directory paths in the status may carry a trailing separator.
       final separator = pathPlatform == _DaemonPathPlatform.windows
@@ -747,6 +749,23 @@ Map<String, AgentProject> _localAgentProjects(
     }
   }
   return Map.unmodifiable(projects);
+}
+
+/// Resolve `.`/`..` segments of an ABSOLUTE POSIX path textually — no host filesystem, no Uri
+/// parsing, no host dialect conversion. `/a/b/../c` is `/a/c`; `..` above the root stays at
+/// the root. A trailing separator is preserved for the caller's trim loop.
+String _normalizePosixPath(String path) {
+  final trailing = path.length > 1 && path.endsWith('/') ? '/' : '';
+  final parts = <String>[];
+  for (final part in path.split('/')) {
+    if (part.isEmpty || part == '.') continue;
+    if (part == '..') {
+      if (parts.isNotEmpty) parts.removeLast();
+      continue;
+    }
+    parts.add(part);
+  }
+  return '/${parts.join('/')}$trailing';
 }
 
 String? _normalizeComputerId(Object? raw) {

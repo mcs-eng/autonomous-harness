@@ -362,6 +362,10 @@ void main() {
             {'id': 'agent', 'cwd': '/home/user/project'},
             {'id': 'drivemount', 'cwd': '/mnt/c/Users/user/project/'},
             {'id': 'windowsnative', 'cwd': r'C:\work\project'},
+            // Dot segments resolve textually in the daemon's dialect — never through host
+            // File/Uri normalization, which on Windows would mangle the POSIX text
+            // (review cycle-7, P2).
+            {'id': 'dotted', 'cwd': '/mnt/c/Users/user/../user/project/./src'},
           ],
         },
       );
@@ -379,12 +383,14 @@ void main() {
         ),
       ).discover();
       final projects = endpoint!.agentProjects;
-      expect(projects.keys, ['agent', 'drivemount']);
+      expect(projects.keys, ['agent', 'drivemount', 'dotted']);
       expect(projects['agent']!.cwd, '/home/user/project');
       expect(projects['agent']!.name, 'project');
       // A trailing separator in the status is trimmed, not doubled.
       expect(projects['drivemount']!.cwd, '/mnt/c/Users/user/project');
       expect(projects['drivemount']!.name, 'project');
+      expect(projects['dotted']!.cwd, '/mnt/c/Users/user/project/src');
+      expect(projects['dotted']!.name, 'src');
     },
     skip: !Platform.isWindows,
   );

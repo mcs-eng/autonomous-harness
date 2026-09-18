@@ -6,6 +6,7 @@ import { ENGINES } from '../engines/types.js'
 import type { AgentCommandOwnershipSnapshot } from './engineBin.js'
 import {
   ambiguousAgentProcess,
+  argsMatchProcCmdlineSerialization,
   argvTokens,
   bypassPermissionActive,
   bypassPermissionActiveFromArgv,
@@ -666,6 +667,35 @@ describe('tmux process primitives', () => {
   it.each(['claude', 'codex'] as const)('recognises native Windows %s.exe basenames', (engine) => {
     expect(engineProcessMatchScore({ executable: `${engine}.exe`, args: `${engine}.exe --version` }, engine))
       .toBeGreaterThan(0)
+  })
+
+  /**
+   * Review cycle-7 P2: the boundary-faithful check must accept the repairs' serialized form —
+   * the interop repair DROPS the `/init` head (and a duplicated interpreter basename), so a
+   * raw-argv-only comparison rejected every legitimate repaired relay row and the
+   * restart/retarget paths silently dropped an active bypass flag. Pinned through the pure
+   * serialization matcher: `processArgvIsBoundaryFaithful` itself reads /proc and stays
+   * Linux-gated, like the repairs it mirrors.
+   */
+  it('accepts the repairs’ serialized argv as boundary-faithful', () => {
+    // The `?`-mangle repair emits the raw argv serialization for a non-relay row.
+    expect(argsMatchProcCmdlineSerialization(
+      'codex.exe --dangerously-bypass-approvals-and-sandbox',
+      'codex.exe\0--dangerously-bypass-approvals-and-sandbox',
+    )).toBe(true)
+    // The interop repair strips the `/init` relay head and the duplicated interpreter
+    // basename; the faithful comparison must run against that SAME transformation.
+    // (The repair's quoting dialect doubles backslashes — see quoteArgvElement, cycle-4.)
+    expect(argsMatchProcCmdlineSerialization(
+      '"C:\\\\Program Files\\\\nodejs\\\\node.exe" --dangerously-bypass-approvals-and-sandbox',
+      '/init\0C:\\Program Files\\nodejs\\node.exe\0node.exe\0--dangerously-bypass-approvals-and-sandbox',
+    )).toBe(true)
+    // A flattened `ps` rendering is refused exactly when flattening lost a boundary: the
+    // space-bearing interpreter path serializes quoted, ps drops the quotes.
+    expect(argsMatchProcCmdlineSerialization(
+      '/init C:\\Program Files\\nodejs\\node.exe --dangerously-bypass-approvals-and-sandbox',
+      '/init\0C:\\Program Files\\nodejs\\node.exe\0--dangerously-bypass-approvals-and-sandbox',
+    )).toBe(false)
   })
 
   it('maps neutral visible/history and ANSI capture options to tmux flags', () => {

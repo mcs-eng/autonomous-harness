@@ -849,11 +849,40 @@ export function processArgvIsBoundaryFaithful(row: Pick<ProcessRow, 'pid' | 'arg
   if (process.platform !== 'linux') return false
   const cmdline = readProcField(row.pid, 'cmdline')
   if (cmdline === null || cmdline === '') return false
+  return argsMatchProcCmdlineSerialization(row.args, cmdline)
+}
+
+/**
+ * Whether [args] is a faithful serialization of a process's true NUL argv, given the raw
+ * /proc cmdline text. Pure and host-independent so tests can pin it on every platform; the
+ * /proc read that feeds it stays Linux-gated inside `processArgvIsBoundaryFaithful`.
+ *
+ * Two serializations count as faithful, matching exactly what the repairs emit:
+ *   - the raw argv, `quoteArgvElement`-joined — what the `?`-mangle repair emits when its
+ *     reconstructed row does NOT qualify as an interop relay;
+ *   - the interop repair's form, which drops the `/init` relay head and a duplicated
+ *     interpreter basename (the Node process.title artifact) — comparing raw-only rejected
+ *     every legitimate repaired relay row, so the restart/retarget paths silently dropped an
+ *     active bypass flag (review cycle-7, P2).
+ * A flattened `ps` rendering passes only when flattening was lossless: any element carrying a
+ * space serializes quoted while `ps` drops the quotes, so those strings differ and the row is
+ * refused — which is exactly the boundary evidence the bypass/resume readers rely on.
+ */
+export function argsMatchProcCmdlineSerialization(args: string, cmdline: string): boolean {
   const argv = cmdline.split('\0')
   // Mirror the repairs' one-artifact strip (review cycle-5, P2): split() carries exactly ONE
   // empty artifact after the final NUL.
   if (cmdline.endsWith('\0') && argv.length && argv[argv.length - 1] === '') argv.pop()
-  return row.args === argv.map(quoteArgvElement).join(' ').trimEnd()
+  const raw = argv.map(quoteArgvElement).join(' ').trimEnd()
+  if (args === raw) return true
+  let serialized = [...argv]
+  if (serialized[0] === '/init' && serialized.length >= 2) serialized = serialized.slice(1)
+  if (serialized.length >= 2
+    && basename(serialized[0]).toLowerCase() === serialized[1].toLowerCase()) {
+    serialized.splice(1, 1)
+  }
+  const expected = serialized.map(quoteArgvElement).join(' ').trimEnd()
+  return args === expected
 }
 
 /**
