@@ -61,6 +61,26 @@ void main() {
       );
     });
 
+    test('decodes a BOM-LESS CJK-dominant inventory (review cycle-4 P2)', () {
+      // wsl.exe documentedly emits BOM-less wide output (WSL issue 4607). For one short line of
+      // Japanese only 2 of 5 high bytes are NUL, so the NUL census rejects the buffer — and the
+      // old fallthrough decoded it as byte-mapped mojibake. No BOM and no ASCII prefix here:
+      // the exact shape the census missed.
+      const name = '日本語';
+      final bytes = utf16le('$name\r\n');
+      final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
+      expect(text.replaceAll('\r\n', '\n').trim(), name);
+    });
+
+    test('a BOM-less mixed CJK inventory decodes wide through the alternation census', () {
+      final bytes = utf16le('日本語\r\nUbuntu-24.04\r\n');
+      final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
+      expect(
+        text.replaceAll('\r\n', '\n').split('\n').where((l) => l.trim().isNotEmpty).toList(),
+        ['日本語', 'Ubuntu-24.04'],
+      );
+    });
+
     test('decodes ASCII wide output (NUL high bytes) with a BOM', () {
       final bytes = <int>[0xff, 0xfe]..addAll(utf16le('Ubuntu\r\nDebian\r\n'));
       final text = const Utf16LeProbeEncoding().decoder.convert(bytes);

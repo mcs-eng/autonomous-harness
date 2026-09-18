@@ -46,11 +46,22 @@ class _Utf16LeProbeDecoder extends Converter<List<int>, String> {
   ///
   /// A BOM (0xFF 0xFE = U+FEFF little-endian) is DECISIVE on its own and
   /// short-circuits the census: `wsl.exe` emits it on wide console output and
-  /// a single-byte inventory does not begin with one. The census alone
-  /// rejects a non-Latin-dominant inventory — for a CJK name like
-  /// `日` + `本` + `語` followed by CRLF, only 2 of 5
-  /// high bytes are NUL — which used to decode those names as byte-mapped
-  /// mojibake (review cycle-3, P2).
+  /// a single-byte inventory does not begin with one.
+  ///
+  /// The NUL census alone rejects a non-Latin-dominant inventory — for a CJK
+  /// name like `日本語` followed by CRLF, only 2 of 5 high bytes are NUL,
+  /// because a CJK code point puts a PRINTABLE byte in the low position
+  /// (本 U+672C encodes as `2c 67`). The complementary signal (review
+  /// cycle-4, P2) is the LINE STRUCTURE: wsl.exe output is CRLF-terminated
+  /// lines, and UTF-16LE renders one line break as the code-unit run
+  /// `0d 00 0a 00` — four bytes single-byte line text cannot contain at a
+  /// code-unit-aligned (even) offset. An even-ASCII/odd-non-ASCII alternation
+  /// census was tried for this first and is WRONG for real CJK: the low byte
+  /// of most CJK code points is printable ASCII-range, so the odd side carries
+  /// printable bytes and the shape matches ordinary single-byte text.
+  /// The NUL census stays for Latin-dominant buffers, where the odd
+  /// bytes are mostly NUL and the strict alternation is what binary blobs
+  /// with embedded ASCII runs would break.
   static bool _looksUtf16Le(List<int> bytes) {
     final len = bytes.length;
     if (len >= 4 && bytes[0] == 0xff && bytes[1] == 0xfe) return true;
@@ -61,7 +72,18 @@ class _Utf16LeProbeDecoder extends Converter<List<int>, String> {
       oddTotal++;
       if (bytes[i] == 0) oddNulls++;
     }
-    return oddTotal > 0 && oddNulls >= 2 && oddNulls * 2 >= oddTotal;
+    if (oddTotal > 0 && oddNulls >= 2 && oddNulls * 2 >= oddTotal) return true;
+    // BOM-less non-Latin-dominant wide: the UTF-16LE CRLF run at an even
+    // (code-unit-aligned) offset.
+    for (var i = 0; i + 3 < len; i += 2) {
+      if (bytes[i] == 0x0d
+          && bytes[i + 1] == 0x00
+          && bytes[i + 2] == 0x0a
+          && bytes[i + 3] == 0x00) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @override
@@ -403,8 +425,14 @@ class WslRuntime {
   /// byte pair (every second code unit is NUL) and at least two of them — a
   /// single stray NUL at the edge should not flip a plain string into a wide
   /// decode. A BOM prefix is decisive wide evidence on its own, exactly as at
-  /// the byte level: without this, a non-Latin-dominant inventory fails the
-  /// NUL census and decodes as mojibake (review cycle-3, P2).
+  /// the byte level.
+  ///
+  /// The byte-level complement applies here too (review cycle-4, P2): a
+  /// BOM-LESS, non-Latin-dominant wide buffer fails the NUL census, so the
+  /// latin1 round-trip of its bytes is additionally tested for the UTF-16LE
+  /// CRLF run — `0d 00 0a 00` as two code units (13, 10) at an even position,
+  /// which single-byte CRLF line text cannot contain. Without this, a
+  /// BOM-less CJK inventory decodes as byte-mapped mojibake through the seam.
   static bool _looksUtf16LeString(String s) {
     if (s.length >= 2 && s.codeUnitAt(0) == 0xff && s.codeUnitAt(1) == 0xfe) {
       return true;
@@ -415,7 +443,19 @@ class WslRuntime {
     for (var i = 1; i < len; i += 2) {
       if (s.codeUnitAt(i) == 0) oddNulls++;
     }
-    return oddNulls >= 2 && oddNulls * 4 >= len;
+    if (oddNulls >= 2 && oddNulls * 4 >= len) return true;
+    // The latin1 round-trip of a UTF-16LE CRLF: FOUR code units (13, 0, 10, 0)
+    // at an even position — single-byte CRLF text carries (13, 10), which must
+    // NOT match, or every plain ASCII inventory flips to a wide decode.
+    for (var i = 0; i + 3 < len; i += 2) {
+      if (s.codeUnitAt(i) == 0x0d
+          && s.codeUnitAt(i + 1) == 0x00
+          && s.codeUnitAt(i + 2) == 0x0a
+          && s.codeUnitAt(i + 3) == 0x00) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Re-pack a latin1-round-tripped UTF-16LE string: each code unit is a raw

@@ -226,7 +226,15 @@ function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
   return rows.map((row) => {
     if (row.executable.includes('?') || row.args.includes('?')) {
       // cmdline is NUL-separated; node's process.title rewrite space-pads the tail of the argv region.
-      const args = readProcField(row.pid, 'cmdline')?.replace(/\0/g, ' ').trimEnd()
+      // Re-split the raw NUL argv and re-join through the SAME CRT-dialect quoting the interop repair
+      // uses — a bare NUL->space join let one prompt ending in `?` (nearly every prompt: the `?` lands
+      // in `ps args`) re-tokenize with its flag text standing alone, and bypassPermissionActive()
+      // flipped to true from prompt text alone (review cycle-4, P1 security). The repair's
+      // qualification gate does not apply here — the `?` mangle is itself the /proc-recovery case —
+      // but the serialization must be boundary-faithful, so quote() is shared.
+      const argv = readProcField(row.pid, 'cmdline')?.split('\0') ?? []
+      while (argv.length && argv[argv.length - 1] === '') argv.pop() // process.title space-pad tail
+      const args = argv.map(quoteArgvElement).join(' ').trimEnd()
       const executable = readProcField(row.pid, 'comm')?.trimEnd()
       return { ...row, ...(executable && { executable }), ...(args && { args }) }
     }
@@ -269,7 +277,12 @@ export function repairInteropRowFromCmdline(
   cmdline: string,
   comm: string | null,
 ): Partial<Pick<ProcessRow, 'args' | 'executable'>> {
-  const argv = cmdline.split('\0').filter(Boolean)
+  const argv = cmdline.split('\0')
+  // A cmdline READ ends at its terminating NUL, so split()'s final empty element is an
+  // artifact — but only the LAST one. filter(Boolean) also dropped legitimate empty argv
+  // elements in the middle (`prog '' more`), losing real boundaries (review cycle-4, P2);
+  // the serializer emits `""` for empty tokens so they survive the re-split.
+  while (argv.length && argv[argv.length - 1] === '') argv.pop()
   if (argv[0] !== '/init') return {}
   // `/init <program> <args…>` — without the relayed program there is nothing to expose.
   if (argv.length < 2) return {}
@@ -284,8 +297,11 @@ export function repairInteropRowFromCmdline(
   //      arbitrary-prefix hit like comm=`co` over basename=`codex` (review cycle-3, P2).
   //   2. An unambiguously WINDOWS argv (drive-letter path / `.exe`).
   // `comm` naming the relay (`init`/`/init`) ties the cmdline to NOTHING — a docker-init row can
-  // carry it too — so it never qualifies on its own; when the argv IS Windows-shaped, the relay
-  // name is still preferred as `executable` below. Anything else keeps its untouched row.
+  // carry it too — so it never qualifies on its own. A windows-shaped argv qualifies ONLY when
+  // `comm` does not contradict it (review cycle-4, P2): `comm` is what Linux says the relay's
+  // executable IS, and a contradictory comm (`docker-init` over `/usr/local/bin/opencode.exe`)
+  // is positive evidence of a NATIVE wrapper naming a `.exe`-LIKE child — the suffix alone is
+  // a name, not identity. An absent comm says nothing and cannot contradict.
   const relayedBase = basename(argv[1]).toLowerCase()
   const trimmedComm = comm?.trimEnd().toLowerCase() ?? ''
   const commMatchesRelayed = trimmedComm !== ''
@@ -293,8 +309,20 @@ export function repairInteropRowFromCmdline(
       || (Buffer.byteLength(trimmedComm) === 15
         && relayedBase.length > trimmedComm.length
         && relayedBase.startsWith(trimmedComm)))
+  // A comm that names a plausible NATIVE parent — not the relay, not the relayed basename —
+  // contradicts the windows-argv evidence. `init`/`/init` name the relay shape itself and are
+  // neutral (handled above: they qualify nothing); anything else that is neither the relayed
+  // basename nor its 15-byte truncation is a concrete native process name.
+  const commContradictsWindowsArgv = trimmedComm !== ''
+    && trimmedComm !== 'init'
+    && trimmedComm !== '/init'
+    && !commMatchesRelayed
   const looksWindowsArgv = /^[A-Za-z]:[\\/]/.test(argv[1]) || /\.exe$/i.test(argv[1])
-  if (!commMatchesRelayed && !looksWindowsArgv) return {}
+  if (looksWindowsArgv) {
+    if (commContradictsWindowsArgv) return {}
+  } else if (!commMatchesRelayed) {
+    return {}
+  }
   // Node rewrites its argv when it sets process.title: [interpPath, interpName, script, …].
   // The bare duplicate would otherwise become the "entrypoint" the walk stops on, so drop it
   // when token 2 is the same file name as the resolved interpreter path in token 1.
@@ -315,27 +343,37 @@ export function repairInteropRowFromCmdline(
   //   - an embedded double quote escapes as `\"`, doubling the backslash run before it (CRT strips
   //     pairs before a quote).
   // Plain tokens (bare flags, unspaced paths) stay unquoted — the `args` shape every caller and
-  // test already relies on.
-  const quote = (token: string): string => {
-    if (!/[\s"']/.test(token) && !token.endsWith('\\')) return token
-    // argvTokens()' dialect, emitted: double-quote the element, escape every embedded quote
-    // as `\"`, and double any backslash run that would touch a quote or the end of the token —
-    // argvTokens collapses `\\` and turns `\"` into a literal quote, so the round trip is
-    // token-faithful for ANY element. Backslashes elsewhere stay single, keeping the emitted
-    // `args` byte-identical to the pre-repair shapes for plain quoted paths. Without this,
-    // single-quoted flag text re-split as a bare flag (bypassPermissionActive flipped from
-    // prompt text) and a trailing backslash swallowed the closing quote, exposing the NEXT
-    // argument's flags (review cycle-3, P1 security).
-    const escaped = token
-      .replace(/(\\*)"/g, (_, run) => '\\'.repeat(2 * run.length) + '\\"')
-      .replace(/\\+$/, ($) => '\\'.repeat(2 * $.length))
-    return `"${escaped}"`
-  }
-  const args = argv.slice(1).map(quote).join(' ')
+  // test already relies on. Empty elements serialize as `""` (cycle-4, P2): unquoted they
+  // re-split to ZERO tokens and the element is lost.
+  const args = argv.slice(1).map(quoteArgvElement).join(' ')
   const relayed = trimmedComm && trimmedComm !== '/init' && trimmedComm !== 'init'
     ? comm!.trimEnd()
     : basename(argv[1])
   return { args, executable: relayed }
+}
+
+/**
+ * Serialize one argv element into the `args` string form argvTokens() parses back
+ * token-faithfully (shared by the interop repair and the `?`-mangled-row /proc recovery —
+ * both must never let argument text re-tokenize into standalone CLI flags).
+ *
+ * The dialect is the one argvTokens() implements: inside double quotes `\\` is one literal
+ * backslash and `\"` is a literal quote. EVERY backslash is doubled when quoting (review
+ * cycle-4, P2): argvTokens collapses `\\` unconditionally, so any single backslash a quoted
+ * token survives with HALVES on the round trip (a spaced UNC path `C:\\\\share…` came back
+ * with its runs halved). Doubling the whole token keeps quote -> argvTokens an identity for
+ * any element, at the cost of emitting doubled backslashes in quoted paths — invisible to
+ * argvTokens() and to the engine, whose own CRT parser applies the same rule. Backslash
+ * doubling happens BEFORE quote escaping so the quote's own preceding run doubles exactly
+ * once. Plain unspaced tokens stay unquoted and byte-identical.
+ */
+export function quoteArgvElement(token: string): string {
+  if (token === '') return '""'
+  if (!/[\s"']/.test(token) && !token.endsWith('\\')) return token
+  const escaped = token
+    .replace(/\\+/g, ($) => '\\'.repeat(2 * $.length))
+    .replace(/(\\*)"/g, (_, run) => run + '\\"')
+  return `"${escaped}"`
 }
 
 function readProcField(pid: number, field: 'cmdline' | 'comm'): string | null {
