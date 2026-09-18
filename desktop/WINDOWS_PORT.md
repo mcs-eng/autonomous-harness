@@ -1,5 +1,19 @@
 # Windows 11 migration
 
+## Preview 3 Claude installation repair (2026-09-18)
+
+On this WSL host, `npm` resolved to `/mnt/c/Program Files/nodejs/npm` while
+`node` was absent. The inherited Windows npm script failed with `exec: node:
+not found`, preventing Claude installation. Engine launch now uses Harness's
+managed Linux Node/npm pair when either command is missing, scoped to the pane.
+It also prepares PATH before executing an already-installed Node-based engine;
+native engines still run without requiring Node/npm.
+
+The generated production launch command installed Claude Code 2.1.277 and ran
+`--version` successfully in WSL. A second launch returned the version without
+reinstalling. The outer shell's PATH was unchanged. This verifies installation
+and process startup, not Claude account authentication or a model turn.
+
 ## Preview 2 keyboard repair (2026-09-18)
 
 Preview 1 rendered terminal panes but could not accept ordinary typing. A native

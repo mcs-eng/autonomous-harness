@@ -632,9 +632,11 @@ function installedPathCandidates(recipe: EngineInstallRecipe): string[] {
  *
  * The verified Node archive provisioned by `harness start` includes npm, but the daemon deliberately
  * does not mutate the user's PATH. A tmux login shell can therefore have neither `node` nor `npm`
- * even though the runtime executing Harness has both. Prefer any npm the user already configured;
- * otherwise prepend the managed runtime's bin directory for this pane only. This is portable across
- * macOS and Linux and avoids an interactive/root package-manager install in an agent launch.
+ * even though the runtime executing Harness has both. npm is only usable together with node: WSL can
+ * inherit Windows' `npm` shim through interop while having no Linux `node`, and that shim then fails with
+ * `exec: node: not found`. Prefer a complete user-configured pair; otherwise prepend the managed
+ * runtime's bin directory for this pane only. This is portable across macOS and Linux and avoids an
+ * interactive/root package-manager install in an agent launch.
  */
 function npmRuntimePrelude(recipe: EngineInstallRecipe, runtimeNode: string, required: boolean): string {
   if (!recipe.executable.npmGlobal) return ''
@@ -642,22 +644,22 @@ function npmRuntimePrelude(recipe: EngineInstallRecipe, runtimeNode: string, req
     .map(shellSingleQuote)
     .join(' ')
   return [
-    'if ! command -v npm >/dev/null 2>&1; then',
+    'if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then',
     `  for harness_node_bin in ${bins}; do`,
     '    if [ -x "$harness_node_bin/node" ] && [ -x "$harness_node_bin/npm" ]; then',
     '      PATH="$harness_node_bin${PATH:+:$PATH}"',
     '      export PATH',
     '      hash -r 2>/dev/null || true',
     ...(required ? [
-      `      printf '%s\\n' 'harness: npm is missing from PATH — enabling Harness managed Node.js/npm'`,
+      `      printf '%s\\n' 'harness: a complete Node.js/npm pair is missing from PATH — enabling Harness managed Node.js/npm'`,
     ] : []),
     '      break',
     '    fi',
     '  done',
     'fi',
     ...(required ? [
-      'if ! command -v npm >/dev/null 2>&1; then',
-      `  printf '%s\\n' 'harness: npm is unavailable and the managed Node.js/npm runtime could not be used.'`,
+      'if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then',
+      `  printf '%s\\n' 'harness: a complete Node.js/npm pair is unavailable and the managed runtime could not be used.'`,
       '  exit 1',
       'fi',
     ] : []),
@@ -729,6 +731,10 @@ function installIfMissingThenExecScript(recipe: EngineInstallRecipe, runtimeNode
     '  shift',
     '  harness_engine "$resolved" "$@"',
     '}',
+    // An already-installed npm engine normally has `#!/usr/bin/env node`. Repair PATH before the first
+    // exec too, or a Windows npm shim / missing Linux node can make that engine fail before installation
+    // is even considered. Optional here: a recipe may resolve to a native executable that needs neither.
+    npmRuntimePrelude(recipe, runtimeNode, false),
     'try_engine "$1" "$@" || true',
     tryCandidates,
     npmRuntimePrelude(recipe, runtimeNode, true),
