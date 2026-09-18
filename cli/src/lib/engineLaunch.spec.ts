@@ -216,6 +216,15 @@ describe('buildEngineLaunchArgv with installIfMissing', () => {
   ): EngineInstallRecipe => ({ command, source: 'test fixture', executable })
   const script = (install: EngineInstallRecipe, runtimeNode?: string): string =>
     buildEngineLaunchArgv('opencode', { installIfMissing: install }, '/bin/zsh', runtimeNode)[2]
+  const scriptWithoutProcessRuntime = (install: EngineInstallRecipe): string => {
+    const original = Object.getOwnPropertyDescriptor(process, 'execPath')
+    try {
+      Object.defineProperty(process, 'execPath', { ...original, value: '/missing/process/node' })
+      return script(install, '/missing/runtime/node')
+    } finally {
+      if (original) Object.defineProperty(process, 'execPath', original)
+    }
+  }
 
   it('execs an installed engine without running the installer', async () => {
     await expect(runPaneScript(script(recipe('false')))).resolves.toMatchObject({ code: 0, ranEngine: true })
@@ -249,11 +258,18 @@ describe('buildEngineLaunchArgv with installIfMissing', () => {
     expect(result.stdout).toContain('install completed, but its executable could not be found')
   })
 
-  it('enables npm from the managed Node runtime when the pane PATH has no npm', async () => {
+  it.each([
+    ['no npm', false],
+    ['a Windows npm shim without Linux node', true],
+  ])('enables the managed Node.js/npm pair when PATH has %s', async (_description, windowsNpm) => {
     const runtimeBin = mkdtempSync(join(tmpdir(), 'harness-managed-node-bin-'))
-    const emptyPath = mkdtempSync(join(tmpdir(), 'harness-empty-path-'))
-    dirs.push(runtimeBin, emptyPath)
+    const interopBin = mkdtempSync(join(tmpdir(), 'harness-windows-npm-bin-'))
+    dirs.push(runtimeBin, interopBin)
     const runtimeNode = executable(runtimeBin, 'node')
+    if (windowsNpm) {
+      writeFileSync(join(interopBin, 'npm'), '#!/bin/sh\nprintf "WINDOWS-NPM-MUST-NOT-RUN\\n"\nexit 91\n')
+      chmodSync(join(interopBin, 'npm'), 0o700)
+    }
     const engineSource = join(runtimeBin, 'engine-source')
     writeFileSync(engineSource, '#!/bin/sh\n/usr/bin/printf "HARNESS-TEST-ENGINE-RAN\\n"\n')
     chmodSync(engineSource, 0o700)
@@ -273,11 +289,50 @@ if [ "$1" = prefix ]; then exit 0; fi
         npmGlobal: true,
       }), runtimeNode),
       'harness-no-such-engine',
-      { PATH: emptyPath },
+      { PATH: interopBin },
     )
 
     expect(result).toMatchObject({ code: 0, ranEngine: true })
-    expect(result.stdout).toContain('enabling Harness managed Node.js/npm')
+    expect(result.stdout).not.toContain('WINDOWS-NPM-MUST-NOT-RUN')
+  })
+
+  it('bootstraps node before first exec of an already-installed node-shebang engine', async () => {
+    const runtimeBin = mkdtempSync(join(tmpdir(), 'harness-managed-node-shebang-'))
+    const interopBin = mkdtempSync(join(tmpdir(), 'harness-node-shebang-path-'))
+    dirs.push(runtimeBin, interopBin)
+    const runtimeNode = join(runtimeBin, 'node')
+    writeFileSync(runtimeNode, '#!/bin/sh\nscript="$1"\nshift\nexec /bin/sh "$script" "$@"\n')
+    chmodSync(runtimeNode, 0o700)
+    executable(runtimeBin, 'npm')
+    writeFileSync(join(interopBin, 'npm'), '#!/bin/sh\nexit 91\n')
+    chmodSync(join(interopBin, 'npm'), 0o700)
+    const engine = join(interopBin, 'harness-node-engine')
+    writeFileSync(engine, '#!/usr/bin/env node\n/usr/bin/printf "HARNESS-TEST-ENGINE-RAN\\n"\n')
+    chmodSync(engine, 0o700)
+
+    const result = await runPaneScript(
+      script(recipe('false', { names: ['harness-node-engine'], npmGlobal: true }), runtimeNode),
+      'harness-node-engine',
+      { PATH: interopBin },
+    )
+
+    expect(result).toMatchObject({ code: 0, ranEngine: true })
+  })
+
+  it('still execs an installed native engine when no Node.js/npm runtime is available', async () => {
+    const nativeBin = mkdtempSync(join(tmpdir(), 'harness-native-engine-'))
+    dirs.push(nativeBin)
+    const nativeEngine = join(nativeBin, 'harness-native-engine')
+    writeFileSync(nativeEngine, '#!/bin/sh\n/usr/bin/printf "HARNESS-TEST-ENGINE-RAN\\n"\n')
+    chmodSync(nativeEngine, 0o700)
+
+    const result = await runPaneScript(
+      scriptWithoutProcessRuntime(recipe('false', { names: ['harness-native-engine'], npmGlobal: true })),
+      'harness-native-engine',
+      { PATH: nativeBin },
+    )
+
+    expect(result).toMatchObject({ code: 0, ranEngine: true })
   })
 
   it('does not add the npm bootstrap to non-npm installers', () => {
