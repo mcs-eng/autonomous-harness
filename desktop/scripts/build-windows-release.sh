@@ -38,8 +38,12 @@ if [[ -f "$REPO_ROOT/.toolchain/flutter.cmd" && "$FLUTTER" == "flutter" ]]; then
 fi
 
 VERSION_RAW="$(sed -n 's/^version: *\(.*\)$/\1/p' pubspec.yaml | head -1)"
-VERSION="${VERSION_RAW%%+*}"
+VERSION="${WINDOWS_RELEASE_VERSION:-${VERSION_RAW%%+*}}"
 VERSION="${VERSION:-0.0.0}"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+  echo "error: WINDOWS_RELEASE_VERSION must be a semantic version" >&2
+  exit 1
+fi
 OUT_DIR="$REPO_ROOT/dist"
 BUNDLE_NAME="harness-desktop-windows-x64-$VERSION"
 STATE_DIR="$REPO_ROOT/.toolchain/state"
@@ -149,13 +153,38 @@ fi
 
 # --- build --------------------------------------------------------------------
 echo "==> flutter build windows --release"
-"$FLUTTER" build windows --release
+"$FLUTTER" build windows --release --build-name="${VERSION%%-*}" --dart-define=WINDOWS_BUNDLED_CLI=true
 
 RELEASE_DIR="$REPO_ROOT/build/windows/x64/runner/Release"
 if [[ ! -f "$RELEASE_DIR/harness.exe" ]]; then
   echo "error: $RELEASE_DIR/harness.exe was not produced" >&2
   exit 1
 fi
+
+# Ship the CLI from this SAME checkout. The Windows runner executes these bytes
+# in WSL with automatic updates disabled; the upstream installer supplies Node
+# and tmux prerequisites, never the fork's running CLI.
+echo "==> bundle matching Harness CLI"
+NPM="${NPM:-npm}"
+(
+  cd "$REPO_ROOT/../cli"
+  "$NPM" run typecheck
+  ADAPTER_VERSION="$VERSION" "$NPM" run bundle
+)
+mkdir -p "$RELEASE_DIR/harness-cli"
+for file in cli.js notify.mjs; do
+  if [[ ! -s "$REPO_ROOT/../cli/dist/$file" ]]; then
+    echo "error: matching CLI bundle is missing $file" >&2
+    exit 1
+  fi
+  cp -f "$REPO_ROOT/../cli/dist/$file" "$RELEASE_DIR/harness-cli/$file"
+done
+SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
+  SOURCE_COMMIT="$SOURCE_COMMIT-dirty"
+fi
+printf '%s\n' "$SOURCE_COMMIT" > "$RELEASE_DIR/source-commit.txt"
+cp -f "$REPO_ROOT/WINDOWS_QUICKSTART.md" "$RELEASE_DIR/README-WINDOWS.md"
 
 # --- the MSVC runtime the bundle must carry -----------------------------------
 # harness.exe and every Flutter plugin DLL IMPORT the MSVC C++ runtime
@@ -284,6 +313,10 @@ with zipfile.ZipFile(archive) as bundle:
     bundle.extractall(target)
 required = [
     "Release/harness.exe",
+    "Release/harness-cli/cli.js",
+    "Release/harness-cli/notify.mjs",
+    "Release/source-commit.txt",
+    "Release/README-WINDOWS.md",
     "Release/version.txt",
     "Release/LICENSE.txt",
     "Release/licenses/xterm-LICENSE.txt",

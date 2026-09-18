@@ -25,6 +25,12 @@ flutter build windows --release   # must run on a Windows 11 x64 host
 
 ## Windows prototype
 
+For the community Windows preview, download a complete desktop + CLI ZIP from
+[this fork's releases](https://github.com/mcs-eng/autonomous-harness/releases)
+and follow [the Windows quick-start](WINDOWS_QUICKSTART.md). This is an independent
+fork, not an official Autonomous Windows release. The packaged CLI stays on the
+version shipped with the desktop; updates are manual.
+
 The desktop interface runs natively on Windows 11 x64. The supported integration target runs the Harness CLI, managed Node runtime, and tmux terminals in a named WSL2 development distribution. The desktop connects to the daemon over loopback; that connection still requires validation on the installed WSL networking configuration.
 
 Windows setup requires a WSL2 distribution with the CLI and tmux. A native Windows launcher answering `version` does not satisfy that requirement: the CLI's terminal backend requires tmux. Docker Desktop's `docker-desktop` and `docker-desktop-data` distributions are excluded from selection, probes, and installation. WSL commands always name their distribution and pass user arguments as separate arguments.

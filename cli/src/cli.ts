@@ -64,7 +64,7 @@ import { tmuxSupportsSessionEnv, TMUX_SESSION_ENV_MIN } from './lib/tmuxVersion.
 import { clearDeleted, isRecentlyDeleted, markDeleted } from './lib/deletedSessions.js'
 import { terminateDeletedAgent, checkPidRuntime } from './lib/deleteAgentFallback.js'
 import { restartAgent, type RestartAgentDeps } from './lib/restartAgent.js'
-import { claudeContinuation, findLiveSession } from './lib/sessionRepair.js'
+import { claudeContinuation, findCorroboratedResumeSession, findLiveSession } from './lib/sessionRepair.js'
 import { TmuxBackend } from './lib/tmuxBackend.js'
 import { DEFAULT_HOST_THEME, loadHostTheme, saveHostTheme, type HostTheme } from './lib/hostTheme.js'
 import { createAndRegisterPane } from './lib/createAgentPane.js'
@@ -2344,13 +2344,32 @@ async function runForeground(session: AuthSession): Promise<void> {
       return
     }
 
-    // A resume id read from flattened `ps` text is prompt-supplied, not engine-supplied: the
-    // token scan cannot help when the string itself has no faithful boundaries (review cycle-7,
-    // P1 security). Without /proc-reconstructed argv the session stays unbound and repair
-    // falls through to `findLiveSession` below, exactly like a resume flag that names nothing.
+    // A resume id read from flattened `ps` text is only a hint: the token scan cannot prove its
+    // origin when the string has no faithful boundaries (review cycle-7, P1 security). The store
+    // corroboration below must independently identify the same live session before it can bind.
     let sessionId = observed.argsBoundaryFaithful ? observed.resumeSessionId : null
     let transcriptPath: string | undefined
     let source = 'terminal-resume'
+    // macOS has no /proc argv. Treat a resume id parsed from flattened `ps` as a hint only, then
+    // require the engine's own store to identify that exact id and the observed PID to hold its
+    // transcript open. This restores evidence-backed old-session resumes without letting prompt text
+    // choose another process's recently updated session.
+    if (!sessionId && observed.resumeSessionId) {
+      const startedAtMs = Date.parse(observed.processIdentity.startMarker)
+      if (Number.isFinite(startedAtMs)) {
+        const corroborated = await findCorroboratedResumeSession(
+          observed.engine,
+          observed.cwd,
+          startedAtMs,
+          observed.resumeSessionId,
+          { pid: observed.processIdentity.pid, codexHome: agent.codexHome ?? undefined },
+        )
+        if (corroborated) {
+          sessionId = corroborated.sessionId
+          transcriptPath = corroborated.transcriptPath
+        }
+      }
+    }
     if (sessionId) {
       if (isRecentlyDeleted(sessionId)) return
       const owner = registry.bySession(sessionId)
@@ -2359,7 +2378,7 @@ async function runForeground(session: AuthSession): Promise<void> {
         const ownerStarted = Date.parse(owner.processIdentity?.startMarker ?? '')
         if (Number.isFinite(ownerStarted) && (!Number.isFinite(observedStarted) || observedStarted <= ownerStarted)) return
       }
-      transcriptPath = observed.engine === 'cursor'
+      transcriptPath ??= observed.engine === 'cursor'
         ? await findCursorTranscript(env.CURSOR_HOME, sessionId) ?? undefined
         : observed.engine === 'grok'
           ? await findGrokTranscript(env.GROK_HOME, observed.cwd, sessionId) ?? undefined

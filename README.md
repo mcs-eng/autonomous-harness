@@ -2,6 +2,12 @@ https://github.com/user-attachments/assets/97848065-61c6-40df-be66-a8247f69aa4c
 
 # Harness
 
+> **Community Windows 11 preview:** this fork adds a native Windows desktop with
+> a WSL2 backend and a matching bundled CLI. [Download the Windows preview](https://github.com/mcs-eng/autonomous-harness/releases)
+> · [Setup and limitations](desktop/WINDOWS_QUICKSTART.md).
+> Independent MIT-licensed fork of Autonomous's OpenHarness; not an official
+> Autonomous Windows release. The upstream project is described below.
+
 Harness is a desktop app for the coding agents you already run — Claude Code, Codex, Cursor, and
 eleven more — on every machine you own, in one window. Each agent is a tmux pane on the machine it
 runs on, kept there by a small daemon (`harness`). The window attaches to those panes, from this

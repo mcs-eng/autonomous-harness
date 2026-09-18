@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPOSITORY_ROOT="$(cd "$DESKTOP_ROOT/.." && pwd)"
 STAMP="packaging-fixture-$(date +%Y%m%d-%H%M%S)-$$"
-FIXTURES_PARENT="${HARNESS_PACKAGING_FIXTURE_ROOT:-$REPOSITORY_ROOT/../packaging-fixtures}"
+FIXTURES_PARENT="${HARNESS_PACKAGING_FIXTURE_ROOT:-$DESKTOP_ROOT/.toolchain/packaging-fixtures}"
 FIXTURES_ROOT="$FIXTURES_PARENT/$STAMP"
 PYTHON_BIN="${PYTHON:-$(command -v python || command -v python3)}"
 mkdir -p "$FIXTURES_ROOT"
@@ -24,6 +24,8 @@ make_fixture() {
   cp "$SCRIPT_DIR/build-windows-release.sh" "$desktop/scripts/"
   cp "$REPOSITORY_ROOT/LICENSE" "$root/LICENSE"
   cp "$DESKTOP_ROOT/third_party/xterm/LICENSE" "$desktop/third_party/xterm/LICENSE"
+  cp "$DESKTOP_ROOT/WINDOWS_QUICKSTART.md" "$desktop/WINDOWS_QUICKSTART.md"
+  mkdir -p "$root/cli"
   printf 'name: harness\nversion: 9.8.7+fixture\n' > "$desktop/pubspec.yaml"
   cat > "$desktop/fake-bin/flutter" <<'SH'
 #!/usr/bin/env bash
@@ -67,6 +69,18 @@ esac
 echo "unexpected fake Flutter arguments: $*" >&2
 exit 64
 SH
+  cat > "$desktop/fake-bin/npm" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FIXTURE_CLI_STATUS:-0}" != "0" ]]; then exit "$FIXTURE_CLI_STATUS"; fi
+if [[ "$2" == "bundle" ]]; then
+  mkdir -p dist
+  printf 'fixture cli\n' > dist/cli.js
+  if [[ "${FIXTURE_MISSING_NOTIFY:-0}" != "1" ]]; then
+    printf 'fixture hook\n' > dist/notify.mjs
+  fi
+fi
+SH
   cat > "$desktop/fake-bin/dumpbin.exe" <<'SH'
 #!/usr/bin/env bash
 if [[ "${FIXTURE_DUMPBIN_STATUS:-0}" != "0" ]]; then
@@ -75,7 +89,7 @@ if [[ "${FIXTURE_DUMPBIN_STATUS:-0}" != "0" ]]; then
 fi
 printf 'MSVCP140.dll\nVCRUNTIME140.dll\nVCRUNTIME140_1.dll\n'
 SH
-  chmod +x "$desktop/fake-bin/flutter" "$desktop/fake-bin/dumpbin.exe"
+  chmod +x "$desktop/fake-bin/flutter" "$desktop/fake-bin/dumpbin.exe" "$desktop/fake-bin/npm"
   printf '%s\n' "$root"
 }
 
@@ -95,7 +109,7 @@ run_fixture() {
   set +e
   (
     cd "$root/desktop"
-    env FLUTTER="$root/desktop/fake-bin/flutter" PYTHON="$PYTHON_BIN" "$@" bash scripts/build-windows-release.sh
+    env FLUTTER="$root/desktop/fake-bin/flutter" NPM="$root/desktop/fake-bin/npm" PYTHON="$PYTHON_BIN" "$@" bash scripts/build-windows-release.sh
   ) > "$log" 2>&1
   local status=$?
   set -e
@@ -129,6 +143,15 @@ extract_root="$(find "$override_root/desktop/.toolchain/state" -type d -name '*-
 [[ -n "$extract_root" ]] || fail "fixture produced no extracted verification directory"
 cmp "$REPOSITORY_ROOT/LICENSE" "$extract_root/Release/LICENSE.txt" || fail "repository LICENSE changed in the bundle"
 cmp "$DESKTOP_ROOT/third_party/xterm/LICENSE" "$extract_root/Release/licenses/xterm-LICENSE.txt" || fail "xterm license changed in the bundle"
+cmp "$override_root/cli/dist/cli.js" "$extract_root/Release/harness-cli/cli.js" || fail "matching CLI not shipped"
+cmp "$override_root/cli/dist/notify.mjs" "$extract_root/Release/harness-cli/notify.mjs" || fail "matching hook not shipped"
+
+missing_cli_root="$(make_fixture missing-cli-hook)"
+missing_cli_log="$(run_fixture "$missing_cli_root" 1 FIXTURE_MISSING_NOTIFY=1)"
+grep -q 'matching CLI bundle is missing notify.mjs' "$missing_cli_log" || fail "missing hook was not rejected"
+
+failed_cli_root="$(make_fixture failed-cli-build)"
+run_fixture "$failed_cli_root" 7 FIXTURE_CLI_STATUS=7 >/dev/null
 
 dumpbin_root="$(make_fixture dumpbin-failure)"
 dumpbin_crt="$dumpbin_root/toolchain/redist"

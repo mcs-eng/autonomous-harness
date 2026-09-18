@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { claudeContinuation } from './sessionRepair.js'
@@ -42,6 +42,58 @@ const STARTED_AT = Date.parse('2026-08-03T09:00:00Z')
 const CWD = '/Users/demo/work/project'
 
 describe('session repair', () => {
+  it('does not treat a recently touched store row as process ownership', async () => {
+    const root = tempRoot()
+    const dir = join(root, 'proj')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'sess-resumed.jsonl')
+    writeFileSync(file, `${JSON.stringify({ type: 'user', cwd: CWD })}\n`)
+    const born = statSync(file).birthtimeMs
+    const startedAt = born + 30_000
+    utimesSync(file, new Date(startedAt + 10_000), new Date(startedAt + 10_000))
+    const { findCorroboratedResumeSession } = await load(root)
+
+    // Concrete cross-process case: process A's flattened prompt happens to contain `--resume
+    // sess-resumed` while process B in the same cwd updates that old transcript. The store result
+    // matches the hinted id, but A does not hold B's file, so A must remain unbound.
+    await expect(findCorroboratedResumeSession('claude', CWD, startedAt, 'sess-resumed', { pid: process.pid }))
+      .resolves.toBeNull()
+    await expect(findCorroboratedResumeSession('claude', CWD, startedAt, 'sess-from-prompt', { pid: process.pid }))
+      .resolves.toBeNull()
+  })
+
+  it('accepts only the exact hinted transcript held by the observed pid', async () => {
+    const root = tempRoot()
+    const a = join(root, 'session-a.jsonl')
+    const b = join(root, 'session-b.jsonl')
+    writeFileSync(a, '{}\n')
+    writeFileSync(b, '{}\n')
+    const { resumeCandidateMatchesOpenFile } = await load(root)
+    const found = { sessionId: 'session-b', transcriptPath: b }
+
+    await expect(resumeCandidateMatchesOpenFile(found, 'session-b', [a])).resolves.toBe(false)
+    await expect(resumeCandidateMatchesOpenFile(found, 'session-a', [b])).resolves.toBe(false)
+    await expect(resumeCandidateMatchesOpenFile(found, 'session-b', [b])).resolves.toBe(true)
+  })
+
+  it('refuses a resume hint when the store has two active candidates in the directory', async () => {
+    const root = tempRoot()
+    const first = join(root, 'proj', 'sess-a.jsonl')
+    mkdirSync(join(root, 'proj'), { recursive: true })
+    writeFileSync(first, `${JSON.stringify({ type: 'user', cwd: CWD })}\n`)
+    const born = statSync(first).birthtimeMs
+    const startedAt = born + 30_000
+    utimesSync(first, new Date(startedAt + 5_000), new Date(startedAt + 5_000))
+    const second = join(root, 'proj', 'sess-b.jsonl')
+    writeFileSync(second, `${JSON.stringify({ type: 'user', cwd: CWD })}\n`)
+    // Keep both in the resumed/wrote tier so uniqueness, rather than birth preference, decides.
+    utimesSync(second, new Date(startedAt + 6_000), new Date(startedAt + 6_000))
+    const { findCorroboratedResumeSession } = await load(root)
+
+    await expect(findCorroboratedResumeSession('claude', CWD, startedAt, 'sess-a', { pid: process.pid }))
+      .resolves.toBeNull()
+  })
+
   it('finds the session the running engine started in this directory', async () => {
     const root = tempRoot()
     writeTranscript(root, 'proj', 'sess-live', CWD, STARTED_AT + 5_000)

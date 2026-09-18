@@ -1,5 +1,30 @@
 # Windows 11 migration
 
+## Community preview delivery (2026-09-18)
+
+The public preview packages the Windows desktop and the CLI from the same source
+checkout. `WINDOWS_BUNDLED_CLI=true` makes the application require the adjacent
+`harness-cli/cli.js` and `notify.mjs`; it executes them with the selected WSL
+distribution's managed Node runtime. Both upstream CLI automatic updates and
+Windows desktop update polling are disabled for this package. User authentication,
+projects, and tmux sessions remain in WSL. Installation and replacement instructions
+are in [WINDOWS_QUICKSTART.md](WINDOWS_QUICKSTART.md).
+
+The September 15 ZIP was never refreshed after the September 17 argument fix.
+Running that old executable made CLI commands return help instead of JSON and
+caused `Bad state: Sign-in did not complete`. A source push was not an installed
+fix. Use the new complete release bundle, not the old extracted executable.
+
+Shared resume discovery now treats flattened process arguments as a hint only:
+the engine store and the observed process's open transcript must corroborate the
+same session. Processes without that evidence remain unbound until an authoritative
+hook or other session signal arrives. This is not a claim of full macOS qualification.
+
+The records below describe earlier prototypes and retain their historical results;
+their statements that the CLI is unchanged or that packaging is unfinished do not
+describe this preview's source. Windows signing, automatic updates, and clean-machine
+qualification remain outside the preview's claims.
+
 This branch migrates the Windows desktop prototype to the active `autonomous-ai/autonomous-harness` repository at `86ad284603fe5beccf3ba9c9ee18db567ad3d0b1`. It retains the monorepo's MIT license and its current desktop, CLI, and backend layout. It is an unsigned development prototype, not an upstream Windows release.
 
 ## Scope

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/auth/cli_link.dart';
 import 'package:harness/core/harness_cli_runner.dart';
+import 'package:harness/core/wsl_runtime.dart';
 
 void main() {
   late Directory scratch;
@@ -145,4 +146,108 @@ void main() {
     // Exercises the managed-tier resolution on a home whose path mixes the
     // platform separators — the shape Windows hands every File() call.
   });
+
+  test('packaged Windows runner uses bundled CLI in WSL with Linux update controls', () async {
+    final bundle = Directory('${scratch.path}/Release Folder/harness-cli')
+      ..createSync(recursive: true);
+    File('${bundle.path}/cli.js').writeAsStringSync('cli');
+    File('${bundle.path}/notify.mjs').writeAsStringSync('notify');
+    final runtime = WslRuntime(
+      runProcess: (executable, arguments, {environment}) async {
+        final joined = arguments.join(' ');
+        if (joined.contains('--status')) return ProcessResult(0, 0, 'ok', '');
+        if (joined.contains('-l -q')) {
+          return ProcessResult(0, 0, 'Ubuntu\r\n', '');
+        }
+        return ProcessResult(0, 0, 'cli launcher\ntmux yes\n', '');
+      },
+    );
+
+    final invocation = await HarnessCliRunner(
+      harnessHome: Directory('${scratch.path}/host-home/.harness'),
+      environment: {'USERPROFILE': '${scratch.path}/host-home', 'PATH': ''},
+      isWindows: true,
+      requiresWindowsBundle: true,
+      windowsBundleDirectory: bundle,
+      wslRuntime: runtime,
+    ).resolve(['auth', 'status', '--json', 'value with "quotes"']);
+
+    expect(invocation.source, HarnessCliSource.wsl);
+    expect(invocation.wslDistro, 'Ubuntu');
+    expect(invocation.arguments, contains(bundle.path));
+    expect(
+      invocation.arguments,
+      containsAllInOrder(['auth', 'status', '--json', 'value with "quotes"']),
+    );
+    final script = invocation.arguments[5];
+    expect(script, contains(r'wslpath -u -- "$1"'));
+    expect(script, contains('export ADAPTER_UPDATE_DISABLE=true'));
+    expect(script, contains(r'export ADAPTER_CLI_DIR="$bundle_dir"'));
+    expect(script, contains(r'exec "$node" "$bundle_dir/cli.js" "$@"'));
+    expect(invocation.environment['ADAPTER_UPDATE_DISABLE'], isNull);
+  });
+
+  test(
+    'packaged Windows runner fails clearly for an incomplete bundle',
+    () async {
+      final bundle = Directory('${scratch.path}/harness-cli')..createSync();
+      File('${bundle.path}/cli.js').writeAsStringSync('cli');
+
+      final runner = HarnessCliRunner(
+        harnessHome: Directory('${scratch.path}/host-home/.harness'),
+        environment: {'USERPROFILE': '${scratch.path}/host-home', 'PATH': ''},
+        isWindows: true,
+        requiresWindowsBundle: true,
+        windowsBundleDirectory: bundle,
+        wslRuntime: WslRuntime(
+          runProcess: (executable, arguments, {environment}) async =>
+              ProcessResult(0, 1, '', ''),
+        ),
+      );
+
+      await expectLater(
+        runner.resolve(['version']),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('notify.mjs'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'unmarked Windows development runner preserves installed WSL CLI behavior',
+    () async {
+      final runtime = WslRuntime(
+        runProcess: (executable, arguments, {environment}) async {
+          final joined = arguments.join(' ');
+          if (joined.contains('--status')) return ProcessResult(0, 0, 'ok', '');
+          if (joined.contains('-l -q')) {
+            return ProcessResult(0, 0, 'Ubuntu\r\n', '');
+          }
+          return ProcessResult(0, 0, 'cli launcher\ntmux yes\n', '');
+        },
+      );
+      final invocation = await HarnessCliRunner(
+        harnessHome: Directory('${scratch.path}/host-home/.harness'),
+        environment: {'USERPROFILE': '${scratch.path}/host-home', 'PATH': ''},
+        isWindows: true,
+        requiresWindowsBundle: false,
+        windowsBundleDirectory: Directory('${scratch.path}/missing-bundle'),
+        wslRuntime: runtime,
+      ).resolve(['version']);
+
+      expect(
+        invocation.arguments[5],
+        contains(r'exec "$HOME/.local/bin/harness"'),
+      );
+      expect(
+        invocation.arguments,
+        isNot(contains('${scratch.path}/missing-bundle')),
+      );
+    },
+  );
 }

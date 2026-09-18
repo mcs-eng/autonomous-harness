@@ -617,6 +617,33 @@ class WslRuntime {
         scriptArguments: arguments,
       );
 
+  /// Runs a Windows-hosted packaged CLI with the managed Linux Node in the
+  /// selected distro. The host path is positional argv, then [wslpath] converts
+  /// it without a shell interpolation round, so spaces and quotes stay data.
+  /// Update controls are exported here because a Windows process environment is
+  /// not inherited by a WSL Linux process.
+  List<String> bundledCliArguments(
+    WslHarnessProbe probe,
+    String windowsBundleDirectory,
+    List<String> arguments,
+  ) => buildArguments(
+    distro: probe.distro!,
+    script: r'''
+bundle_dir="$(wslpath -u -- "$1")" || { echo "Harness packaged CLI path is not accessible in WSL" >&2; exit 126; }
+node_file="$HOME/.harness/runtime/current-node"
+[ -s "$node_file" ] || { echo "Harness managed Node is missing in WSL: $node_file" >&2; exit 126; }
+IFS= read -r node < "$node_file"
+[ -n "$node" ] && [ -x "$node" ] || { echo "Harness managed Node is invalid in WSL: $node" >&2; exit 126; }
+[ -s "$bundle_dir/cli.js" ] && [ -s "$bundle_dir/notify.mjs" ] || { echo "Harness packaged CLI bundle is missing or empty in WSL: $bundle_dir" >&2; exit 126; }
+export ADAPTER_UPDATE_DISABLE=true
+export ADAPTER_CLI_DIR="$bundle_dir"
+shift
+exec "$node" "$bundle_dir/cli.js" "$@"
+''',
+    scriptName: 'harness-bundled',
+    scriptArguments: [windowsBundleDirectory, ...arguments],
+  );
+
   /// This computer's identity, read from the CLI that owns the daemon.
   ///
   /// The Windows side has no `~/.harness/computer-id` when the CLI runs in a

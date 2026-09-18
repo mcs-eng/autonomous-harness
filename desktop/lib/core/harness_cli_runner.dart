@@ -55,6 +55,12 @@ class HarnessCliRunner {
   _startProcess;
   final WslRuntime _wsl;
   final bool _isWindows;
+  final bool _requiresWindowsBundle;
+  final Directory _windowsBundleDirectory;
+
+  static const bool windowsBundledCli = bool.fromEnvironment(
+    'WINDOWS_BUNDLED_CLI',
+  );
 
   /// A name no install can produce. Spawning it fails as a `ProcessException`
   /// on the first call instead of starting this application again.
@@ -84,12 +90,21 @@ class HarnessCliRunner {
     Duration? wslProbeMissTtl,
     DateTime Function()? now,
     bool? isWindows,
+    bool? requiresWindowsBundle,
+    Directory? windowsBundleDirectory,
   }) : environment = environment ?? Platform.environment,
        harnessHome = harnessHome ?? Directory(_defaultHarnessHome()),
        _wsl = wslRuntime ?? WslRuntime(runProcess: runProcess),
        _wslProbeMissTtl = wslProbeMissTtl ?? const Duration(seconds: 5),
        _now = now ?? DateTime.now,
        _isWindows = isWindows ?? Platform.isWindows,
+       _requiresWindowsBundle = requiresWindowsBundle ?? windowsBundledCli,
+       _windowsBundleDirectory =
+           windowsBundleDirectory ??
+           Directory(
+             '${File(Platform.resolvedExecutable).parent.path}'
+             '${Platform.pathSeparator}harness-cli',
+           ),
        _runProcess = runProcess ?? Process.run,
        _startProcess = startProcess ?? Process.start;
 
@@ -159,11 +174,18 @@ class HarnessCliRunner {
   /// Windows resolution: the CLI inside WSL2, then the failing name that keeps
   /// this application from spawning itself when no supported runtime exists.
   Future<HarnessCliInvocation> _resolveWindows(List<String> arguments) async {
+    if (_requiresWindowsBundle) await _validateWindowsBundle();
     final probe = await _wslHarness();
     if (probe != null && probe.found) {
       return HarnessCliInvocation(
         executable: WslRuntime.executable,
-        arguments: _wsl.cliArguments(probe, arguments),
+        arguments: _requiresWindowsBundle
+            ? _wsl.bundledCliArguments(
+                probe,
+                _windowsBundleDirectory.path,
+                arguments,
+              )
+            : _wsl.cliArguments(probe, arguments),
         environment: _commandEnvironment(),
         source: HarnessCliSource.wsl,
         wslDistro: probe.distro,
@@ -176,6 +198,28 @@ class HarnessCliRunner {
       environment: _commandEnvironment(),
       source: HarnessCliSource.path,
     );
+  }
+
+  Future<void> _validateWindowsBundle() async {
+    final cli = File(
+      '${_windowsBundleDirectory.path}${Platform.pathSeparator}cli.js',
+    );
+    final notify = File(
+      '${_windowsBundleDirectory.path}${Platform.pathSeparator}notify.mjs',
+    );
+    for (final file in [cli, notify]) {
+      try {
+        if (!await file.exists() || await file.length() == 0) {
+          throw StateError(
+            'Packaged Harness CLI is missing or empty: ${file.path}',
+          );
+        }
+      } on FileSystemException catch (error) {
+        throw StateError(
+          'Packaged Harness CLI cannot be read: ${file.path} ($error)',
+        );
+      }
+    }
   }
 
   /// The CLI inside WSL2.
