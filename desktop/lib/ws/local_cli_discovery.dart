@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 import '../core/serial_port_lease.dart';
+import '../core/backend_path.dart';
 import '../core/config.dart';
 import '../core/harness_cli_runner.dart';
 import '../core/harness_file_store.dart';
@@ -65,8 +66,11 @@ class LocalMachineIdentity {
   final Duration wslIdMissTtl;
   final DateTime Function() now;
 
-  String? _cachedWslId;
-  DateTime? _wslMissCheckedAt;
+  // Declared late so it can capture the injected clock from the constructor.
+  late final MissTtlCache<String> _wslIdCache = MissTtlCache<String>(
+    ttl: wslIdMissTtl,
+    now: now,
+  );
   bool _usesWsl = false;
 
   /// Filesystem belonging to the identity returned by [computerId]. A newly
@@ -114,14 +118,7 @@ class LocalMachineIdentity {
     if (Platform.isWindows && await _selectedWsl()) {
       _usesWsl = true;
       if (pinned != null) return pinned;
-      if (_cachedWslId != null) return _cachedWslId;
-      final checkedAt = _wslMissCheckedAt;
-      if (checkedAt != null && now().difference(checkedAt) < wslIdMissTtl) {
-        return null;
-      }
-      _wslMissCheckedAt = now();
-      _cachedWslId = await _fromWsl();
-      return _cachedWslId;
+      return _wslIdCache.read(_fromWsl);
     }
 
     _usesWsl = false;
@@ -717,7 +714,7 @@ Map<String, AgentProject> _localAgentProjects(
 ) {
   if (sessions is! List) return const {};
   final projects = <String, AgentProject>{};
-  final home = environment['HOME'] ?? environment['USERPROFILE'];
+  final home = resolveHomeDirectory(environment);
   for (final session in sessions) {
     if (session is! Map || session['id'] is! String) continue;
     final id = session['id'] as String;

@@ -588,12 +588,7 @@ class WslRuntime {
     String scriptName = 'harness',
   }) async {
     if (isDockerDistro(distro)) {
-      return ProcessResult(
-        0,
-        126,
-        '',
-        'refused: $distro is a Docker Desktop distribution',
-      );
+      return _refuseDocker(distro);
     }
     final arguments = buildArguments(
       distro: distro,
@@ -603,6 +598,15 @@ class WslRuntime {
     );
     return _runBounded(arguments);
   }
+
+  /// A Docker Desktop pseudo-distro can never run the CLI's tmux backend; every
+  /// entry point refuses it uniformly with the same exit-code-126 result.
+  ProcessResult _refuseDocker(String distro) => ProcessResult(
+    0,
+    126,
+    '',
+    'refused: $distro is a Docker Desktop distribution',
+  );
 
   /// The CLI, as a command the app can spawn.
   ///
@@ -696,16 +700,7 @@ exec "$node" "$bundle_dir/cli.js" "$@"
     void Function(String line)? onOutput,
     Duration timeout = const Duration(minutes: 5),
   }) {
-    if (isDockerDistro(distro)) {
-      return Future.value(
-        ProcessResult(
-          0,
-          126,
-          '',
-          'refused: $distro is a Docker Desktop distribution',
-        ),
-      );
-    }
+    if (isDockerDistro(distro)) return Future.value(_refuseDocker(distro));
     return runOwnedProcessBounded(
       executable: executable,
       arguments: buildArguments(
@@ -730,16 +725,7 @@ exec "$node" "$bundle_dir/cli.js" "$@"
     void Function(String line)? onOutput,
     Duration timeout = const Duration(minutes: 10),
   }) {
-    if (isDockerDistro(distro)) {
-      return Future.value(
-        ProcessResult(
-          0,
-          126,
-          '',
-          'refused: $distro is a Docker Desktop distribution',
-        ),
-      );
-    }
+    if (isDockerDistro(distro)) return Future.value(_refuseDocker(distro));
     return runOwnedProcessBounded(
       executable: executable,
       arguments: buildArguments(

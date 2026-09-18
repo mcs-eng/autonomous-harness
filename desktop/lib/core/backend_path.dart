@@ -88,3 +88,44 @@ class BackendPath {
     return rest.isEmpty ? '/mnt/$drive' : '/mnt/$drive/$rest';
   }
 }
+
+/// The current user's home directory out of a process environment: `HOME` first,
+/// then `USERPROFILE` — Windows sets only the latter, so a launch that never went
+/// through a shell still resolves. Null when neither names an existing directory.
+String? resolveHomeDirectory(Map<String, String> environment) {
+  final home = environment['HOME'];
+  if (home != null && home.isNotEmpty) return home;
+  final profile = environment['USERPROFILE'];
+  return profile != null && profile.isNotEmpty ? profile : null;
+}
+
+/// A value remembered while present and re-read after [ttl] while absent — so a
+/// transient miss (a distro still booting, a CLI mid-sign-in) is retried later
+/// without turning every read into a probe, and without one miss poisoning the
+/// cache for the life of the process.
+class MissTtlCache<T> {
+  MissTtlCache({required this.ttl, DateTime Function()? now})
+    : _now = now ?? DateTime.now;
+
+  final Duration ttl;
+  final DateTime Function() _now;
+
+  T? _value;
+  DateTime? _missedAt;
+
+  /// The current value, if a past read found one.
+  T? get value => _value;
+
+  /// The cached value, or null when absent — either within [ttl] of the last
+  /// miss, or while a read is already in flight: the miss timestamp is taken
+  /// BEFORE awaiting, so a slow source makes concurrent callers wait instead
+  /// of stampeding it.
+  Future<T?> read(Future<T?> Function() readSource) async {
+    if (_value != null) return _value;
+    final missedAt = _missedAt;
+    if (missedAt != null && _now().difference(missedAt) < ttl) return null;
+    _missedAt = _now();
+    _value = await readSource();
+    return _value;
+  }
+}

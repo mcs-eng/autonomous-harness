@@ -40,8 +40,11 @@ function cleanPaneTitle(title: string): string | null {
  * splits on `/` only. Every base-name read in this module must go through this helper so a row
  * parses identically on any host.
  */
+/** A drive-letter prefix in either slash dialect marks a Windows-authored path. */
+const isWindowsDialectPath = (path: string): boolean => /^[A-Za-z]:[\\/]/.test(path)
+
 function basename(path: string): string {
-  const windowsDialect = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+  const windowsDialect = isWindowsDialectPath(path) || path.startsWith('\\\\')
   const start = windowsDialect
     ? Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
     : path.lastIndexOf('/')
@@ -341,7 +344,7 @@ export function repairInteropRowFromCmdline(
     && trimmedComm !== 'init'
     && trimmedComm !== '/init'
     && !commMatchesRelayed
-  const looksWindowsArgv = /^[A-Za-z]:[\\/]/.test(argv[1]) || /\.exe$/i.test(argv[1])
+  const looksWindowsArgv = isWindowsDialectPath(argv[1]) || /\.exe$/i.test(argv[1])
   if (looksWindowsArgv) {
     if (commContradictsWindowsArgv) return {}
   } else if (!commMatchesRelayed) {

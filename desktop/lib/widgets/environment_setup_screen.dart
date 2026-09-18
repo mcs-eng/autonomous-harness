@@ -700,13 +700,13 @@ class _CheckRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = switch (status) {
-      EnvironmentStepStatus.ready => AppColors.success,
-      EnvironmentStepStatus.failed => AppColors.danger,
-      EnvironmentStepStatus.needsTerminal => AppColors.warning,
-      EnvironmentStepStatus.running => AppColors.accent,
-      EnvironmentStepStatus.notApplicable => AppColors.muted,
-      _ => AppColors.muted,
+    final (color, icon, statusLabel) = switch (status) {
+      EnvironmentStepStatus.ready => (AppColors.success, Icons.check_circle, 'Ready'),
+      EnvironmentStepStatus.failed => (AppColors.danger, Icons.cancel_outlined, 'Missing'),
+      EnvironmentStepStatus.needsTerminal => (AppColors.warning, Icons.circle_outlined, 'Terminal'),
+      EnvironmentStepStatus.running => (AppColors.accent, Icons.circle_outlined, 'Working'),
+      EnvironmentStepStatus.notApplicable => (AppColors.muted, Icons.remove_circle_outline, 'Not applicable'),
+      _ => (AppColors.muted, Icons.circle_outlined, checking ? 'Checking' : 'Required'),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -722,17 +722,7 @@ class _CheckRow extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2, color: color),
             )
           else
-            Icon(
-              status == EnvironmentStepStatus.ready
-                  ? Icons.check_circle
-                  : status == EnvironmentStepStatus.failed
-                  ? Icons.cancel_outlined
-                  : status == EnvironmentStepStatus.notApplicable
-                  ? Icons.remove_circle_outline
-                  : Icons.circle_outlined,
-              size: 17,
-              color: color,
-            ),
+            Icon(icon, size: 17, color: color),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -753,14 +743,7 @@ class _CheckRow extends StatelessWidget {
               ],
             ),
           ),
-          Text(switch (status) {
-            EnvironmentStepStatus.ready => 'Ready',
-            EnvironmentStepStatus.failed => 'Missing',
-            EnvironmentStepStatus.needsTerminal => 'Terminal',
-            EnvironmentStepStatus.running => 'Working',
-            EnvironmentStepStatus.notApplicable => 'Not applicable',
-            _ => checking ? 'Checking' : 'Required',
-          }, style: TextStyle(color: color, fontSize: 11)),
+          Text(statusLabel, style: TextStyle(color: color, fontSize: 11)),
         ],
       ),
     );

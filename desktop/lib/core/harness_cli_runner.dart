@@ -3,6 +3,7 @@ import 'host_platform.dart';
 import 'dart:io';
 
 import '../logging/cli_transcript.dart';
+import 'backend_path.dart';
 import 'wsl_runtime.dart';
 
 /// Runs the Harness CLI owned by this desktop app without depending on a
@@ -75,9 +76,12 @@ class HarnessCliRunner {
   /// on the first call instead of starting this application again.
   static const String windowsMissingCliExecutable = 'harness-cli-not-installed';
 
-  WslHarnessProbe? _wslProbe;
-  DateTime? _wslMissCheckedAt;
   final Duration _wslProbeMissTtl;
+  // Declared late so it can capture the injected clock from the constructor.
+  late final MissTtlCache<WslHarnessProbe> _wslProbeCache = MissTtlCache<WslHarnessProbe>(
+    ttl: _wslProbeMissTtl,
+    now: _now,
+  );
   final DateTime Function() _now;
 
   HarnessCliRunner({
@@ -119,13 +123,7 @@ class HarnessCliRunner {
        _startProcess = startProcess ?? Process.start;
 
   static String _defaultHarnessHome() {
-    // HOME, then USERPROFILE: Windows sets only the latter, so a launch from Explorer threw here
-    // before any UI existed to report it.
-    final home = Platform.environment['HOME'];
-    final profile = Platform.environment['USERPROFILE'];
-    final resolved = home != null && home.isNotEmpty
-        ? home
-        : (profile != null && profile.isNotEmpty ? profile : containerHome);
+    final resolved = resolveHomeDirectory(Platform.environment) ?? containerHome;
     if (resolved == null || resolved.isEmpty) {
       throw StateError('Could not resolve the current user home directory');
     }
@@ -241,44 +239,44 @@ class HarnessCliRunner {
   /// installed, `wsl --install` finished between two polls), and caching that
   /// miss for the life of the runner is what used to force a restart before the
   /// app could see a CLI that had just appeared. A hit is cached for good.
-  Future<WslHarnessProbe?> _wslHarness() async {
-    final now = _now();
-    if (_wslProbe != null && _wslProbe!.found) return _wslProbe;
-    if (_wslMissCheckedAt != null &&
-        now.difference(_wslMissCheckedAt!) < _wslProbeMissTtl) {
-      return null;
-    }
-    _wslMissCheckedAt = now;
-    try {
-      final probe = await _wsl.findHarness();
-      _wslProbe = probe.found ? probe : null;
-    } on ProcessException {
-      _wslProbe = null;
-    }
-    return _wslProbe;
+  Future<WslHarnessProbe?> _wslHarness() {
+    return _wslProbeCache.read(() async {
+      try {
+        final probe = await _wsl.findHarness();
+        return probe.found ? probe : null;
+      } on ProcessException {
+        return null;
+      }
+    });
   }
 
-  WslHarnessProbe? get wslProbe => _wslProbe;
+  WslHarnessProbe? get wslProbe => _wslProbeCache.value;
 
   Future<ProcessResult> run(List<String> arguments) async {
-    final invocation = await resolve(arguments);
+    // The bound covers the WHOLE attempt, not just the command: on Windows the
+    // resolution itself probes WSL, and a probe that never answers must end the
+    // wait exactly like a command that never finishes.
+    Future<ProcessResult> attempt() async {
+      final invocation = await resolve(arguments);
+      return _runProcess(
+        invocation.executable,
+        invocation.arguments,
+        environment: invocation.environment,
+      );
+    }
+
     return logProcessRun(
       _displayLine(arguments),
-      () =>
-          _runProcess(
-            invocation.executable,
-            invocation.arguments,
-            environment: invocation.environment,
-          ).timeout(
-            runTimeout,
-            // The child is not killed — `Process.run` gives no handle to it, and a stuck `start` is the
-            // CLI's own lock's business. What ends here is the app's wait, as an error it can show.
-            onTimeout: () => throw ProcessException(
-              'harness',
-              arguments,
-              'did not finish within ${runTimeout.inSeconds}s',
-            ),
-          ),
+      () => attempt().timeout(
+        runTimeout,
+        // The child is not killed — `Process.run` gives no handle to it, and a stuck `start` is the
+        // CLI's own lock's business. What ends here is the app's wait, as an error it can show.
+        onTimeout: () => throw ProcessException(
+          'harness',
+          arguments,
+          'did not finish within ${runTimeout.inSeconds}s',
+        ),
+      ),
     );
   }
 
@@ -363,12 +361,7 @@ class HarnessCliRunner {
     }
   }
 
-  String? _home() {
-    final home = environment['HOME'];
-    if (home != null && home.isNotEmpty) return home;
-    final profile = environment['USERPROFILE'];
-    return profile != null && profile.isNotEmpty ? profile : null;
-  }
+  String? _home() => resolveHomeDirectory(environment);
 
   Map<String, String> _commandEnvironment() {
     final home = _home();
