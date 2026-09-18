@@ -20,8 +20,8 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
 To compare the downloaded archive with its checksum in Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.1.zip
-Get-Content .\harness-desktop-windows-x64-1.0.0-windows.1.zip.sha256
+Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.2.zip
+Get-Content .\harness-desktop-windows-x64-1.0.0-windows.2.zip.sha256
 ```
 
 ## Prerequisites
@@ -41,6 +41,9 @@ does not replace your standalone `harness` launcher. Keep this folder in place
 while the app or its agents are running.
 
 ## Replacing an older preview
+
+Preview 2 fixes terminal typing on Windows. Preview 1 can display agent output
+while rejecting keyboard text; replace the complete bundle to receive the fix.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.

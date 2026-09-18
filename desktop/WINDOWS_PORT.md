@@ -1,5 +1,16 @@
 # Windows 11 migration
 
+## Preview 2 keyboard repair (2026-09-18)
+
+Preview 1 rendered terminal panes but could not accept ordinary typing. A native
+Windows probe reproduced key events reaching the focused terminal while Flutter
+rejected its input client: `Could not set client, view ID is null.` The vendored
+terminal now supplies its owning Flutter view ID when attaching the input client.
+The regression failed before the fix; all 30 nearby keyboard, focus, and IME tests
+passed afterward. Physical typing in the rebuilt native probe worked and was
+confirmed by the user. That probe has no backend; it does not independently prove
+an agent turn, browser sign-in, or a clean-machine installation.
+
 ## Community preview delivery (2026-09-18)
 
 The public preview packages the Windows desktop and the CLI from the same source
