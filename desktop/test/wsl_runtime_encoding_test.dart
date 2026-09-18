@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/wsl_runtime.dart';
@@ -112,13 +113,42 @@ void main() {
     test('a streamed strict-UTF-8 pipeline used to fail on these bytes', () {
       // Documents the OLD failure mode: utf8.decode on a wide buffer throws
       // (0x9f/0xc3 sequences), which the stream error handler swallowed.
-      final bytes = utf16le('Ubuntu-é\r\n');
+      final bytes = utf16le('Ubuntu-é' + String.fromCharCode(13) + String.fromCharCode(10));
       expect(() => utf8.decode(bytes), throwsFormatException);
       // The new decoder handles exactly those bytes.
       expect(
         const Utf16LeProbeEncoding().decoder.convert(bytes).trim(),
         'Ubuntu-é',
       );
+    });
+  });
+
+  group('listDistros string-seam decode (injected runProcess, review cycle-5 P2)', () {
+    /// A fake [_runProcess] seam handing back an already-decoded PLAIN string —
+    /// the production shape, since `_runBounded`'s [Utf16LeProbeEncoding] has
+    /// already decoded the wide bytes by the time they reach the seam.
+    Future<List<String>> distrosFrom(String plainStdout) async {
+      final runtime = WslRuntime(
+        runProcess: (executable, arguments, {environment}) async =>
+            ProcessResult(0, 0, plainStdout, ''),
+      );
+      return runtime.listDistros();
+    }
+
+    test('never double-decodes plain text that merely starts with a BOM-shaped pair', () async {
+      // A distro name beginning with U+00FF U+00FE reached the seam as PLAIN
+      // text; the old BOM short-circuit sniffed it as wide and re-decoded it
+      // into mojibake (code units [25173, 28277, 30068, 2573]). The seam must
+      // pin the plain-text identity: on this seam a genuine wide BOM cannot
+      // survive the byte-level decode as these code units.
+      final distros = await distrosFrom('\u00ff\u00feUbuntu' + String.fromCharCode(13) + String.fromCharCode(10));
+      expect(distros, ['\u00ff\u00feUbuntu']);
+    });
+
+    test('still decodes NUL-alternation wide text through the seam', () async {
+      final distros = await distrosFrom('U\u0000b\u0000u\u0000n\u0000t\u0000u\u0000'
+          + String.fromCharCode(13) + '\u0000' + String.fromCharCode(10) + '\u0000');
+      expect(distros, ['Ubuntu']);
     });
   });
 }

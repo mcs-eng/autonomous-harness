@@ -233,10 +233,18 @@ function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
       // qualification gate does not apply here — the `?` mangle is itself the /proc-recovery case —
       // but the serialization must be boundary-faithful, so quote() is shared.
       const argv = readProcField(row.pid, 'cmdline')?.split('\0') ?? []
-      while (argv.length && argv[argv.length - 1] === '') argv.pop() // process.title space-pad tail
+      // Same one-artifact rule as the interop repair (review cycle-5, P2): every argv element
+      // is stored NUL-terminated, so split() carries exactly ONE artifact empty after the
+      // final NUL — strip-all deleted legitimate empty final arguments.
+      if (argv.length && argv[argv.length - 1] === '') argv.pop() // process.title space-pad tail
       const args = argv.map(quoteArgvElement).join(' ').trimEnd()
       const executable = readProcField(row.pid, 'comm')?.trimEnd()
-      return { ...row, ...(executable && { executable }), ...(args && { args }) }
+      const mangled = { ...row, ...(executable && { executable }), ...(args && { args }) }
+      // The reconstructed row can still be a WSL interop relay (`/init` head over a Windows
+      // interpreter path under comm=`node.exe`); returning it here used to skip relay discovery
+      // and entrypoint resolution entirely (review cycle-5, P2). When it does NOT qualify, the
+      // repair returns {} and the mangled row stands as reconstructed.
+      return { ...mangled, ...repairInteropRow(mangled) }
     }
     // WSL interop relay: the relayed argv begins with `/init` (WSL's exe launcher) — visible at the
     // head of `ps args`, while `comm` is already the Windows binary (`node.exe`). `/proc/pid/exe`
@@ -278,11 +286,16 @@ export function repairInteropRowFromCmdline(
   comm: string | null,
 ): Partial<Pick<ProcessRow, 'args' | 'executable'>> {
   const argv = cmdline.split('\0')
-  // A cmdline READ ends at its terminating NUL, so split()'s final empty element is an
-  // artifact — but only the LAST one. filter(Boolean) also dropped legitimate empty argv
-  // elements in the middle (`prog '' more`), losing real boundaries (review cycle-4, P2);
-  // the serializer emits `""` for empty tokens so they survive the re-split.
-  while (argv.length && argv[argv.length - 1] === '') argv.pop()
+  // A cmdline READ is the execve argv region: EVERY element stored NUL-terminated, so split()
+  // yields all elements plus exactly ONE artifact empty after the final NUL — regardless of how
+  // long the trailing NUL run is. Pop only that one: the strip-ALL loop deleted legitimate empty
+  // final arguments (`/init\0prog\0x\0\0\0` is `prog x '' ''`, whose three trailing NULs are the
+  // terminators of x and of the two empty elements, not three artifacts — review cycle-5, P2).
+  // Interior empties were lost to filter(Boolean) earlier (review cycle-4, P2); the serializer
+  // emits `""` for empty tokens so every surviving element round-trips.
+  if (cmdline.endsWith('\0') && argv.length && argv[argv.length - 1] === '') {
+    argv.pop() // one artifact: the terminating NUL of the final argv element
+  }
   if (argv[0] !== '/init') return {}
   // `/init <program> <args…>` — without the relayed program there is nothing to expose.
   if (argv.length < 2) return {}
@@ -780,12 +793,20 @@ const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]
  * dead). Token-exact via `argvTokens`, not a substring `.includes()` check on the raw string, so a
  * prompt or argument that merely CONTAINS the flag text cannot false-positive. Engines with no
  * confirmed bypass flag (`BYPASS_PERMISSION_FLAGS[engine] === null`) always read false — never guess.
+ *
+ * A bare `--` option terminator ends the option section in every engine's CLI grammar here:
+ * everything after it is a POSITIONAL (prompt text, file names), however flag-shaped. Scanning
+ * the whole token list let a relayed prompt argument `-- --dangerously-bypass-approvals-and-
+ * sandbox` — the flag text as the positional after the terminator — read as an active bypass
+ * flag (review cycle-5, P1 security); the flag must appear BEFORE the terminator to count.
  */
 export function bypassPermissionActive(engine: RegisteredSession['engine'], args: string): boolean {
   const flags = BYPASS_PERMISSION_FLAGS[engine]
   if (!flags) return false
   const tokens = argvTokens(args)
-  return flags.every((flag) => tokens.includes(flag))
+  const terminator = tokens.indexOf('--')
+  const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
+  return flags.every((flag) => optionTokens.includes(flag))
 }
 
 /** The session id an engine was told to resume, or null when argv does not name one. */

@@ -298,6 +298,40 @@ describe('tmux process primitives', () => {
       expect(argvTokens(relayed.args!)).toEqual([interpreterPath, unc])
       expect(bypassPermissionActive('codex', relayed.args!)).toBe(false)
     })
+
+    /**
+     * Review cycle-5 P2: the strip-ALL trailing-empty loop deleted legitimate empty FINAL
+     * arguments. A cmdline read is the execve argv region — every element stored
+     * NUL-terminated — so split() yields all elements plus exactly ONE artifact empty after
+     * the final NUL, no matter how long the trailing NUL run is:
+     * `/init\0prog\0x\0\0\0` is `prog x '' ''`, not `x` with three artifacts.
+     */
+    it('strips exactly one trailing artifact and keeps legitimate empty final elements', () => {
+      // One terminating NUL: one artifact, nothing else lost.
+      expect(repairInteropRowFromCmdline(
+        ['/init', 'node.exe', 'x'].join(NUL) + NUL,
+        'node.exe',
+      ).args).toBe('node.exe x')
+      // `/init\0node.exe\0x\0\0\0` — the kernel region of `prog x '' ''`: each element
+      // carries its own terminating NUL, so the join needs the final one appended.
+      const tailEmpties = repairInteropRowFromCmdline(
+        ['/init', 'node.exe', 'x', '', ''].join(NUL) + NUL,
+        'node.exe',
+      )
+      expect(argvTokens(tailEmpties.args!)).toEqual(['node.exe', 'x', '', ''])
+      // A genuinely empty FINAL argument with a single terminator survives as one `""`.
+      const finalEmpty = repairInteropRowFromCmdline(
+        ['/init', 'node.exe', 'x', ''].join(NUL) + NUL,
+        'node.exe',
+      )
+      expect(argvTokens(finalEmpty.args!)).toEqual(['node.exe', 'x', ''])
+      // No trailing NUL at all (read stopped at buffer end): strip nothing.
+      const unterminated = repairInteropRowFromCmdline(
+        ['/init', 'node.exe', 'x'].join(NUL),
+        'node.exe',
+      )
+      expect(argvTokens(unterminated.args!)).toEqual(['node.exe', 'x'])
+    })
   })
 
   it.each([
@@ -439,6 +473,33 @@ describe('tmux process primitives', () => {
       .toBe(true)
     expect(bypassPermissionActive('cursor', 'cursor-agent --force')).toBe(true)
     expect(bypassPermissionActive('opencode', 'opencode --auto')).toBe(true)
+  })
+
+  /**
+   * Review cycle-5 P1 (security): a bare `--` option terminator ends the option section in
+   * every engine's CLI grammar — everything after it is a POSITIONAL, however flag-shaped.
+   * Boundary-faithful tokenization (cycles 2-4) made a flag-shaped positional SURVIVE as a
+   * token, so a relayed prompt `-- --dangerously-bypass-approvals-and-sandbox` read as an
+   * active bypass flag and cli.ts persisted it for the relaunch. The flag must appear
+   * BEFORE the terminator to count, for every engine with a confirmed flag.
+   */
+  it.each([
+    ['claude', '--dangerously-skip-permissions'],
+    ['codex', '--dangerously-bypass-approvals-and-sandbox'],
+    ['cursor', '--force'],
+    ['opencode', '--auto'],
+  ] as const)('does not count a flag-shaped positional after `--` for %s', (engine, flag) => {
+    expect(bypassPermissionActive(engine, `engine -- ${flag}`)).toBe(false)
+    expect(bypassPermissionActive(engine, `engine -- prompt about ${flag}`)).toBe(false)
+    // Before the terminator it still counts.
+    expect(bypassPermissionActive(engine, `engine ${flag} -- prompt`)).toBe(true)
+    // No terminator at all: unchanged behavior.
+    expect(bypassPermissionActive(engine, `engine ${flag}`)).toBe(true)
+  })
+
+  it('still reads flags when no `--` terminator is present', () => {
+    expect(bypassPermissionActive('codex', 'codex --dangerously-bypass-approvals-and-sandbox')).toBe(true)
+    expect(bypassPermissionActive('codex', 'codex --model gpt-5 --dangerously-bypass-approvals-and-sandbox')).toBe(true)
   })
 
   it('does not false-positive on a flag that only appears as a substring', () => {

@@ -424,8 +424,17 @@ class WslRuntime {
   /// String-level wide-output sniff for the injected seam: NULs between every
   /// byte pair (every second code unit is NUL) and at least two of them — a
   /// single stray NUL at the edge should not flip a plain string into a wide
-  /// decode. A BOM prefix is decisive wide evidence on its own, exactly as at
-  /// the byte level.
+  /// decode.
+  ///
+  /// A leading BOM-shaped pair (U+00FF U+00FE) is NOT decisive here, unlike
+  /// at the byte level (review cycle-5, P2): on this seam the byte-level
+  /// decoder has ALREADY run, so a genuine wide BOM never survives as these
+  /// two code units — the pair can only be a plain distro name that happens
+  /// to start with U+00FF U+00FE. Sniffing it as wide and re-decoding
+  /// double-decoded plain text into mojibake (`\u00ff\u00feUbuntu` -> garbled
+  /// code units). The NUL census and the CRLF-run discriminator below stay as
+  /// the only wide evidence, exactly as the byte-level census treats
+  /// BOM-less buffers.
   ///
   /// The byte-level complement applies here too (review cycle-4, P2): a
   /// BOM-LESS, non-Latin-dominant wide buffer fails the NUL census, so the
@@ -434,9 +443,8 @@ class WslRuntime {
   /// which single-byte CRLF line text cannot contain. Without this, a
   /// BOM-less CJK inventory decodes as byte-mapped mojibake through the seam.
   static bool _looksUtf16LeString(String s) {
-    if (s.length >= 2 && s.codeUnitAt(0) == 0xff && s.codeUnitAt(1) == 0xfe) {
-      return true;
-    }
+    // No BOM short-circuit on this seam: the byte-level decode has already run, so a
+    // surviving 0xFF 0xFE code-unit pair is PLAIN text, not a wide BOM (cycle-5, P2).
     final len = s.length;
     if (len < 6) return false;
     var oddNulls = 0;
