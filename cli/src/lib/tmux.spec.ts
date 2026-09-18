@@ -705,6 +705,29 @@ describe('tmux process primitives', () => {
   })
 
   /**
+   * Review cycle-9 P2: the both-separator basename over-corrected the Windows port — `\` is a
+   * legal filename character in POSIX paths, so a Linux script literally named `not\codex`
+   * came out as basename `codex` and scored as a Codex match; discovery could claim an
+   * unrelated process. The dialect is read from the path itself: drive-letter/UNC paths split
+   * on both separators, POSIX paths on `/` only.
+   */
+  it('does not split a POSIX path on a backslash that is part of a filename', () => {
+    expect(engineProcessMatchScore({
+      executable: '/tmp/not\\codex',
+      args: '/tmp/not\\codex --version',
+    }, 'codex')).toBe(0)
+    // The Windows dialect still splits on both separators.
+    expect(engineProcessMatchScore({
+      executable: 'C:\\tools\\not\\codex.exe',
+      args: 'C:\\tools\\not\\codex.exe --version',
+    }, 'codex')).toBeGreaterThan(0)
+    expect(engineProcessMatchScore({
+      executable: '\\\\nas\\share\\not\\codex.exe',
+      args: '\\\\nas\\share\\not\\codex.exe --version',
+    }, 'codex')).toBeGreaterThan(0)
+  })
+
+  /**
    * Review cycle-7 P2: the boundary-faithful check must accept the repairs' serialized form —
    * the interop repair DROPS the `/init` head (and a duplicated interpreter basename), so a
    * raw-argv-only comparison rejected every legitimate repaired relay row and the

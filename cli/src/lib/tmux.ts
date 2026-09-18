@@ -25,17 +25,25 @@ function cleanPaneTitle(title: string): string | null {
 }
 
 /**
- * Path base name, splitting on BOTH separators regardless of host platform.
+ * Path base name, splitting on the separators the path's own DIALECT uses.
  *
  * `path.basename` is host-dependent: on Windows it also splits `/`, but on Linux/macOS it does not
  * split `\\`. This file parses process rows whose argv can carry WINDOWS paths while the daemon
  * itself runs INSIDE WSL/Linux — the WSL-interop relay (`comm=node.exe`, argv
  * `/init \0 C:\...\node.exe \0 …codex.js`) is the exact case, and host basename silently defeated
- * the interpreter/entrypoint walk there (review finding P1, 2026-09-17). Every base-name read in
- * this module must go through this helper so a row parses identically on any host.
+ * the interpreter/entrypoint walk there (review finding P1, 2026-09-17). A blind both-separator
+ * split over-corrects the other way: `\` is a legal filename character in POSIX paths, so
+ * `/tmp/not\codex` came out as basename `codex` and scored as a Codex match — discovery could
+ * claim an unrelated process (review cycle-9, P2). The dialect is therefore read from the path
+ * itself: drive-letter (`C:/…`) and UNC (`\\…`) paths split on BOTH separators, everything else
+ * splits on `/` only. Every base-name read in this module must go through this helper so a row
+ * parses identically on any host.
  */
 function basename(path: string): string {
-  const start = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  const windowsDialect = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+  const start = windowsDialect
+    ? Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+    : path.lastIndexOf('/')
   return start === -1 ? path : path.slice(start + 1)
 }
 
