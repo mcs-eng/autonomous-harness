@@ -62,7 +62,10 @@ Future<ProcessResult> runOwnedProcessBounded({
           if (value.trim().isNotEmpty) onOutput?.call(value);
         },
         onError: (Object error) {
-          stderrLines.add('failed to read process stdout: $error');
+          // A failure READING this stream is recorded on its own side: callers
+          // surface stderrLines as the child's error output, and a stdout
+          // transport error is not something the child said.
+          stdoutLines.add('failed to read process stdout: $error');
           complete(stdoutDone);
         },
         onDone: () => complete(stdoutDone),

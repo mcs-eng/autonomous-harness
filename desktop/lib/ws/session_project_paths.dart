@@ -34,16 +34,37 @@ Map<String, AgentProject> localAgentProjects(
       continue;
     }
     String cwd = rawCwd;
-    if (cwd == '~' ||
+    final tildeRooted =
+        cwd == '~' ||
         cwd.startsWith('~/') ||
-        (pathPlatform == DaemonPathPlatform.windows && cwd.startsWith(r'~\'))) {
-      if (home == null || home.isEmpty) continue;
-      cwd = '$home${cwd.substring(1)}';
+        (pathPlatform == DaemonPathPlatform.windows && cwd.startsWith(r'~\'));
+    if (tildeRooted) {
+      // The home must be in the DAEMON's dialect: a POSIX (WSL) daemon's
+      // `~/project` expanded with the Windows GUI's `C:\Users\me` both failed
+      // the POSIX absolute check below (silently dropping the row) and, when
+      // the GUI inherited an MSYS `HOME=/c/Users/me`, PASSED it while naming a
+      // directory that does not exist inside the distro. A single drive letter
+      // as the first POSIX segment (`/c/…`) is that MSYS transliteration, not
+      // a home.
+      final homeInDaemonDialect = home != null &&
+          home.isNotEmpty &&
+          (pathPlatform == DaemonPathPlatform.windows
+              ? RegExp(r'^[A-Za-z]:[\\/]|^\\\\').hasMatch(home)
+              : home.startsWith('/') &&
+                    !RegExp(r'^/[A-Za-z](/|$)').hasMatch(home));
+      if (pathPlatform == DaemonPathPlatform.windows) {
+        if (!homeInDaemonDialect) continue;
+        cwd = '$home${cwd.substring(1)}';
+      } else if (homeInDaemonDialect) {
+        cwd = '$home${cwd.substring(1)}';
+      }
+      // POSIX with no usable home: keep the daemon's own `~/…` verbatim below —
+      // its shell resolves it, and no expansion beats a fabricated path.
     }
     // Validate against the DAEMON's path dialect, not the GUI host's.
     final absolute = pathPlatform == DaemonPathPlatform.windows
         ? RegExp(r'^[A-Za-z]:[\\/]|^\\\\').hasMatch(cwd)
-        : cwd.startsWith('/');
+        : cwd.startsWith('/') || (tildeRooted && !cwd.startsWith(r'~\'));
     if (!absolute) continue;
     try {
       if (pathPlatform == DaemonPathPlatform.posix) {
@@ -52,7 +73,11 @@ Map<String, AgentProject> localAgentProjects(
         // throws ArgumentError (not FormatException) on a `:` in a segment, and a literal
         // backslash in a Linux file name silently becomes a separator (review cycle-7, P2). The
         // daemon's cwds stay in the daemon's dialect; dot segments are resolved by hand.
-        cwd = _normalizePosixPath(cwd);
+        // A kept-verbatim tilde cwd has no dot segments to resolve and must not
+        // grow the synthetic `/` root `_normalizePosixPath` prepends.
+        cwd = tildeRooted && cwd.startsWith('~')
+            ? cwd
+            : _normalizePosixPath(cwd);
       } else {
         cwd = File(cwd).uri.normalizePath().toFilePath();
       }

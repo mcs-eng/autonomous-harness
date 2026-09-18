@@ -1139,7 +1139,34 @@ class EnvironmentProvisioner {
       // same runner the app will use for every later call (which resolves to
       // this distro). A distro that has a `harness` file that cannot execute is
       // not a ready computer.
-      final version = await runner.runBounded(['version']);
+      final ProcessResult version;
+      try {
+        version = await runner.runBounded(['version']);
+      } on StateError catch (error) {
+        // _resolveWindows validates the PACKAGED CLI by throwing: a bundle a
+        // partial update, antivirus quarantine, or a deleted cli.js broke must
+        // surface here as a setup failure the wizard can show — not escape to
+        // bootstrap's outer catch, which reads as "unauthenticated" and bounces
+        // the user to the sign-in screen with no hint a reinstall fixes it.
+        emit(
+          step: EnvironmentStep.harness,
+          status: EnvironmentStepStatus.failed,
+          message: 'The packaged Harness CLI could not be loaded.',
+          output: '✗ $error',
+        );
+        emit(
+          message: 'The Harness CLI shipped with this app is missing or damaged.',
+          phase: EnvironmentSetupPhase.failed,
+          failure: EnvironmentFailure(
+            step: EnvironmentStep.harness,
+            title: 'The packaged Harness CLI is missing or damaged',
+            detail: 'The CLI bundled with this app could not be loaded '
+                '($error). Reinstall the app, or restore the folder named in '
+                'the output, then click Recheck.',
+          ),
+        );
+        return snapshot();
+      }
       if (version.exitCode != 0) {
         final stderrText = '${version.stderr}'.trim();
         final timedOut = version.exitCode == 124;

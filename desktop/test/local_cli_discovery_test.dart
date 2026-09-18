@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/harness_cli_runner.dart';
+import 'package:harness/core/models.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 
 void main() {
@@ -391,6 +392,61 @@ void main() {
       expect(projects['drivemount']!.name, 'project');
       expect(projects['dotted']!.cwd, '/mnt/c/Users/user/project/src');
       expect(projects['dotted']!.name, 'src');
+    },
+    skip: !Platform.isWindows,
+  );
+
+  /**
+   * Bug-hunt P2: a POSIX (WSL) daemon's `~/project` was expanded with the
+   * Windows GUI's own home. `C:\Users\me` failed the POSIX absolute check and
+   * silently dropped the row; an MSYS-inherited `HOME=/c/Users/me` passed it
+   * and registered a cwd that names nothing inside the distro. A tilde is
+   * expanded only with a genuinely POSIX home, and otherwise kept verbatim —
+   * the daemon's own shell resolves it.
+   */
+  test(
+    'a WSL daemon tilde cwd is expanded only with a POSIX home, kept verbatim otherwise',
+    () async {
+      const computerId = '0123456789abcdef0123456789abcdef';
+      final identityFile = File('${scratch.path}/computer-id')
+        ..writeAsStringSync(computerId);
+      server = await serveStatus(
+        await freePort(),
+        () => {
+          ...readyStatus(computerId),
+          'sessions': [
+            {'id': 'tilde', 'cwd': '~/work/project'},
+          ],
+        },
+      );
+      Future<AgentProject?> tildeProjectWith(String? home) async {
+        final endpoint = await LocalCliDiscovery(
+          config: AppConfig(
+            apiBaseUrl: 'https://fixture.invalid',
+            localCliBaseUrl: 'http://127.0.0.1:${server!.port}',
+          ),
+          identity: LocalMachineIdentity(
+            computerIdFile: identityFile,
+            environment: home == null ? const {} : {'HOME': home},
+            // A reader both selects WSL and answers the id, so `probe()` gets
+            // past its identity gate exactly like a real WSL daemon does.
+            wslComputerId: () async => computerId,
+          ),
+        ).discover();
+        return endpoint!.agentProjects['tilde'];
+      }
+
+      final windowsHome = await tildeProjectWith(r'C:\Users\me');
+      expect(windowsHome!.cwd, '~/work/project',
+          reason: 'the Windows USERPROFILE must not stand in for the distro home');
+      expect(windowsHome.name, 'project');
+      final msysHome = await tildeProjectWith('/c/Users/me');
+      expect(msysHome!.cwd, '~/work/project',
+          reason: 'an MSYS HOME must not fabricate a distro path');
+      final posixHome = await tildeProjectWith('/home/me');
+      expect(posixHome!.cwd, '/home/me/work/project');
+      final noHome = await tildeProjectWith(null);
+      expect(noHome!.cwd, '~/work/project');
     },
     skip: !Platform.isWindows,
   );

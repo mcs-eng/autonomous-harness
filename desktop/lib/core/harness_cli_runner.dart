@@ -1,10 +1,12 @@
 import 'host_platform.dart';
 
+import 'dart:convert';
 import 'dart:io';
 
 import '../logging/cli_transcript.dart';
 import 'backend_path.dart';
 import 'bounded_process.dart';
+import 'utf16_probe_encoding.dart';
 import 'wsl_runtime.dart';
 
 /// Runs the Harness CLI owned by this desktop app without depending on a
@@ -268,16 +270,47 @@ class HarnessCliRunner {
 
     return logProcessRun(
       _displayLine(arguments),
-      () => attempt().timeout(
-        runTimeout,
-        // The child is not killed — `Process.run` gives no handle to it, and a stuck `start` is the
-        // CLI's own lock's business. What ends here is the app's wait, as an error it can show.
-        onTimeout: () => throw ProcessException(
-          'harness',
-          arguments,
-          'did not finish within ${runTimeout.inSeconds}s',
-        ),
-      ),
+      () => attempt()
+          .timeout(
+            runTimeout,
+            // The child is not killed — `Process.run` gives no handle to it, and a stuck `start` is the
+            // CLI's own lock's business. What ends here is the app's wait, as an error it can show.
+            onTimeout: () => throw ProcessException(
+              'harness',
+              arguments,
+              'did not finish within ${runTimeout.inSeconds}s',
+            ),
+          )
+          .then(_decodeWideBanner),
+    );
+  }
+
+  /// wsl.exe writes its OWN failure banners (no WSL feature, a bad `-d` name, a
+  /// distro that will not start) as UTF-16LE on redirected handles, while the
+  /// CLI inside the distro writes UTF-8. A banner decoded as UTF-8 arrives
+  /// NUL-riddled — and that is the recovery key: a string carrying NUL code
+  /// units is re-checked by the UTF-16LE probe decoder and re-decoded when it
+  /// really is wide. Non-ASCII banners the UTF-8 decode half-swallowed
+  /// (U+FFFD replacement units) cannot be re-encoded, and are left as decoded.
+  static ProcessResult _decodeWideBanner(ProcessResult result) {
+    String fix(String text) {
+      if (!text.contains('\u0000')) return text;
+      final List<int> bytes;
+      try {
+        bytes = latin1.encode(text);
+      } on ArgumentError {
+        return text;
+      }
+      return Utf16LeProbeDecoder.looksUtf16Le(bytes)
+          ? Utf16LeProbeDecoder.decodeUtf16LeBytes(bytes)
+          : text;
+    }
+
+    return ProcessResult(
+      result.pid,
+      result.exitCode,
+      fix(result.stdout),
+      fix(result.stderr),
     );
   }
 
@@ -314,7 +347,7 @@ class HarnessCliRunner {
         startProcess: _startProcess,
         timeout: timeout,
         environment: invocation.environment,
-      ),
+      ).then(_decodeWideBanner),
     );
   }
 
@@ -395,8 +428,16 @@ class HarnessCliRunner {
     return commandEnvironment;
   }
 
-  /// WSL imports only variables named in WSLENV. Keep the TypeSafe credential in the child process
-  /// environment: putting it in the bash script or argv would expose it in process listings and logs.
+  /// The child environment for a wsl.exe launch, with the router variables
+  /// named in WSLENV.
+  ///
+  /// wsl.exe hands the Linux side the full Windows child environment by
+  /// default; WSLENV carries per-variable flags (path translation, flow
+  /// direction), it does not GATE forwarding — so naming TASK_ROUTER and
+  /// TYPESAFE_API_KEY here records intent and adds no filter. The real
+  /// boundary is that the key only ever travels inside the user's own distro:
+  /// never in the bash script, never in argv, never in a log line, and the
+  /// Jev caller passes it only when the user opted in.
   Map<String, String> _windowsCommandEnvironment() {
     final result = _commandEnvironment();
     final forwarded = <String>{
