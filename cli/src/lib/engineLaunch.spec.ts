@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -155,6 +155,76 @@ describe('commandAvailableInInteractiveShell', () => {
       commandAvailableInInteractiveShell('cursor-agent', bashProbeShell(), recipe),
     ).resolves.toBe(true)
   })
+
+  it('rejects a resolved executable that fails its bounded health probe', async () => {
+    const binDir = mkdtempSync(join(tmpdir(), 'harness-engine-unhealthy-'))
+    dirs.push(binDir)
+    const unhealthy = join(binDir, 'copilot')
+    writeFileSync(unhealthy, '#!/bin/sh\nexit 1\n')
+    chmodSync(unhealthy, 0o700)
+    process.env.HARNESS_ENGINE_TEST_PATH = binDir
+    const recipe: EngineInstallRecipe = {
+      command: 'false',
+      source: 'test fixture',
+      executable: { names: ['copilot'], probeArgs: ['--version'] },
+    }
+
+    await expect(commandAvailableInInteractiveShell('copilot', bashProbeShell(), recipe))
+      .resolves.toBe(false)
+  })
+
+  it('accepts a resolved executable that passes its health probe', async () => {
+    const binDir = mkdtempSync(join(tmpdir(), 'harness-engine-healthy-'))
+    dirs.push(binDir)
+    executable(binDir, 'copilot')
+    process.env.HARNESS_ENGINE_TEST_PATH = binDir
+    const recipe: EngineInstallRecipe = {
+      command: 'false',
+      source: 'test fixture',
+      executable: { names: ['copilot'], probeArgs: ['--version'] },
+    }
+
+    await expect(commandAvailableInInteractiveShell('copilot', bashProbeShell(), recipe))
+      .resolves.toBe(true)
+  })
+
+  it('probes the same resolved command and recipe name only once', async () => {
+    const binDir = mkdtempSync(join(tmpdir(), 'harness-engine-dedup-'))
+    dirs.push(binDir)
+    const attempts = join(binDir, 'attempts')
+    const unhealthy = join(binDir, 'copilot')
+    writeFileSync(unhealthy, `#!/bin/sh\n/usr/bin/printf x >> ${JSON.stringify(attempts)}\nexit 1\n`)
+    chmodSync(unhealthy, 0o700)
+    process.env.HARNESS_ENGINE_TEST_PATH = binDir
+    const recipe: EngineInstallRecipe = {
+      command: 'false',
+      source: 'test fixture',
+      executable: { names: ['copilot'], probeArgs: ['--version'] },
+    }
+
+    await expect(commandAvailableInInteractiveShell('copilot', bashProbeShell(), recipe))
+      .resolves.toBe(false)
+    expect(readFileSync(attempts, 'utf8')).toBe('x')
+  })
+
+  it('bounds a health probe that never returns', async () => {
+    const binDir = mkdtempSync(join(tmpdir(), 'harness-engine-hung-'))
+    dirs.push(binDir)
+    const hung = join(binDir, 'copilot')
+    writeFileSync(hung, '#!/bin/sh\ntrap \'\' TERM\n/bin/sleep 30\n')
+    chmodSync(hung, 0o700)
+    process.env.HARNESS_ENGINE_TEST_PATH = binDir
+    const recipe: EngineInstallRecipe = {
+      command: 'false',
+      source: 'test fixture',
+      executable: { names: ['copilot'], probeArgs: ['--version'] },
+    }
+
+    const started = Date.now()
+    await expect(commandAvailableInInteractiveShell('copilot', bashProbeShell(), recipe))
+      .resolves.toBe(false)
+    expect(Date.now() - started).toBeLessThan(8_000)
+  }, 10_000)
 })
 
 describe('buildEngineLaunchArgv with installFirst', () => {
@@ -294,6 +364,51 @@ if [ "$1" = prefix ]; then exit 0; fi
 
     expect(result).toMatchObject({ code: 0, ranEngine: true })
     expect(result.stdout).not.toContain('WINDOWS-NPM-MUST-NOT-RUN')
+  })
+
+  it('installs and launches a healthy vendor candidate when the PATH executable fails its probe', async () => {
+    const binDir = mkdtempSync(join(tmpdir(), 'harness-probed-engine-path-'))
+    const installDir = mkdtempSync(join(tmpdir(), 'harness-probed-engine-install-'))
+    dirs.push(binDir, installDir)
+    const unhealthy = join(binDir, 'copilot')
+    writeFileSync(unhealthy, '#!/bin/sh\nexit 1\n')
+    chmodSync(unhealthy, 0o700)
+    const source = join(installDir, 'source')
+    const installed = join(installDir, 'copilot')
+    writeFileSync(source, '#!/bin/sh\nif [ "$1" = "--version" ]; then exit 0; fi\n/usr/bin/printf "HARNESS-TEST-ENGINE-RAN\\n"\n')
+    chmodSync(source, 0o700)
+    const install = `/bin/cp ${JSON.stringify(source)} ${JSON.stringify(installed)} && /bin/chmod 700 ${JSON.stringify(installed)}`
+    const result = await runPaneScript(
+      script(recipe(install, {
+        names: ['copilot'],
+        absolutePaths: [installed],
+        probeArgs: ['--version'],
+      }), process.execPath),
+      'copilot',
+      { ...process.env, PATH: binDir },
+    )
+
+    expect(result).toMatchObject({ code: 0, ranEngine: true })
+  })
+
+  it('does not install over an existing executable that passes its probe', async () => {
+    const binDir = mkdtempSync(join(tmpdir(), 'harness-probed-engine-healthy-'))
+    dirs.push(binDir)
+    const healthy = join(binDir, 'copilot')
+    const installMarker = join(binDir, 'installer-ran')
+    writeFileSync(healthy, '#!/bin/sh\nif [ "$1" = "--version" ]; then exit 0; fi\n/usr/bin/printf "HARNESS-TEST-ENGINE-RAN\\n"\n')
+    chmodSync(healthy, 0o700)
+    const result = await runPaneScript(
+      script(recipe(`/usr/bin/touch ${JSON.stringify(installMarker)}`, {
+        names: ['copilot'],
+        probeArgs: ['--version'],
+      }), process.execPath),
+      'copilot',
+      { ...process.env, PATH: binDir },
+    )
+
+    expect(result).toMatchObject({ code: 0, ranEngine: true })
+    expect(existsSync(installMarker)).toBe(false)
   })
 
   it('bootstraps node before first exec of an already-installed node-shebang engine', async () => {

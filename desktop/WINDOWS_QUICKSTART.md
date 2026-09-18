@@ -42,8 +42,9 @@ while the app or its agents are running.
 
 ## Replacing an older preview
 
-Preview 3 includes the terminal typing fix and repairs Claude installation when
-WSL inherits Windows npm without Linux Node. Preview 1 can display agent output
+Preview 3 includes the terminal typing fix, repairs Claude installation when
+WSL inherits Windows npm without Linux Node, and replaces broken Copilot npm
+launchers with a verified native installation. Preview 1 can display agent output
 while rejecting keyboard text; replace the complete bundle to receive both fixes.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
@@ -67,6 +68,8 @@ Sign-in did not complete**. Retrying sign-in in that old executable cannot fix i
   Ctrl+Shift+Tab switch panes.
 - Use the backend folder browser for Linux projects. Drive conversion assumes
   WSL's normal `/mnt/<drive>` mounts.
+- See [agent verification](WINDOWS_AGENT_VERIFICATION.md) for tested versions and
+  the distinction between executable startup and authenticated model turns.
 - Roll back by closing this preview, stopping its daemon, and opening your previous
   complete bundle. Do not delete authentication, projects, or tmux sessions.
 

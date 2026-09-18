@@ -1,6 +1,15 @@
 # Windows 11 migration
 
-## Preview 3 Claude installation repair (2026-09-18)
+## Preview 3 engine installation repairs (2026-09-18)
+
+Copilot's Windows npm launcher was discoverable inside WSL but could not run with
+the managed Linux Node runtime. Copilot discovery and launch now require a bounded
+version probe and use GitHub's official standalone installer under `~/.local` when
+necessary. The generated production launch installed Copilot 1.0.86 successfully;
+a repeat launch returned its version without reinstalling. No model request or
+account authentication was involved. The surrounding shell PATH stayed unchanged.
+Detailed catalog coverage and installer limitations are recorded in
+[WINDOWS_AGENT_VERIFICATION.md](WINDOWS_AGENT_VERIFICATION.md).
 
 On this WSL host, `npm` resolved to `/mnt/c/Program Files/nodejs/npm` while
 `node` was absent. The inherited Windows npm script failed with `exec: node:
