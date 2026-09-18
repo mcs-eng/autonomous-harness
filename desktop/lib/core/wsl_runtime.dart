@@ -62,9 +62,14 @@ class _Utf16LeProbeDecoder extends Converter<List<int>, String> {
   /// The NUL census stays for Latin-dominant buffers, where the odd
   /// bytes are mostly NUL and the strict alternation is what binary blobs
   /// with embedded ASCII runs would break.
-  static bool _looksUtf16Le(List<int> bytes) {
+  /// [bomIsDecisive] is false on the latin1-string seam, where the byte-level
+  /// decode has already run and a surviving 0xFF 0xFE pair is PLAIN text, not
+  /// a wide BOM (review cycle-5, P2).
+  static bool _looksUtf16Le(List<int> bytes, {bool bomIsDecisive = true}) {
     final len = bytes.length;
-    if (len >= 4 && bytes[0] == 0xff && bytes[1] == 0xfe) return true;
+    if (bomIsDecisive && len >= 4 && bytes[0] == 0xff && bytes[1] == 0xfe) {
+      return true;
+    }
     if (len < 6) return false;
     var oddNulls = 0;
     var oddTotal = 0;
@@ -86,19 +91,24 @@ class _Utf16LeProbeDecoder extends Converter<List<int>, String> {
     return false;
   }
 
+  /// Re-pack UTF-16LE bytes into text, stripping a leading BOM when present.
+  static String _decodeUtf16LeBytes(List<int> bytes) {
+    var offset = 0;
+    if (bytes.length >= 2 && bytes[0] == 0xff && bytes[1] == 0xfe) {
+      offset = 2;
+    }
+    final buffer = StringBuffer();
+    for (var i = offset; i + 1 < bytes.length; i += 2) {
+      buffer.writeCharCode(bytes[i] | (bytes[i + 1] << 8));
+    }
+    return buffer.toString();
+  }
+
   @override
   String convert(List<int> input, [int start = 0, int? end]) {
     final bytes = input.sublist(start, end ?? input.length);
     if (_looksUtf16Le(bytes)) {
-      var offset = 0;
-      if (bytes.length >= 2 && bytes[0] == 0xff && bytes[1] == 0xfe) {
-        offset = 2;
-      }
-      final buffer = StringBuffer();
-      for (var i = offset; i + 1 < bytes.length; i += 2) {
-        buffer.writeCharCode(bytes[i] | (bytes[i + 1] << 8));
-      }
-      return buffer.toString();
+      return _decodeUtf16LeBytes(bytes);
     }
     // Single-byte path: one code unit per byte, no loss, no throw.
     return String.fromCharCodes(bytes);
@@ -421,64 +431,25 @@ class WslRuntime {
     }
   }
 
-  /// String-level wide-output sniff for the injected seam: NULs between every
-  /// byte pair (every second code unit is NUL) and at least two of them — a
-  /// single stray NUL at the edge should not flip a plain string into a wide
-  /// decode.
-  ///
-  /// A leading BOM-shaped pair (U+00FF U+00FE) is NOT decisive here, unlike
-  /// at the byte level (review cycle-5, P2): on this seam the byte-level
-  /// decoder has ALREADY run, so a genuine wide BOM never survives as these
-  /// two code units — the pair can only be a plain distro name that happens
-  /// to start with U+00FF U+00FE. Sniffing it as wide and re-decoding
-  /// double-decoded plain text into mojibake (`\u00ff\u00feUbuntu` -> garbled
-  /// code units). The NUL census and the CRLF-run discriminator below stay as
-  /// the only wide evidence, exactly as the byte-level census treats
-  /// BOM-less buffers.
-  ///
-  /// The byte-level complement applies here too (review cycle-4, P2): a
-  /// BOM-LESS, non-Latin-dominant wide buffer fails the NUL census, so the
-  /// latin1 round-trip of its bytes is additionally tested for the UTF-16LE
-  /// CRLF run — `0d 00 0a 00` as two code units (13, 10) at an even position,
-  /// which single-byte CRLF line text cannot contain. Without this, a
-  /// BOM-less CJK inventory decodes as byte-mapped mojibake through the seam.
+  /// String-level wide-output sniff for the injected seam, where the bytes have
+  /// already been latin1-round-tripped: each code unit IS one raw byte, so the
+  /// sniff re-encodes and defers to the byte-level census. The census and the
+  /// CRLF-run discriminator are the only wide evidence here — a leading
+  /// BOM-shaped pair (U+00FF U+00FE) is NOT decisive, unlike at the byte level
+  /// (review cycle-5, P2): on this seam a genuine wide BOM never survives these
+  /// two code units, so the pair can only be plain text and must not be
+  /// re-decoded into mojibake.
   static bool _looksUtf16LeString(String s) {
-    // No BOM short-circuit on this seam: the byte-level decode has already run, so a
-    // surviving 0xFF 0xFE code-unit pair is PLAIN text, not a wide BOM (cycle-5, P2).
-    final len = s.length;
-    if (len < 6) return false;
-    var oddNulls = 0;
-    for (var i = 1; i < len; i += 2) {
-      if (s.codeUnitAt(i) == 0) oddNulls++;
-    }
-    if (oddNulls >= 2 && oddNulls * 4 >= len) return true;
-    // The latin1 round-trip of a UTF-16LE CRLF: FOUR code units (13, 0, 10, 0)
-    // at an even position — single-byte CRLF text carries (13, 10), which must
-    // NOT match, or every plain ASCII inventory flips to a wide decode.
-    for (var i = 0; i + 3 < len; i += 2) {
-      if (s.codeUnitAt(i) == 0x0d
-          && s.codeUnitAt(i + 1) == 0x00
-          && s.codeUnitAt(i + 2) == 0x0a
-          && s.codeUnitAt(i + 3) == 0x00) {
-        return true;
-      }
-    }
-    return false;
+    return _Utf16LeProbeDecoder._looksUtf16Le(
+      latin1.encode(s),
+      bomIsDecisive: false,
+    );
   }
 
   /// Re-pack a latin1-round-tripped UTF-16LE string: each code unit is a raw
-  /// byte, so two code units make one UTF-16 code unit. BOM (0xFF 0xFE) is
-  /// stripped when present.
+  /// byte, so the byte-level decode applies, including BOM stripping.
   static String _decodeUtf16LeString(String s) {
-    var start = 0;
-    if (s.length >= 2 && s.codeUnitAt(0) == 0xff && s.codeUnitAt(1) == 0xfe) {
-      start = 2;
-    }
-    final buffer = StringBuffer();
-    for (var i = start; i + 1 < s.length; i += 2) {
-      buffer.writeCharCode(s.codeUnitAt(i) | (s.codeUnitAt(i + 1) << 8));
-    }
-    return buffer.toString();
+    return _Utf16LeProbeDecoder._decodeUtf16LeBytes(latin1.encode(s));
   }
 
   Future<ProcessResult> _run(List<String> arguments) => _runBounded(arguments);
