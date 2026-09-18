@@ -220,10 +220,17 @@ export function parseProcessRow(line: string): ProcessRow | null {
  * refuses input while the engine visibly runs (observed live on a Windows host + Ubuntu distro).
  * When `/init` is argv[0], `/proc` IS the mangled view: rewrite the row from `cmdline` so the
  * interpreter (`node.exe`) and the real entrypoint (`.../codex.js`) are visible to matching.
+ *
+ * EVERY producer of a process table must run its rows through this repair: the bypass/resume
+ * evidence gate (`processArgvIsBoundaryFaithful`) is sound only when rows carry /proc-reconstructed
+ * argv wherever /proc is readable — an ordinary row left as flattened `ps` text loses exactly the
+ * spaced prompt arguments that make flattening lossy (review cycle-8, P2).
  */
-function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
+export function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
   if (process.platform !== 'linux') return rows
   return rows.map((row) => {
+    const cmdline = readProcField(row.pid, 'cmdline')
+    const comm = readProcField(row.pid, 'comm')
     if (row.executable.includes('?') || row.args.includes('?')) {
       // cmdline is NUL-separated; node's process.title rewrite space-pads the tail of the argv region.
       // Re-split the raw NUL argv and re-join through the SAME CRT-dialect quoting the interop repair
@@ -232,45 +239,34 @@ function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
       // flipped to true from prompt text alone (review cycle-4, P1 security). The repair's
       // qualification gate does not apply here — the `?` mangle is itself the /proc-recovery case —
       // but the serialization must be boundary-faithful, so quote() is shared.
-      const argv = readProcField(row.pid, 'cmdline')?.split('\0') ?? []
+      const argv = cmdline?.split('\0') ?? []
       // Same one-artifact rule as the interop repair (review cycle-5, P2): every argv element
       // is stored NUL-terminated, so split() carries exactly ONE artifact empty after the
       // final NUL — strip-all deleted legitimate empty final arguments.
       if (argv.length && argv[argv.length - 1] === '') argv.pop() // process.title space-pad tail
       const args = argv.map(quoteArgvElement).join(' ').trimEnd()
-      const executable = readProcField(row.pid, 'comm')?.trimEnd()
+      const executable = comm?.trimEnd()
       const mangled = { ...row, ...(executable && { executable }), ...(args && { args }) }
       // The reconstructed row can still be a WSL interop relay (`/init` head over a Windows
       // interpreter path under comm=`node.exe`); returning it here used to skip relay discovery
       // and entrypoint resolution entirely (review cycle-5, P2). When it does NOT qualify, the
       // repair returns {} and the mangled row stands as reconstructed.
-      return { ...mangled, ...repairInteropRow(mangled) }
+      return { ...mangled, ...repairInteropRowFromCmdline(cmdline ?? '', comm) }
     }
-    // WSL interop relay: the relayed argv begins with `/init` (WSL's exe launcher) — visible at the
-    // head of `ps args`, while `comm` is already the Windows binary (`node.exe`). `/proc/pid/exe`
-    // points back at `/init`, so file-identity evidence is unavailable by construction; cmdline
-    // carries the relayed Windows argv. Dropping the `/init` prefix keeps `ps args` from
-    // double-listing it and puts the interpreter (`node.exe`) first, where `processEntrypoint`
-    // walks past it to the real entrypoint (`.../@openai/codex/bin/codex.js`).
-    return { ...row, ...repairInteropRow(row) }
+    // Ordinary row (nothing `?`-mangled): flattened `ps` text still loses argv boundaries
+    // whenever ANY element carries a space — a quoted prompt argument flattens into
+    // free-standing words whose flag-shaped fragments re-tokenize (review cycle-6, P1), and
+    // the evidence gate then refuses the row outright. When /proc is readable, the true NUL
+    // argv is strictly better evidence: re-serialize it through the shared quoting so
+    // bypass/resume readers can trust the row (`codex --dangerously-bypass-approvals-and-
+    // sandbox "fix the bug"` used to silently lose its bypass evidence on restart/retarget —
+    // review cycle-8, P2). With NO /proc evidence the row stands as flattened and stays
+    // untrusted, exactly as the gate requires.
+    const relayed = repairInteropRowFromCmdline(cmdline ?? '', comm)
+    if (relayed.args !== undefined) return { ...row, ...relayed }
+    const faithful = faithfulArgsFromCmdline(cmdline ?? '')
+    return faithful ? { ...row, args: faithful } : row
   })
-}
-
-/**
- * Rewrites one WSL-interop row from its /proc cmdline argv. Pure and
- * host-independent: exportable for tests on every platform (the row scan that
- * calls it stays Linux-gated because /proc only exists there).
- *
- * Returns {} when the row is NOT an interop relay (cmdline missing, no `/init`
- * head) so callers can spread it conditionally; otherwise { args, executable }.
- */
-export function repairInteropRow(
-  row: Pick<ProcessRow, 'pid' | 'args' | 'executable'>,
-): Partial<Pick<ProcessRow, 'args' | 'executable'>> {
-  return repairInteropRowFromCmdline(
-    readProcField(row.pid, 'cmdline') ?? '',
-    readProcField(row.pid, 'comm'),
-  )
 }
 
 /**
@@ -363,6 +359,25 @@ export function repairInteropRowFromCmdline(
     ? comm!.trimEnd()
     : basename(argv[1])
   return { args, executable: relayed }
+}
+
+/**
+ * The boundary-faithful `args` string for an ORDINARY (non-relay) row reconstructed from its
+ * raw /proc cmdline: the true NUL argv re-joined through `quoteArgvElement`. Flattened `ps`
+ * text cannot preserve argv boundaries once any element carries a space, so a readable /proc
+ * is strictly better evidence — but only the reconstruction makes it comparable to what the
+ * evidence gate expects. Pure and host-independent so tests pin it on every platform.
+ * Returns null when the cmdline carries no usable argv (unreadable or empty): the caller
+ * keeps the flattened row, which the evidence gate then refuses, as it must.
+ */
+export function faithfulArgsFromCmdline(cmdline: string): string | null {
+  if (cmdline === '') return null
+  const argv = cmdline.split('\0')
+  // Same one-artifact rule as the evidence gate (review cycle-5, P2): split() carries exactly
+  // ONE empty artifact after the final NUL.
+  if (cmdline.endsWith('\0') && argv.length && argv[argv.length - 1] === '') argv.pop()
+  const args = argv.map(quoteArgvElement).join(' ').trimEnd()
+  return args === '' ? null : args
 }
 
 /**

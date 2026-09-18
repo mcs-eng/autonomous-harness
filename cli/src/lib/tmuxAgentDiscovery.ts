@@ -26,6 +26,7 @@ import {
   parseProcessRow,
   processArgvIsBoundaryFaithful,
   processTreePids,
+  repairMangledRows,
   resumeSessionId,
   setPaneMouseOn,
   type ProcessRow,
@@ -253,7 +254,10 @@ export async function probeTmuxAgents(
   if (!tmux.ok) return { ok: false, error: `tmux list-panes failed: ${tmux.error}` }
   if (!ps.ok) return { ok: false, error: `process table failed: ${ps.error}` }
   const parsed = ps.stdout.split('\n').map(parseProcessRow).filter((row): row is ProcessRow => row !== null)
-  const rows = await enrichProcessRows(parsed, processTreePids(parsed, tmux.panes.map((pane) => pane.rootPid)))
+  // Every process-table producer applies the /proc repair: the bypass/resume evidence gate is
+  // sound only when rows are boundary-faithful wherever /proc is readable (review cycle-8, P2),
+  // and the interop/?-mangle rewrites are what make relayed and locale-mangled rows matchable.
+  const rows = await enrichProcessRows(repairMangledRows(parsed), processTreePids(parsed, tmux.panes.map((pane) => pane.rootPid)))
   const probe = discoverTmuxAgentsFromSnapshot(
     tmux.panes,
     rows,

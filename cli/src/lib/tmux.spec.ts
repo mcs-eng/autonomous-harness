@@ -12,6 +12,7 @@ import {
   bypassPermissionActiveFromArgv,
   engineProcessMatch,
   engineProcessMatchScore,
+  faithfulArgsFromCmdline,
   parseProcessRow,
   quoteArgvElement,
   repairInteropRowFromCmdline,
@@ -333,6 +334,40 @@ describe('tmux process primitives', () => {
         'node.exe',
       )
       expect(argvTokens(unterminated.args!)).toEqual(['node.exe', 'x'])
+    })
+  })
+
+  /**
+   * Review cycle-8 P2: ordinary rows (no `?` mangle, no interop relay) used to keep flattened
+   * `ps` text even with /proc readable, so any spaced argument — most notably a quoted prompt
+   * — failed the boundary-faithful gate and silently dropped legitimate bypass/resume
+   * evidence on restart/retarget. repairMangledRows now re-serializes ordinary rows from
+   * /proc through `faithfulArgsFromCmdline`; rows with NO /proc evidence stay flattened and
+   * untrusted. Pinned through the pure pieces on every host.
+   */
+  describe('faithfulArgsFromCmdline', () => {
+    it('serializes ordinary /proc argv with the shared quoting dialect', () => {
+      expect(faithfulArgsFromCmdline('codex\0--flag')).toBe('codex --flag')
+      expect(faithfulArgsFromCmdline('codex\0fix the bug')).toBe('codex "fix the bug"')
+      expect(faithfulArgsFromCmdline('codex\0C:\\Program Files\\x\\y.exe'))
+        .toBe('codex "C:\\\\Program Files\\\\x\\\\y.exe"')
+    })
+
+    it('strips exactly one trailing NUL artifact and refuses empty evidence', () => {
+      expect(faithfulArgsFromCmdline('codex\0--flag\0')).toBe('codex --flag')
+      expect(faithfulArgsFromCmdline('')).toBeNull()
+    })
+
+    it('makes the reviewer’s spaced-prompt scenario pass the gate the flattened text fails', () => {
+      // `codex --dangerously-bypass-approvals-and-sandbox "fix the bug"`: the flattened ps
+      // rendering can never prove the flag, but the /proc reconstruction must.
+      const cmdline = 'codex\0--dangerously-bypass-approvals-and-sandbox\0fix the bug'
+      const faithful = faithfulArgsFromCmdline(cmdline)!
+      expect(argsMatchProcCmdlineSerialization(faithful, cmdline)).toBe(true)
+      expect(argsMatchProcCmdlineSerialization(
+        'codex --dangerously-bypass-approvals-and-sandbox fix the bug', cmdline,
+      )).toBe(false)
+      expect(bypassPermissionActiveFromArgv('codex', faithful, true)).toBe(true)
     })
   })
 
