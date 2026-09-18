@@ -338,6 +338,9 @@ export class TerminalAgentReconciler {
               processIdentity: current.processIdentity!,
               args: current.processIdentity?.executable ?? '',
               resumeSessionId: null,
+              // A reconstructed observation carries no argv evidence at all — never let a
+              // consumer read bypass state or session ids out of the executable string.
+              argsBoundaryFaithful: false,
               runtimes: nextRuntimes,
               primaryRuntimeKey: nextRuntimes.some((runtime) => terminalRouteKey(runtime) === current.primaryRuntimeKey)
                 ? current.primaryRuntimeKey

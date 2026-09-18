@@ -24,6 +24,7 @@ import {
   engineProcessMatchScore,
   enrichProcessRows,
   parseProcessRow,
+  processArgvIsBoundaryFaithful,
   processTreePids,
   resumeSessionId,
   setPaneMouseOn,
@@ -45,6 +46,12 @@ export interface DiscoveredTmuxAgent {
   /** The stable engine process argv, used only to bind an explicit `--resume <id>` after discovery. */
   args: string
   resumeSessionId: string | null
+  /**
+   * Whether `args` preserves real argv boundaries (/proc-cmdline-reconstructed). Flattened `ps`
+   * text cannot prove a bypass flag or a resume id out of prompt text — consumers must treat it
+   * as no evidence (review cycle-6, P1 security).
+   */
+  argsBoundaryFaithful: boolean
   /**
    * 'ori' when this process is pointed at OpenRouter (`ori claude` and friends). undefined = the probe
    * could not read the process; the registry then keeps whatever it already knew.
@@ -208,6 +215,9 @@ function paneOwner(
       processIdentity: { pid: row.pid, executable: row.executable, startMarker: row.startMarker },
       args: row.args,
       resumeSessionId: resumeSessionId(engine, row.args),
+      // Evidence flag for consumers of `args`: true only when the string was reconstructed from
+      // /proc cmdline and preserves real argv boundaries (review cycle-6, P1 security).
+      argsBoundaryFaithful: processArgvIsBoundaryFaithful(row),
     },
   }
 }

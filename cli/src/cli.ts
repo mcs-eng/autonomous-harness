@@ -75,6 +75,7 @@ import { basename } from 'node:path'
 import {
   bypassPermissionActive,
   clearPaneRemainOnExit,
+  processArgvIsBoundaryFaithful,
   resolvePaneEngineProcess,
   tmuxPaneState,
 } from './lib/tmux.js'
@@ -2463,7 +2464,12 @@ async function runForeground(session: AuthSession): Promise<void> {
       // The live argv is the truth about the bypass flag, and this is the one place every running
       // agent passes through — so a row written before the flag was persisted at all (or by a build
       // that did not yet) learns it here, before any pane recreation ever needs it.
-      registry.setBypassPermission(current.agentId, bypassPermissionActive(current.engine, observed.args))
+      // ONLY boundary-faithful argv counts: flattened `ps` text lets one prompt argument carrying
+      // the flag text flip the state, and a persisted prompt-enabled bypass survives relaunch
+      // (review cycle-6, P1 security). No faithful evidence here leaves the stored state alone.
+      if (observed.argsBoundaryFaithful) {
+        registry.setBypassPermission(current.agentId, bypassPermissionActive(current.engine, observed.args))
+      }
       // Same idea for a Codex profile: a row that never learned which CODEX_HOME its process runs
       // under learns it from the process, before the hook path validates a transcript against it.
       // Fill-only — a profile the row already knows is never re-derived.
@@ -3806,14 +3812,18 @@ async function runForeground(session: AuthSession): Promise<void> {
   })
 
   /** The bypass-permission mode the LIVE process was launched with — there is nowhere to read it from
-   *  once that process is dead, so both swap paths read it before signalling anything. */
+   *  once that process is dead, so both swap paths read it before signalling anything. Only
+   *  boundary-faithful argv counts: flattened `ps` args let one prompt argument carrying the flag
+   *  text flip the state that the relaunch then re-applies (review cycle-6, P1 security), so a
+   *  non-faithful row is NO EVIDENCE and the relaunch proceeds without a bypass flag. */
   const liveBypassPermission = async (session: RegisteredSession): Promise<boolean> => {
     const identity = session.processIdentity
     if (!identity) return false
     const rows = await processRows()
     const row = rows?.find((candidate) =>
       candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
-    return row ? bypassPermissionActive(session.engine, row.args) : false
+    if (!row || !processArgvIsBoundaryFaithful(row)) return false
+    return bypassPermissionActive(session.engine, row.args)
   }
 
   /**

@@ -8,6 +8,7 @@ import {
   ambiguousAgentProcess,
   argvTokens,
   bypassPermissionActive,
+  bypassPermissionActiveFromArgv,
   engineProcessMatch,
   engineProcessMatchScore,
   parseProcessRow,
@@ -621,6 +622,50 @@ describe('tmux process primitives', () => {
     expect(bypassPermissionActive('pi', 'pi --dangerously-skip-permissions')).toBe(false)
     expect(bypassPermissionActive('hermes', 'hermes --dangerously-skip-permissions')).toBe(false)
     expect(bypassPermissionActive('devin', 'devin --dangerously-skip-permissions')).toBe(false)
+  })
+
+  /**
+   * Review cycle-6 P1 (security): every repair path was boundary-faithful by cycle 5, but the
+   * ordinary no-repair path still handed bypassPermissionActive a FLATTENED `ps` args string —
+   * `ps` space-joins argv with every quote gone, so ONE prompt argument containing the flag
+   * text re-tokenized into a standalone flag. `bypassPermissionActiveFromArgv` makes the
+   * precondition explicit: flattened args are NO EVIDENCE and read false, whatever they contain.
+   */
+  it('treats flattened ps args as no evidence for bypass detection', () => {
+    const flattened = 'codex Explain --dangerously-bypass-approvals-and-sandbox please'
+    // The old shape (boundaryFaithful defaults true) reproduces the reviewer's flip...
+    expect(bypassPermissionActive('codex', flattened)).toBe(true)
+    // ...and the sentinel-bearing form refuses it.
+    expect(bypassPermissionActiveFromArgv('codex', flattened, false)).toBe(false)
+    // A faithful real launch still reads true.
+    expect(bypassPermissionActiveFromArgv(
+      'codex', 'codex --dangerously-bypass-approvals-and-sandbox', true,
+    )).toBe(true)
+  })
+
+  /**
+   * Review cycle-6 P1 (security): resumeSessionId's regex searched INSIDE quoted prompt
+   * arguments, so one prompt 'Explain --session ses_OTHER now' supplied a false resume session
+   * that discovery bound a relaunch to. The token form requires the flag as a STANDALONE token
+   * with the id as the NEXT token, and stops at a bare `--` terminator.
+   */
+  it('does not read a session id out of prompt text', () => {
+    // Quoted prompt argument: the flag text is inside ONE token, never a standalone flag.
+    expect(resumeSessionId(
+      'opencode', '"/usr/local/bin/opencode" "Explain --session ses_OTHER now"',
+    )).toBeNull()
+    // After the `--` option terminator everything is positional prompt text.
+    expect(resumeSessionId('opencode', 'opencode -- Explain --session ses_OTHER now')).toBeNull()
+    expect(resumeSessionId('cursor', 'agent -- --resume 53d3843c-724e-47ff-ae3a-9fedfa328bba')).toBeNull()
+    // A real flag still binds.
+    expect(resumeSessionId('opencode', 'opencode --session ses_05e335115ffeM05DT5hJHeN3Vp'))
+      .toBe('ses_05e335115ffeM05DT5hJHeN3Vp')
+  })
+
+  /** Review cycle-6 P2: codex.exe/claude.exe native names scored 0 while opencode.exe scored. */
+  it.each(['claude', 'codex'] as const)('recognises native Windows %s.exe basenames', (engine) => {
+    expect(engineProcessMatchScore({ executable: `${engine}.exe`, args: `${engine}.exe --version` }, engine))
+      .toBeGreaterThan(0)
   })
 
   it('maps neutral visible/history and ANSI capture options to tmux flags', () => {

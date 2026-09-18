@@ -550,11 +550,14 @@ interface EngineProcessSignature {
 /** Vendor-supported native names and launcher/package entrypoints, independent of install prefix. */
 export const ENGINE_PROCESS_SIGNATURES: Readonly<Record<RegisteredSession['engine'], EngineProcessSignature>> = {
   claude: {
-    basenames: [/^claude$/],
+    // Windows interop repair exposes native names (comm / relayed basename can be `claude.exe`,
+    // `codex.exe`) — the optional `.exe` covers direct native Windows launches too
+    // (review cycle-6, P2).
+    basenames: [/^claude(?:\.exe)?$/],
     entrypoints: [/@anthropic-ai[\/\\]claude-code[\/\\]cli\.js$/],
   },
   codex: {
-    basenames: [/^codex$/, /^codex-(?:aarch64|x86_64)-(?:apple-darwin|unknown-linux-(?:gnu|musl))$/],
+    basenames: [/^codex(?:\.exe)?$/, /^codex-(?:aarch64|x86_64)-(?:apple-darwin|unknown-linux-(?:gnu|musl))$/],
     entrypoints: [/@openai[\/\\]codex[\/\\]bin[\/\\]codex(?:\.js)?$/],
   },
   cursor: {
@@ -799,24 +802,90 @@ const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]
  * the whole token list let a relayed prompt argument `-- --dangerously-bypass-approvals-and-
  * sandbox` — the flag text as the positional after the terminator — read as an active bypass
  * flag (review cycle-5, P1 security); the flag must appear BEFORE the terminator to count.
+ *
+ * This function must ONLY ever see boundary-faithful argv — a string reconstructed from the
+ * process's raw NUL argv (/proc cmdline) through `quoteArgvElement`, where one prompt argument
+ * stays one quoted token. The ordinary `ps` row carries FLATTENED arguments (`ps` space-joins
+ * argv with every quote gone), so on that shape one prompt argument containing the flag text
+ * re-tokenizes into a standalone flag and the check flips true from prompt text alone
+ * (review cycle-6, P1 security). The undefined sentinel marks exactly that no-evidence case:
+ * `processArgvIsBoundaryFaithful` decides per row, and no caller may pass a flattened `ps`
+ * args string through without it.
  */
 export function bypassPermissionActive(engine: RegisteredSession['engine'], args: string): boolean {
+  return bypassPermissionActiveFromArgv(engine, args, true)
+}
+
+/**
+ * The sentinel-bearing form: `boundaryFaithful === false` means the args string came from a
+ * source that cannot preserve argv boundaries (flattened `ps` output), where flag text inside
+ * one prompt argument is INDISTINGUISHABLE from a real flag. Rather than risk a prompt
+ * enabling bypass mode on relaunch (cli.ts persists this state), flattened args are
+ * NO EVIDENCE — the function reads false. Only /proc-cmdline-reconstructed rows
+ * (the interop and `?`-mangle repairs) pass true.
+ */
+export function bypassPermissionActiveFromArgv(
+  engine: RegisteredSession['engine'],
+  args: string,
+  boundaryFaithful: boolean,
+): boolean {
   const flags = BYPASS_PERMISSION_FLAGS[engine]
   if (!flags) return false
+  // Flattened `ps` args can never prove a bypass flag: refuse to persist state from them.
+  if (!boundaryFaithful) return false
   const tokens = argvTokens(args)
   const terminator = tokens.indexOf('--')
   const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
   return flags.every((flag) => optionTokens.includes(flag))
 }
 
-/** The session id an engine was told to resume, or null when argv does not name one. */
+/**
+ * Whether a row's `args` string preserves real argv boundaries — the precondition for reading
+ * bypass state or session ids out of it. Only the /proc cmdline repairs know the true NUL argv;
+ * every other row carries `ps`'s flattened space-join, where one prompt argument is no longer
+ * distinguishable from several.
+ */
+export function processArgvIsBoundaryFaithful(row: Pick<ProcessRow, 'pid' | 'args'>): boolean {
+  if (process.platform !== 'linux') return false
+  const cmdline = readProcField(row.pid, 'cmdline')
+  if (cmdline === null || cmdline === '') return false
+  const argv = cmdline.split('\0')
+  // Mirror the repairs' one-artifact strip (review cycle-5, P2): split() carries exactly ONE
+  // empty artifact after the final NUL.
+  if (cmdline.endsWith('\0') && argv.length && argv[argv.length - 1] === '') argv.pop()
+  return row.args === argv.map(quoteArgvElement).join(' ').trimEnd()
+}
+
+/**
+ * The session id an engine was told to resume, or null when argv does not name one.
+ *
+ * Read from TOKENS, not the raw string: the regex form searched inside quoted prompt arguments
+ * and after `--`, so one prompt argument 'Explain --session ses_OTHER now' supplied a false
+ * resume session that discovery bound a relaunch to (review cycle-6, P1 security). A flag must
+ * be a STANDALONE token, its value the next token — and like bypass detection, the scan stops
+ * at a bare `--` option terminator, whose tail is positional prompt text however flag-shaped.
+ * Callers should also honour `processArgvIsBoundaryFaithful`: like bypass state, a session id
+ * read from flattened `ps` text is a guess, not evidence.
+ */
 export function resumeSessionId(engine: RegisteredSession['engine'], args: string): string | null {
   const spec = RESUME_ARGS[engine]
   if (!spec) return null
-  for (const flag of spec.flags) {
-    const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const value = new RegExp(`(?:^|\\s)${escaped}(?:=|\\s+)(\\S+)`, 'i').exec(args)?.[1]
-    if (value && spec.id.test(value)) return value
+  const tokens = argvTokens(args)
+  const terminator = tokens.indexOf('--')
+  const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
+  for (let index = 0; index < optionTokens.length; index++) {
+    const token = optionTokens[index]
+    for (const flag of spec.flags) {
+      // `--resume=<id>` spellings carry the value inside the flag token itself.
+      if (token.toLowerCase() === flag.toLowerCase() && index + 1 < optionTokens.length) {
+        const value = optionTokens[index + 1]
+        if (spec.id.test(value)) return value
+      }
+      const equals = token.toLowerCase().startsWith(`${flag.toLowerCase()}=`)
+        ? token.slice(flag.length + 1)
+        : null
+      if (equals !== null && spec.id.test(equals)) return equals
+    }
   }
   return null
 }

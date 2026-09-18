@@ -648,6 +648,9 @@ class LocalCliDiscovery {
         agentProjects: _localAgentProjects(
           body['sessions'],
           identity.environment,
+          // The daemon may run inside WSL2 while the GUI runs on Windows: its session
+          // cwds follow the daemon's path dialect, not this host's (review cycle-6, P2).
+          _daemonPathPlatform(identity),
         ),
       ),
       pid: pid,
@@ -656,9 +659,37 @@ class LocalCliDiscovery {
   }
 }
 
+/// Which path dialect a daemon's session cwds arrive in.
+enum _DaemonPathPlatform {
+  /// Windows drive/UNC paths (`C:\work`, `\\server\share`) and `\`-relative `~` forms.
+  windows,
+
+  /// POSIX paths (`/home/user/project`) — macOS, Linux, or a WSL2 daemon.
+  posix,
+}
+
+/// The platform whose path rules validate the daemon's session cwds.
+///
+/// The daemon may not share the GUI's platform: on Windows the supported CLI runs inside
+/// WSL2, and its sessions carry POSIX cwds (`/home/user/project`, `/mnt/c/...`) that the
+/// Windows drive/UNC regex silently dropped, removing project-folder metadata for agents
+/// without structured project information (review cycle-6, P2). `LocalMachineIdentity`
+/// already answers which filesystem the selected CLI lives on.
+_DaemonPathPlatform _daemonPathPlatform(LocalMachineIdentity identity) {
+  if (!Platform.isWindows) return _DaemonPathPlatform.posix;
+  // An identity resolution failure must not silently fall back to Windows rules — the
+  // selected CLI is still the WSL one the moment it answers. Any Windows-rooted doubt
+  // resolves POSIX: a `C:\...` cwd simply fails the POSIX check and is dropped, while the
+  // reverse mistake dropped every real WSL project folder.
+  return identity.usesWsl || identity.wslSelected != null || identity.wslComputerId != null
+      ? _DaemonPathPlatform.posix
+      : _DaemonPathPlatform.windows;
+}
+
 Map<String, AgentProject> _localAgentProjects(
   Object? sessions,
   Map<String, String> environment,
+  _DaemonPathPlatform pathPlatform,
 ) {
   if (sessions is! List) return const {};
   final projects = <String, AgentProject>{};
@@ -677,21 +708,32 @@ Map<String, AgentProject> _localAgentProjects(
     String cwd = rawCwd;
     if (cwd == '~' ||
         cwd.startsWith('~/') ||
-        (Platform.isWindows && cwd.startsWith('~\\'))) {
+        (pathPlatform == _DaemonPathPlatform.windows && cwd.startsWith(r'~\'))) {
       if (home == null || home.isEmpty) continue;
       cwd = '$home${cwd.substring(1)}';
     }
-    final absolute = Platform.isWindows
+    // Validate against the DAEMON's path dialect, not the GUI host's.
+    final absolute = pathPlatform == _DaemonPathPlatform.windows
         ? RegExp(r'^[A-Za-z]:[\\/]|^\\\\').hasMatch(cwd)
         : cwd.startsWith('/');
     if (!absolute) continue;
     try {
       cwd = File(cwd).uri.normalizePath().toFilePath();
+      if (pathPlatform == _DaemonPathPlatform.posix && Platform.isWindows) {
+        // `toFilePath()` is host-relative: on a Windows GUI it renders a POSIX path with
+        // backslashes and a leading drive-relative `\`. The daemon's cwds must stay in the
+        // daemon's dialect, so re-normalize the URI path text instead.
+        final posix = Uri.parse('file://${Uri(path: cwd.replaceAll(r'\', '/')).path}');
+        cwd = posix.normalizePath().toFilePath(windows: false);
+      }
       // Directory paths in the status may carry a trailing separator.
-      final separator = Platform.pathSeparator;
+      final separator = pathPlatform == _DaemonPathPlatform.windows
+          ? r'\'
+          : '/';
       while (cwd.length > 1 &&
           cwd.endsWith(separator) &&
-          !(Platform.isWindows && RegExp(r'^[A-Za-z]:\\$').hasMatch(cwd))) {
+          !(pathPlatform == _DaemonPathPlatform.windows &&
+              RegExp(r'^[A-Za-z]:\\$').hasMatch(cwd))) {
         cwd = cwd.substring(0, cwd.length - 1);
       }
       final parts = cwd.split(separator).where((part) => part.isNotEmpty);

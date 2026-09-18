@@ -1309,11 +1309,15 @@ class EnvironmentProvisioner {
   }) {
     final installStep = (
       title: usable.isEmpty
-          ? 'Install the Harness CLI inside the distribution'
+          ? 'Install the Harness CLI inside Ubuntu'
           : 'Install the Harness CLI inside ${usable.first}',
       detail: 'managed Node 20+ · tmux · ~/.harness',
+      // The command must name a real target. With no usable distribution, an unnamed
+      // `wsl -- bash -lc …` would run in the implicit default — exactly the excluded
+      // docker-desktop when that is the only distro (review cycle-6, P1) — so the
+      // no-distro steps point at Ubuntu, the distribution they tell the person to install.
       command: WslRuntime.installCommandForDisplay(
-        distro: usable.isEmpty ? null : usable.first,
+        distro: usable.isEmpty ? 'Ubuntu' : usable.first,
       ),
     );
     if (!wslAvailable) {

@@ -342,6 +342,53 @@ void main() {
     skip: Platform.isWindows,
   );
 
+  /**
+   * Review cycle-6 P2: the daemon may run inside WSL2 while the GUI runs on Windows, and its
+   * session cwds are POSIX paths. The old code validated them with Platform.isWindows rules,
+   * so the drive/UNC regex dropped every real WSL project folder. With the identity reporting
+   * a WSL CLI, `/home/...` and `/mnt/c/...` cwds must publish as agent projects.
+   */
+  test(
+    'keeps POSIX project folders from a WSL daemon on a Windows GUI host',
+    () async {
+      const computerId = '0123456789abcdef0123456789abcdef';
+      final identityFile = File('${scratch.path}/computer-id')
+        ..writeAsStringSync(computerId);
+      server = await serveStatus(
+        await freePort(),
+        () => {
+          ...readyStatus(computerId),
+          'sessions': [
+            {'id': 'agent', 'cwd': '/home/user/project'},
+            {'id': 'drivemount', 'cwd': '/mnt/c/Users/user/project/'},
+            {'id': 'windowsnative', 'cwd': r'C:\work\project'},
+          ],
+        },
+      );
+      final endpoint = await LocalCliDiscovery(
+        config: AppConfig(
+          apiBaseUrl: 'https://fixture.invalid',
+          localCliBaseUrl: 'http://127.0.0.1:${server!.port}',
+        ),
+        identity: LocalMachineIdentity(
+          computerIdFile: identityFile,
+          environment: const {},
+          // A reader both selects WSL and answers the id, so `probe()` gets past
+          // its identity gate exactly like a real WSL daemon does.
+          wslComputerId: () async => computerId,
+        ),
+      ).discover();
+      final projects = endpoint!.agentProjects;
+      expect(projects.keys, ['agent', 'drivemount']);
+      expect(projects['agent']!.cwd, '/home/user/project');
+      expect(projects['agent']!.name, 'project');
+      // A trailing separator in the status is trimmed, not doubled.
+      expect(projects['drivemount']!.cwd, '/mnt/c/Users/user/project');
+      expect(projects['drivemount']!.name, 'project');
+    },
+    skip: !Platform.isWindows,
+  );
+
   test(
     'supervision publishes changing folders without reconnecting or spawning',
     () async {
