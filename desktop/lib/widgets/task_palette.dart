@@ -176,6 +176,10 @@ abstract final class _D {
 /// unsure" arrive at the same place — a question, never a silent wrong guess.
 const double _confidentEnough = 0.85;
 
+@visibleForTesting
+bool routeNeedsConfirmation(RouteAnswer answer) =>
+    answer.via.startsWith('jev') || answer.confidence < _confidentEnough;
+
 class _TaskPalette extends StatefulWidget {
   const _TaskPalette({required this.notifier, this.spoken});
 
@@ -315,7 +319,9 @@ class _TaskPaletteState extends State<_TaskPalette> {
       return;
     }
 
-    if (answer.confidence >= _confidentEnough) {
+    // Jev is an optional typed ranker, and its probability has not been calibrated as an autonomous
+    // dispatch threshold. Its answer always stops here for explicit confirmation.
+    if (!routeNeedsConfirmation(answer)) {
       _answer = answer; // so the receipt can name who took it
       await _commit(answer.agentId, answer.machineId, task);
       return;
@@ -747,6 +753,8 @@ class _TaskPaletteState extends State<_TaskPalette> {
   Widget _question() {
     final answer = _answer;
     final heuristic = answer?.via == 'heuristic';
+    final jev = answer?.via == 'jev';
+    final jevFallback = answer?.via == 'jev-fallback';
     final reason = (answer?.reason ?? '').trim();
     final weighed = answer?.weighed ?? 0;
     final machines = answer?.machines ?? 0;
@@ -780,6 +788,10 @@ class _TaskPaletteState extends State<_TaskPalette> {
                 TextSpan(
                   text: heuristic
                       ? 'the router could not run, so these are name matches'
+                      : jev
+                      ? 'Jev ranked these choices; confirm where to send it'
+                      : jevFallback
+                      ? 'Jev could not answer, so these are local name matches'
                       : 'not sure enough to send it',
                 ),
               ],
@@ -788,7 +800,7 @@ class _TaskPaletteState extends State<_TaskPalette> {
           // The router's own words. It has always sent them and the window has always dropped them,
           // which left the person guessing at a judgement the machine had already explained. The design
           // has no slot for it, so it goes here, quieter than the line above it.
-          if (!heuristic && reason.isNotEmpty)
+          if (!heuristic && !jev && !jevFallback && reason.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 3),
               child: Text(

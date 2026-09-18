@@ -123,6 +123,7 @@ import {
 } from './lib/summarize.js'
 import type { CableAgent } from './cable/cableSession.js'
 import { routeVoiceTask, setVoiceRouterDeviceConnected, setVoiceRouterSessions, shutdownVoiceRouter, type RouterAgent } from './lib/voiceRouter.js'
+import { routeTaskWithJev } from './lib/jevRouter.js'
 import { tailFile } from './lib/sessions.js'
 import { E2eeStore } from './lib/e2ee/store.js'
 import { b64e } from './lib/e2ee/core.js'
@@ -3147,6 +3148,40 @@ async function runForeground(session: AuthSession): Promise<void> {
         // Never a silent truncation: a route that could not have picked the right agent must not read
         // like a route that considered it and said no.
         console.log(`[route] ${all.length} agents · weighing the first ${ranked.length} (open tiles first)`)
+      }
+      if (env.TASK_ROUTER === 'jev') {
+        const routed = await routeTaskWithJev(
+          text,
+          ranked.map((agent) => ({ id: agent.id, name: agent.name, engine: agent.engine })),
+          { apiKey: process.env.TYPESAFE_API_KEY ?? '' },
+        )
+        const named = (id: string) => ranked.find((agent) => agent.id === id)
+        const scores = new Map(routed.scores.map((entry) => [entry.agentId, entry.confidence]))
+        const winner = named(routed.agentId)
+        const ordered = [winner, ...routed.scores.map((entry) => named(entry.agentId)),
+          ...ranked.filter((agent) => agent.id !== routed.agentId && !scores.has(agent.id))]
+          .filter((agent, index, list): agent is NonNullable<typeof agent> =>
+            !!agent && list.findIndex((entry) => entry?.id === agent.id) === index)
+        console.log(`[route] Jev ${routed.via === 'jev' ? 'answered' : 'unavailable; local metadata fallback'} · candidates=${ranked.length}`)
+        return {
+          agentId: routed.agentId,
+          machineId: all.find((entry) => entry.id === routed.agentId)?.machineId ?? '',
+          name: winner?.name ?? '',
+          confidence: routed.confidence,
+          reason: '',
+          weighed: ranked.length,
+          machines: new Set(ranked.map((agent) => agent.machine).filter(Boolean)).size,
+          via: routed.via,
+          candidates: ordered.map((agent) => ({
+            agentId: agent.id,
+            name: agent.name,
+            machineId: all.find((entry) => entry.id === agent.id)?.machineId ?? '',
+            machine: agent.machine ?? '',
+            engine: agent.engine ?? '',
+            recent: '',
+            confidence: agent.id === routed.agentId ? routed.confidence : scores.get(agent.id) ?? 0,
+          })),
+        }
       }
       // Recaps AFTER the cap, and in parallel: a remote agent's recap is an RPC to its machine, so
       // fetching for agents that were never going to be weighed is latency spent on nothing. They are
