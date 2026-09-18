@@ -1,5 +1,52 @@
 # Windows 11 migration
 
+## Upstream sync, Jev task routing, and the fork-owned simplification pass (2026-09-18)
+
+**Sync.** The fork absorbed 558 upstream commits (through upstream main
+`3cd4014a`). All 16 conflicting files were resolved to keep the port's
+boundary-faithful argv evidence gate, the `--` option-terminator guard, and the
+WSL-parameterized tests while adopting upstream's ordered/legacy bypass-flag
+matching (now evaluated only inside the boundary-faithful gate), the
+`observed.engine` fix, viewer-mode nullable discovery, and the AgentPicker-first
+New Agent dialog. Eight diverged shared desktop test files were re-aligned
+byte-for-byte with upstream to cut future merge friction.
+
+Verification was done against control runs, not test counts: every desktop
+failure in the merged tree (48) reproduces on pure upstream at the same commit
+on this Windows host — upstream qualifies macOS/Linux only — and the CLI failure
+delta is upstream's new suites (dsh, grid, orchestrator, sharing) failing on
+Windows the same way upstream-only does. Port-owned specs (tmux 110 tests,
+sessionRepair, reconciler, discovery; 226 total) pass. `flutter analyze` and the
+CLI typecheck are clean. Zero port regressions were found or introduced.
+
+**Jev routing (opt-in).** `TASK_ROUTER=jev` enables TypeSafe Jev ranking for the
+task palette. Only the task text and minimal candidate descriptions travel
+(opaque `agent_N` keys mapped back locally); a malformed, slow, or absent answer
+fails closed to the local metadata fallback. The API key reaches WSL through
+`WSLENV` — never argv, the bash script, or logs — and every Jev-routed answer
+stops at the chooser for explicit confirmation, because its probabilities are
+not calibrated as an autonomous dispatch threshold.
+
+**Simplification pass (fork-owned code only; mergeability with upstream kept).**
+One `_refuseDocker` refusal replaces three; `resolveHomeDirectory` replaces
+three HOME/USERPROFILE ladders; `MissTtlCache` replaces two identical
+hit-forever/recheck-after-TTL caches; `isWindowsDialectPath` replaces a
+duplicated drive-prefix regex; the environment-setup status rendering collapsed
+to one (color, icon, label) switch; the UTF-16LE sniff/decode heuristic is
+single-sourced with a `bomIsDecisive` flag preserving the cycle-5 no-BOM
+short-circuit on the latin1 seam; the publish-managed-{node,tmux,grid}-runtime
+scripts share `scripts/lib/publish-common.sh` (the gsutil/WIF rationale now
+stated once); and the bounded-process primitive, UTF-16 codec, and daemon
+session→project parsing moved out of the two ~800-line WSL god files. The
+DioException triage ladder was deliberately LEFT as a switch: every arm carries
+load-bearing rationale comments and a nested socket check a table would bury.
+
+**Bug fixed — `run()`'s bound now covers resolution.** Upstream's new
+`runTimeout` test exposed that on Windows the bound was applied only to the
+final command, while `resolve()` (which probes WSL) ran unbounded first: a
+probe that never answers hung the whole wait forever, exactly what the test
+pins. The bound now wraps the whole attempt.
+
 ## Preview 3 engine installation repairs (2026-09-18)
 
 Copilot's Windows npm launcher was discoverable inside WSL but could not run with
