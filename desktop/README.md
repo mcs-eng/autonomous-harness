@@ -45,13 +45,19 @@ Complete any Windows restart and Ubuntu user creation requested by that installe
 
 ### Build an unsigned Windows bundle
 
-Use Flutter 3.47 or newer, the Visual Studio Desktop development with C++ workload, and the Windows SDK. From `desktop/`, in Git Bash:
+Use Flutter 3.47 or newer, Node.js 22 with npm, the Visual Studio Desktop
+development with C++ workload, and the Windows SDK. Install the CLI's locked
+build dependencies once with `npm ci` from `cli/`. From `desktop/`, in Git Bash:
 
 ```bash
-bash scripts/build-windows-release.sh
+WINDOWS_RELEASE_VERSION=1.0.0-windows.1 bash scripts/build-windows-release.sh
 ```
 
-The script runs dependency resolution, analysis, tests, and a Windows release build. It packages the entire `Release/` directory, app-local MSVC runtime files, and license notices under `dist/`, then checks the portable SHA-256 file and archive contents. Keep the executable, DLLs, and `data/` directory together when extracting it.
+The script runs dependency resolution, analysis, tests, a Windows release build,
+and a CLI typecheck/bundle build. It packages the entire `Release/` directory,
+matching CLI, app-local MSVC runtime files, and license notices under `dist/`,
+then checks the portable SHA-256 file and archive contents. Keep the executable,
+DLLs, `data/`, and `harness-cli/` directories together when extracting it.
 
 For investigating a known failing baseline, `ALLOW_TEST_FAILURES=1` permits packaging after test failures and returns a nonzero result. Such a bundle is a prototype, not a passed test run. Analysis and native import-inspection failures remain visible. The script does not sign, upload, or publish the bundle.
 
