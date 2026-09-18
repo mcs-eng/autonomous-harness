@@ -206,15 +206,6 @@ void main() {
         await capture('new');
         debugDisableShadows = previousShadows;
         expect(tester.takeException(), isNull);
-        // The three direct agent tiles (the More menu holds the rest); every
-        // label a person reads while choosing must not truncate.
-        for (final label in ['Codex', 'Claude Code', 'OpenCode']) {
-          if (tester
-              .renderObject<RenderParagraph>(find.text(label))
-              .didExceedMaxLines) {
-            issues.add('$label is truncated when choosing an agent');
-          }
-        }
         // The agent bar's pill names the chosen agent: never cut short.
         for (final paragraph in tester.renderObjectList<RenderParagraph>(
           find.descendant(

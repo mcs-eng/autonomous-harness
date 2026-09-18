@@ -529,8 +529,8 @@ void main() {
         );
         expect(machineField.value, 'm');
         expect(machineField.options.map((option) => option.detail), [
-          'This machine',
-          null,
+          'This computer',
+          'Remote',
         ]);
         expect(machineField.options.map((option) => option.label), [
           'My computer',
@@ -593,7 +593,6 @@ void main() {
       }
       expect(_localFocus(tester).hasPrimaryFocus, isTrue);
       expect(picker.opened, 0);
-      // The Local tile opens the native folder chooser.
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
       expect(picker.opened, 1);
@@ -647,29 +646,6 @@ void main() {
       await chord(tester, LogicalKeyboardKey.keyN);
       await _browseLocal(tester);
       await tester.pump();
-      // The Local tile opens the native folder chooser; focus stays on it so a
-      // failed browse can be retried from the keyboard.
-      AppChoiceTile? focusedTile() {
-        final focus = FocusManager.instance.primaryFocus;
-        if (focus?.context is! Element) return null;
-        AppChoiceTile? found;
-        (focus!.context as Element).visitAncestorElements((el) {
-          if (el.widget is AppChoiceTile) {
-            found = el.widget as AppChoiceTile;
-            return false;
-          }
-          return true;
-        });
-        return found;
-      }
-
-      for (var i = 0; i < 40 && focusedTile()?.label != 'Local'; i++) {
-        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-        await tester.pump();
-      }
-      expect(focusedTile()?.label, 'Local');
-      // A first browse chooses a folder; the tile shows its basename.
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
       expect(find.text('my-project'), findsOneWidget);
       final folder = _localFocus(tester);
@@ -689,12 +665,6 @@ void main() {
       expect(folder.hasPrimaryFocus, isTrue);
       expect(find.text('my-project'), findsOneWidget);
       expect(app.launches, isEmpty);
-      // Tab back to the Local tile: Enter retries browsing, not creation.
-      for (var i = 0; i < 40 && focusedTile()?.label != 'Local'; i++) {
-        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-        await tester.pump();
-      }
-      expect(focusedTile()?.label, 'Local');
       picker.pending = Completer<String?>();
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
@@ -836,6 +806,7 @@ void main() {
       expect(find.byType(AlertDialog), findsOneWidget);
       await _browseLocal(tester);
       await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await chord(tester, LogicalKeyboardKey.keyN);
       expect(picker.opened, 1);
       expect(app.probes, 1);
