@@ -625,7 +625,8 @@ class RouteAnswer {
   final int weighed;
   final int machines;
 
-  /// 'model' when a classifier answered, 'heuristic' when name matching stood in for it, '' when the
+  /// 'model' when a classifier answered, 'heuristic' when name matching stood in for it, 'jev' when
+  /// Jev ranked the choices, and 'jev-fallback' when its local metadata fallback did, or '' when the
   /// daemon did not say.
   ///
   /// Both land under the threshold BY DESIGN — an unsure model and a router that could not run must both

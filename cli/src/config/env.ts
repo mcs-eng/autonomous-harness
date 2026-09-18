@@ -356,6 +356,9 @@ const envSchema = z.object({
   RECAP_WITHOUT_DEVICE: z.string().default('true').transform((v) => v !== 'false'),
   // Model for the voice router one-shot classifier (Overview voice → pick the agent). Small/fast by default.
   VOICE_ROUTE_MODEL: z.string().default('haiku'),
+  // Explicit opt-in for TypeSafe Jev task routing. The API key stays in process.env and is never
+  // copied into parsed config, logs, argv, or a desktop RPC frame.
+  TASK_ROUTER: z.enum(['default', 'jev']).default('default'),
   // Test override: run the recap even with no device connected (mirrors node isRecapForced()).
   RECAP_FORCE: z.string().default('false').transform((v) => v === 'true'),
   // Log one line per backend frame (type + audience + a few opaque ids). OFF by default: it is noisy,

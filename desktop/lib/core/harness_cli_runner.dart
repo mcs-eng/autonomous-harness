@@ -198,7 +198,7 @@ class HarnessCliRunner {
                 arguments,
               )
             : _wsl.cliArguments(probe, arguments),
-        environment: _commandEnvironment(),
+        environment: _windowsCommandEnvironment(),
         source: HarnessCliSource.wsl,
         wslDistro: probe.distro,
       );
@@ -399,6 +399,20 @@ class HarnessCliRunner {
       commandEnvironment['LC_ALL'] = 'C.UTF-8';
     }
     return commandEnvironment;
+  }
+
+  /// WSL imports only variables named in WSLENV. Keep the TypeSafe credential in the child process
+  /// environment: putting it in the bash script or argv would expose it in process listings and logs.
+  Map<String, String> _windowsCommandEnvironment() {
+    final result = _commandEnvironment();
+    final forwarded = <String>{
+      for (final entry in (result['WSLENV'] ?? '').split(':'))
+        if (entry.isNotEmpty) entry,
+      if ((result['TASK_ROUTER'] ?? '').isNotEmpty) 'TASK_ROUTER',
+      if ((result['TYPESAFE_API_KEY'] ?? '').isNotEmpty) 'TYPESAFE_API_KEY',
+    };
+    if (forwarded.isNotEmpty) result['WSLENV'] = forwarded.join(':');
+    return result;
   }
 }
 

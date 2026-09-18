@@ -191,7 +191,13 @@ void main() {
 
     final invocation = await HarnessCliRunner(
       harnessHome: Directory('${scratch.path}/host-home/.harness'),
-      environment: {'USERPROFILE': '${scratch.path}/host-home', 'PATH': ''},
+      environment: {
+        'USERPROFILE': '${scratch.path}/host-home',
+        'PATH': '',
+        'TASK_ROUTER': 'jev',
+        'TYPESAFE_API_KEY': 'not-logged-or-argv',
+        'WSLENV': 'EXISTING',
+      },
       isWindows: true,
       requiresWindowsBundle: true,
       windowsBundleDirectory: bundle,
@@ -211,6 +217,11 @@ void main() {
     expect(script, contains(r'export ADAPTER_CLI_DIR="$bundle_dir"'));
     expect(script, contains(r'exec "$node" "$bundle_dir/cli.js" "$@"'));
     expect(invocation.environment['ADAPTER_UPDATE_DISABLE'], isNull);
+    expect(
+      invocation.environment['WSLENV']!.split(':'),
+      containsAll(['EXISTING', 'TASK_ROUTER', 'TYPESAFE_API_KEY']),
+    );
+    expect(invocation.arguments.join(' '), isNot(contains('not-logged-or-argv')));
   });
 
   test(
