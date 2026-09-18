@@ -4,7 +4,6 @@ import { execFile, spawn } from 'child_process'
 import { readFileSync } from 'node:fs'
 import { readlink } from 'node:fs/promises'
 import { platform } from 'node:os'
-import { basename } from 'path'
 import { registry, type ProcessIdentity, type RegisteredSession } from './registry.js'
 import {
   agentAliasOwner,
@@ -23,6 +22,21 @@ function cleanPaneTitle(title: string): string | null {
     .trim()
     .slice(0, 80)
   return cleaned || null
+}
+
+/**
+ * Path base name, splitting on BOTH separators regardless of host platform.
+ *
+ * `path.basename` is host-dependent: on Windows it also splits `/`, but on Linux/macOS it does not
+ * split `\\`. This file parses process rows whose argv can carry WINDOWS paths while the daemon
+ * itself runs INSIDE WSL/Linux — the WSL-interop relay (`comm=node.exe`, argv
+ * `/init \0 C:\...\node.exe \0 …codex.js`) is the exact case, and host basename silently defeated
+ * the interpreter/entrypoint walk there (review finding P1, 2026-09-17). Every base-name read in
+ * this module must go through this helper so a row parses identically on any host.
+ */
+function basename(path: string): string {
+  const start = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return start === -1 ? path : path.slice(start + 1)
 }
 
 /** Current tmux pane titles keyed by pane id. AI CLIs update this with their live session title. */
@@ -54,10 +68,43 @@ export interface ProcessRow extends ProcessIdentity {
 }
 
 export function argvTokens(args: string): string[] {
-  return (args.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((token) => {
-    const quoted = (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
-    return quoted ? token.slice(1, -1) : token
-  })
+  // Escape-aware split, Windows-CRT style inside double quotes: `\"` is a literal quote, not a
+  // boundary. The WSL-interop repair (repairInteropRowFromCmdline) re-quotes relayed argv exactly
+  // this way, and a naive quote-aware split let one escaped `\"` inside a relayed PROMPT argument
+  // close the token early — the flag tail after it re-tokenized as standalone CLI flags, and
+  // bypassPermissionActive() flipped to true from prompt text alone (review cycle-2, P1 security).
+  const tokens: string[] = []
+  let index = 0
+  while (index < args.length) {
+    while (index < args.length && /\s/.test(args[index])) index++
+    if (index >= args.length) break
+    if (args[index] === '"' || args[index] === "'") {
+      const close = args[index]
+      index++
+      let token = ''
+      while (index < args.length && args[index] !== close) {
+        // Only inside DOUBLE quotes is `\"` an escaped literal quote (what quote() emits);
+        // single-quoted shells treat backslashes literally.
+        if (close === '"' && args[index] === '\\' && args[index + 1] === '"') {
+          token += '"'
+          index += 2
+        } else {
+          token += args[index]
+          index++
+        }
+      }
+      if (index < args.length) index++ // consume the closing quote
+      tokens.push(token)
+    } else {
+      let token = ''
+      while (index < args.length && !/\s/.test(args[index])) {
+        token += args[index]
+        index++
+      }
+      tokens.push(token)
+    }
+  }
+  return tokens
 }
 
 /**
@@ -182,31 +229,78 @@ function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
     // carries the relayed Windows argv. Dropping the `/init` prefix keeps `ps args` from
     // double-listing it and puts the interpreter (`node.exe`) first, where `processEntrypoint`
     // walks past it to the real entrypoint (`.../@openai/codex/bin/codex.js`).
-    const argv = (readProcField(row.pid, 'cmdline') ?? '')
-      .split('\0')
-      .filter(Boolean)
-    if (argv[0] !== '/init') return row
-    // `/init <program> <args…>` — without the relayed program there is nothing to expose.
-    if (argv.length < 2) return row
-    // Node rewrites its argv when it sets process.title: [interpPath, interpName, script, …].
-    // The bare duplicate would otherwise become the "entrypoint" the walk stops on, so drop it
-    // when token 2 is the same file name as the resolved interpreter path in token 1.
-    if (argv.length >= 3 && basename(argv[1]).toLowerCase() === argv[2].toLowerCase()) {
-      argv.splice(2, 1)
-    }
-    // Re-join for the `args` field. Elements may contain spaces (Windows install paths do), and
-    // argvTokens() re-splits this string on whitespace, honouring double quotes — so quote any
-    // element that carries one. Without this, `C:\Program Files\nodejs\node.exe` re-splits into
-    // two tokens and the entrypoint walk never reaches the engine script.
-    const quote = (token: string): string =>
-      /[\s"]/.test(token) ? `"${token.replace(/"/g, '\\"')}"` : token
-    const args = argv.slice(1).map(quote).join(' ')
-    const comm = readProcField(row.pid, 'comm')?.trimEnd()
-    const relayed = comm && comm !== '/init' && comm !== 'init'
-      ? comm
-      : basename(argv[1])
-    return { ...row, args, executable: relayed }
+    return { ...row, ...repairInteropRow(row) }
   })
+}
+
+/**
+ * Rewrites one WSL-interop row from its /proc cmdline argv. Pure and
+ * host-independent: exportable for tests on every platform (the row scan that
+ * calls it stays Linux-gated because /proc only exists there).
+ *
+ * Returns {} when the row is NOT an interop relay (cmdline missing, no `/init`
+ * head) so callers can spread it conditionally; otherwise { args, executable }.
+ */
+export function repairInteropRow(
+  row: Pick<ProcessRow, 'pid' | 'args' | 'executable'>,
+): Partial<Pick<ProcessRow, 'args' | 'executable'>> {
+  return repairInteropRowFromCmdline(
+    readProcField(row.pid, 'cmdline') ?? '',
+    readProcField(row.pid, 'comm'),
+  )
+}
+
+/**
+ * The interop repair itself, with the /proc reads lifted out so it can be
+ * pinned by tests on any host: [cmdline] is the raw NUL-joined /proc cmdline
+ * (empty when unreadable), [comm] the /proc comm (null when unreadable).
+ *
+ * Returns {} when the row is NOT an interop relay; otherwise { args,
+ * executable } fields to spread over the original row.
+ */
+export function repairInteropRowFromCmdline(
+  cmdline: string,
+  comm: string | null,
+): Partial<Pick<ProcessRow, 'args' | 'executable'>> {
+  const argv = cmdline.split('\0').filter(Boolean)
+  if (argv[0] !== '/init') return {}
+  // `/init <program> <args…>` — without the relayed program there is nothing to expose.
+  if (argv.length < 2) return {}
+  // WSL-interop qualification, not just an `/init` head. On a native Linux host `/init` is a real
+  // program (docker-init, systemd's shim) whose cmdline can name ANY child —
+  // `/init\0/usr/local/bin/codex\0--version` under comm=`docker-init` scored as Codex here and let a
+  // genuine Linux relay be selected as the engine instead of its child (review cycle-2, P2). A real
+  // interop relay ties the cmdline to the process, and only three things do that: `comm` naming the
+  // relayed program itself (Linux sets comm from the executable the relay runs, e.g. `node.exe`),
+  // `comm` being the relay (`init`/`/init` — no tie evidence, basename fallback applies), or an
+  // unambiguously WINDOWS argv (drive-letter path / `.exe`). Anything else keeps its untouched row.
+  const relayedBase = basename(argv[1]).toLowerCase()
+  const trimmedComm = comm?.trimEnd().toLowerCase() ?? ''
+  const commIsRelay = trimmedComm === 'init' || trimmedComm === '/init'
+  // comm is 15-byte capped on Linux, so an exact basename can arrive truncated.
+  const commMatchesRelayed = trimmedComm !== ''
+    && (relayedBase === trimmedComm || relayedBase.startsWith(trimmedComm))
+  const looksWindowsArgv = /^[A-Za-z]:[\\/]/.test(argv[1]) || /\.exe$/i.test(argv[1])
+  if (!commIsRelay && !commMatchesRelayed && !looksWindowsArgv) return {}
+  // Node rewrites its argv when it sets process.title: [interpPath, interpName, script, …].
+  // The bare duplicate would otherwise become the "entrypoint" the walk stops on, so drop it
+  // when token 2 is the same file name as the resolved interpreter path in token 1.
+  // `basename` splits on BOTH separators: token 1 is a WINDOWS path (`C:\…\node.exe`) while the
+  // daemon runs inside Linux, where `path.basename` would not split `\` (review finding P1).
+  if (argv.length >= 3 && basename(argv[1]).toLowerCase() === argv[2].toLowerCase()) {
+    argv.splice(2, 1)
+  }
+  // Re-join for the `args` field. Elements may contain spaces (Windows install paths do), and
+  // argvTokens() re-splits this string on whitespace, honouring double quotes — so quote any
+  // element that carries one. Without this, `C:\Program Files\nodejs\node.exe` re-splits into
+  // two tokens and the entrypoint walk never reaches the engine script.
+  const quote = (token: string): string =>
+    /[\s"]/.test(token) ? `"${token.replace(/"/g, '\\"')}"` : token
+  const args = argv.slice(1).map(quote).join(' ')
+  const relayed = trimmedComm && trimmedComm !== '/init' && trimmedComm !== 'init'
+    ? comm!.trimEnd()
+    : basename(argv[1])
+  return { args, executable: relayed }
 }
 
 function readProcField(pid: number, field: 'cmdline' | 'comm'): string | null {

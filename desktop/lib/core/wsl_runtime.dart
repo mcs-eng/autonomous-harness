@@ -1,12 +1,101 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 typedef OwnedProcessStarter = Future<Process> Function(
   String executable,
   List<String> arguments, {
   Map<String, String>? environment,
 });
+
+/// Decodes a byte stream that is either UTF-16LE (what `wsl.exe` writes for its
+/// wide console output) or single-byte text, decided per buffer from the bytes
+/// themselves.
+///
+/// Decoding first with a strict UTF-8 codec — the old behavior — CORRUPTED or
+/// threw on every wide buffer, and the stream error path swallowed the failure
+/// while `wsl.exe` exited 0, so discovery read an empty inventory. Sniffing on
+/// the DECODED string cannot recover that: the loss already happened. The bytes
+/// are the only reliable evidence, so they are what is inspected here.
+///
+/// Wide buffers are decoded as UTF-16LE (BOM 0xFF 0xFE stripped when present).
+/// Everything else keeps the plain single-byte mapping so non-UTF-8 junk still
+/// round-trips byte-for-byte, matching what the old latin1-style handling did.
+class Utf16LeProbeEncoding extends Encoding {
+  const Utf16LeProbeEncoding();
+
+  @override
+  Converter<List<int>, String> get decoder => const _Utf16LeProbeDecoder();
+
+  @override
+  Converter<String, List<int>> get encoder => throw UnsupportedError(
+      'Utf16LeProbeEncoding is read-only: it decodes process output only');
+
+  @override
+  String get name => 'utf-16le-probe';
+}
+
+class _Utf16LeProbeDecoder extends Converter<List<int>, String> {
+  const _Utf16LeProbeDecoder();
+
+  /// Wide when NUL high bytes alternate through most of the buffer: UTF-16LE
+  /// ASCII text is `[byte, 0]` pairs. Requiring the pattern through most of
+  /// the buffer keeps a binary blob that merely contains short ASCII runs
+  /// from flipping into a wide decode.
+  static bool _looksUtf16Le(List<int> bytes) {
+    final len = bytes.length;
+    if (len < 6) return false;
+    var start = 0;
+    // Skip a BOM (0xFF 0xFE = U+FEFF little-endian).
+    if (bytes[0] == 0xff && bytes[1] == 0xfe) start = 2;
+    var oddNulls = 0;
+    var oddTotal = 0;
+    for (var i = start + 1; i < len; i += 2) {
+      oddTotal++;
+      if (bytes[i] == 0) oddNulls++;
+    }
+    return oddTotal > 0 && oddNulls >= 2 && oddNulls * 2 >= oddTotal;
+  }
+
+  @override
+  String convert(List<int> input, [int start = 0, int? end]) {
+    final bytes = input.sublist(start, end ?? input.length);
+    if (_looksUtf16Le(bytes)) {
+      var offset = 0;
+      if (bytes.length >= 2 && bytes[0] == 0xff && bytes[1] == 0xfe) {
+        offset = 2;
+      }
+      final buffer = StringBuffer();
+      for (var i = offset; i + 1 < bytes.length; i += 2) {
+        buffer.writeCharCode(bytes[i] | (bytes[i + 1] << 8));
+      }
+      return buffer.toString();
+    }
+    // Single-byte path: one code unit per byte, no loss, no throw.
+    return String.fromCharCodes(bytes);
+  }
+
+  /// Whole-buffer semantics: the wide-vs-single-byte decision needs the FULL
+  /// byte sequence, so chunked conversion accumulates and emits only at
+  /// close. Probe output is bounded (distro lists, version banners), so
+  /// holding one probe's bytes is fine.
+  @override
+  ChunkedConversionSink<List<int>> startChunkedConversion(
+    Sink<String> sink,
+  ) {
+    final bytes = BytesBuilder();
+    return ChunkedConversionSink<List<int>>.withCallback((chunks) {
+      // The withCallback sink fires ONCE, at close, carrying every added
+      // chunk — see _SimpleCallbackSink in dart:convert.
+      for (final chunk in chunks) {
+        bytes.add(chunk);
+      }
+      sink.add(convert(bytes.takeBytes()));
+      sink.close();
+    });
+  }
+}
 
 /// Starts one owned child, captures both output streams from the moment they
 /// are attached, and applies one deadline to exit and stream completion.
@@ -202,6 +291,7 @@ class WslRuntime {
       arguments: arguments,
       startProcess: _startProcess,
       timeout: effective,
+      outputEncoding: const Utf16LeProbeEncoding(),
       stripNulls: true,
       onOutput: onOutput,
     );
@@ -270,16 +360,30 @@ class WslRuntime {
   /// Installed distro names, in `wsl -l -q` order (the default distro first,
   /// as WSL lists it).
   ///
-  /// `wsl.exe` writes UTF-16LE, which a UTF-8 decode turns into ASCII
-  /// characters interleaved with NULs — so the NULs are dropped rather than a
-  /// second decoder being carried for one command.
+  /// `wsl.exe` writes UTF-16LE ("wide" console output). Production decodes at
+  /// the BYTE level: [Utf16LeProbeEncoding] sniffs the NUL-alternation in the
+  /// raw stream before any lossy decode can happen. The old path let the
+  /// strict UTF-8 stream codec run first, so a non-ASCII distro name (é, ü,
+  /// 任) failed or corrupted inside the decoder and the swallowed stream error
+  /// yielded an EMPTY inventory while `wsl.exe` exited 0 (review cycle-2, P2).
+  ///
+  /// The string-level look below is only the compatibility layer for the
+  /// injected [_runProcess] seam, whose fakes hand back an already-decoded
+  /// Dart string (a latin1 round-trip of the wide bytes) and never reach the
+  /// stream codec.
   Future<List<String>> listDistros() async {
     try {
       final result = await _run(['-l', '-q']);
       if (result.exitCode != 0) return const [];
-      return '${result.stdout}'
+      final rawText = '${result.stdout}';
+      final text = _looksUtf16LeString(rawText)
+          ? _decodeUtf16LeString(rawText)
+          : rawText.replaceAll('\u0000', '');
+      return text
           .replaceAll('\u0000', '')
           .replaceAll('\ufeff', '')
+          .replaceAll('\r\n', '\n')
+          .replaceAll('\r', '\n')
           .split('\n')
           .map((line) => line.trim())
           .where((name) => name.isNotEmpty)
@@ -287,6 +391,35 @@ class WslRuntime {
     } on ProcessException {
       return const [];
     }
+  }
+
+  /// String-level wide-output sniff for the injected seam: NULs between every
+  /// byte pair (every second code unit is NUL) and at least two of them — a
+  /// single stray NUL at the edge should not flip a plain string into a wide
+  /// decode.
+  static bool _looksUtf16LeString(String s) {
+    final len = s.length;
+    if (len < 6) return false;
+    var oddNulls = 0;
+    for (var i = 1; i < len; i += 2) {
+      if (s.codeUnitAt(i) == 0) oddNulls++;
+    }
+    return oddNulls >= 2 && oddNulls * 4 >= len;
+  }
+
+  /// Re-pack a latin1-round-tripped UTF-16LE string: each code unit is a raw
+  /// byte, so two code units make one UTF-16 code unit. BOM (0xFF 0xFE) is
+  /// stripped when present.
+  static String _decodeUtf16LeString(String s) {
+    var start = 0;
+    if (s.length >= 2 && s.codeUnitAt(0) == 0xff && s.codeUnitAt(1) == 0xfe) {
+      start = 2;
+    }
+    final buffer = StringBuffer();
+    for (var i = start; i + 1 < s.length; i += 2) {
+      buffer.writeCharCode(s.codeUnitAt(i) | (s.codeUnitAt(i + 1) << 8));
+    }
+    return buffer.toString();
   }
 
   Future<ProcessResult> _run(List<String> arguments) => _runBounded(arguments);
@@ -413,12 +546,20 @@ class WslRuntime {
   }
 
   /// The CLI, as a command the app can spawn.
-  List<String> cliArguments(WslHarnessProbe probe, List<String> arguments) =>
-      buildArguments(
-        distro: probe.distro!,
-        script: 'exec ${probe.executable} "\$@"',
-        scriptArguments: arguments,
-      );
+  ///
+  /// The executable itself is expanded inside a QUOTED position: the managed
+  /// launcher is `"$HOME/.local/bin/harness"`, and a Linux home with a space
+  /// in it passed the quoted probe but SPLIT at execution when the expansion
+  /// was bare (review cycle-2, P2). `"\$@"` is already quoted.
+  List<String> cliArguments(WslHarnessProbe probe, List<String> arguments) {
+    final probeExecutable = probe.executable;
+    return buildArguments(
+      distro: probe.distro!,
+      script: 'exec "$probeExecutable" ' + String.fromCharCode(34) + r'\$@'
+          + String.fromCharCode(34),
+      scriptArguments: arguments,
+    );
+  }
 
   /// This computer's identity, read from the CLI that owns the daemon.
   ///

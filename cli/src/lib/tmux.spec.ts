@@ -6,10 +6,12 @@ import { ENGINES } from '../engines/types.js'
 import type { AgentCommandOwnershipSnapshot } from './engineBin.js'
 import {
   ambiguousAgentProcess,
+  argvTokens,
   bypassPermissionActive,
   engineProcessMatch,
   engineProcessMatchScore,
   parseProcessRow,
+  repairInteropRowFromCmdline,
   resumeSessionId,
   sendLiteralToTmux,
   sendToTmux,
@@ -110,6 +112,113 @@ describe('tmux process primitives', () => {
     const repairedArgs = '"C:\\Program Files\\nodejs\\node.exe"'
       + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
     expect(engineProcessMatchScore({ executable: 'node.exe', args: repairedArgs }, 'codex')).toBe(2)
+  })
+
+  /**
+   * The extraction itself, pinned host-independently (review finding P1): the
+   * critical path runs INSIDE WSL/Linux — `path.basename` there would not
+   * split the `C:\...` backslashes, the duplicate `node.exe` would survive as
+   * the apparent entrypoint, and the row scores 0 again. Runs on any host.
+   */
+  it('repairInteropRowFromCmdline unwraps /init and quotes spaced Windows paths', () => {
+    const fixed = repairInteropRowFromCmdline(
+      [
+        '/init',
+        'C:\\Program Files\\nodejs\\node.exe',
+        'node.exe',
+        'C:\\Program Files\\nodejs\\node_modules\\@openai\\codex\\bin\\codex.js',
+      ].join('\0'),
+      'node.exe',
+    )
+    expect(fixed.executable).toBe('node.exe')
+    expect(fixed.args).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\nodejs\\node_modules\\@openai\\codex\\bin\\codex.js"',
+    )
+    // The duplicate bare `node.exe` (node's process.title rewrite) is dropped:
+    // `node.exe` appears once as executable inside nodejs/, and a second time
+    // only as part of `node_modules` in the entrypoint path. Splitting on the
+    // full `nodejs\node.exe` token shows exactly one interpreter occurrence.
+    expect((fixed.args ?? '').split('nodejs\\node.exe').length - 1).toBe(1)
+    // And the repaired row still reaches the engine entrypoint.
+    expect(
+      engineProcessMatchScore(
+        { executable: fixed.executable!, args: fixed.args! },
+        'codex',
+      ),
+    ).toBe(2)
+  })
+
+  it('repairInteropRowFromCmdline leaves non-interop rows alone', () => {
+    expect(repairInteropRowFromCmdline('bash\0-l\0', 'bash')).toEqual({})
+    expect(repairInteropRowFromCmdline('', null)).toEqual({})
+    expect(repairInteropRowFromCmdline('/init\0', 'init')).toEqual({})
+  })
+
+  /**
+   * The interop repair itself, pinned host-independently because it once shipped a P1 that only
+   * Linux-host tests could have caught: `path.basename` on Linux does not split `\\`, so the
+   * interpreter-title dedup never fired for the real `C:\…\node.exe` argv inside WSL and the
+   * entrypoint walk stopped on the bare duplicate.
+   */
+  describe('repairInteropRowFromCmdline', () => {
+    const windowsArgv = '/init\0C:\\Program Files\\nodejs\\node.exe\0node.exe'
+      + '\0C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
+
+    it('drops the interpreter-title duplicate behind a WINDOWS interpreter path', () => {
+      expect(repairInteropRowFromCmdline(windowsArgv, 'node.exe')).toEqual({
+        args: '"C:\\Program Files\\nodejs\\node.exe"'
+          + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js',
+        executable: 'node.exe',
+      })
+    })
+
+    it('double-quotes space-bearing tokens so argvTokens() re-splits them as one', () => {
+      expect(repairInteropRowFromCmdline(
+        '/init\0C:\\Program Files\\nodejs\\node.exe\0C:\\Program Files\\my engine\\cli.js\0--flag',
+        null,
+      )).toEqual({
+        args: '"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\my engine\\cli.js" --flag',
+        executable: 'node.exe',
+      })
+    })
+
+    it('prefers a real comm name over the relayed interpreter basename', () => {
+      expect(repairInteropRowFromCmdline('/init\0/home/demo/.local/bin/claude', 'claude'))
+        .toEqual({ args: '/home/demo/.local/bin/claude', executable: 'claude' })
+      // The relay itself is never an engine name.
+      expect(repairInteropRowFromCmdline('/init\0/home/demo/.local/bin/claude', '/init'))
+        .toEqual({ args: '/home/demo/.local/bin/claude', executable: 'claude' })
+      expect(repairInteropRowFromCmdline('/init\0/home/demo/.local/bin/claude', 'init'))
+        .toEqual({ args: '/home/demo/.local/bin/claude', executable: 'claude' })
+    })
+
+    /**
+     * Review cycle-2 P2: an exact `/init` argv[0] alone must not qualify a row as a WSL-interop
+     * relay. On a native Linux host `/init` is a real program (docker-init) whose cmdline can name
+     * any child — rewriting it made `engineProcessMatch` report Codex (score 3) for
+     * `/init\0/usr/local/bin/codex\0--version`, so a genuine Linux relay could be selected as the
+     * engine instead of its child. Windows-argv evidence (drive-letter path, `.exe`) or a
+     * Windows-binary comm is required before the rewrite fires.
+     */
+    it('leaves native Linux /init rows untouched even when they name an engine child', () => {
+      const nativeInit = ['/init', '/usr/local/bin/codex', '--version'].join('\0')
+      expect(repairInteropRowFromCmdline(nativeInit, 'docker-init')).toEqual({})
+      expect(repairInteropRowFromCmdline(nativeInit, 'bash')).toEqual({})
+      expect(repairInteropRowFromCmdline(nativeInit, null)).toEqual({})
+      // WSL-interop evidence present -> the rewrite fires even for a POSIX-looking program path:
+      // comm naming the relayed program's own basename ties cmdline to the process. An UNRELATED
+      // comm (node.exe over a codex path) is exactly the spoof shape and stays untouched unless
+      // the argv itself is Windows-shaped.
+      expect(repairInteropRowFromCmdline(nativeInit, 'codex')).toEqual({
+        args: '/usr/local/bin/codex --version',
+        executable: 'codex',
+      })
+      expect(repairInteropRowFromCmdline(nativeInit, 'node.exe')).toEqual({})
+      expect(repairInteropRowFromCmdline(['/init', 'C:\\tools\\codex.exe', '--version'].join('\0'), null)).toEqual({
+        args: 'C:\\tools\\codex.exe --version',
+        executable: 'codex.exe',
+      })
+    })
   })
 
   it.each([
@@ -260,6 +369,35 @@ describe('tmux process primitives', () => {
     expect(bypassPermissionActive('claude', 'claude --dangerously-skip-permissions-explained')).toBe(false)
   })
 
+  /**
+   * Review cycle-2 P1 (security): the WSL-interop repair re-quotes relayed argv by escaping
+   * embedded double quotes as `\"`. The old argvTokens() regex split on those escapes, so ONE
+   * relayed prompt argument — 'Explain " --dangerously-bypass-approvals-and-sandbox " please' —
+   * re-tokenized with the flag standing alone, and bypassPermissionActive() flipped false → true.
+   * cli.ts persists that state (registry.setBypassPermission) and reads it on relaunch, so prompt
+   * text could enable bypass mode for the next session. argvTokens() must treat `\"` inside a
+   * double-quoted token as a literal quote, exactly what quote() emits.
+   */
+  it('does not let an escaped quote inside a relayed prompt enable bypass mode', () => {
+    const promptArg = 'Explain " --dangerously-bypass-approvals-and-sandbox " please'
+    // quote()'s exact output shape for an element carrying spaces and double quotes.
+    const relayedArgs = '"C:\\Program Files\\nodejs\\node.exe"'
+      + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
+      + ` "${promptArg.replace(/"/g, '\\"')}"`
+    expect(bypassPermissionActive('codex', relayedArgs)).toBe(false)
+  })
+
+  it('argvTokens treats \\\" inside a double-quoted token as a literal quote', () => {
+    expect(argvTokens('codex "say \\"hi\\" now"')).toEqual(['codex', 'say "hi" now'])
+    // Unchanged behaviour for the plain cases the matcher relies on.
+    expect(argvTokens('codex "hello world" --flag')).toEqual(['codex', 'hello world', '--flag'])
+    expect(argvTokens("claude 'pick --dangerously-skip-permissions' x")).toEqual(
+      ['claude', 'pick --dangerously-skip-permissions', 'x'])
+    // A Windows path with spaces stays one token, and backslashes are not escapes outside quotes.
+    expect(argvTokens('"C:\\Program Files\\nodejs\\node.exe" --version'))
+      .toEqual(['C:\\Program Files\\nodejs\\node.exe', '--version'])
+  })
+
   it('reads false when the confirmed flag is absent', () => {
     expect(bypassPermissionActive('claude', 'claude --resume abc')).toBe(false)
   })
@@ -279,7 +417,9 @@ describe('tmux process primitives', () => {
     ])
   })
 
-  it('carries prompt and literal bytes only over stdin, never child argv or diagnostics', async () => {
+  // POSIX host artifact: the fake tmux is a `#!/bin/sh` script, which Windows cannot exec through
+  // execFile, and the PATH injection below uses a `:` separator that Windows never matches.
+  it.skipIf(process.platform === 'win32')('carries prompt and literal bytes only over stdin, never child argv or diagnostics', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'harness-tmux-input-'))
     const argsFile = join(dir, 'args')
     const stdinFile = join(dir, 'stdin')

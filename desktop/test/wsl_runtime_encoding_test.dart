@@ -1,0 +1,86 @@
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/core/wsl_runtime.dart';
+
+/// Pins the review cycle-2 P2 fix at the BYTE boundary: production decodes
+/// `wsl.exe` output with [Utf16LeProbeEncoding], which sniffs the NUL
+/// alternation in the RAW bytes. The old path ran the strict UTF-8 stream
+/// codec first, so a non-ASCII distro name failed or corrupted inside the
+/// decoder and the swallowed stream error yielded an EMPTY inventory while
+/// `wsl.exe` exited 0.
+
+void main() {
+  group('Utf16LeProbeEncoding (byte-level, review cycle-2 P2)', () {
+    List<int> utf16le(String text) {
+      final bytes = <int>[];
+      for (final cu in text.codeUnits) {
+        bytes..add(cu & 0xff)..add(cu >> 8);
+      }
+      return bytes;
+    }
+
+    test('decodes wide output with a non-ASCII distro name intact', () {
+      const name = 'Ubuntu-é';
+      final bytes = utf16le('$name\r\n');
+      final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
+      expect(text.replaceAll('\r\n', '\n').trim(), name);
+    });
+
+    test('decodes wide output with CJK distro names intact', () {
+      const name = 'Ubuntu-任';
+      final bytes = utf16le('$name\r\n');
+      final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
+      expect(text.replaceAll('\r\n', '\n').trim(), name);
+    });
+
+    test('decodes ASCII wide output (NUL high bytes) with a BOM', () {
+      final bytes = <int>[0xff, 0xfe]..addAll(utf16le('Ubuntu\r\nDebian\r\n'));
+      final text = const Utf16LeProbeEncoding().decoder.convert(bytes);
+      expect(
+        text.replaceAll('\r\n', '\n').split('\n').where((l) => l.trim().isNotEmpty).toList(),
+        ['Ubuntu', 'Debian'],
+      );
+    });
+
+    test('keeps single-byte output byte-faithful', () {
+      const text = 'Ubuntu\r\nDebian\r\n';
+      final decoded = const Utf16LeProbeEncoding().decoder.convert(utf8.encode(text));
+      expect(decoded.replaceAll('\r\n', '\n').trim(), 'Ubuntu\nDebian');
+    });
+
+    test('chunked conversion emits at close (stream pipeline shape)', () async {
+      final bytes = utf16le('Ubuntu-é\r\n');
+      final chunks = [bytes.sublist(0, 5), bytes.sublist(5)];
+      final out = <String>[];
+      final sink = const Utf16LeProbeEncoding().decoder
+          .startChunkedConversion(_CollectingSink(out));
+      for (final chunk in chunks) {
+        sink.add(chunk);
+      }
+      sink.close();
+      expect(out.single.replaceAll('\r\n', '\n').trim(), 'Ubuntu-é');
+    });
+
+    test('a streamed strict-UTF-8 pipeline used to fail on these bytes', () {
+      // Documents the OLD failure mode: utf8.decode on a wide buffer throws
+      // (0x9f/0xc3 sequences), which the stream error handler swallowed.
+      final bytes = utf16le('Ubuntu-é\r\n');
+      expect(() => utf8.decode(bytes), throwsFormatException);
+      // The new decoder handles exactly those bytes.
+      expect(
+        const Utf16LeProbeEncoding().decoder.convert(bytes).trim(),
+        'Ubuntu-é',
+      );
+    });
+  });
+}
+
+class _CollectingSink implements Sink<String> {
+  final List<String> out;
+  _CollectingSink(this.out);
+  @override
+  void add(String data) => out.add(data);
+  @override
+  void close() {}
+}
