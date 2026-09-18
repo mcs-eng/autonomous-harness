@@ -206,7 +206,9 @@ void main() {
         await capture('new');
         debugDisableShadows = previousShadows;
         expect(tester.takeException(), isNull);
-        for (final label in ['Codex', 'Claude Code', 'Cursor']) {
+        // The three direct agent tiles (the More menu holds the rest); every
+        // label a person reads while choosing must not truncate.
+        for (final label in ['Codex', 'Claude Code', 'OpenCode']) {
           if (tester
               .renderObject<RenderParagraph>(find.text(label))
               .didExceedMaxLines) {

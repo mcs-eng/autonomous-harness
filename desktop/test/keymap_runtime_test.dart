@@ -614,11 +614,16 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsOneWidget);
         expect(find.byType(SwarmSearchResults), findsNothing);
+        // The folder focus opens on the New project tile: the dialog's first
+        // actionable control since the choices became tiles.
+        final newProjectTile = find
+            .descendant(
+              of: find.byKey(const Key('new-agent-folder-newProject')),
+              matching: find.byType(TextButton),
+            )
+            .first;
         expect(
-          tester
-              .widget<InkWell>(find.byKey(const Key('new-agent-folder')))
-              .focusNode!
-              .hasPrimaryFocus,
+          tester.widget<TextButton>(newProjectTile).focusNode!.hasPrimaryFocus,
           isTrue,
         );
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
