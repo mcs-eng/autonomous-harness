@@ -393,6 +393,48 @@ void main() {
     },
   );
 
+  testWidgets(
+    'a legacy remote selection does not restart but a local namesake does',
+    (tester) async {
+      GridModel? picked;
+      build(
+        grids: const [
+          {
+            'name': 'local-fleet',
+            'source': 'local',
+            'own': false,
+            'targetId': 'local:fleet:1111111111111111',
+            'models': [
+              {'id': 'same-model', 'node': 'local'},
+            ],
+          },
+          {
+            'name': 'private-cloud',
+            'source': 'private',
+            'own': true,
+            'targetId': 'remote:private-cloud',
+            'models': [
+              {'id': 'same-model', 'node': 'cloud'},
+            ],
+          },
+        ],
+      );
+      await open(
+        tester,
+        currentModel: 'same-model',
+        onSelected: (model) => picked = model,
+      );
+      await tester.tap(find.text('same-model').last);
+      await tester.pumpAndSettle();
+      expect(picked, isNull);
+      await tester.tap(find.text('Model'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('same-model').first);
+      await tester.pumpAndSettle();
+      expect(picked?.targetId, 'local:fleet:1111111111111111');
+    },
+  );
+
   testWidgets('a short menu is not as wide as the widest menu could be', (
     tester,
   ) async {

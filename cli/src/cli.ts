@@ -43,7 +43,7 @@ import { DaemonCableHost, cableEventFor, cableQuestionFor, cableQuestionCloseFor
 import { MachineListCache, machineListCachePath, withStaleMarker } from './device/machineList.js'
 import { DeviceLink } from './device/deviceLink.js'
 import { DeviceFleet } from './device/deviceFleet.js'
-import { registry, projectDisplayName, type RegisteredSession } from './lib/registry.js'
+import { registry, projectDisplayName, type RegisteredSession, type ProcessIdentity } from './lib/registry.js'
 import { engineSessionTitle } from './lib/sessionTitle.js'
 import { installAmpPlugin, installCodexHooks, installCommandCodeHooks, installCursorHooks, installDevinHooks, installGrokHooks, installAgyHooks, installCopilotHooks, installHermesHooks, installKiloPlugin, installOpencodePlugin, installPiExtension, installSessionHooks } from './lib/hooks.js'
 import { PID_FILE, daemonPort, isAlive, isDaemonRunning, readPid } from './lib/daemonState.js'
@@ -72,7 +72,7 @@ import { ENGINE_CLI_COMMANDS, ENGINES, PROCESS_ENGINES, engineBin, enginePathOve
 import { isTerminalEngine, type AgentEngine } from './engines/types.js'
 import { engineInstallRecipe } from './lib/engineInstall.js'
 import { buildEngineCommandArgv, buildEngineLaunchArgv, commandAvailableInInteractiveShell, namedAgentArgs } from './lib/engineLaunch.js'
-import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, gridEnvVarNames, type GridLaunchMachine, type GridWebSearchStatus } from './lib/gridLaunch.js'
+import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, gridEnvVarNames, type GridLaunchMachine, type GridLaunchOverride, type GridWebSearchStatus } from './lib/gridLaunch.js'
 import { HERMES_SYSTEM_MANAGED_DIR } from './lib/gridWebMcp.js'
 import { writeGridConfigDir } from './lib/gridConfigDir.js'
 import { tmuxSupportsSessionEnv, TMUX_SESSION_ENV_MIN } from './lib/tmuxVersion.js'
@@ -4673,8 +4673,10 @@ async function runForeground(session: AuthSession): Promise<void> {
     const rows = await processRows()
     const row = rows?.find((candidate) =>
       candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
-    if (!row || !processArgvIsBoundaryFaithful(row)) return undefined
-    return probeGridAssignment(identity, engine, row.args, grid)
+    // Keep the existing environment/config probe on hosts without faithful argv; never interpret
+    // flattened ps text as flags. Linux/WSL can additionally recover the argv-backed assignment.
+    const args = row && processArgvIsBoundaryFaithful(row) ? row.args : identity.executable
+    return probeGridAssignment(identity, engine, args, grid)
   }
 
   /**

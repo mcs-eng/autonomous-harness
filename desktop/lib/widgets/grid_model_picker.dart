@@ -156,7 +156,9 @@ class _GridModelPickerState extends State<GridModelPicker> {
       widget.currentModel == model.id &&
       ((widget.currentTargetId != null &&
               widget.currentTargetId == model.targetId) ||
-          (widget.currentTargetId == null && model.targetId == null));
+          (widget.currentTargetId == null &&
+              (model.targetId == null ||
+                  model.targetId!.startsWith('remote:'))));
 
   /// The subscription reading for THIS agent's engine, or null when there is none to show.
   ///

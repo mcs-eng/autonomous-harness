@@ -354,7 +354,7 @@ class Agent {
       engineIconHint: _safeLabel(j['engineIconHint']),
       codexHome: j['engine'] == 'codex' ? _safeCodexHome(j['codexHome']) : null,
       gridModel: _safeLabel(grid?['model']),
-      gridTargetId: _safeLabel(grid?['targetId']),
+      gridTargetId: _safeGridTarget(grid?['targetId']),
       gridWebSearch: GridWebSearch.fromWire(grid?['webSearch']),
       parentAgentId: _safeLabel(j['parentAgentId'] ?? j['parentId']),
       project: AgentProject.fromJson(j['project']),
@@ -450,6 +450,16 @@ class Agent {
   static String? _safeLabel(Object? raw) {
     if (raw is! String || raw.isEmpty) return null;
     return raw.length <= 80 ? raw : raw.substring(0, 80);
+  }
+
+  /// A routing identity must remain exact; shortening it can restart the currently selected model.
+  static String? _safeGridTarget(Object? raw) {
+    if (raw is! String ||
+        raw.isEmpty ||
+        raw.length > 320 ||
+        RegExp(r'[\x00-\x1f\x7f]').hasMatch(raw))
+      return null;
+    return raw;
   }
 
   static String? _safeDetail(Object? raw) {
