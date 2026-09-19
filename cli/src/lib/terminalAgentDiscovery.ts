@@ -244,6 +244,7 @@ export async function probeTerminalAgents(
   herdrSessionOrder: readonly string[],
   daemonPid = process.pid,
   hints: ReadonlyMap<string, AgentEngine> = new Map(),
+  trustedGridBaseUrls: ReadonlyMap<string, string> = new Map(),
 ): Promise<TerminalAgentProbe> {
   const [targets, rows, ownership] = await Promise.all([
     Promise.all(backends.map(async (backend): Promise<TerminalTargetProbe> => ({
@@ -272,7 +273,13 @@ export async function probeTerminalAgents(
     const runtime = await probeGatewayRuntime(agent.processIdentity, agent.args)
     agent.gateway = runtime.kind
     // Same process, same cached read — the grid costs no extra `ps`.
-    agent.grid = await probeGridAssignment(agent.processIdentity, agent.engine, agent.args)
+    const trusted = [...new Set(agent.runtimes.map((runtime) => trustedGridBaseUrls.get(terminalRouteKey(runtime))).filter(Boolean))]
+    agent.grid = await probeGridAssignment(
+      agent.processIdentity,
+      agent.engine,
+      agent.args,
+      trusted.length === 1 ? { baseUrl: trusted[0]! } : undefined,
+    )
     // And, for Codex, the profile it runs under — a fact about the process the row cannot otherwise learn.
     agent.codexHome = await probeCodexHome(agent.processIdentity, agent.engine)
     // And the DSH it was created as — same read, so a pane the daemon did not create is labelled too.

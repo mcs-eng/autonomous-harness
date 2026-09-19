@@ -79,7 +79,7 @@ export interface TmuxAgentDiscoveryDeps {
   onDiscovered: (agent: DiscoveredTmuxAgent) => void | Promise<void>
   onObserved: (agent: DiscoveredTmuxAgent, current: RegisteredSession) => void | Promise<void>
   onRemoved: (agent: RegisteredSession, reason: string) => void | Promise<void>
-  probe?: (daemonPid: number, hints?: ReadonlyMap<string, AgentEngine>) => Promise<TmuxAgentProbe>
+  probe?: (daemonPid: number, hints?: ReadonlyMap<string, AgentEngine>, trustedGridBaseUrls?: ReadonlyMap<string, string>) => Promise<TmuxAgentProbe>
   daemonPid?: number
 }
 
@@ -270,6 +270,7 @@ export function discoverTmuxAgentsFromSnapshot(
 export async function probeTmuxAgents(
   daemonPid = process.pid,
   hints: ReadonlyMap<string, AgentEngine> = new Map(),
+  trustedGridBaseUrls: ReadonlyMap<string, string> = new Map(),
 ): Promise<TmuxAgentProbe> {
   const [tmux, ps, ownership] = await Promise.all([
     listTmuxPanes(),
@@ -298,7 +299,13 @@ export async function probeTmuxAgents(
   await Promise.all(probe.agents.map(async (agent) => {
     const runtime = await probeGatewayRuntime(agent.processIdentity, agent.args)
     agent.gateway = runtime.kind
-    agent.grid = await probeGridAssignment(agent.processIdentity, agent.engine, agent.args)
+    const trustedBaseUrl = trustedGridBaseUrls.get(agent.tmuxPane)
+    agent.grid = await probeGridAssignment(
+      agent.processIdentity,
+      agent.engine,
+      agent.args,
+      trustedBaseUrl ? { baseUrl: trustedBaseUrl } : undefined,
+    )
     // And, for Codex, the profile it runs under — a fact about the process the row cannot otherwise learn.
     agent.codexHome = await probeCodexHome(agent.processIdentity, agent.engine)
   }))
@@ -378,7 +385,13 @@ export class TmuxAgentReconciler {
 
   private async reconcileOnce(): Promise<void> {
     const hints = new Map(this.hints)
-    const probe = await (this.deps.probe ?? probeTmuxAgents)(this.deps.daemonPid ?? process.pid, hints)
+    const trustedGridBaseUrls = new Map<string, string>()
+    for (const current of this.deps.current()) {
+      if (current.tmuxPane && current.gridLaunch?.targetId?.startsWith('local:')) {
+        trustedGridBaseUrls.set(current.tmuxPane, current.gridLaunch.baseUrl)
+      }
+    }
+    const probe = await (this.deps.probe ?? probeTmuxAgents)(this.deps.daemonPid ?? process.pid, hints, trustedGridBaseUrls)
     if (!probe.ok) {
       console.warn(`[discovery] ${probe.error}; keeping ${this.deps.current().length} agent(s)`)
       return

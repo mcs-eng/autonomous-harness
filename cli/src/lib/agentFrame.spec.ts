@@ -34,6 +34,19 @@ describe('agentFrame', () => {
     expect(JSON.stringify(frame)).not.toContain('gridkey-SECRET')
   })
 
+  it('carries only a matching opaque target and normalizes Claude v1', async () => {
+    const row = session({ baseUrl: 'http://127.0.0.1:8090', model: 'qwen' })
+    row.gridLaunch = {
+      networkId: 'local-grid', networkName: 'Bran', baseUrl: 'http://127.0.0.1:8090/v1',
+      apiKey: 'local-secret', model: 'qwen', targetId: 'local:bran:abc',
+    }
+    expect(await agentFrame(row, { selectedModel: null, terminalAvailable: true }))
+      .toMatchObject({ grid: { targetId: 'local:bran:abc' } })
+    row.gridLaunch.baseUrl = 'http://127.0.0.1:9090/v1'
+    const moved = await agentFrame(row, { selectedModel: null, terminalAvailable: true })
+    expect(moved.grid).not.toHaveProperty('targetId')
+  })
+
   it('reports no assignment as null rather than omitting the field', async () => {
     const frame = await agentFrame(session(null), { selectedModel: null, terminalAvailable: true })
     expect(frame).toHaveProperty('grid', null)

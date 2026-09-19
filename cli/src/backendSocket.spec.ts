@@ -1581,6 +1581,15 @@ describe('agent_retarget clearGrid', () => {
     expect(reply?.payload?.error).toBe('INVALID_GRID')
     expect(seen).toHaveLength(0)
   })
+
+  it('refuses a client-forged local target identity on a legacy full override', async () => {
+    const { seen, reply } = await retarget({
+      requestId: 'r', agentId: 'a1',
+      grid: { ...WIRE_GRID, targetId: 'local:forged:1111111111111111' },
+    })
+    expect(reply?.payload?.error).toBe('INVALID_GRID')
+    expect(seen).toHaveLength(0)
+  })
 })
 
 /**

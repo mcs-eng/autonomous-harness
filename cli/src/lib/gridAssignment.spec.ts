@@ -63,6 +63,23 @@ describe('classifyGridAssignment', () => {
     expect(classifyGridAssignment('claude', { ANTHROPIC_BASE_URL: 'not a url' })).toBeNull()
   })
 
+  it('recognizes a loopback endpoint only when it matches a server-owned launch', () => {
+    const local = 'http://127.0.0.1:8090/v1'
+    expect(classifyGridAssignment('codex', {}, `codex -c model_providers.grid.base_url="${local}" -m qwen`, { baseUrl: local }))
+      .toEqual({ baseUrl: local, model: 'qwen' })
+    expect(classifyGridAssignment('codex', {}, `codex -c model_providers.grid.base_url="${local}" -m qwen`))
+      .toBeNull()
+  })
+
+  it('normalizes Claude\'s stripped v1 endpoint against the launch', () => {
+    expect(classifyGridAssignment(
+      'claude',
+      { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8090', ANTHROPIC_MODEL: 'qwen' },
+      '',
+      { baseUrl: 'http://127.0.0.1:8090/v1' },
+    )).toEqual({ baseUrl: 'http://127.0.0.1:8090', model: 'qwen' })
+  })
+
   it('reads Codex off its argv, where its endpoint actually lives', () => {
     const args = `codex -c model_provider="grid" -c model_providers.grid.base_url="${RELAY_V1}" -m GLM-4.7-Flash`
     expect(classifyGridAssignment('codex', { GRID_API_KEY: 'gridkey-secret' }, args))

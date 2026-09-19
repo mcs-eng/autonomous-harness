@@ -19,7 +19,7 @@ const FAKE_GRID = `#!/usr/bin/env node
 const fs = require('fs')
 const log = process.env.FAKE_GRID_LOG
 const plan = JSON.parse(fs.readFileSync(process.env.FAKE_GRID_PLAN, 'utf8'))
-const args = process.argv.slice(2).filter((a) => a !== '--remote')
+const args = process.argv.slice(2).filter((a) => a !== '--remote' && a !== '--local')
 const verb = args[0] || ''
 const calls = fs.existsSync(log) ? JSON.parse(fs.readFileSync(log, 'utf8')) : []
 calls.push(process.argv.slice(2))
