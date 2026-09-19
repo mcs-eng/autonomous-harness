@@ -1856,6 +1856,7 @@ describe('grid_models_list says whether this machine has a grid CLI', () => {
       await vi.waitFor(() => expect(result('local-2')).toBeDefined(), { timeout: 5_000 })
       expect(result('local-1')).toMatchObject({ gridName: null, models: [] })
       expect((result('local-1')?.grids as Array<{ source?: string }>).some((grid) => grid.source === 'local')).toBe(true)
+      expect((result('local-1')?.grids as Array<{ source?: string }>).every((grid) => grid.source === 'local')).toBe(true)
       expect(socket.deriveGridName).toHaveBeenCalledTimes(1)
 
       resolveDerived(GRID_NAME)
