@@ -19,6 +19,7 @@ const OFFICIAL_COMMANDS = {
   grok: 'curl -fsSL https://x.ai/cli/install.sh | bash',
   agy: 'curl -fsSL https://antigravity.google/cli/install.sh | bash',
   copilot: 'curl -fsSL https://gh.io/copilot-install | PREFIX="$HOME/.local" PATH="$HOME/.local/bin:$PATH" bash',
+  cline: 'npm install -g cline',
 } as const
 
 describe('ENGINE_INSTALL', () => {
@@ -43,6 +44,13 @@ describe('ENGINE_INSTALL', () => {
     expect(ENGINE_INSTALL.copilot.executable.npmGlobal).toBeUndefined()
     expect(ENGINE_INSTALL.copilot.executable.homeRelativePaths).toContain('.local/bin/copilot')
     expect(ENGINE_INSTALL.copilot.executable.probeArgs).toEqual(['--version'])
+  })
+
+  it('uses Cline’s official npm package and verifies its native wrapper', () => {
+    expect(ENGINE_INSTALL.cline.command).toBe('npm install -g cline')
+    expect(ENGINE_INSTALL.cline.executable.names).toEqual(['cline'])
+    expect(ENGINE_INSTALL.cline.executable.npmGlobal).toBe(true)
+    expect(ENGINE_INSTALL.cline.executable.probeArgs).toEqual(['--version'])
   })
 
   it('generates valid POSIX pane scripts for every recipe', () => {

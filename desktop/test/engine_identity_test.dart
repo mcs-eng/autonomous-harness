@@ -65,6 +65,12 @@ void main() {
         'Codex',
         reason: 'ids are trimmed and case-folded',
       );
+      expect(engineIdentity('cline').detail, 'Code · Cline Bot Inc.');
+      expect(engineIdentity('cline').homepage, 'https://cline.bot');
+      expect(
+        engineIdentity('cline').blurb,
+        contains('Harness history, turn tracking, and resume are unavailable'),
+      );
     },
   );
 

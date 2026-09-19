@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:file_selector/file_selector.dart';
@@ -25,6 +26,7 @@ import '../store/store_editorial.dart';
 import 'engine_identity.dart';
 import 'codex_profile_field.dart';
 import 'agent_picker.dart';
+import 'companion_agent_dialog.dart';
 import 'remote_folder_picker.dart';
 import 'new_agent_project_picker.dart';
 import 'new_harness_help.dart';
@@ -1070,8 +1072,32 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
             value: _engine,
             recent: () => _recentAgents,
             installed: _installedIds,
-            statusOf: _agentStatus,
+            statusOf: (id) => switch (id) {
+              'deepseek-web' => 'Runs locally in a WSL distribution',
+              'zcode-desktop' => 'Opens the official app on this PC',
+              _ => _agentStatus(id),
+            },
             choices: [
+              if (Platform.isWindows &&
+                  widget.notifier.stateOf(_machineId)?.isLocalMachine ==
+                      true) ...[
+                AgentChoice(
+                  id: 'deepseek-web',
+                  label: 'DeepSeek Harness',
+                  detail: 'Browser workspace on this PC',
+                  creator: 'DeepSeek',
+                  description: 'Launch the official browser UI in WSL. Separate from Harness terminal panes and task routing.',
+                  mark: (size) => Icon(Icons.open_in_browser, size: size),
+                ),
+                AgentChoice(
+                  id: 'zcode-desktop',
+                  label: 'ZCode',
+                  detail: 'Desktop app on this PC',
+                  creator: 'Z.ai',
+                  description: 'Open the installed official desktop app. Choose your project and sign in there.',
+                  mark: (size) => Icon(Icons.desktop_windows, size: size),
+                ),
+              ],
               for (final identity in allEngines)
                 AgentChoice(
                   id: identity.id,
@@ -1124,6 +1150,16 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
             ],
             onChanged: (value) {
               if (_choicesLocked) return;
+              if (value == 'deepseek-web' || value == 'zcode-desktop') {
+                unawaited(
+                  showCompanionAgentDialog(
+                    context,
+                    agent: value,
+                    initialFolder: _folder,
+                  ),
+                );
+                return;
+              }
               setState(() {
                 unawaited(widget.notifier.agentPreference.select(value));
                 _engineChosenByUser = true;

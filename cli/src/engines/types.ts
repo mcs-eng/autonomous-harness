@@ -11,6 +11,7 @@ import type { RegisteredSession } from '../lib/registry.js'
 export const ENGINES = [
   'claude', 'codex', 'cursor', 'opencode', 'pi', 'hermes',
   'commandcode', 'devin', 'muse', 'amp', 'kilo', 'grok', 'agy', 'copilot',
+  'cline',
   'terminal',
 ] as const
 

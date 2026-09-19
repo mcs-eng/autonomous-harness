@@ -122,6 +122,16 @@ export const ENGINE_INSTALL: Readonly<Record<ProcessEngine, EngineInstallRecipe>
       probeArgs: ['--version'],
     },
   },
+  cline: {
+    command: 'npm install -g cline',
+    source: 'https://github.com/cline/cline/tree/main/apps/cli',
+    executable: {
+      names: ['cline'],
+      npmGlobal: true,
+      homeRelativePaths: ['.local/bin/cline'],
+      probeArgs: ['--version'],
+    },
+  },
 }
 
 /** A terminal has nothing to install — the login shell is already there — hence `undefined`. */

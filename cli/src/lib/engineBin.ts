@@ -34,6 +34,7 @@ export const ENGINE_CLI_COMMANDS: Readonly<Record<AgentEngine, string>> = {
   grok: 'grok',
   agy: 'agy',
   copilot: 'copilot',
+  cline: 'cline',
   // A terminal has no command: the pane runs the user's login shell (engineLaunch.ts). The empty
   // string is what keeps every "is this binary installed" probe honest — nothing to look for.
   terminal: '',
@@ -82,6 +83,7 @@ export const ENGINE_CLI_ALIASES: Readonly<Record<AgentEngine, readonly string[]>
   grok: ['grok', 'agent'],
   agy: ['agy'],
   copilot: ['copilot'],
+  cline: ['cline'],
   terminal: [],
 }
 
@@ -196,6 +198,7 @@ function vendorFallbackCommands(engine: AgentEngine): string[] {
     case 'grok': return [join(env.GROK_HOME, 'bin', 'grok'), join(home, '.local', 'bin', 'grok')]
     case 'agy': return [join(home, '.local', 'bin', 'agy')]
     case 'copilot': return [join(home, '.local', 'bin', 'copilot')]
+    case 'cline': return [join(home, '.local', 'bin', 'cline')]
     default: return []
   }
 }
@@ -435,6 +438,7 @@ export function engineBin(engine: AgentEngine): string {
     case 'grok': return env.GROK_PATH || ENGINE_CLI_COMMANDS.grok
     case 'agy': return env.AGY_PATH || ENGINE_CLI_COMMANDS.agy
     case 'copilot': return env.COPILOT_PATH || ENGINE_CLI_COMMANDS.copilot
+    case 'cline': return ENGINE_CLI_COMMANDS.cline
     // Never launched by name — `buildEngineLaunchArgv` builds the shell argv itself.
     case 'terminal': return ENGINE_CLI_COMMANDS.terminal
   }

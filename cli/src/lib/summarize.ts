@@ -72,7 +72,7 @@ export function syncSummaryPoolSessions(sessions: Array<{ engine: AgentEngine }>
     // so they cannot be pre-warmed the way a stdin-fed CLI can — no pooled worker for them.
     if (session.engine === 'hermes' || session.engine === 'devin' || session.engine === 'muse'
       || session.engine === 'amp' || session.engine === 'grok' || session.engine === 'agy' || session.engine === 'copilot'
-      || session.engine === 'terminal') continue
+      || session.engine === 'cline' || session.engine === 'terminal') continue
     counts[session.engine]++
   }
   setOneShotPoolActiveCounts(counts)

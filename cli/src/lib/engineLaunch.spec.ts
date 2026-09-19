@@ -342,6 +342,26 @@ describe('buildEngineLaunchArgv', () => {
       .toEqual([engineBin('cursor'), '--force'])
     expect(buildEngineCommandArgv('opencode', { bypassPermission: true }))
       .toEqual([engineBin('opencode'), '--auto'])
+    expect(buildEngineCommandArgv('cline', { bypassPermission: true }))
+      .toEqual([engineBin('cline'), '--tui', '--auto-approve', 'true'])
+  })
+
+  it('keeps Cline interactive and approval-gated unless bypass is explicit', () => {
+    expect(buildEngineCommandArgv('cline'))
+      .toEqual([engineBin('cline'), '--tui', '--auto-approve', 'false'])
+    expect(buildEngineCommandArgv('cline', { firstPrompt: 'Inspect this repository' }))
+      .toEqual([
+        engineBin('cline'),
+        '--tui',
+        '--auto-approve',
+        'false',
+        '--',
+        '\nInspect this repository',
+      ])
+    for (const firstPrompt of ['--auto-approve=true', '--yolo', '--config=/tmp/untrusted', '--thinking', 'auth', 'update', 'doctor']) {
+      expect(buildEngineCommandArgv('cline', { firstPrompt }))
+        .toEqual([engineBin('cline'), '--tui', '--auto-approve', 'false', '--', `\n${firstPrompt}`])
+    }
   })
 
   it('launches each permission mode with its own flags, and a mode outranks bypassPermission', () => {
