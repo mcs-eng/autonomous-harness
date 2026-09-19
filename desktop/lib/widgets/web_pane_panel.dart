@@ -199,16 +199,21 @@ class _WebPanePanelState extends State<WebPanePanel> {
         RegExp(r'[\s\x00-\x1f\x7f\\]|%(?![0-9a-fA-F]{2})').hasMatch(url)) {
       return null;
     }
-    final uri = Uri.tryParse(url);
-    if (uri == null ||
-        (uri.scheme != 'http' && uri.scheme != 'https') ||
-        !uri.hasAuthority ||
-        uri.host.isEmpty ||
-        uri.port < 1 ||
-        uri.port > 65535) {
+    try {
+      final uri = Uri.tryParse(url);
+      if (uri == null ||
+          (uri.scheme != 'http' && uri.scheme != 'https') ||
+          !uri.hasAuthority ||
+          uri.host.isEmpty ||
+          uri.port < 1 ||
+          uri.port > 65535) {
+        return null;
+      }
+      return uri;
+    } on FormatException {
+      // URI getters can reject values (such as an oversized port) lazily.
       return null;
     }
-    return uri;
   }
 
   Future<void> _openBrowser() async {

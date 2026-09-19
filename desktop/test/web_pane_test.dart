@@ -207,6 +207,7 @@ void main() {
       'https://',
       'http:///viewer',
       'http://localhost:99999/',
+      'http://localhost:999999999999999999999999999999/',
       'http://localhost/%oops',
       'http://localhost/\nviewer',
       'http://localhost/\x00viewer',
