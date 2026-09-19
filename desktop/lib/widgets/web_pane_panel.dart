@@ -491,7 +491,8 @@ class _Notice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Center(
-    child: Padding(
+    child: SingleChildScrollView(
+      primary: false,
       padding: const EdgeInsets.all(20),
       child: Column(
         mainAxisSize: MainAxisSize.min,
