@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'fs'
+import { mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { fileURLToPath } from 'url'
 import { BackendSocket, compactRuntimePickerModels, deviceAgentListItem, deviceAgentRow, grokHistoryPage } from './backendSocket.js'
@@ -15,6 +15,9 @@ import * as storeCatalog from './dsh/catalog.js'
 import { randomUUID } from 'node:crypto'
 import { fakeGridAnswers, installFakeGrid, type FakeGrid } from './lib/__fixtures__/fakeGrid.js'
 import { clearGridMcpUrlCache } from './lib/gridMcpUrl.js'
+import { removeLocalGridProfile, setLocalGridProfile } from './lib/gridProfiles.js'
+import { env } from './config/env.js'
+import { forgetGridModels } from './lib/gridModels.js'
 
 describe('viewer forwarding authentication', () => {
   it('requires encryption and a web-role session remotely, while permitting trusted local clients', async () => {
@@ -1819,6 +1822,56 @@ describe('grid_models_list says whether this machine has a grid CLI', () => {
       .find((frame) => frame?.type === 'grid_models_list_result')
     await socket.stop()
     expect(reply?.payload).toMatchObject({ gridName: GRID_NAME })
+  })
+
+  it('answers local profiles immediately, then restores a derived private-cloud classification', async () => {
+    forgetGridModels()
+    fake = installFakeGrid({
+      ...plan,
+      models: { stdout: JSON.stringify([{ model: 'Qwen-Test', engine: 'engine', node: 'cloud-node' }]) },
+    })
+    vi.mocked(globalThis.fetch).mockResolvedValue(Response.json({ data: [{ id: 'Qwen-Test' }] }))
+    const profileId = `backend-local-${randomUUID()}`
+    const gridHome = `${env.ADAPTER_DATA_DIR}/${profileId}`
+    mkdirSync(gridHome, { mode: 0o700 })
+    setLocalGridProfile({ id: profileId, label: 'Test local fleet', gridHome, gridName: 'local-fleet' })
+
+    const socket = new BackendSocket('token')
+    let resolveDerived: (name: string | null) => void = () => {}
+    const derived = new Promise<string | null>((resolve) => { resolveDerived = resolve })
+    socket.deriveGridName = vi.fn(() => derived)
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+
+    const result = (requestId: string) => parseSent(ws)
+      .map((item) => item.frame as { type?: string; payload?: Record<string, unknown> } | undefined)
+      .find((frame) => frame?.type === 'grid_models_list_result' && frame.payload?.requestId === requestId)
+      ?.payload
+
+    try {
+      ws.message({ t: 'down', connId: 'web-1', frame: { type: 'grid_models_list', payload: { requestId: 'local-1' } } })
+      ws.message({ t: 'down', connId: 'web-1', frame: { type: 'grid_models_list', payload: { requestId: 'local-2' } } })
+      await vi.waitFor(() => expect(result('local-1')).toBeDefined(), { timeout: 5_000 })
+      await vi.waitFor(() => expect(result('local-2')).toBeDefined(), { timeout: 5_000 })
+      expect(result('local-1')).toMatchObject({ gridName: null, models: [] })
+      expect((result('local-1')?.grids as Array<{ source?: string }>).some((grid) => grid.source === 'local')).toBe(true)
+      expect(socket.deriveGridName).toHaveBeenCalledTimes(1)
+
+      resolveDerived(GRID_NAME)
+      await vi.waitFor(() => expect(socket.gridName()).toBe(GRID_NAME))
+      ws.message({ t: 'down', connId: 'web-1', frame: { type: 'grid_models_list', payload: { requestId: 'restored' } } })
+      await vi.waitFor(() => expect(result('restored')).toBeDefined(), { timeout: 5_000 })
+      expect(result('restored')).toMatchObject({
+        gridName: GRID_NAME,
+        models: [expect.objectContaining({ node: 'cloud-node' })],
+      })
+      expect((result('restored')?.grids as Array<{ name: string; source?: string }>))
+        .toContainEqual(expect.objectContaining({ name: GRID_NAME, source: 'private' }))
+    } finally {
+      removeLocalGridProfile(profileId)
+      await socket.stop()
+    }
   })
 })
 
