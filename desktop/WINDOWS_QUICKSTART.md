@@ -108,8 +108,8 @@ name below with your existing configuration:
 
 ```sh
 # Inside the selected WSL distribution (bash)
-"$HOME/.harness/runtime/node-v22.23.2-linux-x64/bin/node" \
-  /mnt/c/path/to/Release/harness-cli/cli.js grid profile set local-fleet \
+node_path="$(cat "$HOME/.harness/runtime/current-node")"
+"$node_path" "/mnt/c/path/to/Release/harness-cli/cli.js" grid profile set local-fleet \
   --label "My local fleet" --home "$HOME/.harness/grid-fleet/local" --grid my-fleet
 ```
 
@@ -118,7 +118,8 @@ compatible agent pane and choose the model under that local fleet. Registration
 does not install models, start a fleet, or prove an agent can complete a turn.
 Local Grid 0.3.47 provides OpenAI-compatible inference, so this preview offers it to
 engines such as Codex and OpenCode; Claude Code's remote Grid options are separate.
-Endpoints and credentials stay in the daemon's private state.
+The daemon resolves endpoints and credentials from registered profiles; the picker
+sends the profile's opaque identity, never a caller-supplied endpoint or key.
 
 To reopen a configured fleet dashboard, use **Open Harness** and select its existing
 workspace. A newly created Grid workspace may show an empty fleet until connected.
