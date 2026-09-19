@@ -20,8 +20,8 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
 To compare the downloaded archive with its checksum in Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.5.zip
-Get-Content .\harness-desktop-windows-x64-1.0.0-windows.5.zip.sha256
+Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.6.zip
+Get-Content .\harness-desktop-windows-x64-1.0.0-windows.6.zip.sha256
 ```
 
 ## Prerequisites
@@ -49,6 +49,7 @@ while rejecting keyboard text; replace the complete bundle to receive both fixes
 Preview 4 adds **Open in browser** to viewer panes, including Grid's fleet dashboard.
 Preview 5 adds isolated local fleets to compatible agents' model pickers and moves
 recurring engine discovery off the daemon's main event loop.
+Preview 6 also includes the upstream review's Unicode WSL distribution-name fix.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.
