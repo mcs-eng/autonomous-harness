@@ -193,6 +193,13 @@ export class TerminalAgentReconciler {
   private async reconcileOnce(): Promise<void> {
     await this.deps.beforeProbe?.()
     const hints = new Map(this.hints)
+    const trustedGridBaseUrls = new Map<string, string>()
+    for (const current of this.deps.current()) {
+      if (!current.gridLaunch?.targetId?.startsWith('local:')) continue
+      for (const runtime of current.runtimes) {
+        trustedGridBaseUrls.set(terminalRouteKey(runtime), current.gridLaunch.baseUrl)
+      }
+    }
     const probe = await (this.deps.probe
       ? this.deps.probe(hints)
       : probeTerminalAgents(
@@ -201,6 +208,7 @@ export class TerminalAgentReconciler {
         this.deps.herdrSessionOrder,
         this.deps.daemonPid ?? process.pid,
         hints,
+        trustedGridBaseUrls,
       ))
     const availableTargets = probe.targets.filter((target) => target.result.state === 'available')
     const livePlacements = new Set(availableTargets.flatMap((target) =>

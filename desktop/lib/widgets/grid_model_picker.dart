@@ -64,6 +64,7 @@ class GridModelPicker extends StatefulWidget {
   /// The grid model this agent is on right now, or null when it is on its own login. Drives the
   /// filled row, so the menu answers "where am I" as well as "where could I go".
   final String? currentModel;
+  final String? currentTargetId;
 
   /// Whether the agent can search the web on [currentModel], as the daemon decided when it built
   /// the launch. Shown as a subtitle under the current Local row and in the control's tooltip —
@@ -83,6 +84,7 @@ class GridModelPicker extends StatefulWidget {
     this.onUseOwnLogin,
     this.onRunLocalModel,
     this.currentModel,
+    this.currentTargetId,
     this.webSearch,
     this.engineLabel,
   });
@@ -148,7 +150,13 @@ class _GridModelPickerState extends State<GridModelPicker> {
   /// The subtitle under one Local row: the sentence for the CURRENT model only. The status is about
   /// this agent's launch, and the other rows are places it could go, about which nothing is known.
   String? _subtitleFor(GridModel model) =>
-      widget.currentModel == model.id ? _webSearchSentence : null;
+      _isCurrent(model) ? _webSearchSentence : null;
+
+  bool _isCurrent(GridModel model) =>
+      widget.currentModel == model.id &&
+      ((widget.currentTargetId != null &&
+              widget.currentTargetId == model.targetId) ||
+          (widget.currentTargetId == null && model.targetId == null));
 
   /// The subscription reading for THIS agent's engine, or null when there is none to show.
   ///
@@ -244,16 +252,25 @@ class _GridModelPickerState extends State<GridModelPicker> {
           // same fact and read oddly split onto its own clause. Shared: the general fact as the
           // heading, the specific grid as the name under it — the two are different kinds of
           // information (why the rows are here vs. which fleet they are), not one sentence.
-          section.own
-              ? paneMenuHeader('Local models on your machines')
+          section.source == 'local'
+              ? paneMenuHeader(
+                  'Local models',
+                  caption: section.profileId == null
+                      ? section.label ?? section.name
+                      : '${section.label ?? section.name} · ${section.profileId}',
+                )
+              : section.own || section.source == 'private'
+              ? paneMenuHeader('Your private cloud models', caption: section.name)
               : paneMenuHeader('Models shared with you', caption: section.name),
           // An engine with no way onto a Local model (Cursor talks only to its own API; the
           // daemon refuses the move) is told so here, instead of being offered rows whose click
           // would do nothing. The daemon names the capable engines beside the list; an older
           // daemon names none, and then every row is offered as before.
-          if (!_shown!.canRunLocally(widget.engineLabel))
+          if (!_shown!.canRunSection(section, widget.engineLabel))
             paneMenuEmpty(
-              '${engineIdentity(widget.engineLabel).label} can only run on its own login.',
+              section.source == 'local'
+                  ? '${engineIdentity(widget.engineLabel).label} cannot run models from this local fleet.'
+                  : '${engineIdentity(widget.engineLabel).label} can only run on its own login.',
             )
           // Two different facts, two sentences. "We could not ask" and "this account has no
           // grid" send a person to two different places, and the one that used to cover both
@@ -263,12 +280,12 @@ class _GridModelPickerState extends State<GridModelPicker> {
           else if (section.models.isEmpty &&
               _emptySentence(_shown!, section) != null)
             paneMenuEmpty(_emptySentence(_shown!, section)!),
-          if (_shown!.canRunLocally(widget.engineLabel))
+          if (_shown!.canRunSection(section, widget.engineLabel))
             for (final model in section.models)
               paneMenuItem(
                 onTap: () => close(_Choice.model(model)),
                 child: PaneMenuRow(
-                  selected: widget.currentModel == model.id,
+                  selected: _isCurrent(model),
                   title: model.id,
                   // Which machine answers it — on the own grid one of the user's own computers,
                   // which is the useful part of the answer.
@@ -301,7 +318,7 @@ class _GridModelPickerState extends State<GridModelPicker> {
       if (widget.currentModel != null) widget.onUseOwnLogin?.call();
       return;
     }
-    if (chosen.model!.id != widget.currentModel)
+    if (!_isCurrent(chosen.model!))
       widget.onSelected?.call(chosen.model!);
   }
 
@@ -323,7 +340,10 @@ class _GridModelPickerState extends State<GridModelPicker> {
     // The account's rest are the models on the user's own machines; an empty list there needs a
     // sentence under the heading. Shared grids are never drawn empty (see _sectionsToDraw), so
     // this branch only ever fires for the own grid.
-    if (section.own) {
+    if (section.source == 'local') {
+      return 'No models are available from ${section.label ?? section.name}.';
+    }
+    if (section.own || section.source == 'private') {
       return 'No local models on this account yet.';
     }
     return null;
@@ -335,9 +355,11 @@ class _GridModelPickerState extends State<GridModelPicker> {
   /// gain — the menu is for picking a model, not for surveying grids.
   List<GridSection> _sectionsToDraw(GridModels answer) {
     final sections = answer.sections
-        .where((s) => s.own || s.models.isNotEmpty)
+        .where((s) => s.source == 'local' || s.own || s.models.isNotEmpty)
         .toList();
-    if (sections.any((s) => s.own)) return sections;
+    // A non-empty `grids` list is the new protocol, even when it contains only local profiles while
+    // remote discovery is slow. The synthetic private section is solely an older-daemon fallback.
+    if (answer.grids.isNotEmpty) return sections;
     return [
       GridSection(
         name: answer.gridName ?? '',
@@ -391,11 +413,42 @@ class _GridModelPickerState extends State<GridModelPicker> {
     if (a.models.length != b.models.length) return false;
     for (var i = 0; i < a.models.length; i += 1) {
       if (a.models[i].id != b.models[i].id ||
-          a.models[i].node != b.models[i].node) {
+          a.models[i].node != b.models[i].node ||
+          a.models[i].targetId != b.models[i].targetId) {
         return false;
       }
     }
+    if (a.grids.length != b.grids.length) return false;
+    for (var i = 0; i < a.grids.length; i += 1) {
+      final left = a.grids[i];
+      final right = b.grids[i];
+      if (left.name != right.name ||
+          left.own != right.own ||
+          left.source != right.source ||
+          left.label != right.label ||
+          left.profileId != right.profileId ||
+          left.targetId != right.targetId ||
+          !_sameStrings(left.engines, right.engines) ||
+          left.models.length != right.models.length) {
+        return false;
+      }
+      for (var m = 0; m < left.models.length; m += 1) {
+        if (left.models[m].id != right.models[m].id ||
+            left.models[m].node != right.models[m].node ||
+            left.models[m].targetId != right.models[m].targetId) {
+          return false;
+        }
+      }
+    }
     return true;
+  }
+
+  static bool _sameStrings(Set<String>? left, Set<String>? right) {
+    if (identical(left, right)) return true;
+    if (left == null || right == null || left.length != right.length) {
+      return false;
+    }
+    return left.containsAll(right);
   }
 
   @override

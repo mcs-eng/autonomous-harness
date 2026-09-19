@@ -1719,6 +1719,7 @@ class _TerminalHeader extends StatelessWidget {
                             notifier: notifier,
                             machineId: session.machineId,
                             currentModel: agent?.gridModel,
+                            currentTargetId: agent?.gridTargetId,
                             webSearch: agent?.gridWebSearch,
                             engineLabel: session.engineId,
                             onSelected: (model) => unawaited(
@@ -1727,6 +1728,7 @@ class _TerminalHeader extends StatelessWidget {
                                 session.agentId,
                                 model.id,
                                 gridName: model.grid,
+                                gridTarget: model.targetId,
                               ),
                             ),
                             onUseOwnLogin: () => unawaited(

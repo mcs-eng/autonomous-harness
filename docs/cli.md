@@ -24,10 +24,41 @@ works the same on a headless Linux server; the app is not required on a machine,
 | `harness link connect <id> [--name=<label>]` · `harness link list` · `harness link unlink <id>` | Let this machine reach another of yours, terminating E2EE here; list; unlink. |
 | `harness remote` | From a Harness terminal tile: choose another of your machines (linking it on the spot if needed), open a terminal there and move this tile to it. |
 | `harness grid login [--force] [--json]` · `harness grid logout` | Sign the `grid` CLI in with this computer's account, no second browser. |
+| `harness grid profile list\|set\|remove` | Register isolated local Grid homes that this daemon may offer in the model picker. |
 | `harness flash [flags]` | Re-flash a plugged-in Harness device over USB. Flags pass straight to the flasher. |
 | `harness autonomous-device discover\|status\|list\|pair\|revoke` | Pair Autonomous OS devices found on the LAN, directly, with no relay. |
 
 Interactive prompts read one line from stdin with `--stdin`; `--json` switches any of them to NDJSON.
+
+### Isolated local Grid profiles
+
+The ordinary Grid sign-in and its remote/cloud catalog remain the default. To add a deliberately
+isolated local fleet, register its existing server-side state directory:
+
+```sh
+harness grid profile set local-fleet \
+  --label "My local fleet" \
+  --home "$HOME/.harness/grid-fleet/local" \
+  --grid my-fleet
+```
+
+The home must be an existing absolute directory. Harness stores the canonical path in its private
+daemon state and uses a destination-fingerprinted identity for picker requests; the profile id is
+shown beside its label so duplicate labels remain distinguishable. Endpoints and keys are resolved
+by the daemon with that profile's `GRID_HOME`; a client cannot supply either one. Changing a profile's
+home or grid name invalidates its former picker targets. `profile remove` removes only the
+registration and never edits the Grid home.
+
+Each profile is independent. A malformed entry is skipped. A valid profile whose home is temporarily
+unavailable remains registered and shows an empty section without hiding another local profile or the
+cloud catalog; changing another profile never deletes it. When a local profile exists, the model list
+gives cloud discovery a short window and returns responsive local choices first; a later open can
+include the cloud answer once that discovery responds. Local catalog reads use
+`grid --local info ... --env` followed by that hub's bounded `/models` request because Grid 0.3.47's
+local `models` command can hang and its
+`engines` output can lag a live hub. The same release exposes OpenAI-compatible inference but no
+Anthropic Messages route, so local profiles are offered to compatible engines such as Codex and
+OpenCode; Claude Code's remote Grid choices remain available.
 
 The daemon also serves a loopback dashboard at `http://127.0.0.1:18473`: health, this machine's
 fingerprint, paired clients, stop. It never renders a transcript. Configuration is environment

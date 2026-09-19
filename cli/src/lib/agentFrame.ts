@@ -20,7 +20,7 @@
 
 import { stat } from 'node:fs/promises'
 import { agentProject, type AgentProject } from './agentProject.js'
-import type { GridAssignment } from './gridAssignment.js'
+import { gridEndpointMatchesLaunch, type GridAssignment } from './gridAssignment.js'
 import type { GridWebSearchStatus } from './gridLaunch.js'
 import { projectDisplayName, sessionDisplayTitle, type RegisteredSession } from './registry.js'
 import { engineCanFork } from './forkAgent.js'
@@ -137,7 +137,13 @@ export async function agentFrame(
     // a real answer ("on no grid") and must be sent as one — omitting the key would make every push
     // indistinguishable from a daemon too old to know about grids. The web-search status rides on
     // the block — decided by the launch, kept on the row — so it is gone the moment the block is.
-    grid: s.grid ? { ...s.grid, ...(s.gridWebSearch ? { webSearch: s.gridWebSearch } : {}) } : null,
+    grid: s.grid ? {
+      ...s.grid,
+      ...(s.gridLaunch?.targetId && gridEndpointMatchesLaunch(s.engine, s.grid.baseUrl, s.gridLaunch)
+        ? { targetId: s.gridLaunch.targetId }
+        : {}),
+      ...(s.gridWebSearch ? { webSearch: s.gridWebSearch } : {}),
+    } : null,
     // The Codex profile folder this agent launched against, if one was chosen instead of the
     // engine's own login. Codex only; null is a real answer ("uses ~/.codex") for the same reason
     // `grid: null` is above.

@@ -6,7 +6,9 @@
  * a person, and what an agent is told to ask for.
  */
 import { gridExec, gridJson } from './gridExec.js'
+import { localGridCapableEngines } from './gridLaunch.js'
 import { resolveGridMcpUrl } from './gridMcpUrl.js'
+import { localGridTargetId, readLocalGridProfiles, type LocalGridProfile } from './gridProfiles.js'
 
 /** A row of `grid models --json`. `node` names the machine serving it — on a private grid, one of
  *  the user's own. */
@@ -83,16 +85,45 @@ export async function listGridModels(gridName: string | null): Promise<GridModel
   return models
 }
 
+function localProcessEnv(profile: LocalGridProfile): NodeJS.ProcessEnv {
+  return { ...process.env, GRID_HOME: profile.gridHome }
+}
+
+async function listLocalProfile(profile: LocalGridProfile): Promise<GridModel[]> {
+  // Grid 0.3.47's local `models` can hang and `engines` can omit a live engine while the hub is
+  // already serving it. `info --env` is fast and authoritative for the profile's hub; its OpenAI
+  // catalogue preserves the exact model ids engines must send.
+  const result = await gridExec(['--local', 'info', profile.gridName, '--env'], {
+    processEnv: localProcessEnv(profile), timeoutMs: 5_000,
+  })
+  if (result.code !== 'OK') return []
+  const endpoint = readEnvExports(result.stdout)
+  if (!endpoint.baseUrl || !endpoint.apiKey) return []
+  return (await modelIdsAt(endpoint.baseUrl, endpoint.apiKey, 4_000)).map((id) => ({ id, node: profile.label }))
+}
+
 /** One grid this computer is signed into, with what it serves — the picker's section. */
 export interface GridSection {
   /** The grid's name as `grid ls` prints it. */
   name: string
   /** `permissioned-public` is the account's own private grid; the others are shared. */
   type: string
-  /** True for the account's private grid — the picker labels that one "Local". */
+  /** True for the account's private remote grid. */
   own: boolean
+  /** Opaque server-owned route identity. It contains no endpoint, path or credential. */
+  targetId?: string
+  source?: 'local' | 'private' | 'shared'
+  label?: string
+  /** Stable operator-facing profile id, so duplicate labels remain distinguishable. */
+  profileId?: string
+  /** Engines compatible with this source's inference protocol. Absent means the general set. */
+  engines?: string[]
   models: GridModel[]
 }
+
+// A local-first answer may return before remote discovery settles. Keep that one remote operation
+// shared until it finishes so repeated picker opens cannot accumulate 30-second CLI subprocesses.
+const remoteCatalogs = new Map<string, Promise<GridSection[]>>()
 
 /**
  * Every grid this computer is signed into, each with its live models, own grid first.
@@ -104,22 +135,47 @@ export interface GridSection {
  * spawn and a relay round trip, and three of them one after another was the whole of what a
  * person waited through. A grid that fails to answer is an empty section, not a missing one.
  */
-export async function listAllGridModels(ownGridName: string | null): Promise<GridSection[]> {
-  const { value: rows } = await gridJson<Array<{ grid?: unknown; type?: unknown }>>(['--remote', 'ls'])
-  if (!Array.isArray(rows)) {
-    return ownGridName ? [{ name: ownGridName, type: 'permissioned-public', own: true, models: await listGridModels(ownGridName) }] : []
-  }
-  const grids = rows
-    .filter((row): row is { grid: string; type?: unknown } => typeof row.grid === 'string' && row.grid.trim().length > 0)
-    .map((row) => ({ name: row.grid.trim(), type: typeof row.type === 'string' ? row.type : '' }))
-  const sections = await Promise.all(grids.map(async (grid) => ({
-    name: grid.name,
-    type: grid.type,
-    own: grid.name === ownGridName,
-    models: await listGridModels(grid.name),
+export async function listAllGridModels(
+  ownGridName: string | null,
+  profiles: readonly LocalGridProfile[] = readLocalGridProfiles(),
+): Promise<GridSection[]> {
+  const locals = Promise.all(profiles.map(async (profile): Promise<GridSection> => ({
+    name: profile.gridName, type: 'local', own: false, source: 'local', label: profile.label,
+    profileId: profile.id, targetId: localGridTargetId(profile),
+    engines: localGridCapableEngines(),
+    models: await listLocalProfile(profile).catch(() => []),
   })))
-  sections.sort((a, b) => Number(b.own) - Number(a.own))
-  return sections
+  const remoteKey = ownGridName ?? ''
+  let remotes = remoteCatalogs.get(remoteKey)
+  if (!remotes) {
+    remotes = (async (): Promise<GridSection[]> => {
+      const { value: rows } = await gridJson<Array<{ grid?: unknown; type?: unknown }>>(['--remote', 'ls'])
+      if (!Array.isArray(rows)) {
+        return ownGridName ? [{ name: ownGridName, type: 'permissioned-public', own: true, source: 'private', targetId: `remote:${ownGridName}`, models: await listGridModels(ownGridName) }] : []
+      }
+      const grids = rows
+        .filter((row): row is { grid: string; type?: unknown } => typeof row.grid === 'string' && row.grid.trim().length > 0)
+        .map((row) => ({ name: row.grid.trim(), type: typeof row.type === 'string' ? row.type : '' }))
+      const sections = await Promise.all(grids.map(async (grid): Promise<GridSection> => ({
+        name: grid.name, type: grid.type, own: grid.name === ownGridName,
+        source: grid.name === ownGridName ? 'private' : 'shared', targetId: `remote:${grid.name}`,
+        models: await listGridModels(grid.name),
+      })))
+      sections.sort((a, b) => Number(b.own) - Number(a.own))
+      return sections
+    })().catch(() => [])
+    remoteCatalogs.set(remoteKey, remotes)
+    void remotes.finally(() => {
+      if (remoteCatalogs.get(remoteKey) === remotes) remoteCatalogs.delete(remoteKey)
+    })
+  }
+  const localSections = await locals
+  // A slow cloud catalogue must not hide a responsive local fleet. Let it populate its existing
+  // caches in the background; the next open can include it.
+  const remoteSections = profiles.length
+    ? await Promise.race([remotes, new Promise<GridSection[]>((resolve) => setTimeout(() => resolve([]), 2_000))])
+    : await remotes
+  return [...localSections, ...remoteSections]
 }
 
 /**
@@ -158,10 +214,14 @@ async function relayModelIds(gridName: string): Promise<string[]> {
   if (info.code !== 'OK') return []
   const env = readEnvExports(info.stdout)
   if (!env.baseUrl || !env.apiKey) return []
+  return await modelIdsAt(env.baseUrl, env.apiKey, 10_000)
+}
+
+async function modelIdsAt(baseUrl: string, apiKey: string, timeoutMs: number): Promise<string[]> {
   try {
-    const response = await fetch(`${env.baseUrl.replace(/\/$/, '')}/models`, {
-      headers: { authorization: `Bearer ${env.apiKey}` },
-      signal: AbortSignal.timeout(10_000),
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/models`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(timeoutMs),
     })
     if (!response.ok) return []
     const body = await response.json() as { data?: Array<{ id?: unknown }> }
@@ -186,6 +246,8 @@ export interface GridTarget {
   /** The control plane's web-tools MCP endpoint. Absent when it could not be obtained; the agent
    *  then runs on the grid with no web tools, and the daemon log says why. */
   mcpUrl?: string
+  /** Opaque route identity retained for UI selection; never used as an endpoint. */
+  targetId?: string
 }
 
 /**
@@ -206,8 +268,26 @@ export interface GridTarget {
  * valid, and a mismatch nobody would think to look for. A missing `mcpUrl` degrades rather than
  * refuses: inference is the feature, web search is an accessory (`gridMcpUrl.ts`).
  */
-export async function resolveGridTarget(gridName: string | null, model: string): Promise<GridTarget | null> {
+export async function resolveGridTarget(
+  gridName: string | null,
+  model: string,
+  targetId?: string,
+  profiles: readonly LocalGridProfile[] = readLocalGridProfiles(),
+): Promise<GridTarget | null> {
   if (!gridName?.trim() || !model.trim()) return null
+  if (targetId?.startsWith('local:')) {
+    const profile = profiles.find((row) => localGridTargetId(row) === targetId && row.gridName === gridName)
+    if (!profile) return null
+    const processEnv = localProcessEnv(profile)
+    const info = await gridExec(['--local', 'info', profile.gridName, '--env'], { processEnv, timeoutMs: 5_000 })
+    if (info.code !== 'OK') return null
+    const { baseUrl, apiKey } = readEnvExports(info.stdout)
+    if (!baseUrl || !apiKey) return null
+    const listed = await gridExec(['--local', 'ls', '--json'], { processEnv, timeoutMs: 5_000 })
+    const localId = localGridId(listed.stdout, profile.gridName) ?? profile.gridName
+    return { networkId: localId, networkName: profile.label, baseUrl, apiKey, model, targetId }
+  }
+  if (targetId && targetId !== `remote:${gridName}`) return null
   const mcpUrl = await resolveGridMcpUrl(gridName)
   const info = await gridExec(['--remote', 'info', gridName, '--env'])
   if (info.code !== 'OK') return null
@@ -223,8 +303,25 @@ export async function resolveGridTarget(gridName: string | null, model: string):
     baseUrl,
     apiKey,
     model,
+    ...(targetId ? { targetId } : {}),
     ...(mcpUrl ? { mcpUrl } : {}),
   }
+}
+
+/** 0.3.47 emits tab-separated rows for local `ls --json`; accept JSON once it is repaired. */
+export function localGridId(stdout: string, gridName: string): string | null {
+  try {
+    const rows = JSON.parse(stdout) as Array<{ grid?: unknown; name?: unknown; id?: unknown }>
+    if (Array.isArray(rows)) {
+      const row = rows.find((item) => item?.grid === gridName || item?.name === gridName)
+      return typeof row?.id === 'string' && row.id.trim() ? row.id.trim() : null
+    }
+  } catch { /* text fallback */ }
+  for (const line of stdout.split(/\r?\n/)) {
+    const [name, id] = line.split('\t')
+    if (name?.trim() === gridName && id?.trim()) return id.trim()
+  }
+  return null
 }
 
 /** The two exports out of `grid info --env`. ⚠️ Values are SHELL-QUOTED — a base URL read with the
