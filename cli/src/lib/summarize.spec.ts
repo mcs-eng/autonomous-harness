@@ -173,7 +173,7 @@ describe('Cursor recap', () => {
     expect(mocks.cleanupCursor).toHaveBeenCalledWith('cursor-recap-session')
   })
 
-  it('includes Cursor, OpenCode, Kilo and Pi sessions when sizing recap workers', () => {
+  it('includes transcript-backed engines and excludes process-only Cline when sizing recap workers', () => {
     syncSummaryPoolSessions([
       { engine: 'claude' },
       { engine: 'codex' },
@@ -187,6 +187,7 @@ describe('Cursor recap', () => {
       { engine: 'commandcode' },
       { engine: 'hermes' }, // not poolable (prompt is argv) — must NOT be counted
       { engine: 'devin' },  // likewise: piping a prompt to `devin -p` panics the CLI
+      { engine: 'cline' },  // terminal-only preview: no Harness transcript to summarize
     ])
 
     expect(mocks.setCounts).toHaveBeenCalledWith({ claude: 1, codex: 1, cursor: 2, opencode: 1, kilo: 1, pi: 1, commandcode: 1 })
