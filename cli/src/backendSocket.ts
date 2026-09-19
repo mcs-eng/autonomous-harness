@@ -1849,10 +1849,21 @@ export class BackendSocket {
                   }),
                 }).grids
             const grids = await listing
+            // The remote catalogue can finish before the background name derivation. Do not label
+            // its private grid as shared in that window. If derivation landed while the catalogue
+            // was out, classify against the latest name; if it is still pending, return the useful
+            // local rows alone. A settled null means this is a shared-only account, so those rows
+            // become visible normally on the next line.
+            const responseGridName = profiles.length ? this.harnessGridName : gridName
+            const responseGrids = profiles.length && !responseGridName && this.gridNameResolution
+              ? grids.filter((grid) => grid.source === 'local')
+              : grids.map((grid) => grid.source === 'local'
+                  ? grid
+                  : { ...grid, own: grid.name === responseGridName, source: grid.name === responseGridName ? 'private' as const : 'shared' as const })
             reply(type, requestId, {
-              gridName,
-              models: grids.find((g) => g.own)?.models ?? [],
-              grids,
+              gridName: responseGridName,
+              models: responseGrids.find((g) => g.own)?.models ?? [],
+              grids: responseGrids,
               // Which engines a Local model can be offered to at all. Static per CLI version — it is
               // the set of launch contracts in `gridLaunch.ts` — and answered here, beside the list,
               // so the picker can say "Cursor runs only on its own login" instead of offering a row
