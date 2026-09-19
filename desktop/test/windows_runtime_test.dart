@@ -184,6 +184,50 @@ void main() {
       expect(probed, ['Ubuntu']);
     });
 
+    test('findHarness prefers a later fully ready distro', () async {
+      final runtime = WslRuntime(
+        runProcess: fake((executable, arguments) {
+          final distro = arguments[1];
+          return ProcessResult(
+            0,
+            0,
+            distro == 'Ready'
+                ? 'cli launcher\ntmux yes\n'
+                : 'cli launcher\ntmux no\n',
+            '',
+          );
+        }),
+      );
+
+      final probe = await runtime.findHarness(distros: ['Incomplete', 'Ready']);
+      expect(probe.distro, 'Ready');
+      expect(probe.found, isTrue);
+      expect(probe.tmuxReady, isTrue);
+    });
+
+    test('findHarness retains the first CLI distro when none is ready', () async {
+      final runtime = WslRuntime(
+        runProcess: fake((executable, arguments) {
+          final distro = arguments[1];
+          return ProcessResult(
+            0,
+            0,
+            distro == 'Missing'
+                ? 'cli missing\ntmux yes\n'
+                : 'cli launcher\ntmux no\n',
+            '',
+          );
+        }),
+      );
+
+      final probe = await runtime.findHarness(
+        distros: ['FirstCli', 'SecondCli', 'Missing'],
+      );
+      expect(probe.distro, 'FirstCli');
+      expect(probe.found, isTrue);
+      expect(probe.tmuxReady, isFalse);
+    });
+
     test('the probe reports the CLI and tmux separately', () async {
       final runtime = WslRuntime(
         runProcess: fake(

@@ -185,6 +185,9 @@ if ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
 fi
 printf '%s\n' "$SOURCE_COMMIT" > "$RELEASE_DIR/source-commit.txt"
 cp -f "$REPO_ROOT/WINDOWS_QUICKSTART.md" "$RELEASE_DIR/README-WINDOWS.md"
+for doc in WINDOWS_PORT.md WINDOWS_AGENT_VERIFICATION.md; do
+  cp -f "$REPO_ROOT/$doc" "$RELEASE_DIR/$doc"
+done
 
 # --- the MSVC runtime the bundle must carry -----------------------------------
 # harness.exe and every Flutter plugin DLL IMPORT the MSVC C++ runtime
@@ -317,6 +320,8 @@ required = [
     "Release/harness-cli/notify.mjs",
     "Release/source-commit.txt",
     "Release/README-WINDOWS.md",
+    "Release/WINDOWS_PORT.md",
+    "Release/WINDOWS_AGENT_VERIFICATION.md",
     "Release/version.txt",
     "Release/LICENSE.txt",
     "Release/licenses/xterm-LICENSE.txt",

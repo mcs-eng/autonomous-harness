@@ -25,6 +25,8 @@ make_fixture() {
   cp "$REPOSITORY_ROOT/LICENSE" "$root/LICENSE"
   cp "$DESKTOP_ROOT/third_party/xterm/LICENSE" "$desktop/third_party/xterm/LICENSE"
   cp "$DESKTOP_ROOT/WINDOWS_QUICKSTART.md" "$desktop/WINDOWS_QUICKSTART.md"
+  cp "$DESKTOP_ROOT/WINDOWS_PORT.md" "$desktop/WINDOWS_PORT.md"
+  cp "$DESKTOP_ROOT/WINDOWS_AGENT_VERIFICATION.md" "$desktop/WINDOWS_AGENT_VERIFICATION.md"
   mkdir -p "$root/cli"
   printf 'name: harness\nversion: 9.8.7+fixture\n' > "$desktop/pubspec.yaml"
   cat > "$desktop/fake-bin/flutter" <<'SH'
