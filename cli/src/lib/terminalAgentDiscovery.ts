@@ -16,6 +16,7 @@ import {
   enrichProcessRows,
   processRows,
   processTreePids,
+  processArgvIsBoundaryFaithful,
   resumeSessionId,
   type ProcessRow,
 } from './tmux.js'
@@ -35,6 +36,12 @@ export interface DiscoveredTerminalAgent {
   processIdentity: ProcessIdentity
   args: string
   resumeSessionId: string | null
+  /**
+   * Whether `args` preserves real argv boundaries (/proc-cmdline-reconstructed). Flattened `ps`
+   * text cannot prove a bypass flag or a resume id out of prompt text — consumers must treat it
+   * as no evidence (review cycle-6, P1 security).
+   */
+  argsBoundaryFaithful: boolean
   runtimes: TerminalRuntimeRef[]
   primaryRuntimeKey: string
   /**
@@ -160,6 +167,10 @@ function rootOwner(
       processIdentity: { pid: row.pid, executable: row.executable, startMarker: row.startMarker },
       args: row.args,
       resumeSessionId: resumeSessionId(engine, row.args),
+      // Flattened `ps` args cannot prove bypass state or a resume id out of prompt text
+      // (review cycle-6, P1 security); only /proc-cmdline-reconstructed rows carry real
+      // argv boundaries. Set here once so every consumer reads the same evidence flag.
+      argsBoundaryFaithful: processArgvIsBoundaryFaithful(row),
     },
   }
 }

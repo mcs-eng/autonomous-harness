@@ -15,7 +15,7 @@
  */
 
 import { execFile } from 'child_process'
-import { open, readdir, readFile, realpath, stat } from 'fs/promises'
+import { open, readdir, readFile, readlink, realpath, stat } from 'fs/promises'
 import { basename, dirname, join, sep } from 'path'
 import { promisify } from 'util'
 import { env } from '../config/env.js'
@@ -24,6 +24,7 @@ import type { AgentEngine } from '../engines/types.js'
 import { readCodexRolloutMeta } from '../engines/codex/rollout.js'
 import { agyConversationForPid, findAgyTranscript } from '../engines/agy/session.js'
 import { copilotSessionCwd, copilotSessionForPid, findCopilotTranscript } from '../engines/copilot/session.js'
+import { findCursorTranscript } from '../engines/cursor/discovery.js'
 import { sqlitePreflightMessage } from './sqliteAvailability.js'
 
 const execFileAsync = promisify(execFile)
@@ -93,7 +94,7 @@ async function readTranscriptMeta(path: string): Promise<TranscriptMeta | null> 
 
 /** Session id from `<id>.jsonl`, or from pi's `<timestamp>_<id>.jsonl`. */
 function idFromFile(path: string): string {
-  const base = path.split('/').pop()?.replace(/\.jsonl$/, '') ?? ''
+  const base = basename(path).replace(/\.jsonl$/, '')
   const underscore = base.lastIndexOf('_')
   return underscore === -1 ? base : base.slice(underscore + 1)
 }
@@ -366,6 +367,71 @@ export async function findLiveSession(
     default:
       return null
   }
+}
+
+/**
+ * Corroborate an explicit resume id read from a process row whose argv boundaries are unavailable.
+ *
+ * macOS `ps` flattens argv, so a flag-shaped fragment inside a prompt is indistinguishable from a
+ * real resume flag. The id is therefore only a hint: the engine's own store must identify the same
+ * session, and the observed PID must hold that exact transcript open. Store recency alone is not
+ * ownership evidence: another agent in the same cwd can update the hinted session concurrently.
+ *
+ * Cursor cannot be enumerated safely by cwd. When its selected process exposes the active transcript
+ * as an open file, use that exact pid-to-file relationship and require the path to equal Cursor's
+ * canonical path for the hinted id. If it does not expose one, stay unbound.
+ */
+export async function findCorroboratedResumeSession(
+  engine: AgentEngine,
+  cwd: string,
+  startedAtMs: number,
+  resumeSessionId: string,
+  opts?: { pid?: number; codexHome?: string },
+): Promise<RepairedSession | null> {
+  if (!opts?.pid) return null
+  const targets = process.platform === 'linux'
+    ? await linuxOpenFileTargets(opts.pid)
+    : await lsofOpenFileTargets(opts.pid)
+  if (engine === 'cursor') {
+    const expected = await findCursorTranscript(env.CURSOR_HOME, resumeSessionId)
+    if (!expected) return null
+    return await resumeCandidateMatchesOpenFile(
+      { sessionId: resumeSessionId, transcriptPath: expected },
+      resumeSessionId,
+      targets,
+    ) ? { sessionId: resumeSessionId, transcriptPath: expected } : null
+  }
+  const found = await findLiveSession(engine, cwd, startedAtMs, {
+    pid: opts?.pid,
+    codexHome: opts?.codexHome,
+  })
+  return await resumeCandidateMatchesOpenFile(found, resumeSessionId, targets) ? found : null
+}
+
+/** Evidence seam for tests: both the id and the PID-held transcript path must agree. */
+export async function resumeCandidateMatchesOpenFile(
+  found: RepairedSession | null,
+  resumeSessionId: string,
+  openFiles: readonly string[],
+): Promise<boolean> {
+  if (!found?.transcriptPath || found.sessionId !== resumeSessionId) return false
+  const canonicalExpected = await realpath(found.transcriptPath).catch(() => found.transcriptPath!)
+  const canonicalTargets = await Promise.all(openFiles.map((path) => realpath(path).catch(() => path)))
+  return canonicalTargets.includes(canonicalExpected)
+}
+
+async function linuxOpenFileTargets(pid: number): Promise<string[]> {
+  const dir = `/proc/${pid}/fd`
+  const entries = await readdir(dir).catch(() => [])
+  return Promise.all(entries.map((entry) => readlink(join(dir, entry)).catch(() => '')))
+    .then((paths) => paths.filter(Boolean))
+}
+
+async function lsofOpenFileTargets(pid: number): Promise<string[]> {
+  const result = await execFileAsync('lsof', ['-w', '-p', String(pid), '-Fn'], { timeout: 4_000 })
+    .then((value) => value.stdout)
+    .catch((err: { stdout?: string }) => err.stdout ?? '')
+  return result.split('\n').filter((line) => line.startsWith('n')).map((line) => line.slice(1))
 }
 
 /** The conversation the given `agy` pid is holding, if its transcript exists yet. */

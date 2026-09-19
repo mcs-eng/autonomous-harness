@@ -15,6 +15,8 @@
 set -euo pipefail
 set +x
 
+. "$(dirname "${BASH_SOURCE[0]}")/lib/publish-common.sh"
+
 VERSION="${1:-}"
 ARCHIVES_DIR="${2:-}"
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ -z "$ARCHIVES_DIR" ]]; then
@@ -22,36 +24,6 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ -z "$ARCHIVES_DIR" ]]; t
   exit 2
 fi
 [[ -d "$ARCHIVES_DIR" ]] || { echo "error: $ARCHIVES_DIR is not a directory" >&2; exit 2; }
-
-for command in shasum python3; do
-  command -v "$command" >/dev/null 2>&1 || {
-    echo "error: $command is required" >&2
-    exit 1
-  }
-done
-
-# --- GCS client: `gcloud storage`, and only `gcloud storage` ---
-# gsutil was retired from this repo on 2026-09-17 (see publish-managed-tmux-runtime.sh). It is a
-# standalone Python tool that only understands gcloud's *user* and *service-account-key*
-# credentials: it cannot use the external-account (federated) credential Workload Identity
-# Federation issues, so every call fails under WIF while the identical `gcloud storage` call works
-# — it is the same gcloud binary that performed the token exchange. Do not reintroduce it.
-command -v gcloud >/dev/null 2>&1 || {
-  echo "error: gcloud not found — install/authenticate the gcloud SDK" >&2
-  exit 1
-}
-gcloud storage --help >/dev/null 2>&1 || {
-  echo "error: this gcloud is too old for 'gcloud storage' — update the gcloud SDK" >&2
-  exit 1
-}
-
-# gcs_cp <src> <dst> [cache-control] [content-type] — either side may be gs:// or a local path or `-`.
-gcs_cp() {
-  local src="$1" dst="$2" cc="${3:-}" ct="${4:-}" args=(storage cp)
-  if [ -n "$cc" ]; then args+=("--cache-control=$cc"); fi
-  if [ -n "$ct" ]; then args+=("--content-type=$ct"); fi
-  gcloud "${args[@]}" "$src" "$dst"
-}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FLOOR="$(sed -n "s/^export const GRID_VERSION_FLOOR = '\([0-9.]*\)'.*/\1/p" "$REPO_ROOT/cli/src/lib/gridExec.ts")"
@@ -61,14 +33,10 @@ if [[ "$(printf '%s\n%s\n' "$FLOOR" "$VERSION" | sort -V | head -1)" != "$FLOOR"
   exit 1
 fi
 
-GCS_BUCKET="${GCS_BUCKET:-s3-autonomous-upgrade-3}"
-PUBLIC_BASE="${GCS_PUBLIC_BASE_URL:-https://storage.googleapis.com/${GCS_BUCKET}}"
-METADATA_PATH="${METADATA_PATH:-harness/runtime/grid/metadata.json}"
+publish_require_tools shasum python3
+publish_require_gcloud
+publish_init_env "harness/runtime/grid/metadata.json"
 PLATFORMS="${GRID_PLATFORMS:-darwin-arm64 darwin-x64 linux-x64 linux-arm64}"
-WORK_DIR="$(mktemp -d)"
-SRC="$WORK_DIR/metadata.json"
-DST="$WORK_DIR/metadata.next.json"
-trap 'rm -rf "$WORK_DIR"' EXIT
 
 # Every named platform or nothing: a manifest naming some and not others would make the installer's
 # behaviour depend on which computer it runs on. Publish fewer on purpose with GRID_PLATFORMS.
@@ -88,51 +56,20 @@ for platform in $PLATFORMS; do
   }
   sha256="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
   size="$(wc -c < "$archive_path" | tr -d ' ')"
-  ENTRIES+=("$platform|$VERSION|$archive|$sha256|$size|$root")
+  url="${PUBLIC_BASE%/}/harness/runtime/grid/v${VERSION}/${archive}"
+  ENTRIES+=("$platform|$VERSION|$url|$sha256|$size|$root")
 done
 
 for entry in "${ENTRIES[@]}"; do
-  IFS='|' read -r platform version archive sha256 size root <<< "$entry"
-  object_path="harness/runtime/grid/v${version}/${archive}"
+  IFS='|' read -r platform version url sha256 size root <<< "$entry"
+  archive="${url##*/}"
   echo ">> uploading $archive ($size bytes, sha256 $sha256)"
-  gcs_cp "$ARCHIVES_DIR/$archive" "gs://${GCS_BUCKET}/${object_path}" \
+  gcs_cp "$ARCHIVES_DIR/$archive" "gs://${GCS_BUCKET}/harness/runtime/grid/v${version}/${archive}" \
     'public, max-age=31536000, immutable'
 done
 
-if ! gcs_cp "gs://${GCS_BUCKET}/${METADATA_PATH}" "$SRC" 2>/dev/null; then
-  printf '{}' > "$SRC"
-fi
-
-python3 - "$SRC" "$DST" "${PUBLIC_BASE%/}" "${ENTRIES[@]}" <<'PY'
-import json, sys
-src, dst, public_base, *entries = sys.argv[1:]
-try:
-    with open(src) as f:
-        document = json.load(f)
-except (OSError, json.JSONDecodeError):
-    document = {}
-if not isinstance(document, dict):
-    document = {}
-grid = document.get("grid")
-if not isinstance(grid, dict):
-    grid = {}
-document["grid"] = grid
-for entry in entries:
-    platform, version, archive, sha256, size, root = entry.split("|", 5)
-    grid[platform] = {
-        "version": version,
-        "url": f"{public_base}/harness/runtime/grid/v{version}/{archive}",
-        "sha256": sha256,
-        "size": int(size),
-        "archiveRoot": root,
-    }
-with open(dst, "w") as f:
-    json.dump(document, f, indent=2)
-    f.write("\n")
-PY
-
-gcs_cp "$DST" "gs://${GCS_BUCKET}/${METADATA_PATH}" \
-       'no-cache, no-store, must-revalidate' 'application/json'
+publish_fetch_current_metadata
+publish_merge_metadata grid
+publish_upload_metadata
 
 echo ">> published managed grid ${VERSION} for: ${PLATFORMS}"
-echo ">> manifest: ${PUBLIC_BASE%/}/${METADATA_PATH}"

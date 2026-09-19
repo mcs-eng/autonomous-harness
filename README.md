@@ -2,6 +2,18 @@
 
 **The open-source software and hardware platform for domain-specific harnesses.**
 
+> **Community Windows 11 preview:** this fork adds a native Windows desktop with
+> a WSL2 backend and a matching bundled CLI. [Download the Windows preview](https://github.com/mcs-eng/autonomous-harness/releases)
+> · [Setup and limitations](desktop/WINDOWS_QUICKSTART.md).
+> Independent MIT-licensed fork of Autonomous's OpenHarness; not an official
+> Autonomous Windows release. The upstream project is described below.
+
+Harness is a desktop app for the coding agents you already run — Claude Code, Codex, Cursor, and
+eleven more — on every machine you own, in one window. Each agent is a tmux pane on the machine it
+runs on, kept there by a small daemon (`harness`). The window attaches to those panes, from this
+computer or from any other, with everything between machines encrypted end to end. An optional USB
+device puts the same agents on your desk.
+
 Run Claude Code, Codex, and every other coding agent in persistent terminals on all your machines. Give
 them a **domain-specific harness (DSH)** and they design circuit boards, model 3D parts, simulate
 robots, and build games in a live viewer. Keep them on your desk with the open-hardware

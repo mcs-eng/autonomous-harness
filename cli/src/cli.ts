@@ -78,7 +78,7 @@ import { tmuxSupportsSessionEnv, TMUX_SESSION_ENV_MIN } from './lib/tmuxVersion.
 import { clearDeleted, isRecentlyDeleted, markDeleted } from './lib/deletedSessions.js'
 import { terminateDeletedAgent, checkPidRuntime } from './lib/deleteAgentFallback.js'
 import { restartAgent, type RestartAgentDeps } from './lib/restartAgent.js'
-import { claudeContinuation, findLiveSession } from './lib/sessionRepair.js'
+import { claudeContinuation, findCorroboratedResumeSession, findLiveSession } from './lib/sessionRepair.js'
 import { TmuxBackend } from './lib/tmuxBackend.js'
 import { DEFAULT_HOST_THEME, loadHostTheme, saveHostTheme, type HostTheme } from './lib/hostTheme.js'
 import { createAndRegisterPane } from './lib/createAgentPane.js'
@@ -103,6 +103,7 @@ import { basename } from 'node:path'
 import {
   bypassPermissionActive,
   clearPaneRemainOnExit,
+  processArgvIsBoundaryFaithful,
   resolvePaneEngineProcess,
   tmuxPaneState,
 } from './lib/tmux.js'
@@ -151,6 +152,7 @@ import {
 } from './lib/summarize.js'
 import type { CableAgent } from './cable/cableSession.js'
 import { routeVoiceTask, setVoiceRouterDeviceConnected, setVoiceRouterSessions, shutdownVoiceRouter, type RouterAgent } from './lib/voiceRouter.js'
+import { routeTaskWithJev } from './lib/jevRouter.js'
 import { tailFile } from './lib/sessions.js'
 import { E2eeStore } from './lib/e2ee/store.js'
 import { b64e } from './lib/e2ee/core.js'
@@ -2769,9 +2771,32 @@ async function runForeground(session: AuthSession): Promise<void> {
       return
     }
 
-    let sessionId = observed.resumeSessionId
+    // A resume id read from flattened `ps` text is only a hint: the token scan cannot prove its
+    // origin when the string has no faithful boundaries (review cycle-7, P1 security). The store
+    // corroboration below must independently identify the same live session before it can bind.
+    let sessionId = observed.argsBoundaryFaithful ? observed.resumeSessionId : null
     let transcriptPath: string | undefined
     let source = 'terminal-resume'
+    // macOS has no /proc argv. Treat a resume id parsed from flattened `ps` as a hint only, then
+    // require the engine's own store to identify that exact id and the observed PID to hold its
+    // transcript open. This restores evidence-backed old-session resumes without letting prompt text
+    // choose another process's recently updated session.
+    if (!sessionId && observed.resumeSessionId) {
+      const startedAtMs = Date.parse(observed.processIdentity.startMarker)
+      if (Number.isFinite(startedAtMs)) {
+        const corroborated = await findCorroboratedResumeSession(
+          observed.engine,
+          observed.cwd,
+          startedAtMs,
+          observed.resumeSessionId,
+          { pid: observed.processIdentity.pid, codexHome: agent.codexHome ?? undefined },
+        )
+        if (corroborated) {
+          sessionId = corroborated.sessionId
+          transcriptPath = corroborated.transcriptPath
+        }
+      }
+    }
     if (sessionId) {
       if (isRecentlyDeleted(sessionId)) return
       const owner = registry.bySession(sessionId)
@@ -2780,7 +2805,7 @@ async function runForeground(session: AuthSession): Promise<void> {
         const ownerStarted = Date.parse(owner.processIdentity?.startMarker ?? '')
         if (Number.isFinite(ownerStarted) && (!Number.isFinite(observedStarted) || observedStarted <= ownerStarted)) return
       }
-      transcriptPath = observed.engine === 'cursor'
+      transcriptPath ??= observed.engine === 'cursor'
         ? await findCursorTranscript(env.CURSOR_HOME, sessionId) ?? undefined
         : observed.engine === 'grok'
           ? await findGrokTranscript(env.GROK_HOME, observed.cwd, sessionId) ?? undefined
@@ -2899,9 +2924,14 @@ async function runForeground(session: AuthSession): Promise<void> {
       // The live argv is the truth about the bypass flag, and this is the one place every running
       // agent passes through — so a row written before the flag was persisted at all (or by a build
       // that did not yet) learns it here, before any pane recreation ever needs it.
+      // ONLY boundary-faithful argv counts: flattened `ps` text lets one prompt argument carrying
+      // the flag text flip the state, and a persisted prompt-enabled bypass survives relaunch
+      // (review cycle-6, P1 security). No faithful evidence here leaves the stored state alone.
       // `observed.engine`, not `current.engine`: for a terminal that just adopted one, the row's
       // engine was `terminal` a line ago, which has no bypass flag and would read every launch as "no".
-      registry.setBypassPermission(current.agentId, bypassPermissionActive(observed.engine, observed.args))
+      if (observed.argsBoundaryFaithful) {
+        registry.setBypassPermission(current.agentId, bypassPermissionActive(observed.engine, observed.args))
+      }
       // Same idea for a Codex profile: a row that never learned which CODEX_HOME its process runs
       // under learns it from the process, before the hook path validates a transcript against it.
       // Fill-only — a profile the row already knows is never re-derived.
@@ -3603,6 +3633,40 @@ async function runForeground(session: AuthSession): Promise<void> {
         // Never a silent truncation: a route that could not have picked the right agent must not read
         // like a route that considered it and said no.
         console.log(`[route] ${all.length} agents · weighing the first ${ranked.length} (open tiles first)`)
+      }
+      if (env.TASK_ROUTER === 'jev') {
+        const routed = await routeTaskWithJev(
+          text,
+          ranked.map((agent) => ({ id: agent.id, name: agent.name, engine: agent.engine })),
+          { apiKey: process.env.TYPESAFE_API_KEY ?? '' },
+        )
+        const named = (id: string) => ranked.find((agent) => agent.id === id)
+        const scores = new Map(routed.scores.map((entry) => [entry.agentId, entry.confidence]))
+        const winner = named(routed.agentId)
+        const ordered = [winner, ...routed.scores.map((entry) => named(entry.agentId)),
+          ...ranked.filter((agent) => agent.id !== routed.agentId && !scores.has(agent.id))]
+          .filter((agent, index, list): agent is NonNullable<typeof agent> =>
+            !!agent && list.findIndex((entry) => entry?.id === agent.id) === index)
+        console.log(`[route] Jev ${routed.via === 'jev' ? 'answered' : 'unavailable; local metadata fallback'} · candidates=${ranked.length}`)
+        return {
+          agentId: routed.agentId,
+          machineId: all.find((entry) => entry.id === routed.agentId)?.machineId ?? '',
+          name: winner?.name ?? '',
+          confidence: routed.confidence,
+          reason: '',
+          weighed: ranked.length,
+          machines: new Set(ranked.map((agent) => agent.machine).filter(Boolean)).size,
+          via: routed.via,
+          candidates: ordered.map((agent) => ({
+            agentId: agent.id,
+            name: agent.name,
+            machineId: all.find((entry) => entry.id === agent.id)?.machineId ?? '',
+            machine: agent.machine ?? '',
+            engine: agent.engine ?? '',
+            recent: '',
+            confidence: agent.id === routed.agentId ? routed.confidence : scores.get(agent.id) ?? 0,
+          })),
+        }
       }
       // Recaps AFTER the cap, and in parallel: a remote agent's recap is an RPC to its machine, so
       // fetching for agents that were never going to be weighed is latency spent on nothing. They are
@@ -4542,14 +4606,18 @@ async function runForeground(session: AuthSession): Promise<void> {
   })
 
   /** The bypass-permission mode the LIVE process was launched with — there is nowhere to read it from
-   *  once that process is dead, so both swap paths read it before signalling anything. */
+   *  once that process is dead, so both swap paths read it before signalling anything. Only
+   *  boundary-faithful argv counts: flattened `ps` args let one prompt argument carrying the flag
+   *  text flip the state that the relaunch then re-applies (review cycle-6, P1 security), so a
+   *  non-faithful row is NO EVIDENCE and the relaunch proceeds without a bypass flag. */
   const liveBypassPermission = async (session: RegisteredSession): Promise<boolean> => {
     const identity = session.processIdentity
     if (!identity) return false
     const rows = await processRows()
     const row = rows?.find((candidate) =>
       candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
-    return row ? bypassPermissionActive(session.engine, row.args) : false
+    if (!row || !processArgvIsBoundaryFaithful(row)) return false
+    return bypassPermissionActive(session.engine, row.args)
   }
 
   /**

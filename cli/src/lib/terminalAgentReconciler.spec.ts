@@ -25,6 +25,7 @@ function session(runtimes: TerminalRuntimeRef[] = [tmux]): RegisteredSession {
 function observed(runtimes: TerminalRuntimeRef[]): DiscoveredTerminalAgent {
   return {
     engine: 'claude', cwd: '/work', processIdentity: identity, args: 'claude', resumeSessionId: null,
+    argsBoundaryFaithful: false,
     runtimes, primaryRuntimeKey: terminalRouteKey(runtimes[0]),
   }
 }

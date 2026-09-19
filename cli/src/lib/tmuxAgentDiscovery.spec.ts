@@ -317,6 +317,7 @@ function observed(pid: number, engine: AgentEngine = 'claude'): DiscoveredTmuxAg
     processIdentity: { pid, executable: engine, startMarker: `${START} ${pid}` },
     args: engine,
     resumeSessionId: null,
+    argsBoundaryFaithful: false,
   }
 }
 
