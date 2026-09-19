@@ -112,20 +112,44 @@ class MissTtlCache<T> {
 
   T? _value;
   DateTime? _missedAt;
+  Future<T?>? _inFlight;
 
   /// The current value, if a past read found one.
   T? get value => _value;
 
-  /// The cached value, or null when absent — either within [ttl] of the last
-  /// miss, or while a read is already in flight: the miss timestamp is taken
-  /// BEFORE awaiting, so a slow source makes concurrent callers wait instead
-  /// of stampeding it.
+  /// The cached value, or null when absent within [ttl] of the last completed
+  /// miss. Concurrent callers share an active read instead of observing a
+  /// provisional miss or starting another source read.
   Future<T?> read(Future<T?> Function() readSource) async {
     if (_value != null) return _value;
+    final active = _inFlight;
+    if (active != null) return active;
     final missedAt = _missedAt;
     if (missedAt != null && _now().difference(missedAt) < ttl) return null;
-    _missedAt = _now();
-    _value = await readSource();
-    return _value;
+
+    late final Future<T?> operation;
+    operation = () async {
+      try {
+        // Future.sync also turns a synchronous source exception into an
+        // asynchronous completion. That guarantees [operation] has been
+        // assigned before the finally block inspects it.
+        final result = await Future<T?>.sync(readSource);
+        if (result == null) {
+          // The TTL begins when the source answers, not when a potentially slow
+          // read starts. Time spent waiting must not consume the retry window.
+          _missedAt = _now();
+        } else {
+          _value = result;
+          _missedAt = null;
+        }
+        return result;
+      } finally {
+        // A failed source read is retryable immediately. The identity guard
+        // prevents an older completion from clearing a newer operation.
+        if (identical(_inFlight, operation)) _inFlight = null;
+      }
+    }();
+    _inFlight = operation;
+    return operation;
   }
 }

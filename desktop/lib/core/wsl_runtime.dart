@@ -261,14 +261,19 @@ class WslRuntime {
   /// a Docker-only machine reports "not found" and names that as the problem.
   Future<WslHarnessProbe> findHarness({List<String>? distros}) async {
     final names = distros ?? await usableDistros();
+    WslHarnessProbe? firstFound;
     WslHarnessProbe? firstMissing;
     for (final distro in names) {
       if (isDockerDistro(distro)) continue;
       final probe = await probeHarness(distro: distro);
-      if (probe.found) return probe;
-      firstMissing ??= probe;
+      if (probe.found) {
+        if (probe.tmuxReady) return probe;
+        firstFound ??= probe;
+      } else {
+        firstMissing ??= probe;
+      }
     }
-    return firstMissing ?? const WslHarnessProbe.notFound();
+    return firstFound ?? firstMissing ?? const WslHarnessProbe.notFound();
   }
 
   /// Looks for the CLI in one distro, run exactly as the app would run it, and
