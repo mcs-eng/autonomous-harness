@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'fs'
 import { homedir } from 'os'
 import { fileURLToPath } from 'url'
@@ -1754,10 +1754,16 @@ describe('grid_models_list says whether this machine has a grid CLI', () => {
   const { gridName: GRID_NAME, plan } = fakeGridAnswers()
 
   let fake: FakeGrid | null = null
+  beforeEach(() => {
+    // The fake CLI's info response contains a relay URL. Keep its catalogue
+    // request local too: this spec checks CLI presence, not network availability.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ data: [] }))
+  })
   afterEach(async () => {
     fake?.dispose()
     fake = null
     wsMock.instances.length = 0
+    vi.restoreAllMocks()
   })
 
   async function listModels(): Promise<Record<string, unknown> | undefined> {
