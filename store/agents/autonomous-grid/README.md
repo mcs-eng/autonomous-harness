@@ -52,6 +52,10 @@ Remote telemetry does not by itself grant administrative access to each serving 
 - `viewer.mjs` polls `info`, `engines`, `models`, remote `stats`, and managed hosts' `device-info`.
   It serves a read-only loopback viewer and SSE updates. No credential files, full CLI output,
   arbitrary workspace files, or mutation endpoints are exposed to the browser.
+- An optional `nvidia-smi-ssh` sensor can attach host GPU readings to one exact engine endpoint.
+  It runs one fixed, noninteractive query through existing SSH trust; it is useful when a local Grid
+  join exposes the model endpoint but not its remote host's sensors. The viewer labels those readings
+  as shared host GPU load, because other services on that host can use the same card.
 - The viewer uses only reported metrics. Local Grid currently exposes less live telemetry than
   remote Grid. Missing temperature or speed reads `—`; a failed refresh preserves a visibly stale
   observation. Speeds are per-engine last decode estimates, never summed into a fictional fleet rate.

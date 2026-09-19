@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { atomicJson, gridJson, now, number, operations, readConfig, readJson, stateDir, text } from './fleet.mjs';
+import { readNvidiaSmiSensor } from './sensors.mjs';
 
 const array = value => Array.isArray(value) ? value : [];
 const objects = value => array(value).filter(v => v && typeof v === 'object' && !Array.isArray(v));
@@ -68,7 +69,38 @@ export function normalizeDevice(machine, raw, observedAt) {
   };
 }
 
-export function assemble(config, reads, previous = null, observedAt = now()) {
+function clearHostGpu(node, source, checkedAt, error) {
+  return { ...node, memoryKind: 'Host GPU memory', memoryTotalGb: null, memoryUsedGb: null, memoryFreeGb: null,
+    temperatureC: null, utilizationPct: null, powerW: null, powerLimitW: null,
+    gpuTelemetry: { scope: 'shared-host', source: source.id, name: null, observedAt: null, checkedAt, error } };
+}
+
+function applySensors(config, sensorReads, nodes, sources, observedAt) {
+  for (const source of config.sensors || []) {
+    const endpointNodes = nodes.filter(node => node.endpoint === source.engineEndpoint);
+    const matches = endpointNodes.filter(node => !node.stale && node.online !== false);
+    const result = sensorReads[source.id] || { ok: false, error: 'NVIDIA SSH sensor did not run.' };
+    const checkedAt = result.observedAt || observedAt;
+    let error = result.ok ? null : result.error;
+    if (!matches.length) error = 'NVIDIA SSH sensor did not match a serving engine endpoint.';
+    else if (matches.length > 1) error = 'NVIDIA SSH sensor matched more than one engine endpoint.';
+    const ok = !error && matches.length === 1;
+    sources[`sensor:${source.id}`] = { ok, error, observedAt: checkedAt };
+    for (const match of endpointNodes) {
+      const index = nodes.indexOf(match);
+      const serving = matches.includes(match);
+      nodes[index] = clearHostGpu(match, source, checkedAt, error || (serving ? null : 'Engine is not currently serving.'));
+      if (!ok || !serving) continue;
+      const reading = result.value;
+      nodes[index] = { ...nodes[index], memoryTotalGb: reading.memoryTotalMb / 1024, memoryUsedGb: reading.memoryUsedMb / 1024,
+        memoryFreeGb: reading.memoryFreeMb / 1024, temperatureC: reading.temperatureC, utilizationPct: reading.utilizationPct,
+        powerW: reading.powerW, powerLimitW: reading.powerLimitW,
+        gpuTelemetry: { scope: 'shared-host', source: source.id, name: reading.name, observedAt: checkedAt, checkedAt, error: null } };
+    }
+  }
+}
+
+export function assemble(config, reads, previous = null, observedAt = now(), sensorReads = {}) {
   const scope = JSON.stringify([config.mode, config.grid, config.controller]);
   if (previous?.scope !== scope) previous = null;
   const sources = Object.fromEntries(Object.entries(reads).map(([name, result]) => [name, { ok: result.ok, error: result.ok ? null : result.error, observedAt }]));
@@ -91,6 +123,7 @@ export function assemble(config, reads, previous = null, observedAt = now()) {
     nodes = (previous?.nodes || []).map(n => ({ ...n, stale: true }));
     if (reads.engines?.ok) sources.engines = { ok: false, error: 'Grid returned an unexpected engine list.', observedAt };
   }
+  applySensors(config, sensorReads, nodes, sources, observedAt);
   // An id is a node identity, not a display label. Keep duplicate names independently inspectable.
   const seen = new Map();
   nodes = nodes.map(n => { const count = seen.get(n.id) || 0; seen.set(n.id, count + 1); return count ? { ...n, id: `${n.id}-${count}` } : n; });
@@ -119,7 +152,7 @@ export function assemble(config, reads, previous = null, observedAt = now()) {
   };
 }
 
-export function createCollector(workspace, { runJson = gridJson, intervalMs = 8000 } = {}) {
+export function createCollector(workspace, { runJson = gridJson, readSensor = readNvidiaSmiSensor, intervalMs = 8000 } = {}) {
   let inFlight, deviceCache = new Map(), previous;
   async function followSelection(config) {
     // Only a workspace that HAS a grid follows the selection; one with none waits for `connect`
@@ -160,8 +193,12 @@ export function createCollector(workspace, { runJson = gridJson, intervalMs = 80
       ? listed.value.value.map(row => ({ name: text(row.grid || row.name || row.id), type: text(row.type) })).filter(g => g.name && !g.name.startsWith('-'))
       : previous?.grids || [];
     previous ||= await readJson(join(stateDir(workspace), 'snapshot.json'), null).catch(() => null);
+    const sensorResults = await Promise.all((config.sensors || []).map(async source => {
+      try { return [source.id, await readSensor(source)]; }
+      catch { return [source.id, { ok: false, error: 'NVIDIA SSH sensor could not be read.' }]; }
+    }));
     const observedAt = now();
-    const snapshot = assemble(config, reads, previous, observedAt);
+    const snapshot = assemble(config, reads, previous, observedAt, Object.fromEntries(sensorResults));
     snapshot.grids = grids;
     snapshot.machines = await Promise.all(config.machines.map(async machine => {
       const cacheKey = JSON.stringify(machine);
