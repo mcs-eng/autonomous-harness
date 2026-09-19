@@ -140,6 +140,11 @@ describe('tmux process primitives', () => {
     expect(engineProcessMatchScore({ executable: 'devin', args: 'devin' }, 'devin')).toBe(3)
     expect(engineProcessMatchScore({ executable: 'muse-bin-0.1.0-R708.1', args: 'muse-bin-0.1.0-R708.1' }, 'muse')).toBe(3)
     expect(engineProcessMatchScore({ executable: '/Users/demo/.grok/bin/grok', args: 'grok' }, 'grok')).toBe(3)
+    expect(engineProcessMatchScore({ executable: 'cline', args: 'cline --tui --auto-approve false' }, 'cline')).toBe(3)
+    expect(engineProcessMatchScore({
+      executable: '/home/demo/.local/lib/node_modules/cline/bin/.cline',
+      args: '/home/demo/.local/lib/node_modules/cline/bin/.cline --tui --auto-approve false',
+    }, 'cline')).toBe(3)
   })
 
   /**
@@ -563,6 +568,8 @@ describe('tmux process primitives', () => {
       .toBe(true)
     expect(bypassPermissionActive('cursor', 'cursor-agent --force')).toBe(true)
     expect(bypassPermissionActive('opencode', 'opencode --auto')).toBe(true)
+    expect(bypassPermissionActive('cline', 'cline --tui --auto-approve true')).toBe(true)
+    expect(bypassPermissionActive('cline', 'cline --tui --auto-approve false')).toBe(false)
   })
 
   /**

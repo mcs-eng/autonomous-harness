@@ -641,6 +641,11 @@ export const ENGINE_PROCESS_SIGNATURES: Readonly<Record<RegisteredSession['engin
     basenames: [/^copilot$/],
     entrypoints: [/@github[\/\\]copilot[\/\\](?:npm-loader\.js|index\.js|bin[\/\\]copilot)$/],
   },
+  cline: {
+    // The npm wrapper execs the downloaded native `bin/.cline` image.
+    basenames: [/^\.cline$/, /^cline(?:\.exe)?$/],
+    entrypoints: [/[\/\\]cline[\/\\]bin[\/\\](?:\.cline|cline)$/],
+  },
   // A terminal is a shell, and a shell is what every pane starts as — so nothing matches it, ever.
   // Discovery walks PROCESS_ENGINES and never asks; this entry exists for the Record's sake.
   terminal: { basenames: [], entrypoints: [] },

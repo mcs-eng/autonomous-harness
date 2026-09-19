@@ -211,6 +211,16 @@ const _engines = <String, EngineIdentity>{
     homepage: 'https://antigravity.google',
     blurb: "Google's Antigravity agent in the terminal.",
   ),
+  'cline': EngineIdentity(
+    id: 'cline',
+    label: 'Cline',
+    category: 'Code',
+    tagline: 'Terminal-only preview with approval prompts',
+    creator: 'Cline Bot Inc.',
+    color: Color(0xff7f57ff),
+    homepage: 'https://cline.bot',
+    blurb: "Runs Cline's native TUI with approval prompts. Harness history, turn tracking, and resume are unavailable.",
+  ),
 };
 
 /// The domain-specific harnesses this build has a picture of, keyed by their

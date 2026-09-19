@@ -41,7 +41,7 @@
     "typescript": "^5.5.3",
     "vitest": "^4.1.10"
   },
-  "description": "Run your own coding-agent CLIs (Claude Code, Codex, Cursor, OpenCode, Pi, Hermes, Command Code, Devin, Muse, Amp, Kilo, and Grok) in tmux, Herdr, or both and drive them from the web or a paired device.",
+  "description": "Run your own coding-agent CLIs (Claude Code, Codex, Cursor, OpenCode, Pi, Hermes, Command Code, Devin, Muse, Amp, Kilo, Grok, and Cline) in tmux, Herdr, or both and drive them from the web or a paired device.",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -34,6 +34,7 @@ export const BYPASS_PERMISSION_FLAGS: Readonly<Record<AgentEngine, string[] | nu
   grok: null,
   agy: null,
   copilot: null,
+  cline: ['--auto-approve', 'true'],
   // A shell has no permissions to bypass.
   terminal: null,
 }
@@ -107,6 +108,8 @@ export const FIRST_PROMPT_ARGS: Readonly<Record<AgentEngine, readonly string[] |
   grok: null,
   agy: null,
   copilot: null,
+  // `cline --tui [prompt]` starts the interactive session with a positional prompt.
+  cline: [],
   terminal: null,
 }
 
@@ -162,6 +165,7 @@ export const NAMED_AGENT_ARGS: Readonly<Record<AgentEngine, readonly string[] | 
   grok: null,
   agy: null,
   copilot: null,
+  cline: null,
   terminal: null,
 }
 
@@ -328,6 +332,9 @@ export function supportsNativeFork(engine: AgentEngine): boolean {
 /** The executable argv, before the interactive-shell wrapper is applied. */
 export function buildEngineCommandArgv(engine: AgentEngine, opts: LaunchCommandOptions = {}): string[] {
   const argv = [engineBin(engine)]
+  // A positional prompt selects Cline's one-shot mode unless the TUI is explicit.
+  // Keep every Harness pane interactive, including an empty first launch.
+  if (engine === 'cline') argv.push('--tui')
   // A fork is a resume that leaves the source alone; the two are exclusive, and the fork wins.
   const fork = opts.forkSessionId ? LAUNCH_FORK_FLAG[engine] : undefined
   const resumeFlag = fork ? fork.lead : opts.resumeSessionId ? LAUNCH_RESUME_FLAG[engine] : undefined
@@ -344,6 +351,10 @@ export function buildEngineCommandArgv(engine: AgentEngine, opts: LaunchCommandO
   } else if (opts.bypassPermission) {
     const flags = BYPASS_PERMISSION_FLAGS[engine]
     if (flags) argv.push(...flags)
+  } else if (engine === 'cline') {
+    // Cline's vendor default is auto-approval. Harness's ordinary mode promises
+    // review, so it must override that default rather than merely omit a flag.
+    argv.push('--auto-approve', 'false')
   }
   if (!resumeIsSubcommand && resumeFlag && sessionArg) {
     argv.push(...resumeFlag, sessionArg, ...(fork?.after ?? []))
