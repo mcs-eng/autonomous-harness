@@ -13,7 +13,6 @@ export interface JevRouteResult {
   agentId: string
   confidence: number
   scores: Array<{ agentId: string; confidence: number }>
-  via: 'jev' | 'jev-fallback'
 }
 
 interface JevOptions {
@@ -25,44 +24,24 @@ interface JevOptions {
 const JEV_URL = 'https://api.typesafe.ai/v1/systemone'
 const DEFAULT_TIMEOUT_MS = 8_000
 
-const words = (value: string): string[] => value
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/g, '')
-  .toLowerCase()
-  .split(/[^a-z0-9]+/)
-  .filter((word) => word.length > 1)
-
-/** Failure stays local: rank only the offered name and engine metadata for manual confirmation. */
-export function localJevFallback(task: string, candidates: JevRouteCandidate[]): JevRouteResult {
-  const taskWords = new Set(words(task))
-  const ranked = candidates.map((candidate, index) => ({
-    candidate,
-    index,
-    hits: words(`${candidate.name} ${candidate.engine ?? ''}`).filter((word) => taskWords.has(word)).length,
-  })).sort((a, b) => b.hits - a.hits || a.index - b.index)
-  const bestHits = ranked[0]?.hits ?? 0
-  const confidence = bestHits > 0 ? 0.4 : 0.2
-  return {
-    agentId: ranked[0]?.candidate.id ?? '',
-    confidence,
-    scores: ranked.slice(1).map((entry) => ({
-      agentId: entry.candidate.id,
-      confidence: bestHits > 0 ? Math.min(0.35, entry.hits / bestHits * confidence) : 0.1,
-    })),
-    via: 'jev-fallback',
-  }
-}
-
 /**
- * Sends only the task and minimal candidate descriptions. Opaque option keys are mapped back locally;
- * no Harness agent id, transcript, path, history, machine name, or credential appears in the body.
+ * Asks Jev to rank the offered agents for one task, and resolves null whenever
+ * it cannot answer — no key, one or zero candidates, any non-2xx, malformed,
+ * or non-probabilistic response, or the timeout. Null is the caller's signal to
+ * fall through to the standard ranking, which sees the same candidates with
+ * more signal than any local stand-in could; there is deliberately no local
+ * fallback in here to maintain.
+ *
+ * Sends only the task and minimal candidate descriptions. Opaque option keys
+ * are mapped back locally; no Harness agent id, transcript, path, history,
+ * machine name, or credential appears in the body.
  */
 export async function routeTaskWithJev(
   task: string,
   candidates: JevRouteCandidate[],
   options: JevOptions,
-): Promise<JevRouteResult> {
-  if (candidates.length <= 1 || !options.apiKey.trim()) return localJevFallback(task, candidates)
+): Promise<JevRouteResult | null> {
+  if (candidates.length <= 1 || !options.apiKey.trim()) return null
 
   const byOption = new Map<string, JevRouteCandidate>()
   const criteria: Record<string, string> = {}
@@ -96,19 +75,17 @@ export async function routeTaskWithJev(
       }),
       signal: controller.signal,
     })
-    if (!response.ok) return localJevFallback(task, candidates)
+    if (!response.ok) return null
     const body = await response.json() as Record<string, unknown>
     const answers = body.answers
     const answer = answers && typeof answers === 'object'
       ? (answers as Record<string, unknown>).agent
       : null
-    if (!answer || typeof answer !== 'object') return localJevFallback(task, candidates)
+    if (!answer || typeof answer !== 'object') return null
     const value = answer as Record<string, unknown>
     const picked = typeof value.choice === 'string' ? byOption.get(value.choice) : undefined
     const probabilities = value.probabilities
-    if (!picked || !probabilities || typeof probabilities !== 'object') {
-      return localJevFallback(task, candidates)
-    }
+    if (!picked || !probabilities || typeof probabilities !== 'object') return null
 
     let malformed = false
     const scores = [...byOption.entries()].map(([option, candidate]) => {
@@ -118,17 +95,16 @@ export async function routeTaskWithJev(
       return { agentId: candidate.id, confidence: probability }
     }).sort((a, b) => b.confidence - a.confidence)
     const total = scores.reduce((sum, entry) => sum + entry.confidence, 0)
-    if (malformed || Math.abs(total - 1) > 0.01) return localJevFallback(task, candidates)
+    if (malformed || Math.abs(total - 1) > 0.01) return null
     const winner = scores.find((entry) => entry.agentId === picked.id)
-    if (!winner || winner.confidence <= 0) return localJevFallback(task, candidates)
+    if (!winner || winner.confidence <= 0) return null
     return {
       agentId: picked.id,
       confidence: winner.confidence,
       scores: scores.filter((entry) => entry.agentId !== picked.id),
-      via: 'jev',
     }
   } catch {
-    return localJevFallback(task, candidates)
+    return null
   } finally {
     clearTimeout(timer)
   }
