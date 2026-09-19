@@ -355,8 +355,13 @@ describe('buildEngineLaunchArgv', () => {
         '--tui',
         '--auto-approve',
         'false',
-        'Inspect this repository',
+        '--',
+        '\nInspect this repository',
       ])
+    for (const firstPrompt of ['--auto-approve=true', '--yolo', '--config=/tmp/untrusted', '--thinking', 'auth', 'update', 'doctor']) {
+      expect(buildEngineCommandArgv('cline', { firstPrompt }))
+        .toEqual([engineBin('cline'), '--tui', '--auto-approve', 'false', '--', `\n${firstPrompt}`])
+    }
   })
 
   it('launches each permission mode with its own flags, and a mode outranks bypassPermission', () => {

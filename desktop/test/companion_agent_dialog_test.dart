@@ -38,7 +38,7 @@ class _Companion extends DeepSeekCompanion {
 
 void main() {
   testWidgets(
-    'starts selected workspace, opens privately, and stops the server',
+    'starts selected workspace, retries a private browser failure, and stops',
     (tester) async {
       final service = _Companion();
       addTearDown(service.dispose);
@@ -52,6 +52,7 @@ void main() {
             loadDistros: () async => ['Ubuntu', 'Debian'],
             openBrowser: (uri) async {
               opened.add(uri);
+              if (opened.length == 1) throw StateError('Browser refused $uri');
               return true;
             },
           ),
@@ -65,6 +66,12 @@ void main() {
       expect(opened.single, service.launchUri);
       expect(find.textContaining('fixture-secret'), findsNothing);
       expect(find.text('Open browser'), findsOneWidget);
+      expect(find.textContaining('Could not open your browser'), findsOneWidget);
+      expect(service.running, isTrue);
+      await tester.tap(find.text('Open browser'));
+      await tester.pumpAndSettle();
+      expect(opened.length, 2);
+      expect(find.textContaining('Could not open your browser'), findsNothing);
       await tester.tap(find.text('Stop server'));
       await tester.pumpAndSettle();
       expect(service.running, isFalse);
@@ -120,6 +127,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(launches, 1);
     expect(service.running, isFalse);
-        expect(find.textContaining('ZCode runs in its own window'), findsOneWidget);
+    expect(find.textContaining('ZCode runs in its own window'), findsOneWidget);
   });
 }

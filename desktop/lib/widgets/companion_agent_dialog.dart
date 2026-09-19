@@ -92,9 +92,16 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
   Future<void> _openBrowser() async {
     final uri = _service.launchUri;
     if (uri == null) return;
-    final opened =
-        await (widget.openBrowser ??
-            (uri) => launchUrl(uri, mode: LaunchMode.externalApplication))(uri);
+    var opened = false;
+    try {
+      opened =
+          await (widget.openBrowser ??
+              (uri) =>
+                  launchUrl(uri, mode: LaunchMode.externalApplication))(uri);
+    } catch (_) {
+      // Platform launch failures can include the URL. Keep the token private
+      // and leave the running server available for another browser attempt.
+    }
     if (!opened && mounted) {
       setState(
         () => _error = 'Could not open your browser. Try Open browser again.',

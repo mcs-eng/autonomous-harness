@@ -41,6 +41,16 @@ No model requests were made by these checks.
 | Grok | 1.0.34 | Isolated Linux binary startup passed; installer caveat below |
 | AGY | 1.2.6 | Isolated Linux install/startup passed |
 | Hermes | — | Blocked: installer attempted to install system compiler packages |
+| Cline | 3.0.62 | Isolated TUI startup and native process discovery; released parser checked for prompt/permission isolation |
+| DeepSeek Harness | 0.1.5-rc.2 | Real WSL browser server, Windows loopback handoff, HTTP 200, and owned-server shutdown |
+| ZCode | Desktop 3.14.0 / CLI 0.16.9 | Installed official app located and CLI help checked; external desktop launch only |
+
+The September 19 additions remain preview integrations. Cline authentication and
+model turns were not exercised. DeepSeek's browser connection was verified without
+submitting a model task. Review reproduced and fixed option-shaped Cline prompts
+changing launch policy, and DeepSeek tool descendants surviving server shutdown.
+The companion now loads the interactive shell's tool PATH and shows a retryable,
+sanitized error if the browser cannot open.
 
 Credential-free terminal startup probes displayed live interfaces or onboarding
 for Claude, Codex, Cursor, OpenCode, Pi, Command Code, and Kilo. OpenCode and Kilo

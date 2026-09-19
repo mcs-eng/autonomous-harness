@@ -24,7 +24,7 @@ List<String> deepSeekCompanionArguments({
     'setsid',
     '--wait',
     'bash',
-    '-lc',
+    '-ic',
     _deepSeekSupervisor,
     'harness-deepseek',
     folder,
@@ -35,6 +35,9 @@ List<String> deepSeekCompanionArguments({
 // ends that group, including when the desktop exits unexpectedly. No global
 // process name, port lookup, or user-owned server is ever killed.
 const _deepSeekSupervisor = r'''
+# Load the user's interactive tool PATH, then keep all children in this session's
+# process group so stopping the companion also stops its tools.
+set +m
 export PATH="$HOME/.local/bin:$PATH"
 node_file="$HOME/.harness/runtime/current-node"
 if [ -s "$node_file" ]; then
@@ -53,10 +56,9 @@ cleanup() {
   trap '' TERM
   kill -TERM -- -$$ 2>/dev/null || true
   if [ -n "$child" ]; then
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
-      kill -0 "$child" 2>/dev/null || return
-      sleep 0.2
-    done
+    # The direct server can exit while a tool ignores TERM. Keep the session
+    # leader alive through the grace period, then stop the whole owned group.
+    sleep 2
     kill -KILL -- -$$ 2>/dev/null || true
   fi
 }

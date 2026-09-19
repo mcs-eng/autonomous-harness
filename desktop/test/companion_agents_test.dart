@@ -67,7 +67,7 @@ void main() {
         'setsid',
         '--wait',
         'bash',
-        '-lc',
+        '-ic',
       ]);
       expect(args.last, folder);
       expect(args[7], isNot(contains(folder)));

@@ -109,7 +109,7 @@ export const FIRST_PROMPT_ARGS: Readonly<Record<AgentEngine, readonly string[] |
   agy: null,
   copilot: null,
   // `cline --tui [prompt]` starts the interactive session with a positional prompt.
-  cline: [],
+  cline: ['--'],
   terminal: null,
 }
 
@@ -135,6 +135,10 @@ export function supportsFirstPrompt(engine: AgentEngine): boolean {
 export function firstPromptArgs(engine: AgentEngine, prompt: string): string[] {
   const lead = FIRST_PROMPT_ARGS[engine]
   if (lead === null) throw new FirstPromptUnsupportedError(engine)
+  // Cline 3.0.62 scans config/legacy flags before its option parser and ignores
+  // `--` there. Commander also recognizes subcommands after `--`. A leading
+  // newline keeps message text out of both paths without dropping its content.
+  if (engine === 'cline') return [...lead, `\n${prompt}`]
   return [...lead, prompt]
 }
 

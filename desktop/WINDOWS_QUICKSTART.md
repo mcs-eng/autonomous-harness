@@ -54,6 +54,25 @@ This stops the connection service; do not kill your tmux sessions or delete
 Then open the new extracted `Release/harness.exe`, not an old shortcut or an
 executable under a build scratch directory.
 
+## Additional agent options in preview 3
+
+Choose these from **New Agent** on this PC:
+
+- **Cline** runs its official CLI in a terminal pane with approval prompts enabled.
+  Complete provider setup in Cline. This preview does not provide Harness history,
+  turn tracking, grid routing, or automatic session resume for Cline.
+- **DeepSeek Harness** opens its official browser workspace. First install
+  `@deepseek-ai/dsh@0.1.5-rc.2` in your chosen WSL distribution using
+  `npm install -g @deepseek-ai/dsh@0.1.5-rc.2` with Node 22.19+ (22.x) or 24+.
+  Then select an existing project folder and **Start and open browser**. Return to
+  the same option to reopen the browser or stop the server. Closing Harness stops
+  that server and its tool processes.
+- **ZCode** opens the [official Windows app](https://zcode.z.ai/en/docs/install),
+  installed separately. Select your workspace and provider inside ZCode.
+
+DeepSeek and ZCode run beside Harness; their conversations and approvals remain
+in their own applications. They are not Harness task-routing targets.
+
 The September 15 prototype loses WSL command arguments and can show **Bad state:
 Sign-in did not complete**. Retrying sign-in in that old executable cannot fix it.
 
