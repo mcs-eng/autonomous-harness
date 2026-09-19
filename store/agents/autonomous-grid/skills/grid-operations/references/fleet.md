@@ -24,6 +24,31 @@ are observable, but the agent needs a configured route before administering thei
 }
 ```
 
+When a joined endpoint does not report its host GPU sensors, add one optional fixed-command source:
+
+```json
+"sensors": [
+  {
+    "id": "inference-host-gpu",
+    "type": "nvidia-smi-ssh",
+    "engineEndpoint": "http://inference-host:11434/v1",
+    "host": "operator@inference-host",
+    "sshBinary": "/mnt/c/Windows/System32/OpenSSH/ssh.exe",
+    "identityFile": "C:\\Users\\operator\\.ssh\\id_ed25519",
+    "gpuIndex": 0
+  }
+]
+```
+
+The endpoint must match exactly one normalized engine endpoint. Duplicate source mappings are
+rejected, and a host with multiple GPUs needs an explicit `gpuIndex`; the viewer never guesses.
+`sshBinary` and `identityFile` are optional absolute paths. They let a WSL-hosted viewer use the
+Windows OpenSSH client and its existing key custody without copying a private key into WSL. Only a
+fixed `nvidia-smi` query runs, with batch mode, strict host-key checking, no terminal, a short timeout,
+and bounded output. A failed read clears the current host GPU values and exposes the source error;
+it does not reuse the last reading as live. The key and `known_hosts` entry must already exist.
+Store paths only in `grid-fleet.json`, never key contents.
+
 Harness targets use the exact machine ID returned by `fleet discover`, the local Harness daemon,
 and the existing encrypted machine pairing. `fleet discover --add` preserves configured targets and
 adds the rest. Both daemons must support Grid fleet protocol 1. It never copies credentials or

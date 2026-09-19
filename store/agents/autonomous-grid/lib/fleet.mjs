@@ -6,12 +6,21 @@ import { fileURLToPath } from 'node:url';
 import { harnessExecute } from './harness.mjs';
 
 export const PACKAGE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-export const DEFAULT_CONFIG = { spec: 1, mode: 'local', grid: null, machines: [{ id: 'local', name: 'This machine', transport: 'local' }], preferences: { goal: 'Run useful models on the machines I own', keepFreeMemoryGb: 4, allowAutomaticChanges: false } };
+export const DEFAULT_CONFIG = { spec: 1, mode: 'local', grid: null, machines: [{ id: 'local', name: 'This machine', transport: 'local' }], sensors: [], preferences: { goal: 'Run useful models on the machines I own', keepFreeMemoryGb: 4, allowAutomaticChanges: false } };
 export const now = () => new Date().toISOString();
 export const stateDir = workspace => join(workspace, '.harness', 'grid');
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
 export const text = (value, max = 240) => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max) : '';
 export const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+const absolutePath = value => typeof value === 'string' && value.length <= 1024 && !/[\x00-\x1f\x7f]/.test(value) && (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value));
+
+function sensorEndpoint(value, id) {
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
+    return url.href.replace(/\/$/, '');
+  } catch { throw new Error(`Sensor ${id} needs an exact HTTP engineEndpoint without credentials, query, or fragment.`); }
+}
 
 export async function readJson(file, fallback, limit = 2 * 1024 * 1024) {
   try {
@@ -51,7 +60,27 @@ export function validateConfig(raw) {
   // The controller is explicit, so editing the order of an inventory cannot redirect fleet reads.
   const controller = raw.controller || machines.find(m => m.transport === 'local')?.id || machines[0].id;
   if (!ids.has(controller)) throw new Error('controller must name a configured machine.');
-  return { spec: 1, mode: raw.mode, grid: raw.grid, controller, machines, preferences: { goal: text(raw.preferences?.goal, 500) || DEFAULT_CONFIG.preferences.goal, keepFreeMemoryGb: number(raw.preferences?.keepFreeMemoryGb) ?? 4, allowAutomaticChanges: raw.preferences?.allowAutomaticChanges === true } };
+  const sourceIds = new Set(), sensorEndpoints = new Set();
+  if (raw.sensors !== undefined && (!Array.isArray(raw.sensors) || raw.sensors.length > 16)) throw new Error('sensors must contain at most 16 sources.');
+  const sensors = (raw.sensors || []).map(source => {
+    if (!source || !idPattern.test(source.id) || sourceIds.has(source.id)) throw new Error('Every sensor needs a unique, simple id.');
+    sourceIds.add(source.id);
+    if (source.type !== 'nvidia-smi-ssh') throw new Error(`Unknown sensor type for ${source.id}.`);
+    const allowed = new Set(['id', 'type', 'engineEndpoint', 'host', 'port', 'sshBinary', 'identityFile', 'gpuIndex']);
+    const unknown = Object.keys(source).find(key => !allowed.has(key));
+    if (unknown) throw new Error(`Unknown setting ${unknown} for sensor ${source.id}.`);
+    if (typeof source.host !== 'string' || !/^(?:[A-Za-z0-9][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(source.host)) throw new Error(`Invalid SSH host for sensor ${source.id}.`);
+    if (source.port !== undefined && (!Number.isInteger(source.port) || source.port < 1 || source.port > 65535)) throw new Error(`Invalid SSH port for sensor ${source.id}.`);
+    if (source.sshBinary !== undefined && !absolutePath(source.sshBinary)) throw new Error(`sshBinary for sensor ${source.id} must be an absolute path.`);
+    if (source.identityFile !== undefined && !absolutePath(source.identityFile)) throw new Error(`identityFile for sensor ${source.id} must be an absolute path.`);
+    if (source.gpuIndex !== undefined && (!Number.isInteger(source.gpuIndex) || source.gpuIndex < 0 || source.gpuIndex > 63)) throw new Error(`gpuIndex for sensor ${source.id} must be an integer from 0 to 63.`);
+    const engineEndpoint = sensorEndpoint(source.engineEndpoint, source.id);
+    if (sensorEndpoints.has(engineEndpoint)) throw new Error(`Only one sensor may target engineEndpoint ${engineEndpoint}.`);
+    sensorEndpoints.add(engineEndpoint);
+    return { id: source.id, type: source.type, engineEndpoint, host: source.host,
+      ...(source.port ? { port: source.port } : {}), ...(source.sshBinary ? { sshBinary: source.sshBinary } : {}), ...(source.identityFile ? { identityFile: source.identityFile } : {}), ...(source.gpuIndex !== undefined ? { gpuIndex: source.gpuIndex } : {}) };
+  });
+  return { spec: 1, mode: raw.mode, grid: raw.grid, controller, machines, sensors, preferences: { goal: text(raw.preferences?.goal, 500) || DEFAULT_CONFIG.preferences.goal, keepFreeMemoryGb: number(raw.preferences?.keepFreeMemoryGb) ?? 4, allowAutomaticChanges: raw.preferences?.allowAutomaticChanges === true } };
 }
 export async function readConfig(workspace) { return validateConfig(await readJson(join(workspace, 'grid-fleet.json'), DEFAULT_CONFIG)); }
 
