@@ -49,6 +49,22 @@ final command, while `resolve()` (which probes WSL) ran unbounded first: a
 probe that never answers hung the whole wait forever, exactly what the test
 pins. The bound now wraps the whole attempt.
 
+**Bug fixed — the merge silently turned the Windows app into a viewer.**
+Upstream's `kViewerMode` is true on Windows by platform (`Platform.isWindows`),
+on the stance that the CLI cannot run there. The merged app therefore never
+built a `LocalCliDiscovery`, never learned the local computer id, matched no
+machine row as "this computer", and degraded every machine — this one included
+— to relay-only cloud E2EE: the local machine demanded its link password
+("Link this machine") and listed as **Remote** in the New Agent machine picker.
+The fork's founding premise is the opposite, so `viewer_mode.dart` no longer
+forces viewer mode on Windows: the Windows desktop app is a full peer with the
+CLI hosted in WSL2, and upstream's viewer-on-Windows stays reachable with
+`--dart-define=HARNESS_VIEWER_MODE=true`. Verified against the running release
+build: the app resolves the distro CLI's computer id, trusts the loopback
+endpoint, and reaches the daemon over local transport. One-time consequence of
+the interim relay-only state: the machine was linked with a remote password —
+that pairing remains valid and harmless.
+
 ## Preview 3 engine installation repairs (2026-09-18)
 
 Copilot's Windows npm launcher was discoverable inside WSL but could not run with
