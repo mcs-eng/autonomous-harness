@@ -727,6 +727,10 @@ export class BackendSocket {
   /** The account's private harness grid name, as the backend last reported it. Null until the first
    *  `machine_meta` lands, or when this account has none yet. */
   private harnessGridName: string | null = null
+  /** Advances whenever a newer authoritative source writes `harnessGridName`. */
+  private harnessGridNameRevision = 0
+  /** One background reconcile/derivation for local-first model-list replies. */
+  private gridNameResolution: Promise<void> | null = null
   /** Injected so the derivation (a `grid` spawn) is a seam in tests; see `lib/gridDerive.ts`. */
   deriveGridName: () => Promise<string | null> = deriveHarnessGridName
   /** The daemon-start grid reconcile (`lib/gridAttach.ts`), while it is running — so the first
@@ -736,7 +740,10 @@ export class BackendSocket {
 
   /** Set the account's private grid name from the reconcile that just confirmed it, so the RPCs
    *  answer with it at once rather than waiting for the next `machine_meta` (`lib/gridAttach.ts`). */
-  setHarnessGridName(name: string | null): void { this.harnessGridName = name }
+  setHarnessGridName(name: string | null): void {
+    this.harnessGridName = name
+    this.harnessGridNameRevision += 1
+  }
 
   /** Which grid this machine's agents can be pointed at — for `harness status` and the models RPC. */
   gridName(): string | null { return this.harnessGridName }
@@ -764,6 +771,27 @@ export class BackendSocket {
       if (timer) clearTimeout(timer)
     }
     return this.harnessGridName ?? await this.deriveGridName()
+  }
+
+  /**
+   * Learn the private remote grid without holding a registered local profile's picker response.
+   * Repeated opens share this one operation. Its result is cached only if no newer machine_meta or
+   * reconcile answer landed while it was out, so an older derived name cannot overwrite authority.
+   */
+  private resolveGridNameInBackground(): void {
+    if (this.gridNameResolution || this.harnessGridName) return
+    const revision = this.harnessGridNameRevision
+    const work = this.resolveGridName()
+      .then((name) => {
+        if (!name || this.harnessGridNameRevision !== revision) return
+        this.harnessGridName = name
+        this.harnessGridNameRevision += 1
+      })
+      .catch(() => {})
+    this.gridNameResolution = work
+    void work.finally(() => {
+      if (this.gridNameResolution === work) this.gridNameResolution = null
+    })
   }
 
   connect(): void {
@@ -1452,7 +1480,7 @@ export class BackendSocket {
       // absence as null used to WIPE a grid name a moment after it was set, leaving the picker
       // empty. Absent ⇒ unchanged; null ⇒ this account has none; a string ⇒ that grid.
       if ('gridName' in meta) {
-        this.harnessGridName = typeof meta.gridName === 'string' && meta.gridName.trim() ? meta.gridName.trim() : null
+        this.setHarnessGridName(typeof meta.gridName === 'string' && meta.gridName.trim() ? meta.gridName.trim() : null)
       }
       this.onMachineMeta?.(typeof name === 'string' && name.trim() ? name.trim() : null)
       return
@@ -1808,6 +1836,7 @@ export class BackendSocket {
             // A registered local profile is useful while remote auth is unavailable. Do not put its
             // picker behind resolveGridName's reconcile/derive waits; the ordinary background Grid
             // reconcile will refresh the cached private name when it can.
+            if (profiles.length) this.resolveGridNameInBackground()
             const gridName = profiles.length ? this.harnessGridName : await this.resolveGridName()
             const key = `${gridName ?? ''}\u0000${profiles.map(localGridTargetId).join('\u0000')}`
             const inFlight = this.gridModelsInFlight
