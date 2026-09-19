@@ -260,7 +260,10 @@ class _GridModelPickerState extends State<GridModelPicker> {
                       : '${section.label ?? section.name} · ${section.profileId}',
                 )
               : section.own || section.source == 'private'
-              ? paneMenuHeader('Your private cloud models', caption: section.name)
+              ? paneMenuHeader(
+                  'Your private cloud models',
+                  caption: section.name,
+                )
               : paneMenuHeader('Models shared with you', caption: section.name),
           // An engine with no way onto a Local model (Cursor talks only to its own API; the
           // daemon refuses the move) is told so here, instead of being offered rows whose click
@@ -318,8 +321,7 @@ class _GridModelPickerState extends State<GridModelPicker> {
       if (widget.currentModel != null) widget.onUseOwnLogin?.call();
       return;
     }
-    if (!_isCurrent(chosen.model!))
-      widget.onSelected?.call(chosen.model!);
+    if (!_isCurrent(chosen.model!)) widget.onSelected?.call(chosen.model!);
   }
 
   /// What the Local section says when it lists nothing.
@@ -359,7 +361,7 @@ class _GridModelPickerState extends State<GridModelPicker> {
         .toList();
     // A non-empty `grids` list is the new protocol, even when it contains only local profiles while
     // remote discovery is slow. The synthetic private section is solely an older-daemon fallback.
-    if (answer.grids.isNotEmpty) return sections;
+    if (answer.grids.isNotEmpty || sections.any((s) => s.own)) return sections;
     return [
       GridSection(
         name: answer.gridName ?? '',

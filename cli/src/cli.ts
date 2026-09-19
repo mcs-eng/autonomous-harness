@@ -4664,6 +4664,19 @@ async function runForeground(session: AuthSession): Promise<void> {
     return bypassPermissionActive(session.engine, row.args)
   }
 
+  /** Read the new process's argv, not its executable name: Codex keeps its Grid URL/model there. */
+  const restartedGridAssignment = async (
+    identity: ProcessIdentity,
+    engine: AgentEngine,
+    grid: GridLaunchOverride | undefined,
+  ) => {
+    const rows = await processRows()
+    const row = rows?.find((candidate) =>
+      candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
+    if (!row || !processArgvIsBoundaryFaithful(row)) return undefined
+    return probeGridAssignment(identity, engine, row.args, grid)
+  }
+
   /**
    * Move a RUNNING agent onto a grid (`agent_retarget`).
    *
@@ -4826,10 +4839,9 @@ async function runForeground(session: AuthSession): Promise<void> {
       // Both are read from the one cached environment of the new pid, so this costs no extra `ps`.
       const [gateway, assignment] = await Promise.all([
         probeGatewayRuntime(outcome.processIdentity),
-        probeGridAssignment(
+        restartedGridAssignment(
           outcome.processIdentity,
           session.engine,
-          outcome.processIdentity.executable,
           grid ?? undefined,
         ),
       ])
@@ -4991,10 +5003,9 @@ async function runForeground(session: AuthSession): Promise<void> {
       // than left to the next scan, so the announce below already says where the engine came back.
       const [gateway, assignment] = await Promise.all([
         probeGatewayRuntime(outcome.processIdentity),
-        probeGridAssignment(
+        restartedGridAssignment(
           outcome.processIdentity,
           engine,
-          outcome.processIdentity.executable,
           session.gridLaunch ?? undefined,
         ),
       ])

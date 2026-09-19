@@ -790,7 +790,12 @@ class GridModel {
   /// Opaque daemon-owned launch target. It never contains a path, endpoint, or credential.
   final String? targetId;
 
-  const GridModel({required this.id, required this.node, this.grid, this.targetId});
+  const GridModel({
+    required this.id,
+    required this.node,
+    this.grid,
+    this.targetId,
+  });
 }
 
 /// Which `grid` a machine would run, as its daemon reports beside the model list (`gridCli`).

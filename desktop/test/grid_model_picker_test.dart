@@ -385,7 +385,7 @@ void main() {
       );
       await open(tester, engine: 'claude');
       expect(
-        find.text('Anthropic cannot run models from this local fleet.'),
+        find.text('Claude cannot run models from this local fleet.'),
         findsOneWidget,
       );
       expect(find.text('local-qwen'), findsNothing);
