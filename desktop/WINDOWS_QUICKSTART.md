@@ -20,8 +20,8 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
 To compare the downloaded archive with its checksum in Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.3.zip
-Get-Content .\harness-desktop-windows-x64-1.0.0-windows.3.zip.sha256
+Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.4.zip
+Get-Content .\harness-desktop-windows-x64-1.0.0-windows.4.zip.sha256
 ```
 
 ## Prerequisites
@@ -46,6 +46,7 @@ Preview 3 includes the terminal typing fix, repairs Claude installation when
 WSL inherits Windows npm without Linux Node, and replaces broken Copilot npm
 launchers with a verified native installation. Preview 1 can display agent output
 while rejecting keyboard text; replace the complete bundle to receive both fixes.
+Preview 4 adds **Open in browser** to viewer panes, including Grid's fleet dashboard.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.
@@ -75,6 +76,21 @@ in their own applications. They are not Harness task-routing targets.
 
 The September 15 prototype loses WSL command arguments and can show **Bad state:
 Sign-in did not complete**. Retrying sign-in in that old executable cannot fix it.
+
+## Grid and other Store viewers
+
+The upstream **Grid** harness (`autonomous/autonomous-grid`) is available from
+**Store → Grid → Install/Open**. It uses Codex and the Grid toolchain in your WSL
+distribution to inspect connected machines, model placement, and fleet telemetry.
+Install and authenticate Codex there before starting the agent.
+
+On Windows, choose **Open in browser** in the viewer pane. Keep Harness and the
+workspace running while using the dashboard. Viewer addresses can change after a
+restart; use the pane's button again instead of a saved browser bookmark. Viewers
+are embedded in Harness on macOS; Windows and Linux use the external browser.
+
+Connect your own Grid before expecting live fleet data. Installing this package
+does not deploy models or enroll your GPU machines automatically.
 
 ## Preview limitations and recovery
 
