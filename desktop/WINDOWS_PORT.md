@@ -22,10 +22,12 @@ CLI typecheck are clean. Zero port regressions were found or introduced.
 **Jev routing (opt-in).** `TASK_ROUTER=jev` enables TypeSafe Jev ranking for the
 task palette. Only the task text and minimal candidate descriptions travel
 (opaque `agent_N` keys mapped back locally); a malformed, slow, or absent answer
-fails closed to the local metadata fallback. The API key reaches WSL through
-`WSLENV` — never argv, the bash script, or logs — and every Jev-routed answer
-stops at the chooser for explicit confirmation, because its probabilities are
-not calibrated as an autonomous dispatch threshold.
+falls through to the standard router ranking, which sees the same candidates
+with more signal — the router deliberately keeps no weaker local stand-in. The
+API key reaches WSL through `WSLENV` — never argv, the bash script, or logs —
+and every Jev-routed answer stops at the chooser for explicit confirmation,
+because its probabilities are not calibrated as an autonomous dispatch
+threshold.
 
 **Simplification pass (fork-owned code only; mergeability with upstream kept).**
 One `_refuseDocker` refusal replaces three; `resolveHomeDirectory` replaces

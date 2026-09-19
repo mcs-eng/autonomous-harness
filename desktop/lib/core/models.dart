@@ -626,8 +626,9 @@ class RouteAnswer {
   final int machines;
 
   /// 'model' when a classifier answered, 'heuristic' when name matching stood in for it, 'jev' when
-  /// Jev ranked the choices, and 'jev-fallback' when its local metadata fallback did, or '' when the
-  /// daemon did not say.
+  /// the TypeSafe Jev ranker answered the routing call (its unanswered case falls through to the
+  /// standard ranking rather than emitting a Jev-specific fallback; 'jev-fallback' remains accepted
+  /// defensively for any peer that emits it), or '' when the daemon did not say.
   ///
   /// Both land under the threshold BY DESIGN — an unsure model and a router that could not run must both
   /// stop and ask — which is exactly why the window needs to tell them apart: "not sure which agent" and
