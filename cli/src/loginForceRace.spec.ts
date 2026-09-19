@@ -23,7 +23,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 const CLI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const CLI_SOURCE = join(CLI_ROOT, 'src', 'cli.ts')
-const TSX = join(CLI_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const dirs: string[] = []
 const servers: Server[] = []
 const children: ChildProcess[] = []
@@ -94,7 +93,9 @@ interface CliRun {
 }
 
 function runCli(root: string, args: string[], backendBase: string): CliRun {
-  const child = spawn(process.execPath, [TSX, CLI_SOURCE, ...args], {
+  // Run the CLI in the tracked process: the tsx CLI wrapper spawns another Node
+  // process that survives child.kill() when this race test times out.
+  const child = spawn(process.execPath, ['--import', 'tsx', CLI_SOURCE, ...args], {
     cwd: CLI_ROOT, env: envFor(root, backendBase), stdio: ['ignore', 'pipe', 'pipe'],
   })
   children.push(child)
