@@ -1,16 +1,113 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/terminal/terminal_session.dart';
 import 'package:harness/widgets/terminal_panel.dart';
 import 'package:harness/widgets/pane_header_actions.dart';
+import 'package:harness/widgets/transient_menus.dart';
 import 'package:xterm/xterm.dart';
 
 import 'swarm_screen_test.dart' show terminal;
 import 'swarm_state_test.dart' show createApp;
 
 void main() {
+  testWidgets('narrow header keeps models, actions, Stop and Close reachable', (
+    tester,
+  ) async {
+    final app = createApp();
+    app.stateOf('m')!.agents = const [
+      Agent(
+        id: 'a0',
+        name: 'Narrow project',
+        engine: 'codex',
+        terminalAvailable: true,
+        viewerUrl: 'http://fixture.invalid/viewer',
+      ),
+    ];
+    final session = terminal('a0', []);
+    final actions = <String>[];
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(720, 500);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Center(
+          child: SizedBox(
+            width: 320,
+            height: 320,
+            child: TerminalPanel(
+              notifier: app,
+              session: session,
+              focused: false,
+              compactHeader: true,
+              onClose: () => actions.add('close'),
+              onDelete: () => actions.add('stop'),
+              onRestart: () => actions.add('restart'),
+              onFork: () => actions.add('fork'),
+              onToggleZoom: () => actions.add('zoom'),
+              onToggleComposer: () => actions.add('compose'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final controls = find.byType(PaneHeaderActions);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: tester.getCenter(controls));
+    await tester.pump(const Duration(milliseconds: 120));
+    final model = find.byTooltip('Where this agent runs');
+    expect(model.hitTestable(), findsOneWidget);
+    expect(tester.getSize(model), const Size(28, 28));
+    expect(find.byTooltip('Show viewer').hitTestable(), findsOneWidget);
+    expect(find.byTooltip('Stop Harness').hitTestable(), findsOneWidget);
+    expect(find.byTooltip('Close Pane').hitTestable(), findsOneWidget);
+    await tester.tap(find.byTooltip('More pane actions'));
+    await tester.pumpAndSettle();
+    for (final label in [
+      'Share harness',
+      'Show message composer',
+      'Zoom Pane',
+      'Restart Harness',
+      'Fork Harness',
+    ]) {
+      expect(find.widgetWithText(MenuItemButton, label), findsOneWidget);
+    }
+    dismissTransientMenus();
+    await tester.pumpAndSettle();
+    expect(find.byType(MenuItemButton), findsNothing);
+    await tester.tap(find.byTooltip('More pane actions'));
+    await tester.pumpAndSettle();
+    final forkFocus = Focus.of(tester.element(find.text('Fork Harness')));
+    for (var i = 0; i < 8 && !forkFocus.hasFocus; i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+    }
+    expect(forkFocus.hasFocus, isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(actions, ['fork']);
+    expect(find.byType(MenuItemButton), findsNothing);
+    await tester.tap(model);
+    await tester.pumpAndSettle();
+    expect(find.text('Subscription'), findsOneWidget);
+    await tester.tapAt(const Offset(10, 450));
+    await tester.pump();
+    await mouse.moveTo(tester.getCenter(controls));
+    await tester.pump(const Duration(milliseconds: 120));
+    await tester.tap(find.byTooltip('Stop Harness'));
+    expect(actions, ['fork', 'stop']);
+    await tester.tap(find.byTooltip('Close Pane'));
+    expect(actions, ['fork', 'stop', 'close']);
+    expect(tester.takeException(), isNull);
+    await mouse.removePointer();
+    await tester.pumpWidget(const SizedBox());
+    session.dispose();
+    app.dispose();
+  });
+
   testWidgets(
     'retained header uses current callbacks, names, projects and status',
     (tester) async {

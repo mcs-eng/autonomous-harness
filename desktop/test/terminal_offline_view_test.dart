@@ -5,6 +5,7 @@ import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/terminal/terminal_session.dart';
 import 'package:harness/widgets/terminal_composer.dart';
 import 'package:harness/widgets/terminal_find_bar.dart';
+import 'package:harness/widgets/terminal_panel.dart';
 import 'package:xterm/xterm.dart';
 
 import 'swarm_interactions_test.dart' show chord;
@@ -42,7 +43,8 @@ void main() {
       expect(scroll.offset, 80);
       expect(tester.getSize(find.byType(TerminalView)), size);
       expect(view.widget.controller!.selection, isNotNull);
-      expect(find.text('Offline'), findsOneWidget);
+      expect(find.descendant(of: find.byType(TerminalPanel),
+        matching: find.text('Offline')), findsOneWidget);
       expect(find.text('TERMINAL FROZEN'), findsNothing);
       await chord(tester, LogicalKeyboardKey.keyF);
       await tester.enterText(findField, 'marker');

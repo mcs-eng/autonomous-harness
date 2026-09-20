@@ -26,6 +26,28 @@ Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.7.zip
 Get-Content .\harness-desktop-windows-x64-1.0.0-windows.7.zip.sha256
 ```
 
+## Projects sidebar (source builds after Preview 7)
+
+The sidebar switches between **Projects** and the existing **Machines** view.
+Choose a session to return to its existing tab, or reopen its view if closed.
+Project headings expand the list without starting agents. Non-Git folders work
+too; repositories with multiple checkouts list each host and working folder.
+
+**Add folder** saves an existing location. **New project** opens the creation
+dialog; its folder is created only when you submit. The **+** beside a location
+opens **New agent here** with that exact machine and folder preselected, in a new
+tab. Shared or disconnected hosts cannot create agents from this action.
+On Windows with WSL, the folder picker browses the selected distribution.
+
+Rows show branch and current activity, including **Needs input**, **Start failed**,
+and **Offline**. Closing a view keeps its agent running; stopping remains a
+separate **Stop** action. The sidebar button opens a drawer in narrow windows.
+Narrow pane headers retain Model, Viewer, Stop, and Close controls when available;
+other actions move into **More pane actions**. Tab and Enter operate the navigation
+controls without taking terminal input.
+
+This source change does not update an installed Preview 7 bundle or desktop shortcut.
+
 ## Prerequisites
 
 Windows 11 x64, virtualization enabled, internet access, and a WSL2 Ubuntu

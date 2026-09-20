@@ -223,6 +223,9 @@ void main() {
         final pane = app.adoptSessionForTest(terminal('a0', input));
         final target = app.activeSwarm;
         await mount(tester, app);
+        // Preserve room for two 40-column panes with the test's wide Ahem font.
+        await tester.tap(find.byKey(const ValueKey('project-sidebar-toggle')));
+        await tester.pump();
         final field = find.byKey(const ValueKey('swarm-search-input'));
         if (entry == 'Open') {
           await chord(tester, LogicalKeyboardKey.keyO);
@@ -285,6 +288,8 @@ void main() {
       final original = app.activeSwarm;
       await mount(tester, app);
       if (change == 'stale split') {
+        await tester.tap(find.byKey(const ValueKey('project-sidebar-toggle')));
+        await tester.pump();
         await chord(tester, LogicalKeyboardKey.keyP, shift: true);
         await tester.enterText(
           find.byKey(const ValueKey('swarm-search-input')),

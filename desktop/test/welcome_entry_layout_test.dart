@@ -114,7 +114,8 @@ void main() {
         expect(openRect.top, greaterThan(fieldRect.bottom));
         expect(openRect.left, closeTo(fieldRect.left, 1));
         expect(createRect.left, greaterThan(openRect.right));
-        expect(fieldRect.center.dx, closeTo(width / 2, 1));
+        final workspace = tester.getRect(find.byKey(ValueKey('harness-start:${app.activeSwarmId}')));
+        expect(fieldRect.center.dx, closeTo(workspace.center.dx, 1));
         // The store card leads the footer row under the search; the device
         // card follows it on the same row, never wrapped below it.
         expect(storeRect.left, closeTo(fieldRect.left, 1));
