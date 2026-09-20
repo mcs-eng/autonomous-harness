@@ -2,6 +2,7 @@ import type { AgentEngine } from '../engines/types.js'
 import {
   agentAliasOwner,
   agentCommandOwnershipSnapshot,
+  engineBinaryOwnershipSnapshot,
   PROCESS_ENGINES,
   type AgentCommandOwnershipSnapshot,
 } from './engineBin.js'
@@ -243,13 +244,15 @@ export async function probeTerminalAgents(
   herdrSessionOrder: readonly string[],
   daemonPid = process.pid,
   hints: ReadonlyMap<string, AgentEngine> = new Map(),
+  trustedGridBaseUrls: ReadonlyMap<string, string> = new Map(),
 ): Promise<TerminalAgentProbe> {
-  const [targets, rows] = await Promise.all([
+  const [targets, rows, ownership] = await Promise.all([
     Promise.all(backends.map(async (backend): Promise<TerminalTargetProbe> => ({
       instanceId: backend.instanceId,
       result: await backend.inventory().catch(() => ({ state: 'unavailable' as const, reason: 'terminal inventory failed' })),
     }))),
     processRows(),
+    engineBinaryOwnershipSnapshot(),
   ])
   if (!rows) return { processTableAvailable: false, targets, agents: [], ambiguousPlacements: new Set() }
   const roots = targets.flatMap((target) => target.result.state === 'available' ? target.result.roots : [])
@@ -261,6 +264,7 @@ export async function probeTerminalAgents(
     backendOrder,
     herdrSessionOrder,
     hints,
+    ownership,
   )
   // Which endpoint each agent's engine talks to. Cached per live process, so this is one read per agent
   // for its whole life rather than one per pass — and a failed read leaves `gateway` undefined rather
@@ -269,7 +273,13 @@ export async function probeTerminalAgents(
     const runtime = await probeGatewayRuntime(agent.processIdentity, agent.args)
     agent.gateway = runtime.kind
     // Same process, same cached read — the grid costs no extra `ps`.
-    agent.grid = await probeGridAssignment(agent.processIdentity, agent.engine, agent.args)
+    const trusted = [...new Set(agent.runtimes.map((runtime) => trustedGridBaseUrls.get(terminalRouteKey(runtime))).filter(Boolean))]
+    agent.grid = await probeGridAssignment(
+      agent.processIdentity,
+      agent.engine,
+      agent.args,
+      trusted.length === 1 ? { baseUrl: trusted[0]! } : undefined,
+    )
     // And, for Codex, the profile it runs under — a fact about the process the row cannot otherwise learn.
     agent.codexHome = await probeCodexHome(agent.processIdentity, agent.engine)
     // And the DSH it was created as — same read, so a pane the daemon did not create is labelled too.

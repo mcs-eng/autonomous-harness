@@ -22,8 +22,8 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
 To compare the downloaded archive with its checksum in Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.4.zip
-Get-Content .\harness-desktop-windows-x64-1.0.0-windows.4.zip.sha256
+Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.6.zip
+Get-Content .\harness-desktop-windows-x64-1.0.0-windows.6.zip.sha256
 ```
 
 ## Prerequisites
@@ -49,6 +49,9 @@ WSL inherits Windows npm without Linux Node, and replaces broken Copilot npm
 launchers with a verified native installation. Preview 1 can display agent output
 while rejecting keyboard text; replace the complete bundle to receive both fixes.
 Preview 4 adds **Open in browser** to viewer panes, including Grid's fleet dashboard.
+Preview 5 adds isolated local fleets to compatible agents' model pickers and moves
+recurring engine discovery off the daemon's main event loop.
+Preview 6 also includes the upstream review's Unicode WSL distribution-name fix.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.
@@ -56,6 +59,11 @@ This stops the connection service; do not kill your tmux sessions or delete
 `~/.harness`. Existing authentication and session data stay in the distribution.
 Then open the new extracted `Release/harness.exe`, not an old shortcut or an
 executable under a build scratch directory.
+
+If your previous panes are absent, choose **Open Harness** and select an existing
+agent to attach it to the current tab. Repeat for the remaining agents. The saved
+tab arrangement and the agent sessions are separate; creating a new Store workspace
+does not reopen an existing one or inherit its fleet configuration.
 
 ## Additional agent options in preview 3
 
@@ -93,6 +101,33 @@ are embedded in Harness on macOS; Windows and Linux use the external browser.
 
 Connect your own Grid before expecting live fleet data. Installing this package
 does not deploy models or enroll your GPU machines automatically.
+
+### Local fleets in the model picker
+
+Preview 5 can register an existing isolated Grid home without changing the default
+remote/cloud profile. In the WSL distribution used by Harness, run the bundled CLI
+with its managed Node runtime. Replace the release path, profile home, and fleet
+name below with your existing configuration:
+
+```sh
+# Inside the selected WSL distribution (bash)
+node_path="$(cat "$HOME/.harness/runtime/current-node")"
+"$node_path" "/mnt/c/path/to/Release/harness-cli/cli.js" grid profile set local-fleet \
+  --label "My local fleet" --home "$HOME/.harness/grid-fleet/local" --grid my-fleet
+```
+
+The profile home must already exist. Open the model dropdown at the top of a
+compatible agent pane and choose the model under that local fleet. Registration
+does not install models, start a fleet, or prove an agent can complete a turn.
+Local Grid 0.3.47 provides OpenAI-compatible inference, so this preview offers it to
+engines such as Codex and OpenCode; Claude Code's remote Grid options are separate.
+The daemon resolves endpoints and credentials from registered profiles; the picker
+sends the profile's opaque identity, never a caller-supplied endpoint or key.
+
+To reopen a configured fleet dashboard, use **Open Harness** and select its existing
+workspace. A newly created Grid workspace may show an empty fleet until connected.
+Codex may display its own update prompt in the adjacent terminal; that prompt is
+separate from the dashboard and can be skipped to continue with the installed version.
 
 ## Local mode (no account)
 

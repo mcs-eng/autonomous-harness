@@ -3,6 +3,32 @@ import 'package:harness/core/models.dart';
 
 void main() {
   _dshTests();
+  test(
+    'keeps Grid routing identities exact rather than truncating them as labels',
+    () {
+      final target = 'local:${'a' * 64}:1234567890abcdef';
+      final agent = Agent.fromJson({
+        'id': 'a',
+        'grid': {'targetId': target},
+      });
+      expect(agent.gridTargetId, target);
+      expect(agent.copyWith(name: 'renamed').gridTargetId, target);
+      expect(
+        Agent.fromJson({
+          'id': 'a',
+          'grid': {'targetId': 'x' * 321},
+        }).gridTargetId,
+        isNull,
+      );
+      expect(
+        Agent.fromJson({
+          'id': 'a',
+          'grid': {'targetId': 'local:bad\n'},
+        }).gridTargetId,
+        isNull,
+      );
+    },
+  );
   test('uses explicit terminal availability from a new CLI', () {
     final dormantPane = Agent.fromJson({
       'id': 'agent-1',
@@ -70,7 +96,10 @@ void main() {
     });
 
     test('reads the status off the grid block', () {
-      expect(onGrid({'model': 'qwen', 'webSearch': 'on'}).gridWebSearch, GridWebSearch.on);
+      expect(
+        onGrid({'model': 'qwen', 'webSearch': 'on'}).gridWebSearch,
+        GridWebSearch.on,
+      );
       expect(
         onGrid({'model': 'qwen', 'webSearch': 'unavailable'}).gridWebSearch,
         GridWebSearch.unavailable,
@@ -85,12 +114,19 @@ void main() {
       // An older daemon, or a grid agent the daemon merely discovered: no field at all.
       expect(onGrid({'model': 'qwen'}).gridWebSearch, isNull);
       // A newer daemon with a fourth word: not printed verbatim, not guessed at.
-      expect(onGrid({'model': 'qwen', 'webSearch': 'throttled'}).gridWebSearch, isNull);
+      expect(
+        onGrid({'model': 'qwen', 'webSearch': 'throttled'}).gridWebSearch,
+        isNull,
+      );
       expect(onGrid({'model': 'qwen', 'webSearch': 7}).gridWebSearch, isNull);
     });
 
     test('has nothing to say off a grid', () {
-      final own = Agent.fromJson({'id': 'agent-2', 'name': 'Own', 'grid': null});
+      final own = Agent.fromJson({
+        'id': 'agent-2',
+        'name': 'Own',
+        'grid': null,
+      });
       expect(own.gridModel, isNull);
       expect(own.gridWebSearch, isNull);
     });
@@ -140,7 +176,10 @@ void _dshTests() {
     expect(verdict.artifact, 'boards/main.board.json');
     expect(verdict.updatedAt, DateTime.utc(2026, 9, 14, 20));
     expect(agent.copyWith(name: 'Renamed').verdict, verdict);
-    expect(agent.copyWith(name: 'Renamed').dsh, 'autonomous/autonomous-circuit');
+    expect(
+      agent.copyWith(name: 'Renamed').dsh,
+      'autonomous/autonomous-circuit',
+    );
   });
 
   test('a plain engine agent has none of them and draws as its engine', () {

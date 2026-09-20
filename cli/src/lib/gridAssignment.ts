@@ -21,7 +21,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AgentEngine } from '../engines/types.js'
-import { GRID_ROUTER_MODEL } from './gridLaunch.js'
+import { anthropicBaseUrl, GRID_ROUTER_MODEL, relayBaseUrl, type GridLaunchOverride } from './gridLaunch.js'
 import { readProcessEnv } from './processEnv.js'
 import type { ProcessIdentity } from './registry.js'
 
@@ -91,16 +91,41 @@ function isGridUrl(value: string): boolean {
   }
 }
 
+function comparableUrl(value: string): string | null {
+  try {
+    const url = new URL(value)
+    url.hash = ''
+    url.search = ''
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/'
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return null
+  }
+}
+
+/** Does the live engine endpoint equal the endpoint this server-owned launch produced? */
+export function gridEndpointMatchesLaunch(
+  engine: AgentEngine,
+  observed: string,
+  launch: Pick<GridLaunchOverride, 'baseUrl'>,
+): boolean {
+  const expected = engine === 'claude' ? anthropicBaseUrl(launch.baseUrl) : relayBaseUrl(launch.baseUrl)
+  const left = comparableUrl(observed)
+  const right = comparableUrl(expected)
+  return left !== null && right !== null && left === right
+}
+
 /** Classify an already-read environment and argv. Exported so a spec can pin the rules with no I/O. */
 export function classifyGridAssignment(
   engine: AgentEngine,
   processEnv: Record<string, string>,
   args = '',
+  trustedLaunch?: Pick<GridLaunchOverride, 'baseUrl'>,
 ): GridAssignment | null {
   const urlVar = BASE_URL_VAR[engine]
   const fromArgv = urlVar ? null : CODEX_BASE_URL.exec(args)
   const baseUrl = (urlVar ? processEnv[urlVar] : (fromArgv?.[1] ?? fromArgv?.[2]))?.trim()
-  if (!baseUrl || !isGridUrl(baseUrl)) return null
+  if (!baseUrl || (!isGridUrl(baseUrl) && (!trustedLaunch || !gridEndpointMatchesLaunch(engine, baseUrl, trustedLaunch)))) return null
   const modelVar = MODEL_VAR[engine]
   const model = modelVar
     ? processEnv[modelVar]?.trim()
@@ -137,6 +162,7 @@ export function classifyGridAssignment(
 export async function readPiGridAssignment(
   processEnv: Record<string, string>,
   args: string,
+  trustedLaunch?: Pick<GridLaunchOverride, 'baseUrl'>,
 ): Promise<GridAssignment | null> {
   const dir = processEnv[PI_CONFIG_DIR_VAR]?.trim()
   if (!dir) return null
@@ -147,7 +173,8 @@ export async function readPiGridAssignment(
       providers?: Record<string, { baseUrl?: unknown }>
     }
     const baseUrl = raw.providers?.[model[1]]?.baseUrl
-    if (typeof baseUrl !== 'string' || !isGridUrl(baseUrl)) return null
+    if (typeof baseUrl !== 'string'
+      || (!isGridUrl(baseUrl) && (!trustedLaunch || !gridEndpointMatchesLaunch('pi', baseUrl, trustedLaunch)))) return null
     return { baseUrl, model: model[2] }
   } catch {
     return null
@@ -176,6 +203,7 @@ const OPENCODE_CONFIG_VAR = 'OPENCODE_CONFIG'
  */
 export async function readOpencodeGridAssignment(
   processEnv: Record<string, string>,
+  trustedLaunch?: Pick<GridLaunchOverride, 'baseUrl'>,
 ): Promise<GridAssignment | null> {
   const configPath = processEnv[OPENCODE_CONFIG_VAR]?.trim()
   if (!configPath) return null
@@ -189,7 +217,8 @@ export async function readOpencodeGridAssignment(
     // safe direction to be wrong in.
     if (providers.length !== 1) return null
     const baseUrl = providers[0].options?.baseURL
-    if (typeof baseUrl !== 'string' || !isGridUrl(baseUrl)) return null
+    if (typeof baseUrl !== 'string'
+      || (!isGridUrl(baseUrl) && (!trustedLaunch || !gridEndpointMatchesLaunch('opencode', baseUrl, trustedLaunch)))) return null
     const models = Object.keys(providers[0].models ?? {})
     if (models.length !== 1) return null
     // The router reports as NO model, the same as every other engine launched without one.
@@ -231,10 +260,11 @@ export async function probeGridAssignment(
   identity: ProcessIdentity,
   engine: AgentEngine,
   args = '',
+  trustedLaunch?: Pick<GridLaunchOverride, 'baseUrl'>,
 ): Promise<GridAssignment | null | undefined> {
   const processEnv = await readProcessEnv(identity)
   if (!processEnv) return undefined
-  return await gridAssignmentFromEnv(engine, processEnv, args)
+  return await gridAssignmentFromEnv(engine, processEnv, args, trustedLaunch)
 }
 
 /**
@@ -252,10 +282,11 @@ export async function gridAssignmentFromEnv(
   engine: AgentEngine,
   env: Record<string, string>,
   args = '',
+  trustedLaunch?: Pick<GridLaunchOverride, 'baseUrl'>,
 ): Promise<GridAssignment | null> {
-  if (engine === 'pi') return await readPiGridAssignment(env, args)
-  if (engine === 'opencode') return await readOpencodeGridAssignment(env)
-  return classifyGridAssignment(engine, env, args)
+  if (engine === 'pi') return await readPiGridAssignment(env, args, trustedLaunch)
+  if (engine === 'opencode') return await readOpencodeGridAssignment(env, trustedLaunch)
+  return classifyGridAssignment(engine, env, args, trustedLaunch)
 }
 
 /**

@@ -4022,6 +4022,7 @@ class AppNotifier extends ChangeNotifier {
     String agentId,
     String modelId, {
     String? gridName,
+    String? gridTarget,
   }) async {
     try {
       await _conn(machineId).request(
@@ -4030,6 +4031,7 @@ class AppNotifier extends ChangeNotifier {
           'agentId': agentId,
           'gridModel': modelId,
           if (gridName != null) 'gridName': gridName,
+          if (gridTarget != null) 'gridTarget': gridTarget,
         },
         timeout: const Duration(seconds: 30),
       );
@@ -4058,6 +4060,7 @@ class AppNotifier extends ChangeNotifier {
             (m) => GridModel(
               id: (m['id'] as String?) ?? '',
               node: (m['node'] as String?) ?? '',
+              targetId: m['targetId'] as String?,
             ),
           )
           .where((m) => m.id.isNotEmpty)
@@ -4069,6 +4072,7 @@ class AppNotifier extends ChangeNotifier {
             (m) => GridModel(
               id: (m['id'] as String?) ?? '',
               node: (m['node'] as String?) ?? '',
+              targetId: m['targetId'] as String?,
             ),
           )
           .where((m) => m.id.isNotEmpty)
@@ -4080,9 +4084,22 @@ class AppNotifier extends ChangeNotifier {
             (g) => GridSection(
               name: g['name'] as String,
               own: g['own'] == true,
+              source: g['source'] as String?,
+              label: g['label'] as String?,
+              profileId: g['profileId'] as String?,
+              targetId: g['targetId'] as String?,
+              engines: (g['engines'] as List<dynamic>?)
+                  ?.whereType<String>()
+                  .map((engine) => engine.toLowerCase())
+                  .toSet(),
               models: [
                 for (final m in parseModels(g['models']))
-                  GridModel(id: m.id, node: m.node, grid: g['name'] as String),
+                  GridModel(
+                    id: m.id,
+                    node: m.node,
+                    grid: g['name'] as String,
+                    targetId: g['targetId'] as String?,
+                  ),
               ],
             ),
           )

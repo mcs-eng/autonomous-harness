@@ -100,6 +100,7 @@ void main() {
   Future<void> open(
     WidgetTester tester, {
     String? currentModel,
+    String? currentTargetId,
     GridWebSearch? webSearch,
     String engine = 'claude',
     VoidCallback? onOwnLogin,
@@ -118,6 +119,7 @@ void main() {
               machineId: 'local',
               engineLabel: engine,
               currentModel: currentModel,
+              currentTargetId: currentTargetId,
               webSearch: webSearch,
               onUseOwnLogin: onOwnLogin,
               onSelected: onSelected,
@@ -141,7 +143,7 @@ void main() {
     // carries — this control cannot put an agent on an API provider, so offering one would be a
     // choice that goes nowhere.
     expect(find.text('Subscription'), findsOneWidget);
-    expect(find.text('Local models on your machines'), findsOneWidget);
+    expect(find.text('Your private cloud models'), findsOneWidget);
     expect(find.text('API'), findsNothing);
 
     // A picker that can only move an agent ONTO a grid is a one-way door, so the engine's own login
@@ -240,7 +242,7 @@ void main() {
     expect(find.text('Qwen3.5-4B'), findsOneWidget);
     expect(find.text('LFM2.5-8B'), findsOneWidget);
     // Still one menu, redrawn — not a second one over the first.
-    expect(find.text('Local models on your machines'), findsOneWidget);
+    expect(find.text('Your private cloud models'), findsOneWidget);
   });
 
   testWidgets(
@@ -275,14 +277,14 @@ void main() {
       );
       await open(tester, onSelected: (m) => picked = m);
 
-      expect(find.text('Local models on your machines'), findsOneWidget);
+      expect(find.text('Your private cloud models'), findsOneWidget);
       expect(find.text('Models shared with you'), findsOneWidget);
       expect(find.text('autonomous.ai'), findsOneWidget);
       expect(find.text('Qwen3.5-4B'), findsOneWidget);
       expect(find.text('DeepSeek-V4-Flash'), findsOneWidget);
       // Own first: Local sits above the shared grids.
       expect(
-        tester.getTopLeft(find.text('Local models on your machines')).dy <
+        tester.getTopLeft(find.text('Your private cloud models')).dy <
             tester.getTopLeft(find.text('Models shared with you')).dy,
         isTrue,
       );
@@ -303,6 +305,133 @@ void main() {
       await tester.pumpAndSettle();
       expect(picked?.id, 'DeepSeek-V4-Flash');
       expect(picked?.grid, 'autonomous.ai');
+    },
+  );
+
+  testWidgets(
+    'same-named models keep distinct local targets and select the chosen one',
+    (tester) async {
+      GridModel? picked;
+      build(
+        gridName: 'private-cloud',
+        grids: const [
+          {
+            'name': 'bran-fleet',
+            'own': false,
+            'source': 'local',
+            'label': 'Bran fleet',
+            'profileId': 'bran-a',
+            'targetId': 'local:bran-a:1111111111111111',
+            'engines': ['codex', 'opencode'],
+            'models': [
+              {'id': 'qwen3.5:12b', 'node': 'Bran fleet'},
+            ],
+          },
+          {
+            'name': 'private-cloud',
+            'own': true,
+            'source': 'private',
+            'targetId': 'remote:private-cloud',
+            'models': [
+              {'id': 'qwen3.5:12b', 'node': 'cloud-node'},
+            ],
+          },
+        ],
+      );
+      await open(
+        tester,
+        currentModel: 'qwen3.5:12b',
+        currentTargetId: 'remote:private-cloud',
+        engine: 'codex',
+        onSelected: (model) => picked = model,
+      );
+
+      expect(find.text('Bran fleet · bran-a'), findsOneWidget);
+      expect(find.text('qwen3.5:12b'), findsNWidgets(2));
+      await tester.tap(find.text('qwen3.5:12b').first);
+      await tester.pumpAndSettle();
+      expect(picked?.targetId, 'local:bran-a:1111111111111111');
+    },
+  );
+
+  testWidgets(
+    'local OpenAI-only models are hidden from Claude while remote Claude choices remain',
+    (tester) async {
+      build(
+        gridName: 'private-cloud',
+        grids: const [
+          {
+            'name': 'local-fleet',
+            'own': false,
+            'source': 'local',
+            'label': 'My fleet',
+            'profileId': 'local-a',
+            'targetId': 'local:local-a:1111111111111111',
+            'engines': ['codex', 'opencode'],
+            'models': [
+              {'id': 'local-qwen', 'node': 'My fleet'},
+            ],
+          },
+          {
+            'name': 'private-cloud',
+            'own': true,
+            'source': 'private',
+            'targetId': 'remote:private-cloud',
+            'models': [
+              {'id': 'cloud-claude', 'node': 'cloud-node'},
+            ],
+          },
+        ],
+      );
+      await open(tester, engine: 'claude');
+      expect(
+        find.text('Claude cannot run models from this local fleet.'),
+        findsOneWidget,
+      );
+      expect(find.text('local-qwen'), findsNothing);
+      expect(find.text('cloud-claude'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'a legacy remote selection does not restart but a local namesake does',
+    (tester) async {
+      GridModel? picked;
+      build(
+        grids: const [
+          {
+            'name': 'local-fleet',
+            'source': 'local',
+            'own': false,
+            'targetId': 'local:fleet:1111111111111111',
+            'models': [
+              {'id': 'same-model', 'node': 'local'},
+            ],
+          },
+          {
+            'name': 'private-cloud',
+            'source': 'private',
+            'own': true,
+            'targetId': 'remote:private-cloud',
+            'models': [
+              {'id': 'same-model', 'node': 'cloud'},
+            ],
+          },
+        ],
+      );
+      await open(
+        tester,
+        currentModel: 'same-model',
+        onSelected: (model) => picked = model,
+      );
+      await tester.tap(find.text('same-model').last);
+      await tester.pumpAndSettle();
+      expect(picked, isNull);
+      await tester.tap(find.text('Model'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('same-model').first);
+      await tester.pumpAndSettle();
+      expect(picked?.targetId, 'local:fleet:1111111111111111');
     },
   );
 

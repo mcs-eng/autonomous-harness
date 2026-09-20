@@ -221,6 +221,7 @@ class Agent {
   /// Read by the daemon off the live process on every discovery, never bookkept — so it is the
   /// truth even for an agent someone re-pointed by hand. Null is a real answer, not a missing one.
   final String? gridModel;
+  final String? gridTargetId;
 
   /// Whether the agent can search the web on that model, or null when the daemon said nothing —
   /// an agent on its own login, an older daemon, or a grid agent it merely discovered. Decided by
@@ -281,6 +282,7 @@ class Agent {
     this.engineIconHint,
     this.codexHome,
     this.gridModel,
+    this.gridTargetId,
     this.gridWebSearch,
     this.parentAgentId,
     this.project,
@@ -352,6 +354,7 @@ class Agent {
       engineIconHint: _safeLabel(j['engineIconHint']),
       codexHome: j['engine'] == 'codex' ? _safeCodexHome(j['codexHome']) : null,
       gridModel: _safeLabel(grid?['model']),
+      gridTargetId: _safeGridTarget(grid?['targetId']),
       gridWebSearch: GridWebSearch.fromWire(grid?['webSearch']),
       parentAgentId: _safeLabel(j['parentAgentId'] ?? j['parentId']),
       project: AgentProject.fromJson(j['project']),
@@ -387,6 +390,7 @@ class Agent {
     engineIconHint: engineIconHint,
     codexHome: codexHome,
     gridModel: gridModel,
+    gridTargetId: gridTargetId,
     gridWebSearch: gridWebSearch,
     parentAgentId: parentAgentId,
     project: project,
@@ -446,6 +450,16 @@ class Agent {
   static String? _safeLabel(Object? raw) {
     if (raw is! String || raw.isEmpty) return null;
     return raw.length <= 80 ? raw : raw.substring(0, 80);
+  }
+
+  /// A routing identity must remain exact; shortening it can restart the currently selected model.
+  static String? _safeGridTarget(Object? raw) {
+    if (raw is! String ||
+        raw.isEmpty ||
+        raw.length > 320 ||
+        RegExp(r'[\x00-\x1f\x7f]').hasMatch(raw))
+      return null;
+    return raw;
   }
 
   static String? _safeDetail(Object? raw) {
@@ -783,7 +797,15 @@ class GridModel {
   /// sends only the own grid's list, which the retarget then targets as it always did.
   final String? grid;
 
-  const GridModel({required this.id, required this.node, this.grid});
+  /// Opaque daemon-owned launch target. It never contains a path, endpoint, or credential.
+  final String? targetId;
+
+  const GridModel({
+    required this.id,
+    required this.node,
+    this.grid,
+    this.targetId,
+  });
 }
 
 /// Which `grid` a machine would run, as its daemon reports beside the model list (`gridCli`).
@@ -807,16 +829,26 @@ enum GridCli {
 
 /// The picker's whole answer: which grid was asked, and what it offers.
 ///
-/// One grid the machine is signed into, with what it serves. [own] marks the account's private
-/// grid — the picker calls that one "Local"; a shared grid goes by its name.
+/// One available model source. [source] distinguishes an explicit local profile, the account's
+/// private remote grid, and a grid shared with the account.
 class GridSection {
   final String name;
   final bool own;
+  final String? source;
+  final String? label;
+  final String? profileId;
+  final String? targetId;
+  final Set<String>? engines;
   final List<GridModel> models;
 
   const GridSection({
     required this.name,
     required this.own,
+    this.source,
+    this.label,
+    this.profileId,
+    this.targetId,
+    this.engines,
     required this.models,
   });
 }
@@ -883,5 +915,16 @@ class GridModels {
     if (capable == null) return true;
     final id = engine?.trim().toLowerCase();
     return id != null && capable.contains(id);
+  }
+
+  /// A source may be narrower than the daemon's general Grid contracts. Local hubs currently expose
+  /// OpenAI-compatible inference, so their sections omit engines that require another protocol.
+  bool canRunSection(GridSection section, String? engine) {
+    final id = engine?.trim().toLowerCase();
+    final sectionEngines = section.engines;
+    if (sectionEngines != null) {
+      return id != null && sectionEngines.contains(id);
+    }
+    return canRunLocally(engine);
   }
 }

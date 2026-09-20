@@ -33,6 +33,7 @@ import { gridCliPresence } from './lib/gridExec.js'
 import { GridFleetRpc, GRID_FLEET_PROTOCOL, GRID_FLEET_MAX_TIMEOUT_MS, parseGridFleetRequest } from './lib/gridFleetRpc.js'
 import { gridCapableEngines, parseGridLaunchOverride, type GridLaunchOverride } from './lib/gridLaunch.js'
 import { listAllGridModels, resolveGridTarget } from './lib/gridModels.js'
+import { localGridTargetId, readLocalGridProfiles } from './lib/gridProfiles.js'
 import { deriveHarnessGridName } from './lib/gridDerive.js'
 import { AGENT_NAME_RE, FirstPromptUnsupportedError, MAX_FIRST_PROMPT_CHARS, NamedAgentUnsupportedError, permissionModeApproves, permissionModeFlags, supportsFirstPrompt, supportsNamedAgent } from './lib/engineLaunch.js'
 import { readAccountUsage, type AccountUsageReading } from './lib/accountUsage.js'
@@ -553,7 +554,7 @@ export class BackendSocket {
   accountUsageReader: () => Promise<AccountUsageReading[]> = readAccountUsage
   /** The grid listing currently out, shared by every `grid_models_list` for the same own grid
    *  that lands meanwhile. */
-  private gridModelsInFlight: { gridName: string | null; grids: ReturnType<typeof listAllGridModels> } | null = null
+  private gridModelsInFlight: { key: string; grids: ReturnType<typeof listAllGridModels> } | null = null
   /** Receives `theme_set` — the desktop's pane colours, to become this machine's tmux
    *  `window-style` (lib/hostTheme.ts). Wired by cli.ts; null answers with UNSUPPORTED. */
   hostThemeSink: ((theme: HostTheme) => void) | null = null
@@ -726,6 +727,10 @@ export class BackendSocket {
   /** The account's private harness grid name, as the backend last reported it. Null until the first
    *  `machine_meta` lands, or when this account has none yet. */
   private harnessGridName: string | null = null
+  /** Advances whenever a newer authoritative source writes `harnessGridName`. */
+  private harnessGridNameRevision = 0
+  /** One background reconcile/derivation for local-first model-list replies. */
+  private gridNameResolution: Promise<void> | null = null
   /** Injected so the derivation (a `grid` spawn) is a seam in tests; see `lib/gridDerive.ts`. */
   deriveGridName: () => Promise<string | null> = deriveHarnessGridName
   /** The daemon-start grid reconcile (`lib/gridAttach.ts`), while it is running — so the first
@@ -735,7 +740,10 @@ export class BackendSocket {
 
   /** Set the account's private grid name from the reconcile that just confirmed it, so the RPCs
    *  answer with it at once rather than waiting for the next `machine_meta` (`lib/gridAttach.ts`). */
-  setHarnessGridName(name: string | null): void { this.harnessGridName = name }
+  setHarnessGridName(name: string | null): void {
+    this.harnessGridName = name
+    this.harnessGridNameRevision += 1
+  }
 
   /** Which grid this machine's agents can be pointed at — for `harness status` and the models RPC. */
   gridName(): string | null { return this.harnessGridName }
@@ -763,6 +771,27 @@ export class BackendSocket {
       if (timer) clearTimeout(timer)
     }
     return this.harnessGridName ?? await this.deriveGridName()
+  }
+
+  /**
+   * Learn the private remote grid without holding a registered local profile's picker response.
+   * Repeated opens share this one operation. Its result is cached only if no newer machine_meta or
+   * reconcile answer landed while it was out, so an older derived name cannot overwrite authority.
+   */
+  private resolveGridNameInBackground(): void {
+    if (this.gridNameResolution || this.harnessGridName) return
+    const revision = this.harnessGridNameRevision
+    const work = this.resolveGridName()
+      .then((name) => {
+        if (!name || this.harnessGridNameRevision !== revision) return
+        this.harnessGridName = name
+        this.harnessGridNameRevision += 1
+      })
+      .catch(() => {})
+    this.gridNameResolution = work
+    void work.finally(() => {
+      if (this.gridNameResolution === work) this.gridNameResolution = null
+    })
   }
 
   connect(): void {
@@ -1451,7 +1480,7 @@ export class BackendSocket {
       // absence as null used to WIPE a grid name a moment after it was set, leaving the picker
       // empty. Absent ⇒ unchanged; null ⇒ this account has none; a string ⇒ that grid.
       if ('gridName' in meta) {
-        this.harnessGridName = typeof meta.gridName === 'string' && meta.gridName.trim() ? meta.gridName.trim() : null
+        this.setHarnessGridName(typeof meta.gridName === 'string' && meta.gridName.trim() ? meta.gridName.trim() : null)
       }
       this.onMachineMeta?.(typeof name === 'string' && name.trim() ? name.trim() : null)
       return
@@ -1803,21 +1832,38 @@ export class BackendSocket {
           // spawns' 30s) would start more `grid` processes for the same answer. Later askers share
           // the one in flight; the cache in listGridModels covers the settled case.
           void (async () => {
-            const gridName = await this.resolveGridName()
+            const profiles = readLocalGridProfiles()
+            // A registered local profile is useful while remote auth is unavailable. Do not put its
+            // picker behind resolveGridName's reconcile/derive waits; the ordinary background Grid
+            // reconcile will refresh the cached private name when it can.
+            if (profiles.length) this.resolveGridNameInBackground()
+            const gridName = profiles.length ? this.harnessGridName : await this.resolveGridName()
+            const key = `${gridName ?? ''}\u0000${profiles.map(localGridTargetId).join('\u0000')}`
             const inFlight = this.gridModelsInFlight
-            const listing = inFlight && inFlight.gridName === gridName
+            const listing = inFlight && inFlight.key === key
               ? inFlight.grids
               : (this.gridModelsInFlight = {
-                  gridName,
-                  grids: listAllGridModels(gridName).finally(() => {
-                    if (this.gridModelsInFlight?.gridName === gridName) this.gridModelsInFlight = null
+                  key,
+                  grids: listAllGridModels(gridName, profiles).finally(() => {
+                    if (this.gridModelsInFlight?.key === key) this.gridModelsInFlight = null
                   }),
                 }).grids
             const grids = await listing
+            // The remote catalogue can finish before the background name derivation. Do not label
+            // its private grid as shared in that window. If derivation landed while the catalogue
+            // was out, classify against the latest name; if it is still pending, return the useful
+            // local rows alone. A settled null means this is a shared-only account, so those rows
+            // become visible normally on the next line.
+            const responseGridName = profiles.length ? this.harnessGridName : gridName
+            const responseGrids = profiles.length && !responseGridName && this.gridNameResolution
+              ? grids.filter((grid) => grid.source === 'local')
+              : grids.map((grid) => grid.source === 'local'
+                  ? grid
+                  : { ...grid, own: grid.name === responseGridName, source: grid.name === responseGridName ? 'private' as const : 'shared' as const })
             reply(type, requestId, {
-              gridName,
-              models: grids.find((g) => g.own)?.models ?? [],
-              grids,
+              gridName: responseGridName,
+              models: responseGrids.find((g) => g.own)?.models ?? [],
+              grids: responseGrids,
               // Which engines a Local model can be offered to at all. Static per CLI version — it is
               // the set of launch contracts in `gridLaunch.ts` — and answered here, beside the list,
               // so the picker can say "Cursor runs only on its own login" instead of offering a row
@@ -2071,9 +2117,14 @@ export class BackendSocket {
           }
           // Absent is the ordinary case and stays indistinguishable from a client that predates grids;
           // present-but-malformed is refused here rather than half-applied at launch, because an agent
-          // that quietly ran on the engine's own login would look like it worked.
+          // that quietly ran on the engine's own login would look like it worked. A local target id is
+          // never trusted in this legacy object: only daemon-side profile resolution may attach one.
           const grid = parseGridLaunchOverride(payload.grid)
           if (grid.state === 'invalid') { reply(type, requestId, { error: 'INVALID_GRID', detail: grid.reason }); return }
+          if (grid.state === 'ok' && grid.override.targetId?.startsWith('local:')) {
+            reply(type, requestId, { error: 'INVALID_GRID', detail: 'local Grid targets are resolved by the daemon' })
+            return
+          }
           if (terminal && grid.state === 'ok') { reply(type, requestId, { error: 'INVALID_GRID', detail: 'a terminal has no engine to point at a grid' }); return }
           // Same validation the desktop app already applies client-side (`Agent._safeCodexHome`) —
           // repeated here because a client's own check is not a guarantee about what actually
@@ -2214,25 +2265,37 @@ export class BackendSocket {
           if (!agentId) { reply(type, requestId, { error: 'MISSING_AGENT_ID' }); return }
           if (!this.onRetargetAgent) { reply(type, requestId, { error: 'UNSUPPORTED_ON_REMOTE' }); return }
           const clear = payload.clearGrid === true
-          // `gridModel` is the header picker's frame: a model id and nothing else. The endpoint and
-          // the credential are resolved HERE, from this machine's own signed-in `grid`, so neither
-          // ever crosses the relay and the app cannot be the source of truth for an address it does
-          // not know. A client that sends the full `grid` object still works unchanged.
+          // `gridModel` is the header picker's frame: a model id and an opaque daemon-issued target.
+          // The endpoint and credential are resolved HERE, from this machine's configured Grid
+          // state. Legacy clients may still send a full remote override, but never a local identity.
           const picked = typeof payload.gridModel === 'string' ? payload.gridModel : ''
+          const suppliedGrid = payload.grid !== undefined
           if (picked && payload.grid === undefined && !clear) {
             // The grid the model was picked FROM, when the picker says (a shared grid's section);
             // the account's own grid otherwise, as before.
             const pickedGrid = typeof payload.gridName === 'string' && payload.gridName.trim()
               ? payload.gridName.trim()
               : await this.resolveGridName()
-            const resolved = await resolveGridTarget(pickedGrid, picked)
+            const targetId = typeof payload.gridTarget === 'string' ? payload.gridTarget.trim() : undefined
+            const resolved = await resolveGridTarget(pickedGrid, picked, targetId)
             if (!resolved) {
               reply(type, requestId, { error: 'GRID_UNAVAILABLE', detail: 'Could not read this machine\'s grid endpoint.' })
+              return
+            }
+            if (resolved.targetId?.startsWith('local:') && registry.resolve(agentId)?.engine === 'claude') {
+              reply(type, requestId, {
+                error: 'GRID_ENGINE_UNSUPPORTED',
+                detail: 'Claude Code needs the Anthropic Messages API, which this local Grid hub does not serve.',
+              })
               return
             }
             payload.grid = resolved
           }
           const target = parseGridLaunchOverride(payload.grid)
+          if (suppliedGrid && target.state === 'ok' && target.override.targetId?.startsWith('local:')) {
+            reply(type, requestId, { error: 'INVALID_GRID', detail: 'local Grid targets are resolved by the daemon' })
+            return
+          }
           // Exactly one, and `clearGrid` is a separate field rather than `grid: null` on purpose:
           // parseGridLaunchOverride already answers `absent` for both undefined and null, so
           // overloading null would make "I forgot the field" and "I mean own login" the same frame.

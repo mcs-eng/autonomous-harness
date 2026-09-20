@@ -43,7 +43,7 @@ import { DaemonCableHost, cableEventFor, cableQuestionFor, cableQuestionCloseFor
 import { MachineListCache, machineListCachePath, withStaleMarker } from './device/machineList.js'
 import { DeviceLink } from './device/deviceLink.js'
 import { DeviceFleet } from './device/deviceFleet.js'
-import { registry, projectDisplayName, type RegisteredSession } from './lib/registry.js'
+import { registry, projectDisplayName, type RegisteredSession, type ProcessIdentity } from './lib/registry.js'
 import { engineSessionTitle } from './lib/sessionTitle.js'
 import { installAmpPlugin, installCodexHooks, installCommandCodeHooks, installCursorHooks, installDevinHooks, installGrokHooks, installAgyHooks, installCopilotHooks, installHermesHooks, installKiloPlugin, installOpencodePlugin, installPiExtension, installSessionHooks } from './lib/hooks.js'
 import { PID_FILE, daemonPort, isAlive, isDaemonRunning, readPid } from './lib/daemonState.js'
@@ -66,12 +66,13 @@ import { warnIfGridSignInRemains } from './lib/gridCredentials.js'
 import { reconcileGridAttach, gridNamesLocal, createGridAttachRunner } from './lib/gridAttach.js'
 import { signedInGridEmail, resetGridDeriveMemo } from './lib/gridDerive.js'
 import { forgetGridModels } from './lib/gridModels.js'
+import { readLocalGridProfiles, removeLocalGridProfile, setLocalGridProfile } from './lib/gridProfiles.js'
 import { gridAvailable } from './lib/gridExec.js'
 import { ENGINE_CLI_COMMANDS, ENGINES, PROCESS_ENGINES, engineBin, enginePathOverride } from './lib/engineBin.js'
 import { isTerminalEngine, type AgentEngine } from './engines/types.js'
 import { engineInstallRecipe } from './lib/engineInstall.js'
 import { buildEngineCommandArgv, buildEngineLaunchArgv, commandAvailableInInteractiveShell, namedAgentArgs } from './lib/engineLaunch.js'
-import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, gridEnvVarNames, type GridLaunchMachine, type GridWebSearchStatus } from './lib/gridLaunch.js'
+import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, gridEnvVarNames, type GridLaunchMachine, type GridLaunchOverride, type GridWebSearchStatus } from './lib/gridLaunch.js'
 import { HERMES_SYSTEM_MANAGED_DIR } from './lib/gridWebMcp.js'
 import { writeGridConfigDir } from './lib/gridConfigDir.js'
 import { tmuxSupportsSessionEnv, TMUX_SESSION_ENV_MIN } from './lib/tmuxVersion.js'
@@ -352,6 +353,11 @@ Grid (the fleet of AI engines the \`grid\` CLI serves — needs \`grid\` on PATH
   harness grid logout [flags]  sign out of your grid — the whole of \`grid logout\`, which stops what
                                this box is serving BEFORE deleting anything. Flags go straight to it:
                                --force signs out over a serve child it could not confirm stopped
+  harness grid profile list    list server-owned local Grid profiles (paths remain on this machine)
+  harness grid profile set ID --label LABEL --home ABSOLUTE_PATH --grid GRID
+                               register or replace one isolated local Grid profile
+  harness grid profile remove ID
+                               remove a local Grid profile (does not change its Grid home)
 
 ${dshUsage()}
 
@@ -933,6 +939,37 @@ async function gridLogoutCommand(args: string[]): Promise<void> {
   // `grid` as a clean sign-out.
   if (outcome.ran === false) console.error(`\n  ✗ ${outcome.message}\n`)
   process.exitCode = outcome.exitCode
+}
+
+function gridProfileCommand(argv: string[]): void {
+  const [verb, id] = argv
+  const json = argv.includes('--json')
+  const value = (flag: string): string | undefined => {
+    const at = argv.indexOf(flag)
+    return at >= 0 ? argv[at + 1] : undefined
+  }
+  if (verb === 'list') {
+    const profiles = readLocalGridProfiles()
+    if (json) console.log(JSON.stringify({ profiles }))
+    else if (!profiles.length) console.log('No local Grid profiles configured.')
+    else for (const profile of profiles) console.log(`${profile.id}\t${profile.label}\t${profile.gridName}\t${profile.gridHome}`)
+    return
+  }
+  if (verb === 'set' && id) {
+    const label = value('--label'); const gridHome = value('--home'); const gridName = value('--grid')
+    if (!label || !gridHome || !gridName) throw new Error('Usage: harness grid profile set ID --label LABEL --home ABSOLUTE_PATH --grid GRID')
+    const profile = setLocalGridProfile({ id, label, gridHome, gridName })
+    forgetGridModels()
+    console.log(json ? JSON.stringify({ profile }) : `Saved local Grid profile ${profile.id} (${profile.label}).`)
+    return
+  }
+  if (verb === 'remove' && id) {
+    const removed = removeLocalGridProfile(id)
+    forgetGridModels()
+    console.log(json ? JSON.stringify({ id, removed }) : removed ? `Removed local Grid profile ${id}.` : `No local Grid profile named ${id}.`)
+    return
+  }
+  throw new Error('Usage: harness grid profile list|set|remove')
 }
 
 /**
@@ -4678,6 +4715,21 @@ async function runForeground(session: AuthSession): Promise<void> {
     return bypassPermissionActive(session.engine, row.args)
   }
 
+  /** Read the new process's argv, not its executable name: Codex keeps its Grid URL/model there. */
+  const restartedGridAssignment = async (
+    identity: ProcessIdentity,
+    engine: AgentEngine,
+    grid: GridLaunchOverride | undefined,
+  ) => {
+    const rows = await processRows()
+    const row = rows?.find((candidate) =>
+      candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
+    // Keep the existing environment/config probe on hosts without faithful argv; never interpret
+    // flattened ps text as flags. Linux/WSL can additionally recover the argv-backed assignment.
+    const args = row && processArgvIsBoundaryFaithful(row) ? row.args : identity.executable
+    return probeGridAssignment(identity, engine, args, grid)
+  }
+
   /**
    * Move a RUNNING agent onto a grid (`agent_retarget`).
    *
@@ -4840,7 +4892,11 @@ async function runForeground(session: AuthSession): Promise<void> {
       // Both are read from the one cached environment of the new pid, so this costs no extra `ps`.
       const [gateway, assignment] = await Promise.all([
         probeGatewayRuntime(outcome.processIdentity),
-        probeGridAssignment(outcome.processIdentity, session.engine, outcome.processIdentity.executable),
+        restartedGridAssignment(
+          outcome.processIdentity,
+          session.engine,
+          grid ?? undefined,
+        ),
       ])
       registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind, assignment)
       // The launch that just worked is the one a restart or a post-reboot restore must repeat — and
@@ -5000,7 +5056,11 @@ async function runForeground(session: AuthSession): Promise<void> {
       // than left to the next scan, so the announce below already says where the engine came back.
       const [gateway, assignment] = await Promise.all([
         probeGatewayRuntime(outcome.processIdentity),
-        probeGridAssignment(outcome.processIdentity, engine, outcome.processIdentity.executable),
+        restartedGridAssignment(
+          outcome.processIdentity,
+          engine,
+          session.gridLaunch ?? undefined,
+        ),
       ])
       registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind, assignment)
       registry.setActive(session.agentId, true)
@@ -6445,6 +6505,9 @@ switch (cmd) {
     // token goes: filtering by value instead would eat an option's *value* the day `grid logout`
     // takes one, forwarding the flag with nothing behind it.
     else if (args[0] === 'logout') gridLogoutCommand(withoutFirst(rest, 'logout')).catch(onError)
+    else if (args[0] === 'profile') {
+      try { gridProfileCommand(withoutFirst(rest, 'profile')) } catch (error) { onError(error) }
+    }
     else { console.error(`Unknown command: grid ${args[0] ?? ''}`); usage(1) }
     break
   case 'dsh':

@@ -1,10 +1,9 @@
 /**
  * Pointing an agent at an Autonomous Grid instead of the engine's own login.
  *
- * The desktop app lets a user pick a grid (and optionally a model), mints a short-lived relay key for
- * it, and sends the result as `payload.grid` on `agent_create` / `agent_retarget`. Nothing about that
- * reaches an engine by itself: this CLI is what spawns the engine, so this module turns that payload
- * into the launch — environment, and where the vendor demands it, argv.
+ * A client names a model and an opaque target. The daemon resolves that target into this override;
+ * nothing about it reaches an engine by itself, so this module turns the server-owned result into
+ * the launch — environment, and where the vendor demands it, argv.
  *
  * The one place that payload is kept is the registry row (`RegisteredSession.gridLaunch`, in a 0600
  * file this daemon owns) — so a restart, or a pane recreated after a reboot, relaunches onto the SAME
@@ -111,6 +110,8 @@ export interface GridLaunchOverride {
    * Absent means no web tools, which is exactly what an older desktop sends.
    */
   mcpUrl?: string
+  /** Opaque server-owned catalogue identity. It is display/selection state, never an address. */
+  targetId?: string
 }
 
 export type GridOverrideParse =
@@ -184,6 +185,9 @@ export function parseGridLaunchOverride(raw: unknown): GridOverrideParse {
   if (hasMcpUrl && !mcpUrl) return { state: 'invalid', reason: 'grid mcpUrl must be a non-empty string' }
   const badMcpUrl = mcpUrl ? urlProblem('mcpUrl', mcpUrl) : null
   if (badMcpUrl) return { state: 'invalid', reason: badMcpUrl }
+  const hasTargetId = source.targetId !== undefined && source.targetId !== null
+  const targetId = hasTargetId ? requiredString(source, 'targetId') : undefined
+  if (hasTargetId && (!targetId || targetId.length > 320)) return { state: 'invalid', reason: 'grid targetId must be a non-empty bounded string' }
   return {
     state: 'ok',
     override: {
@@ -193,6 +197,7 @@ export function parseGridLaunchOverride(raw: unknown): GridOverrideParse {
       apiKey: apiKey as string,
       ...(model ? { model } : {}),
       ...(mcpUrl ? { mcpUrl } : {}),
+      ...(targetId ? { targetId } : {}),
     },
   }
 }
@@ -899,6 +904,11 @@ const GRID_ENGINE_REFUSALS: Partial<Record<AgentEngine, string>> = {
 /** Engines that can be pointed at a grid today, for error text that names what to pick instead. */
 export function gridCapableEngines(): AgentEngine[] {
   return Object.keys(GRID_ENGINE_CONTRACTS) as AgentEngine[]
+}
+
+/** Engines whose Grid contract speaks the OpenAI-compatible API exposed by a local 0.3.47 hub. */
+export function localGridCapableEngines(): AgentEngine[] {
+  return gridCapableEngines().filter((engine) => engine !== 'claude')
 }
 
 export type GridLaunchResult =
