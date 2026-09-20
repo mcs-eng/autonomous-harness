@@ -4,12 +4,16 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'wsl_runtime.dart';
+import 'wsl_preferences.dart';
+
 const deepSeekInstallCommand = 'npm install -g @deepseek-ai/dsh@0.1.5-rc.2';
 
 /// Arguments stay separate from shell source, including project paths.
 List<String> deepSeekCompanionArguments({
   required String distro,
   required String folder,
+  WslRuntime? runtime,
 }) {
   if (distro.trim().isEmpty || distro.contains('\x00')) {
     throw ArgumentError('Choose a WSL distribution.');
@@ -17,18 +21,18 @@ List<String> deepSeekCompanionArguments({
   if (!folder.startsWith('/') || folder.contains('\x00')) {
     throw ArgumentError('Choose an absolute Linux project folder.');
   }
-  return [
-    '-d',
-    distro,
-    '-e',
-    'setsid',
-    '--wait',
-    'bash',
-    '-ic',
-    _deepSeekSupervisor,
-    'harness-deepseek',
-    folder,
-  ];
+  return (runtime ?? WslRuntime()).commandArguments(
+    distro: distro,
+    command: [
+      'setsid',
+      '--wait',
+      'bash',
+      '-ic',
+      _deepSeekSupervisor,
+      'harness-deepseek',
+      folder,
+    ],
+  );
 }
 
 // The session leader owns the server and its children. Closing Harness's stdin
@@ -108,15 +112,20 @@ typedef CompanionProcessStarter = Future<Process> Function(
 class DeepSeekCompanion extends ChangeNotifier {
   DeepSeekCompanion({
     CompanionProcessStarter? startProcess,
+    WslRuntime? wslRuntime,
     this.startupTimeout = const Duration(seconds: 60),
     this.shutdownTimeout = const Duration(seconds: 6),
-  }) : _startProcess = startProcess ?? _start;
+  }) : _startProcess = startProcess ?? _start,
+       _wsl = wslRuntime ?? WslRuntime();
 
   static final instance = DeepSeekCompanion();
   static Future<Process> _start(String executable, List<String> arguments) =>
       Process.start(executable, arguments);
 
   final CompanionProcessStarter _startProcess;
+  final WslRuntime _wsl;
+  WslSelection? get linuxAccount => _wsl.selection;
+  String? get linuxAccountError => _wsl.selectionError;
   final Duration startupTimeout;
   final Duration shutdownTimeout;
   Process? _process;
@@ -155,6 +164,7 @@ class DeepSeekCompanion extends ChangeNotifier {
     final arguments = deepSeekCompanionArguments(
       distro: distro,
       folder: folder,
+      runtime: _wsl,
     );
     final generation = ++_generation;
     final ready = Completer<void>();

@@ -45,6 +45,7 @@ typedef AuthenticatedScreenBuilder = Widget Function(AppNotifier app);
 /// trees are otherwise byte-identical outside `lib/phone/` and `lib/p2p/`.
 Future<void> startHarness({
   required AuthenticatedScreenBuilder authenticatedScreen,
+
   /// A viewer build's second wire to each machine (see
   /// [TerminalTransportPlugin]); the desktop passes none.
   TerminalTransportPluginFactory? transportPlugins,
@@ -64,17 +65,16 @@ Future<void> startHarness({
   await configureDesktopWindow(palette: appearancePrefsStore.value.palette);
   runApp(
     ProviderScope(
-      child: HarnessApp(keymap: keymap, authenticatedScreen: authenticatedScreen),
+      child: HarnessApp(
+        keymap: keymap,
+        authenticatedScreen: authenticatedScreen,
+      ),
     ),
   );
 }
 
 class HarnessApp extends StatelessWidget {
-  const HarnessApp({
-    super.key,
-    this.keymap,
-    required this.authenticatedScreen,
-  });
+  const HarnessApp({super.key, this.keymap, required this.authenticatedScreen});
   final AppKeymap? keymap;
   final AuthenticatedScreenBuilder authenticatedScreen;
 
@@ -299,7 +299,11 @@ class _RootShellState extends ConsumerState<RootShell>
             // and again on success.
             screen = app.signingIn
                 ? LoginScreen(notifier: app)
-                : BootstrappingScreen(statusMessage: app.bootStatusMessage);
+                : BootstrappingScreen(
+                    statusMessage: app.bootStatusMessage,
+                    error: app.bootError,
+                    onRetry: app.retrySessionCheck,
+                  );
           case AppStatus.checkingEnvironment:
             screen = EnvironmentPreflightScreen(
               readiness: app.environmentReadiness,

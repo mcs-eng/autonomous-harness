@@ -48,6 +48,52 @@ controls without taking terminal input.
 
 This source change does not update an installed Preview 7 bundle or desktop shortcut.
 
+### Getting back to work and recovering
+
+An empty tab now shows **Continue working** with up to three existing sessions,
+their machine, folder, branch, and current state. Sessions needing input appear
+first; your visits during this app session come next. **Needs your input** opens
+the existing attention list. Opening a session reuses its existing view and does
+not create, restart, or send instructions to an agent. Search and the Harness
+Store remain available. A new installation keeps the introductory start page.
+
+Unavailable project sessions now explain the problem and offer **Refresh status**
+or **Show machines**. Agent selection shows installation status even in a narrow
+window. Installed does not mean signed in or funded. DeepSeek and ZCode explicitly
+open their separate browser/desktop workspaces; a successful handoff closes the
+managed-agent draft, while cancellation preserves it.
+
+Startup identifies the sign-in check and offers **Try again** when it cannot read
+the saved session, rather than assuming you signed out. A failed local-service
+start reconnects through the existing supervisor. Sign-out or window disposal
+invalidates pending checks, so late replies cannot restart the service or change
+old session views. Windows preflight reuses its verified WSL result for the version
+check: fixture process calls fall from six to four, while rechecks still discover
+afresh and validate the packaged CLI. This is not a measured launch-time claim.
+
+These changes improve explicit project and agent choice. They do not automatically
+route tasks between providers, share credentials, or add model-server load.
+
+### Recovering an existing Linux installation
+
+If setup suddenly reports a missing CLI after changing Ubuntu's default user,
+the existing installation may belong to a different Linux account. In setup,
+choose **Change Linux account**, turn off **Use WSL default accounts**, then
+select the distribution and enter the account that owns that installation.
+The same choice is under **Customize OpenHarness → Terminal**.
+
+Save, close, and reopen OpenHarness. The selected distribution and account are
+used together for tool checks, CLI commands, project folders, and machine
+identity. Saving never switches an active session. This preference does not
+change WSL's default user, copy credentials, or migrate project files. Select
+`root` only when deliberately reconnecting to an existing root installation;
+agents in that account have administrator access inside the distribution.
+
+An unavailable selected account/distribution is an error, not permission to
+switch to another installation. A timed-out or malformed tool check shows
+**Not checked** with **Recheck** rather than an install action. A confirmed
+missing CLI no longer incorrectly marks an available tmux as missing.
+
 ## Prerequisites
 
 Windows 11 x64, virtualization enabled, internet access, and a WSL2 Ubuntu

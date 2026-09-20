@@ -35,7 +35,7 @@ void main() {
     expect(find.byType(LoginAurora), findsOneWidget);
     expect(find.text('Getting OpenHarness ready'), findsOneWidget);
     expect(find.text('Opening OpenHarness…'), findsOneWidget);
-    expect(find.textContaining('few seconds'), findsOneWidget);
+    expect(find.textContaining('when the service is ready'), findsOneWidget);
 
     final logo = tester.widget<Image>(find.byType(Image));
     expect((logo.image as AssetImage).assetName, 'assets/app_icon.png');

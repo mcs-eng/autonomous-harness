@@ -301,6 +301,35 @@ void main() {
     spawnCommand: spawnCommand,
   );
 
+  test('canceling supervision during auth prevents a late spawn', () async {
+    final identity = File('${scratch.path}/computer-id')
+      ..writeAsStringSync('0123456789abcdef0123456789abcdef');
+    final pending = Completer<bool>();
+    final checked = Completer<void>();
+    var spawns = 0;
+    final discovery = discoveryFor(
+      await freePort(),
+      identity,
+      spawnCommand: () async {
+        spawns++;
+      },
+    );
+    final timer = discovery.startSupervising(
+      checkInterval: const Duration(milliseconds: 10),
+      spawnAfter: 1,
+      stillSignedIn: () {
+        if (!checked.isCompleted) checked.complete();
+        return pending.future;
+      },
+    );
+    addTearDown(timer.cancel);
+    await checked.future.timeout(const Duration(seconds: 3));
+    timer.cancel();
+    pending.complete(true);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(spawns, 0);
+  });
+
   test(
     'reads real working folders from older local status snapshots',
     () async {
@@ -901,11 +930,13 @@ void main() {
     final port = await freePort();
     server = await serveStatus(port, () => readyStatus(computerId));
     var spawnCount = 0;
+    final firstSpawn = Completer<void>();
     final discovery = discoveryFor(
       port,
       identityFile,
       spawnCommand: () async {
         spawnCount++;
+        if (!firstSpawn.isCompleted) firstSpawn.complete();
       },
     );
 
@@ -931,7 +962,7 @@ void main() {
     // Quiet for good: now it is down, and the spawn is the fix.
     await server!.close(force: true);
     server = null;
-    await Future.delayed(const Duration(milliseconds: 250));
+    await firstSpawn.future.timeout(const Duration(seconds: 3));
     expect(spawnCount, greaterThan(0));
   });
 

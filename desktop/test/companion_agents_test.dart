@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/companion_agents.dart';
+import 'package:harness/core/wsl_runtime.dart';
+import 'package:harness/core/wsl_preferences.dart';
 
 class FakeCompanionProcess implements Process {
   final output = StreamController<List<int>>();
@@ -50,6 +52,26 @@ class FakeCompanionProcess implements Process {
 Future<void> tick() => Future<void>.delayed(Duration.zero);
 
 void main() {
+  test('browser companion uses the selected Linux account and refuses another distro', () {
+    final runtime = WslRuntime(
+      selection: const WslSelection(distro: 'Ubuntu', username: 'developer'),
+    );
+    final args = deepSeekCompanionArguments(
+      distro: 'Ubuntu',
+      folder: '/home/developer/work',
+      runtime: runtime,
+    );
+    expect(args.take(5), ['-d', 'Ubuntu', '--user', 'developer', '-e']);
+    expect(args.last, '/home/developer/work');
+    expect(
+      () => deepSeekCompanionArguments(
+        distro: 'Other',
+        folder: '/tmp',
+        runtime: runtime,
+      ),
+      throwsStateError,
+    );
+  });
   const endpoint = 'http://127.0.0.1:54321/?token=private-test-token';
 
   test(

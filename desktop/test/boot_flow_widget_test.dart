@@ -59,10 +59,14 @@ class _FakeCliLogin extends CliLogin {
 }
 
 class _ControlledCliLogin extends CliLogin {
-  final Completer<CliAuthStatus> status = Completer<CliAuthStatus>();
+  Completer<CliAuthStatus> status = Completer<CliAuthStatus>();
+  int calls = 0;
 
   @override
-  Future<CliAuthStatus> checkStatus() => status.future;
+  Future<CliAuthStatus> checkStatus() {
+    calls++;
+    return status.future;
+  }
 }
 
 class _BrokenConfigStore extends ConfigStore {
@@ -547,16 +551,53 @@ void main() {
     expect(find.text('Pre-flight check'), findsNothing);
   });
 
+  testWidgets('names the sign-in check while auth resolves, then opens login', (
+    tester,
+  ) async {
+    final cliLogin = _ControlledCliLogin();
+    final app = AppNotifier(
+      config: AppConfig.dev,
+      authSession: AuthSession(),
+      configStore: ConfigStore(storage: _FakeKeyValueStore()),
+      cliLogin: cliLogin,
+      environmentProvisioner: _ReadyEnvironmentProvisioner(),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [appStateProvider.overrideWithValue(app)],
+        child: HarnessApp(authenticatedScreen: _swarm),
+      ),
+    );
+
+    final bootstrap = app.bootstrap();
+    await tester.pump();
+    await tester.pump();
+
+    expect(app.status, AppStatus.bootstrapping);
+    expect(find.text('Checking sign-in…'), findsOneWidget);
+    expect(find.text('Continue to sign in'), findsNothing);
+    expect(find.text('ENVIRONMENT SETUP'), findsNothing);
+
+    cliLogin.status.complete(const CliAuthStatus(loggedIn: false));
+    await bootstrap;
+    await tester.pump();
+
+    expect(app.status, AppStatus.unauthenticated);
+    expect(find.text('Sign in'), findsOneWidget);
+    app.dispose();
+  });
+
   testWidgets(
-    'ready pre-flight is visible while auth resolves, then opens login',
+    'a failed session check retries without opening browser sign-in',
     (tester) async {
-      final cliLogin = _ControlledCliLogin();
+      final login = _ControlledCliLogin();
+      final provisioner = _ReadyEnvironmentProvisioner();
       final app = AppNotifier(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: _FakeKeyValueStore()),
-        cliLogin: cliLogin,
-        environmentProvisioner: _ReadyEnvironmentProvisioner(),
+        cliLogin: login,
+        environmentProvisioner: provisioner,
       );
       await tester.pumpWidget(
         ProviderScope(
@@ -564,22 +605,31 @@ void main() {
           child: HarnessApp(authenticatedScreen: _swarm),
         ),
       );
-
-      final bootstrap = app.bootstrap();
+      final boot = app.bootstrap();
+      await tester.pump();
+      login.status.completeError(StateError('CLI status timed out'));
+      await boot;
+      await tester.pump();
+      expect(
+        find.textContaining('Could not check your saved sign-in'),
+        findsOneWidget,
+      );
+      expect(find.text('Sign in'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      login.status = Completer<CliAuthStatus>();
+      await tester.tap(find.text('Try again'));
+      final duplicate = app.retrySessionCheck();
+      await tester.pump();
+      expect(login.calls, 2);
+      expect(find.text('Checking sign-in…'), findsOneWidget);
+      login.status.complete(const CliAuthStatus(loggedIn: false));
+      await duplicate;
       await tester.pump();
       await tester.pump();
-
-      expect(app.status, AppStatus.checkingEnvironment);
-      expect(find.text('Environment ready'), findsOneWidget);
-      expect(find.text('Continue to sign in'), findsNothing);
-      expect(find.text('ENVIRONMENT SETUP'), findsNothing);
-
-      cliLogin.status.complete(const CliAuthStatus(loggedIn: false));
-      await bootstrap;
-      await tester.pump();
-
+      expect(app.bootError, isNull);
       expect(app.status, AppStatus.unauthenticated);
       expect(find.text('Sign in'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
   );

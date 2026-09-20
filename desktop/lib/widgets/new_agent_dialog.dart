@@ -32,7 +32,12 @@ import 'new_agent_project_picker.dart';
 import 'new_harness_help.dart';
 import 'dsh_install_panel.dart';
 
-enum NewAgentDialogResult { created, findExisting, backToSearch }
+enum NewAgentDialogResult {
+  created,
+  findExisting,
+  backToSearch,
+  companionOpened,
+}
 
 enum _FolderSource { newProject, local, remote }
 
@@ -1083,6 +1088,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                       true) ...[
                 AgentChoice(
                   id: 'deepseek-web',
+                  actionLabel: 'Open browser workspace',
                   label: 'DeepSeek Harness',
                   detail: 'Browser workspace on this PC',
                   creator: 'DeepSeek',
@@ -1091,6 +1097,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                 ),
                 AgentChoice(
                   id: 'zcode-desktop',
+                  actionLabel: 'Open desktop app',
                   label: 'ZCode',
                   detail: 'Desktop app on this PC',
                   creator: 'Z.ai',
@@ -1148,16 +1155,21 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                 mark: (size) => EngineMark(engine: kTerminalEngine, size: size),
               ),
             ],
-            onChanged: (value) {
+            onChanged: (value) async {
               if (_choicesLocked) return;
               if (value == 'deepseek-web' || value == 'zcode-desktop') {
-                unawaited(
-                  showCompanionAgentDialog(
-                    context,
-                    agent: value,
-                    initialFolder: _folder,
-                  ),
+                final opened = await showCompanionAgentDialog(
+                  context,
+                  agent: value,
+                  initialFolder: _folder,
+                  closeOnLaunch: true,
                 );
+                if (opened == true &&
+                    context.mounted &&
+                    ModalRoute.of(context)?.isCurrent == true) {
+                  Navigator.of(context)
+                      .pop(NewAgentDialogResult.companionOpened);
+                }
                 return;
               }
               setState(() {
@@ -1183,6 +1195,16 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
               });
               if (isHarnessId(value)) unawaited(_probeHarnesses());
             },
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _agentStatus(_engine) ??
+                'Installation status is not available for this machine yet.',
+            key: const ValueKey('selected-agent-status'),
+            style: TextStyle(
+              fontSize: 12,
+              color: grid.AppPalette.textSecondary,
+            ),
           ),
           if (!_confirmationPending && _engineCheckFailed) ...[
             const SizedBox(height: 6),
@@ -1563,6 +1585,12 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
   /// A line for the agent search's preview: is [id] on the chosen machine, or
   /// will Harness install it first. Null while the machine has not said.
   String? _agentStatus(String id) {
+    if (id == 'deepseek-web') {
+      return 'Opens a separate browser workspace on this PC';
+    }
+    if (id == 'zcode-desktop') {
+      return 'Opens the separate desktop app on this PC';
+    }
     final machine = widget.notifier.stateOf(_machineId);
     if (machine == null) return null;
     final name = machine.machine.displayName;

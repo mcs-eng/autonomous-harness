@@ -467,6 +467,8 @@ class AppNotifier extends ChangeNotifier {
     _loginAuthorized = false;
     _profileInFlight = null;
     _retryInFlight = null;
+    _bootError = null;
+    _bootStatusMessage = null;
     machinesLoading = false;
     return ++_authRevision;
   }
@@ -482,6 +484,7 @@ class AppNotifier extends ChangeNotifier {
   // Shown on the pre-navigation `bootstrapping` screen while [_finishBootstrapSignedIn] waits on the
   // local daemon — null the rest of the time, including once [status] flips to `authenticated`.
   String? _bootStatusMessage;
+  String? _bootError;
   EnvironmentReadiness environmentReadiness = EnvironmentReadiness.initial();
   bool _environmentSetupInFlight = false;
   // Polls a step stuck in needsTerminal/failed every 5s (see `_scheduleEnvironmentRecheck`) so a user
@@ -1332,6 +1335,7 @@ class AppNotifier extends ChangeNotifier {
   bool get machineRecoveryPending => _machineRecoveryTimer != null;
   bool get lastErrorRetryable => _lastErrorRetryable;
   String? get bootStatusMessage => _bootStatusMessage;
+  String? get bootError => _bootError;
 
   /// Clears the error strip without retrying anything, for a failure retrying
   /// cannot fix (see [_lastErrorRetryable]).
@@ -2199,12 +2203,9 @@ class AppNotifier extends ChangeNotifier {
     final revision = _authRevision;
     if (!_authWorkCurrent(revision)) return;
     _cancelEnvironmentRecheckTimer();
-    // A viewer skipped the preflight (see [_prepareEnvironment]), so there is no
-    // preflight screen to hold while the sign-in is checked — it stays on the
-    // boot spinner instead.
-    status = viewer == null
-        ? AppStatus.checkingEnvironment
-        : AppStatus.bootstrapping;
+    _bootError = null;
+    _bootStatusMessage = 'Checking sign-in…';
+    status = AppStatus.bootstrapping;
     notifyListeners();
     // Auth now lives entirely with the local `harness` CLI — it owns the SSO session on disk and
     // refreshes it itself. This app never reads, stores, or refreshes a token of its own; it just
@@ -2212,6 +2213,7 @@ class AppNotifier extends ChangeNotifier {
     try {
       final authStatus = await cliLogin.checkStatus();
       if (!_authWorkCurrent(revision)) return;
+      _bootStatusMessage = null;
       if (!authStatus.loggedIn) {
         currentUser = null;
         if (localOnly && authStatus.localOnly) {
@@ -2242,13 +2244,26 @@ class AppNotifier extends ChangeNotifier {
     } catch (error, stack) {
       if (!_authWorkCurrent(revision)) return;
       debugPrint(
-        'continueAfterEnvironmentReady: fallback to login after error: '
+        'continueAfterEnvironmentReady: startup check failed: '
         '$error\n$stack',
       );
-      currentUser = null;
-      status = AppStatus.unauthenticated;
+      // A failed CLI check is not proof that the saved session is gone.
+      // Keep the retry on the startup surface; never force a new browser login.
+      _bootStatusMessage = null;
+      _bootError =
+          'Could not check your saved sign-in. Try again to reconnect.';
+      status = AppStatus.bootstrapping;
       notifyListeners();
     }
+  }
+
+  Future<void> retrySessionCheck() async {
+    if (_disposed || status != AppStatus.bootstrapping || _bootError == null) {
+      return;
+    }
+    // _continueAfterEnvironmentReady clears the error before its first await,
+    // so repeated clicks cannot start concurrent checks.
+    await _continueAfterEnvironmentReady();
   }
 
   void showEnvironmentReview() {
@@ -2588,8 +2603,9 @@ class AppNotifier extends ChangeNotifier {
           _signedOutAtRuntime(_signedOutMessage);
           return;
         }
+        _startDaemonSupervision(discovery);
         throw StateError(
-          'The local Harness daemon did not start. Try running `harness start` yourself, then reopen the app.',
+          'The local Harness service did not start. Reconnecting automatically; you can also retry now.',
         );
     }
     _startDaemonSupervision(discovery);
@@ -2629,19 +2645,28 @@ class AppNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Supervision starts once the daemon is at least ANSWERING — ready or still connecting. It used to
-  /// wait for ready, out of fear of a concurrent `harness start` from both places; the supervisor
-  /// no longer spawns while anything answers on the port, so that race is gone, and starting it on
-  /// a not-ready daemon is what lets a boot that landed mid-update recover without a click.
+  /// Supervise even a failed start once sign-in is confirmed. The existing
+  /// backoff and spawn-slot gate handle recovery without a second app launch.
   void _startDaemonSupervision(LocalCliDiscovery discovery) {
+    final revision = _authRevision;
     _daemonSupervisionTimer ??= discovery.startSupervising(
       spawnAllowedAt: inSpawnSlot,
-      stillSignedIn: () async =>
-          localOnly || (await cliLogin.checkStatus()).loggedIn,
-      onSignedOut: () => _signedOutAtRuntime(_signedOutMessage),
-      onSnapshot: _updateLocalProjectSnapshot,
-      onBackendOnline: _noteBackendOnline,
+      stillSignedIn: () async {
+        if (!_authWorkCurrent(revision)) return false;
+        final signedIn = localOnly || (await cliLogin.checkStatus()).loggedIn;
+        return _authWorkCurrent(revision) && signedIn;
+      },
+      onSignedOut: () {
+        if (_authWorkCurrent(revision)) _signedOutAtRuntime(_signedOutMessage);
+      },
+      onSnapshot: (endpoint) {
+        if (_authWorkCurrent(revision)) _updateLocalProjectSnapshot(endpoint);
+      },
+      onBackendOnline: (online) {
+        if (_authWorkCurrent(revision)) _noteBackendOnline(online);
+      },
       onReady: (endpoint) {
+        if (!_authWorkCurrent(revision)) return;
         // Back (or here for the first time). If the app is sitting on the error strip from a boot
         // or reload that found the daemon not ready, this is the moment it was waiting for.
         //
@@ -3648,6 +3673,8 @@ class AppNotifier extends ChangeNotifier {
   /// a real connectivity problem is already surfaced by the push path and the existing offline
   /// detection in _performMachineDataLoad, and a quiet background tick should not fight either.
   Future<void> _syncAgentsIfChanged(MachineState machine) async {
+    final revision = _authRevision;
+    if (!_machineWorkCurrent(machine, revision)) return;
     if (machine.connectionStatus != ConnectionStatus.connected) return;
     if (machine.agentsLoadInFlight != null) {
       return; // a real (foreground) load already owns this tick
@@ -3658,6 +3685,7 @@ class AppNotifier extends ChangeNotifier {
         'agents_list',
         timeout: const Duration(seconds: 10),
       );
+      if (!_machineWorkCurrent(machine, revision)) return;
       final agents = (response['agents'] as List<dynamic>? ?? [])
           .map((item) => Agent.fromJson(item as Map<String, dynamic>))
           .toList();

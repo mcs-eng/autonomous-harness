@@ -43,6 +43,7 @@ import '../widgets/machine_actions.dart';
 import '../widgets/machines_manager.dart';
 import '../widgets/new_agent_dialog.dart';
 import '../widgets/project_sidebar.dart';
+import '../widgets/workspace_resume.dart';
 import '../widgets/pane_grid.dart';
 import '../widgets/shortcuts_sheet.dart';
 import '../widgets/swarm_dialogs.dart';
@@ -134,13 +135,26 @@ class _SwarmScreenState extends State<SwarmScreen> {
     },
     onNewProject: () => unawaited(_createInProject()),
     onNewAgent: (location) => unawaited(_createInProject(location)),
-    onOpenAgent: (row) {
-      _scaffold.currentState?.closeDrawer();
-      _closeSearch();
-      _preparePaneFocus();
-      unawaited(openProjectAgent(app, row));
-    },
+    onOpenAgent: _openProjectSession,
   );
+
+  void _openProjectSession(SwarmAgentRef row) {
+    _scaffold.currentState?.closeDrawer();
+    _closeSearch();
+    _preparePaneFocus();
+    unawaited(openProjectAgent(app, row));
+  }
+
+  Widget? _resumeWork() {
+    final rows = workspaceResumeAgents(app, _navigation.recent);
+    if (rows.isEmpty && workspaceWaitingCount(app) == 0) return null;
+    return WorkspaceResume(
+      app: app,
+      rows: rows,
+      onOpen: _openProjectSession,
+      onAttention: _notifications,
+    );
+  }
 
   Future<void> _createInProject([ProjectLocation? location]) async {
     if (_dialogOpen || _spokenPaletteOpen) return;
@@ -644,7 +658,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
         .toList();
     if (sections.any((s) => s.own)) return sections;
     return [
-      GridSection(name: answer.gridName ?? '', own: true, models: answer.models),
+      GridSection(
+        name: answer.gridName ?? '',
+        own: true,
+        models: answer.models,
+      ),
       ...sections,
     ];
   }
@@ -1758,6 +1776,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                                       catalog: _searchCatalog,
                                                     ),
                                                 onNew: _newAgent,
+                                                resume: _resumeWork(),
                                                 onStore: app.openStore,
                                                 onChoose: (selection) =>
                                                     _activateSearch(

@@ -114,7 +114,8 @@ void main() {
       );
       expect(tester.widget<TextField>(_startInput).focusNode!.hasFocus, isTrue);
       expect(find.byKey(const ValueKey('harness-device-link')), findsOneWidget);
-      expect(find.byType(ListTile), findsNothing);
+      expect(find.text('Continue working'), findsOneWidget);
+      expect(_results, findsNothing);
       await tester.tap(_startInput);
       await tester.pump();
       expect(
