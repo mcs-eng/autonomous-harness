@@ -85,6 +85,12 @@ describe('isShellNoise', () => {
     expect(isShellNoise('bash: [7146: 2 (255)] tcsetattr: Inappropriate ioctl for device')).toBe(true)
     expect(isShellNoise('logout')).toBe(true)
     expect(isShellNoise('exit')).toBe(true)
+    expect(isShellNoise('logout', 'stderr')).toBe(true)
+    expect(isShellNoise('exit', 'stderr')).toBe(true)
+    // bash writes the echo to stderr; a doctor's own stdout line that happens to read `exit` stays
+    expect(isShellNoise('logout', 'stdout')).toBe(false)
+    expect(isShellNoise('exit', 'stdout')).toBe(false)
+    expect(isShellNoise('bash: no job control in this shell', 'stdout')).toBe(true)
     expect(isShellNoise('miss bash: no job control is not what this doctor checks')).toBe(false)
     expect(isShellNoise('exit code was 3')).toBe(false)
     expect(isShellNoise('bash: line 3: kicad-cli: command not found')).toBe(false)
@@ -112,6 +118,12 @@ describe('runDshCommand in an interactive login bash with no terminal', () => {
     const result = await runDshCommand('echo one; echo two >&2; exit 3', { cwd: dir })
     expect(result).toMatchObject({ code: 3, signal: null, timedOut: false })
     expect(result.lines.toSorted()).toEqual(['one', 'two'])
+  })
+
+  it.runIf(existsSync('/bin/bash'))('keeps a doctor\'s own stdout `exit` while dropping the shell\'s stderr echo of it', async () => {
+    const result = await runDshCommand('echo exit; echo logout; exit 1', { cwd: dir })
+    expect(result).toMatchObject({ code: 1, signal: null, timedOut: false })
+    expect(result.lines).toEqual(['exit', 'logout'])
   })
 
   it.runIf(existsSync('/bin/bash'))('a timeout ends the script, not only the command that was running', async () => {

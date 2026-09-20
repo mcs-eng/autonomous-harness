@@ -35,18 +35,18 @@ export interface DshCommandResult {
  * below; and its `exit` builtin, interactive, echoes `exit` — `logout` in a login shell, which this
  * is — so a doctor ending in `exit 1` said `logout`. Measured 2026-09-20 with SHELL=/bin/bash and
  * no tty: the hosted CI runner's situation, and a Linux daemon's whenever it was not started from a
- * terminal. Neither `+m` nor `set +m` silences the first two. The echo is matched as a whole line,
- * on either stream, so a doctor whose own line is exactly `exit` or `logout` loses it; nothing
- * else is close.
+ * terminal. Neither `+m` nor `set +m` silences the first two. The echo is matched as a whole line
+ * and, when the caller says which stream a line came from, only on stderr, where bash writes it: a
+ * doctor whose own stdout line is exactly `exit` or `logout` keeps it. A caller that does not say
+ * (the viewer's log) loses such a line on either stream; nothing else is close.
  */
-export function isShellNoise(line: string): boolean {
+export function isShellNoise(line: string, stream?: 'stdout' | 'stderr'): boolean {
   return /can't change option: zle$/.test(line)
     || /^\(eval\):\d+: can't change option: zle$/.test(line)
     || /^bash: cannot set terminal process group \(-?\d+\): /.test(line)
     || line === 'bash: no job control in this shell'
     || /^bash: \[\d+: \d+ \(\d+\)\] tcsetattr: /.test(line)
-    || line === 'exit'
-    || line === 'logout'
+    || (stream !== 'stdout' && (line === 'exit' || line === 'logout'))
 }
 
 /**
@@ -131,19 +131,19 @@ export function runDshCommand(script: string, opts: DshCommandOptions): Promise<
       resolve({ code: 127, signal: null, lines: [line], timedOut: false })
       return
     }
-    const feed = (chunk: Buffer, carry: { rest: string }): void => {
+    const feed = (chunk: Buffer, carry: { rest: string; stream: 'stdout' | 'stderr' }): void => {
       carry.rest += chunk.toString('utf8')
       let at: number
       while ((at = carry.rest.indexOf('\n')) >= 0) {
         const line = carry.rest.slice(0, at).replace(/\r$/, '')
         carry.rest = carry.rest.slice(at + 1)
-        if (isShellNoise(line)) continue
+        if (isShellNoise(line, carry.stream)) continue
         lines.push(line)
         opts.onLine?.(line)
       }
     }
-    const out = { rest: '' }
-    const err = { rest: '' }
+    const out = { rest: '', stream: 'stdout' as const }
+    const err = { rest: '', stream: 'stderr' as const }
     child.stdout?.on('data', (chunk: Buffer) => feed(chunk, out))
     child.stderr?.on('data', (chunk: Buffer) => feed(chunk, err))
     const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
