@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'bounded_process.dart';
 import 'utf16_probe_encoding.dart';
+import 'wsl_preferences.dart';
 
 /// The loopback port the Harness CLI daemon owns. Kept here only for the
 /// documentation comment below; the app reads the real address from AppConfig.
@@ -57,7 +58,13 @@ class WslRuntime {
     })?
     startProcess,
     Duration? probeTimeout,
+    WslSelection? selection,
+    WslPreferencesStore? preferencesStore,
   }) : _runProcess = runProcess ?? Process.run,
+       selection = selection ?? (preferencesStore ?? wslPreferencesStore).value,
+       _preferencesLoadError = selection == null
+           ? (preferencesStore ?? wslPreferencesStore).loadError
+           : null,
        _startProcess = startProcess ?? Process.start,
        // A hung `wsl.exe` — a distro stuck in boot, a probe waiting on the WSL
        // service — must fail in bounded time. Every probe below goes through
@@ -73,6 +80,17 @@ class WslRuntime {
   /// injection — gets the bounded, killable path.
   final bool _injected;
   final Duration _probeTimeout;
+  final WslSelection? selection;
+  final String? _preferencesLoadError;
+
+  String? get selectionError =>
+      _preferencesLoadError ??
+      (selection == null
+          ? null
+          : WslSelection.validationError(
+              distro: selection!.distro,
+              username: selection!.username,
+            ));
 
   /// Runs [arguments] with a deadline and requests child termination on expiry.
   ///
@@ -143,10 +161,7 @@ class WslRuntime {
   /// and a tmux server inside a distribution the user does not own. They are
   /// excluded from every probe and from every install.
   static bool isDockerDistro(String name) {
-    final normalized = name.trim().toLowerCase();
-    return normalized == 'docker-desktop' ||
-        normalized == 'docker-desktop-data' ||
-        normalized.startsWith('docker-desktop-');
+    return WslSelection.isDockerDistro(name);
   }
 
   /// Distributions the app is willing to USE: everything WSL has, minus
@@ -246,16 +261,33 @@ class WslRuntime {
     required String script,
     List<String> scriptArguments = const [],
     String scriptName = 'harness',
-  }) => [
-    '-d',
-    distro,
-    '-e',
-    'bash',
-    '-lc',
-    script,
-    scriptName,
-    ...scriptArguments,
-  ];
+  }) => commandArguments(
+    distro: distro,
+    command: ['bash', '-lc', script, scriptName, ...scriptArguments],
+  );
+
+  /// A direct command in the same pinned account, also used by companions that
+  /// need an interactive shell or their own process supervisor.
+  List<String> commandArguments({
+    required String distro,
+    required List<String> command,
+  }) {
+    final error = selectionError;
+    if (error != null) throw StateError(error);
+    if (isDockerDistro(distro) ||
+        (selection != null && selection!.distro != distro)) {
+      throw StateError(
+        'Refusing a distribution outside the selected Linux account.',
+      );
+    }
+    return [
+      '-d',
+      distro,
+      if (selection != null) ...['--user', selection!.username],
+      '-e',
+      ...command,
+    ];
+  }
 
   /// Looks for the CLI in every USABLE distro, by name.
   ///
@@ -263,7 +295,22 @@ class WslRuntime {
   /// implicit default. A machine whose CLI lives in a second distro still works;
   /// a Docker-only machine reports "not found" and names that as the problem.
   Future<WslHarnessProbe> findHarness({List<String>? distros}) async {
+    if (selectionError != null) {
+      return WslHarnessProbe.failed(
+        distro: selection?.distro,
+        failure: WslProbeFailure.invalidSelection,
+      );
+    }
     final names = distros ?? await usableDistros();
+    if (selection != null) {
+      if (!names.contains(selection!.distro)) {
+        return WslHarnessProbe.failed(
+          distro: selection!.distro,
+          failure: WslProbeFailure.selectedDistroUnavailable,
+        );
+      }
+      return probeHarness(distro: selection!.distro);
+    }
     WslHarnessProbe? firstFound;
     WslHarnessProbe? firstFailed;
     WslHarnessProbe? firstMissing;
@@ -519,14 +566,27 @@ exec "$node" "$bundle_dir/cli.js" "$@"
 
   /// The command a person would type, spelled for a Windows shell so it can be
   /// copied out of the app and run in Windows Terminal.
-  static String installCommandForDisplay({String? distro}) {
-    final target = distro == null ? '' : '-d $distro ';
-    return 'wsl $target-- bash -lc "$cliInstallCommand"';
+  static String _displayArgument(String value) =>
+      RegExp(r'^[a-zA-Z0-9_.-]+$').hasMatch(value)
+      ? value
+      : "'${value.replaceAll("'", "''")}'";
+
+  static String installCommandForDisplay({String? distro, String? username}) {
+    final target = distro == null ? '' : '-d ${_displayArgument(distro)} ';
+    final user = username == null
+        ? ''
+        : '--user ${_displayArgument(username)} ';
+    return 'wsl $target$user-e bash -lc "$cliInstallCommand"';
   }
 
   /// Installing tmux into a distro that already has the CLI but no backend.
-  static String tmuxCommandForDisplay({required String distro}) =>
-      "wsl -d $distro -- bash -lc 'sudo apt-get install -y tmux && tmux -V'";
+  static String tmuxCommandForDisplay({
+    required String distro,
+    String? username,
+  }) =>
+      'wsl -d ${_displayArgument(distro)} '
+      '${username == null ? '' : '--user ${_displayArgument(username)} '}'
+      "-e bash -lc 'sudo apt-get install -y tmux && tmux -V'";
 }
 
 /// What one look for the CLI inside WSL found.
@@ -535,7 +595,13 @@ exec "$node" "$bundle_dir/cli.js" "$@"
 /// missing. It is null only when no usable distribution was available. This
 /// lets provisioning target the selected distro and preserve its independent
 /// tmux result without ever falling through to WSL's implicit default.
-enum WslProbeFailure { timedOut, commandFailed, invalidResponse }
+enum WslProbeFailure {
+  timedOut,
+  commandFailed,
+  invalidResponse,
+  invalidSelection,
+  selectedDistroUnavailable,
+}
 
 class WslHarnessProbe {
   final String? distro;
@@ -581,6 +647,9 @@ class WslHarnessProbe {
       'The tool check in $distroLabel failed with exit code $exitCode.',
     WslProbeFailure.invalidResponse =>
       'The tool check in $distroLabel returned an incomplete or unrecognized response.',
+    WslProbeFailure.invalidSelection => 'The saved Linux account is invalid or unreadable. Choose a Linux account, then close and reopen Harness.',
+    WslProbeFailure.selectedDistroUnavailable =>
+      'The selected distribution $distroLabel was not found in the WSL inventory. Check the Linux account selection before retrying.',
     null => null,
   };
 

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/harness_cli_runner.dart';
 import 'package:harness/core/wsl_runtime.dart';
+import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 
 /// The Windows port's own decisions, pinned where they can be pinned without a
@@ -339,13 +340,13 @@ void main() {
     test('the displayed commands name the distro', () {
       expect(
         WslRuntime.installCommandForDisplay(distro: 'Ubuntu'),
-        contains('wsl -d Ubuntu --'),
+        contains('wsl -d Ubuntu -e'),
       );
-      expect(WslRuntime.installCommandForDisplay(), startsWith('wsl --'));
+      expect(WslRuntime.installCommandForDisplay(), startsWith('wsl -e'));
       expect(WslRuntime.installCommandForDisplay(), contains('install.sh'));
       expect(
         WslRuntime.tmuxCommandForDisplay(distro: 'Ubuntu'),
-        contains("wsl -d Ubuntu -- bash -lc 'sudo apt-get install -y tmux"),
+        contains("wsl -d Ubuntu -e bash -lc 'sudo apt-get install -y tmux"),
       );
     });
   });
@@ -737,6 +738,73 @@ void main() {
       }
     });
 
+    test('automatic setup and subsequent CLI verification keep the selected account', () async {
+      final seen = <List<String>>[];
+      final readiness = await verify(
+        wslEnabled: true,
+        listing: 'Debian\r\nUbuntu\r\n',
+        probe: 'cli missing\ntmux no\n',
+        selection: const WslSelection(distro: 'Ubuntu', username: 'root'),
+        install: true,
+        sudoAllowed: true,
+        seen: seen,
+      );
+      expect(readiness.isReady, isTrue);
+      final named = seen.where((args) => args.contains('-d'));
+      expect(named, isNotEmpty);
+      for (final args in named) {
+        expect(args.take(4), ['-d', 'Ubuntu', '--user', 'root']);
+      }
+      expect(
+        named.any((args) => args.contains('harness-tmux-install')),
+        isTrue,
+      );
+      expect(named.any((args) => args.contains('harness-install')), isTrue);
+      expect(named.any((args) => args.last == 'version'), isTrue);
+    });
+
+    test(
+      'manual setup recipes target the same explicit user as discovery',
+      () async {
+        final readiness = await verify(
+          wslEnabled: true,
+          listing: 'Ubuntu\r\n',
+          probe: 'cli missing\ntmux no\n',
+          selection: const WslSelection(distro: 'Ubuntu', username: 'root'),
+        );
+        expect(readiness.plan, hasLength(2));
+        for (final item in readiness.plan) {
+          expect(item.command, contains('wsl -d Ubuntu --user root -e'));
+        }
+        expect(readiness.failure?.command, contains('--user root'));
+        expect(readiness.failure?.detail, contains('selected user root'));
+      },
+    );
+
+    test(
+      'an unavailable selected distro cannot trigger installation elsewhere',
+      () async {
+        final seen = <List<String>>[];
+        final readiness = await verify(
+          wslEnabled: true,
+          listing: 'Debian\r\n',
+          probe: 'cli launcher\ntmux yes\n',
+          selection: const WslSelection(distro: 'Ubuntu', username: 'root'),
+          install: true,
+          sudoAllowed: true,
+          seen: seen,
+        );
+        expect(readiness.phase, EnvironmentSetupPhase.failed);
+        expect(readiness.plan, isEmpty);
+        expect(readiness.failure?.command, isNull);
+        expect(
+          readiness.failure?.detail,
+          contains('selected distribution Ubuntu'),
+        );
+        expect(seen.every((args) => !args.contains('-d')), isTrue);
+      },
+    );
+
     test('a failed tmux install stops before the CLI installer', () async {
       final seen = <List<String>>[];
       final readiness = await verify(
@@ -768,14 +836,14 @@ void main() {
         readiness.failure?.title,
         'The Harness CLI was not found in Ubuntu',
       );
-      expect(readiness.failure?.command, contains('wsl -d Ubuntu --'));
+      expect(readiness.failure?.command, contains('wsl -d Ubuntu -e'));
       expect(readiness.failure?.command, contains('install.sh'));
       expect(readiness.plan.map((item) => item.title), [
         'tmux in Ubuntu',
         'Managed Node 20+ & Harness CLI in Ubuntu',
       ]);
       for (final item in readiness.plan) {
-        expect(item.command, contains('wsl -d Ubuntu --'));
+        expect(item.command, contains('wsl -d Ubuntu -e'));
       }
     });
 
@@ -797,7 +865,7 @@ void main() {
         seen.any((arguments) => arguments.join(' ').contains('install.sh')),
         isFalse,
       );
-      expect(readiness.failure?.command, contains('wsl -d Ubuntu --'));
+      expect(readiness.failure?.command, contains('wsl -d Ubuntu -e'));
     });
 
     test('a read-only check never installs, even in a usable distro', () async {
@@ -1147,6 +1215,7 @@ Future<EnvironmentReadiness> verify({
   int checks = 1,
   List<List<String>>? seen,
   List<ProcessResult>? probeAnswers,
+  WslSelection? selection,
 }) async {
   final calls = <List<String>>[];
   var currentProbe = probe;
@@ -1225,6 +1294,7 @@ Future<EnvironmentReadiness> verify({
     run: (executable, arguments, {environment}) async =>
         respond(executable, arguments),
     wslRuntime: WslRuntime(
+      selection: selection,
       runProcess: (executable, arguments, {environment}) async =>
           respond(executable, arguments),
       startProcess: startSimulatedInstall,
