@@ -20,8 +20,8 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
 To compare the downloaded archive with its checksum in Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.6.zip
-Get-Content .\harness-desktop-windows-x64-1.0.0-windows.6.zip.sha256
+Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.7.zip
+Get-Content .\harness-desktop-windows-x64-1.0.0-windows.7.zip.sha256
 ```
 
 ## Prerequisites
@@ -50,6 +50,12 @@ Preview 4 adds **Open in browser** to viewer panes, including Grid's fleet dashb
 Preview 5 adds isolated local fleets to compatible agents' model pickers and moves
 recurring engine discovery off the daemon's main event loop.
 Preview 6 also includes the upstream review's Unicode WSL distribution-name fix.
+Preview 7 fixes native Windows project-folder creation and incorporates upstream
+`0e00e2bb` (September 19): updated harness identities, viewer changes, and the
+Store's listed/unlisted distinction. Withdrawn experimental presets stay hidden;
+existing installed workspaces are retained. Jev Sheets and the Isolated Web Viewer
+are the new listed packages in the bundled catalog. Their own setup and account
+requirements still apply; inclusion in the catalog is not live qualification.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.
