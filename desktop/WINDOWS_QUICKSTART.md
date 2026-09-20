@@ -12,7 +12,9 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
    `data`, the DLLs, and `harness-cli` together. Do not run it inside the ZIP.
 3. Open `Release/harness.exe`. The preview is unsigned; Windows may warn about an
    unknown publisher. Review the source and checksum before deciding to run it.
-4. Follow the setup screen, then select **Sign in** and finish in your browser.
+4. Follow the setup screen, then either select **Sign in** and finish in your
+   browser, or select **Use this computer without an account** for
+   [local mode](#local-mode-no-account).
 5. Create a project and agent. Install and authenticate the coding agent in the
    selected development distribution if its engine is missing. Prefer native Linux
    agent installations; WSL interop discovery is also supported.
@@ -126,6 +128,29 @@ To reopen a configured fleet dashboard, use **Open Harness** and select its exis
 workspace. A newly created Grid workspace may show an empty fleet until connected.
 Codex may display its own update prompt in the adjacent terminal; that prompt is
 separate from the dashboard and can be skipped to continue with the installed version.
+
+## Local mode (no account)
+
+The login screen offers **Use this computer without an account**. The app then
+runs the bundled CLI with `HARNESS_LOCAL_ONLY=true` (forwarded into WSL through
+`WSLENV`, never as an argument): the daemon starts on this computer's own id,
+never dials the Harness backend, installs no grid, and lists this computer as
+its one machine. Everything on this PC works as it does when signed in: create
+agents, attach terminals, switch panes. The choice is remembered across
+launches in `state.json` beside the theme.
+
+What needs the account stays off until you sign in: other machines, linking,
+shared harnesses, the Harness Store, and the signed-in profile. The account
+menu and Settings say **Local mode** and offer **Leave local mode**, which
+stops the local daemon and returns to the login screen; signing in there ends
+local mode, because the CLI lets a saved sign-in win over the flag and the app
+agrees with it.
+
+Only the CLI included in this ZIP knows the flag. The upstream launcher does
+not, and a remembered local mode against it returns to the login screen with a
+sentence saying so. From a WSL terminal, the same daemon is
+`HARNESS_LOCAL_ONLY=true harness start`; `harness auth status --json` then
+answers `localOnly: true`, and `harness status` reads `local mode, no account`.
 
 ## Preview limitations and recovery
 
