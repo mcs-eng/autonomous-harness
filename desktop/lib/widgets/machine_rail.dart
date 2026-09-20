@@ -15,6 +15,7 @@ import '../shared/widgets/app_menu.dart';
 import '../shared/widgets/skeleton.dart';
 import '../shortcuts/app_shortcuts.dart';
 import '../state/app_state.dart';
+import '../state/swarm_catalog.dart';
 import 'agent_drag.dart';
 import 'machine_actions.dart';
 import 'delete_agent_dialog.dart';
@@ -56,7 +57,18 @@ class MachineRail extends StatefulWidget {
   /// nothing is worse than no button.
   final VoidCallback? onCollapse;
 
-  const MachineRail({super.key, required this.notifier, this.onCollapse});
+  /// A hosting drawer can reveal work and dismiss itself through one action.
+  /// Without it, the standalone rail keeps its existing selection behavior.
+  final ValueChanged<SwarmAgentRef>? onOpenAgent;
+  final VoidCallback? onEscape;
+
+  const MachineRail({
+    super.key,
+    required this.notifier,
+    this.onCollapse,
+    this.onOpenAgent,
+    this.onEscape,
+  });
 
   @override
   State<MachineRail> createState() => _MachineRailState();
@@ -119,11 +131,25 @@ class _MachineRailState extends State<MachineRail> {
         key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter ||
         key == LogicalKeyboardKey.space) {
-      unawaited(notifier.activateRailRow());
+      final row = notifier.railRowAt(notifier.railCursor);
+      final onOpenAgent = widget.onOpenAgent;
+      if (row?.agentId != null && onOpenAgent != null) {
+        final machine = notifier.stateOf(row!.machineId);
+        final agent = machine?.agents
+            .where((agent) => agent.id == row.agentId)
+            .firstOrNull;
+        if (machine != null && agent != null) {
+          notifier.unfocusRail();
+          onOpenAgent(SwarmAgentRef(machine, agent));
+        }
+      } else {
+        unawaited(notifier.activateRailRow());
+      }
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.escape) {
       notifier.unfocusRail();
+      widget.onEscape?.call();
       return KeyEventResult.handled;
     }
     // Everything else — including ⌘ chords — goes up to the app's own bindings,
@@ -338,6 +364,7 @@ class _MachineRailState extends State<MachineRail> {
                           notifier: widget.notifier,
                           machine: machines[index],
                           isFirst: index == 0,
+                          onOpenAgent: widget.onOpenAgent,
                         ),
                       ),
               ),
@@ -442,11 +469,13 @@ class _MachineNode extends StatefulWidget {
 
   final AppNotifier notifier;
   final Machine machine;
+  final ValueChanged<SwarmAgentRef>? onOpenAgent;
 
   const _MachineNode({
     required this.notifier,
     required this.machine,
     required this.isFirst,
+    this.onOpenAgent,
   });
 
   @override
@@ -524,7 +553,11 @@ class _MachineNodeState extends State<_MachineNode> {
       // Hoisted so the rows are not rebuilt on every frame of the fold. Built
       // here but only *mounted* below while `fold > 0`, so a closed machine
       // costs nothing.
-      child: _AgentTree(notifier: notifier, state: state),
+      child: _AgentTree(
+        notifier: notifier,
+        state: state,
+        onOpenAgent: widget.onOpenAgent,
+      ),
       builder: (context, fold, tree) =>
           _node(context, fold, tree!, state, connectionColor),
     );
@@ -812,8 +845,13 @@ class _MachineNodeState extends State<_MachineNode> {
 class _AgentTree extends StatelessWidget {
   final AppNotifier notifier;
   final MachineState state;
+  final ValueChanged<SwarmAgentRef>? onOpenAgent;
 
-  const _AgentTree({required this.notifier, required this.state});
+  const _AgentTree({
+    required this.notifier,
+    required this.state,
+    this.onOpenAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -949,6 +987,7 @@ class _AgentTree extends StatelessWidget {
         agent: agent,
         depth: depth,
         hasChildren: children.isNotEmpty,
+        onOpenAgent: onOpenAgent,
       ),
       for (final child in children)
         ..._rows(child, byParent, visible, depth + 1, nextAncestors),
@@ -993,6 +1032,7 @@ class _AgentRow extends StatefulWidget {
   final Agent agent;
   final int depth;
   final bool hasChildren;
+  final ValueChanged<SwarmAgentRef>? onOpenAgent;
 
   const _AgentRow({
     required this.notifier,
@@ -1000,6 +1040,7 @@ class _AgentRow extends StatefulWidget {
     required this.agent,
     required this.depth,
     required this.hasChildren,
+    this.onOpenAgent,
   });
 
   @override
@@ -1124,6 +1165,10 @@ class _AgentRowState extends State<_AgentRow> {
             // ceiling of nine was unreachable for anyone who did not know the
             // drag: a cap nobody can climb to is the same as no cap being raised.
             onTap: () {
+              if (widget.onOpenAgent case final onOpenAgent?) {
+                onOpenAgent(SwarmAgentRef(state, agent));
+                return;
+              }
               final machineId = state.machine.machineId;
               if (HardwareKeyboard.instance.isMetaPressed &&
                   notifier.canAddPane &&

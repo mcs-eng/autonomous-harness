@@ -3,6 +3,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../theme/app_theme.dart';
+import 'transient_menus.dart';
 
 /// Direct pane controls, in a stable order even when an action is unavailable.
 class PaneHeaderActions extends StatelessWidget {
@@ -23,6 +24,7 @@ class PaneHeaderActions extends StatelessWidget {
     this.details,
     this.modelPicker,
     this.terminal = false,
+    this.compact = false,
   });
 
   final bool zoomed, composerVisible;
@@ -30,6 +32,9 @@ class PaneHeaderActions extends StatelessWidget {
   /// The pane is a shell, not a harness: Restart and Stop say so, because
   /// "Stop Harness" over a terminal reads as a button for something else.
   final bool terminal;
+
+  /// Keep Stop and Close directly reachable when the full action row cannot fit.
+  final bool compact;
   final VoidCallback? onShare;
   final VoidCallback? onZoom,
       onRestart,
@@ -103,48 +108,113 @@ class PaneHeaderActions extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (onShare != null) ...[
-              action('Share harness', Icons.person_add_alt_1_outlined, onShare),
-              const SizedBox(width: 2),
-            ],
-            if (modelPicker != null) ...[
-              modelPicker!,
-              const SizedBox(width: 4),
-            ],
-            if (onToggleViewer != null) ...[
-              _ViewerToggle(
-                key: const ValueKey('pane-viewer-toggle'),
-                on: viewerVisible,
-                color: viewerColor ?? AppColors.text,
-                onPressed: onToggleViewer,
+            if (compact) ...[
+              if (modelPicker != null) ...[
+                modelPicker!,
+                const SizedBox(width: 4),
+              ],
+              if (onToggleViewer != null) ...[
+                _ViewerToggle(
+                  key: const ValueKey('pane-viewer-toggle'),
+                  on: viewerVisible,
+                  color: viewerColor ?? AppColors.text,
+                  onPressed: onToggleViewer,
+                ),
+                const SizedBox(width: 2),
+              ],
+              _PaneHeaderOverflowMenu(
+                menuChildren: [
+                  for (final entry in [
+                    if (onShare != null)
+                      (
+                        'Share harness',
+                        Icons.person_add_alt_1_outlined,
+                        onShare,
+                      ),
+                    if (onToggleComposer != null)
+                      (
+                        composerVisible
+                            ? 'Hide message composer'
+                            : 'Show message composer',
+                        LucideIcons.keyboard,
+                        onToggleComposer,
+                      ),
+                    (
+                      'Zoom Pane',
+                      zoomed ? LucideIcons.minimize : LucideIcons.maximize,
+                      onZoom,
+                    ),
+                    (
+                      terminal ? 'Restart Terminal' : 'Restart Harness',
+                      LucideIcons.refreshCw,
+                      onRestart,
+                    ),
+                    if (onFork != null)
+                      ('Fork Harness', LucideIcons.gitFork, onFork),
+                  ])
+                    MenuItemButton(
+                      onPressed: entry.$3,
+                      leadingIcon: Icon(entry.$2, size: 16),
+                      child: Text(entry.$1),
+                    ),
+                ],
+                builder: (controller) => action(
+                  'More pane actions',
+                  Icons.more_horiz,
+                  () => controller.isOpen
+                      ? controller.close()
+                      : controller.open(),
+                ),
               ),
               const SizedBox(width: 2),
-            ],
-            if (onToggleComposer != null) ...[
+            ] else ...[
+              if (onShare != null) ...[
+                action(
+                  'Share harness',
+                  Icons.person_add_alt_1_outlined,
+                  onShare,
+                ),
+                const SizedBox(width: 2),
+              ],
+              if (modelPicker != null) ...[
+                modelPicker!,
+                const SizedBox(width: 4),
+              ],
+              if (onToggleViewer != null) ...[
+                _ViewerToggle(
+                  key: const ValueKey('pane-viewer-toggle'),
+                  on: viewerVisible,
+                  color: viewerColor ?? AppColors.text,
+                  onPressed: onToggleViewer,
+                ),
+                const SizedBox(width: 2),
+              ],
+              if (onToggleComposer != null) ...[
+                action(
+                  composerVisible
+                      ? 'Hide message composer'
+                      : 'Show message composer',
+                  LucideIcons.keyboard,
+                  onToggleComposer,
+                ),
+                const SizedBox(width: 2),
+              ],
               action(
-                composerVisible
-                    ? 'Hide message composer'
-                    : 'Show message composer',
-                LucideIcons.keyboard,
-                onToggleComposer,
+                'Zoom Pane',
+                zoomed ? LucideIcons.minimize : LucideIcons.maximize,
+                onZoom,
               ),
               const SizedBox(width: 2),
-            ],
-            action(
-              'Zoom Pane',
-              zoomed ? LucideIcons.minimize : LucideIcons.maximize,
-              onZoom,
-            ),
-            const SizedBox(width: 2),
-            action(
-              terminal ? 'Restart Terminal' : 'Restart Harness',
-              LucideIcons.refreshCw,
-              onRestart,
-            ),
-            const SizedBox(width: 2),
-            if (onFork != null) ...[
-              action('Fork Harness', LucideIcons.gitFork, onFork),
+              action(
+                terminal ? 'Restart Terminal' : 'Restart Harness',
+                LucideIcons.refreshCw,
+                onRestart,
+              ),
               const SizedBox(width: 2),
+              if (onFork != null) ...[
+                action('Fork Harness', LucideIcons.gitFork, onFork),
+                const SizedBox(width: 2),
+              ],
             ],
             action(
               terminal ? 'Stop Terminal' : 'Stop Harness',
@@ -176,6 +246,44 @@ class PaneHeaderActions extends StatelessWidget {
       ],
     );
   }
+}
+
+class _PaneHeaderOverflowMenu extends StatefulWidget {
+  const _PaneHeaderOverflowMenu({
+    required this.menuChildren,
+    required this.builder,
+  });
+
+  final List<Widget> menuChildren;
+  final Widget Function(MenuController) builder;
+
+  @override
+  State<_PaneHeaderOverflowMenu> createState() =>
+      _PaneHeaderOverflowMenuState();
+}
+
+class _PaneHeaderOverflowMenuState extends State<_PaneHeaderOverflowMenu> {
+  final _controller = MenuController();
+  VoidCallback? _unregister;
+
+  @override
+  void dispose() {
+    _unregister?.call();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => MenuAnchor(
+    controller: _controller,
+    // Native tab changes are outside Flutter's pointer dismissal surface.
+    onOpen: () => _unregister = registerTransientMenu(_controller.close),
+    onClose: () {
+      _unregister?.call();
+      _unregister = null;
+    },
+    menuChildren: widget.menuChildren,
+    builder: (context, controller, _) => widget.builder(controller),
+  );
 }
 
 /// Only header controls depend on this hover state, so the terminal and title

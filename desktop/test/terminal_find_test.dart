@@ -621,6 +621,8 @@ void main() {
       await tester.pump();
       expect(search.count, 0);
       expect(findField, findsNothing);
+      // Let the sidebar's selection transition finish before measuring output.
+      await tester.pump(const Duration(milliseconds: 200));
       await output(a, 1, 'second marker\r\n');
       expect(tester.binding.hasScheduledFrame, isFalse);
       app.selectSwarm(first.id, attachPending: false);

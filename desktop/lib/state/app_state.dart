@@ -1374,6 +1374,14 @@ class AppNotifier extends ChangeNotifier {
     return !_localMachineRunsInWsl(machineId);
   }
 
+  /// Display the backend that owns a project, including the local WSL distro.
+  String projectMachineLabel(String machineId) {
+    final name = stateOf(machineId)?.machine.displayName ?? machineId;
+    if (!_localMachineRunsInWsl(machineId)) return name;
+    final distro = debugLocalCliWslDistro ?? _discovery.wslDistro;
+    return '$name · WSL${distro == null ? '' : ' · $distro'}';
+  }
+
   /// The path to hand the CLI for [folder] on [machineId], or an error sentence.
   ///
   /// This is the single choke point for the GUI-filesystem question: an agent's

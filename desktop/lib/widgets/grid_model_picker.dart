@@ -76,6 +76,9 @@ class GridModelPicker extends StatefulWidget {
   /// The agent's engine, for the subscription row's icon and label.
   final String? engineLabel;
 
+  /// A narrow terminal header retains the same picker behind a 28px icon.
+  final bool iconOnly;
+
   const GridModelPicker({
     super.key,
     required this.notifier,
@@ -87,6 +90,7 @@ class GridModelPicker extends StatefulWidget {
     this.currentTargetId,
     this.webSearch,
     this.engineLabel,
+    this.iconOnly = false,
   });
 
   @override
@@ -481,34 +485,61 @@ class _GridModelPickerState extends State<GridModelPicker> {
             // ancestor asking for a hand is not, by itself, the thing that decides.
             mouseCursor: SystemMouseCursors.click,
             borderRadius: BorderRadius.circular(4),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // No leading glyph: the word carries the control, and a header this dense reads
-                  // better with one fewer mark in it. The spinner takes that space only while a read
-                  // is in flight, so the label does not shift when nothing is happening.
-                  if (_loading) ...[
-                    const SizedBox(
-                      width: 11,
-                      height: 11,
-                      child: CircularProgressIndicator(strokeWidth: 1.5),
+            child: widget.iconOnly
+                ? Semantics(
+                    label: 'Model',
+                    child: SizedBox.square(
+                      dimension: 28,
+                      child: Center(
+                        child: _loading
+                            ? const SizedBox.square(
+                                dimension: 11,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.5,
+                                ),
+                              )
+                            : Icon(
+                                Icons.tune,
+                                size: 16,
+                                color: AppColors.textSoft,
+                              ),
+                      ),
                     ),
-                    const SizedBox(width: 5),
-                  ],
-                  Text(
-                    'Model',
-                    style: TextStyle(fontSize: 11, color: AppColors.textSoft),
+                  )
+                : Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 3,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // No leading glyph: the word carries the control, and a header this dense reads
+                        // better with one fewer mark in it. The spinner takes that space only while a read
+                        // is in flight, so the label does not shift when nothing is happening.
+                        if (_loading) ...[
+                          const SizedBox(
+                            width: 11,
+                            height: 11,
+                            child: CircularProgressIndicator(strokeWidth: 1.5),
+                          ),
+                          const SizedBox(width: 5),
+                        ],
+                        Text(
+                          'Model',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: AppColors.textSoft,
+                          ),
+                        ),
+                        Icon(
+                          Icons.arrow_drop_down,
+                          size: 14,
+                          color: AppColors.mutedStrong,
+                        ),
+                      ],
+                    ),
                   ),
-                  Icon(
-                    Icons.arrow_drop_down,
-                    size: 14,
-                    color: AppColors.mutedStrong,
-                  ),
-                ],
-              ),
-            ),
           ),
         ),
       ),

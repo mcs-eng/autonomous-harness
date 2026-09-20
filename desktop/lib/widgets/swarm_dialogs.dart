@@ -190,7 +190,7 @@ class _ProjectDialogState extends State<_ProjectDialog> {
       error = null;
     });
     try {
-      final folder = widget.notifier.stateOf(id)?.isLocalMachine == true
+      final folder = widget.notifier.machineSharesGuiFilesystem(id)
           ? await getDirectoryPath(initialDirectory: path)
           : await showRemoteFolderPicker(
               context,
@@ -200,7 +200,7 @@ class _ProjectDialogState extends State<_ProjectDialog> {
             );
       if (!mounted || revision != _machineRevision) return;
       setState(() {
-        path = folder ?? path;
+        if (folder != null) _acceptFolder(id, folder);
       });
     } catch (_) {
       if (mounted && revision == _machineRevision) {
@@ -215,7 +215,12 @@ class _ProjectDialogState extends State<_ProjectDialog> {
   }
 
   Future<void> clone() async {
-    if (picking) return;
+    final id = machineId;
+    if (id == null ||
+        picking ||
+        !widget.notifier.machineSharesGuiFilesystem(id)) {
+      return;
+    }
     final revision = _machineRevision;
     setState(() => picking = true);
     final folder = await showCloneRepositoryDialog(
@@ -226,10 +231,34 @@ class _ProjectDialogState extends State<_ProjectDialog> {
     setState(() {
       picking = false;
       if (folder != null && revision == _machineRevision) {
-        path = folder;
-        error = null;
+        _acceptFolder(id, folder);
       }
     });
+  }
+
+  void _acceptFolder(String id, String folder) {
+    if (widget.notifier.stateOf(id) == null) {
+      path = null;
+      error = 'This machine is no longer available. Choose a machine again.';
+      return;
+    }
+    final resolved = widget.notifier.backendFolderFor(id, folder);
+    error = resolved.error;
+    path = resolved.error == null ? resolved.path : null;
+  }
+
+  void _save() {
+    final id = machineId;
+    final folder = path;
+    if (id == null || folder == null || picking) return;
+    // Discovery may identify a WSL backend while the picker/dialog is open.
+    // Persist the location that this machine can actually use, or refuse it.
+    setState(() => _acceptFolder(id, folder));
+    if (error != null || path == null || folderName.isEmpty) return;
+    Navigator.pop(
+      context,
+      SavedSwarmProject(machineId: id, path: path!, name: folderName),
+    );
   }
 
   @override
@@ -276,7 +305,7 @@ class _ProjectDialogState extends State<_ProjectDialog> {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          if (widget.notifier.stateOf(machineId ?? '')?.isLocalMachine == true)
+          if (widget.notifier.machineSharesGuiFilesystem(machineId ?? ''))
             TextButton(
               onPressed: picking ? null : clone,
               style: TextButton.styleFrom(foregroundColor: Colors.white70),
@@ -296,16 +325,7 @@ class _ProjectDialogState extends State<_ProjectDialog> {
         child: const Text('Cancel'),
       ),
       FilledButton(
-        onPressed: path == null || folderName.isEmpty || picking
-            ? null
-            : () => Navigator.pop(
-                context,
-                SavedSwarmProject(
-                  machineId: machineId!,
-                  path: path!,
-                  name: folderName,
-                ),
-              ),
+        onPressed: path == null || folderName.isEmpty || picking ? null : _save,
         child: const Text('Add project'),
       ),
     ],

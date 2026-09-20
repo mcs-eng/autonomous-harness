@@ -466,7 +466,8 @@ void main() {
         },
       );
       await mount(tester, app);
-      expect(find.text('Existing project'), findsNothing);
+      // The sidebar exposes the project before the search overlay opens.
+      expect(find.text('Existing project'), findsOneWidget);
       await chord(tester, LogicalKeyboardKey.keyO);
       await tester.pump();
       await tester.enterText(
@@ -502,7 +503,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Models'), findsNothing);
-      expect(find.text('Machines'), findsNothing);
+      expect(find.text('Machines'), findsOneWidget);
       await chord(tester, LogicalKeyboardKey.keyO);
       await tester.pump();
       await tester.enterText(
@@ -659,7 +660,13 @@ void main() {
       app.selectSwarm(first);
       await tester.pump();
       expect(tester.state(find.byType(TerminalView)), same(renderer));
-      expect(find.text('Renamed while hidden'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(TerminalPanel),
+          matching: find.text('Renamed while hidden'),
+        ),
+        findsOneWidget,
+      );
       expect(
         session.terminal.buffer.getText(),
         contains('arrived while hidden'),

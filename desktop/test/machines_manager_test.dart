@@ -63,7 +63,14 @@ void main() {
         await tester.tap(find.text('Rename'));
         await tester.pumpAndSettle();
         expect(find.text('Rename Machine'), findsOneWidget);
-        final field = find.byType(TextField);
+        final renameDialog = find.ancestor(
+          of: find.text('Rename Machine'),
+          matching: find.byType(AlertDialog),
+        );
+        final field = find.descendant(
+          of: renameDialog,
+          matching: find.byType(TextField),
+        );
         await tester.enterText(field, '   ');
         await tester.testTextInput.receiveAction(TextInputAction.done);
         await tester.pump();
