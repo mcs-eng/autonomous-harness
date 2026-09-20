@@ -1027,7 +1027,11 @@ class EnvironmentProvisioner {
         ? await wsl.dockerOnlyDistros()
         : const <String>[];
 
-    var probe = await wsl.findHarness(distros: usable);
+    // No WSL, or no distro the app may use, is reported as that below; a pinned
+    // account is only judged once there is an inventory to judge it against.
+    var probe = usable.isEmpty
+        ? const WslHarnessProbe.notFound()
+        : await wsl.findHarness(distros: usable);
 
     // A distro to install INTO: the one the CLI was found in, or — when it is
     // absent — the first distro the app is allowed to use. Never Docker's, never

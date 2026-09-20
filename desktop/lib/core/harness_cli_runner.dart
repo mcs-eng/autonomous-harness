@@ -31,7 +31,7 @@ import 'wsl_runtime.dart';
 /// macOS and Linux only and its installer is a POSIX script, so a Windows host
 /// runs the CLI inside a named development distro and Windows 11 forwards
 /// loopback into it (see [WslRuntime]). This resolves to
-/// `wsl.exe -d <distro> -- bash -lc 'exec "$HOME/.local/bin/harness" "$@"' …`
+/// `wsl.exe -d <distro> [--user <user>] -e bash -lc 'exec "$HOME/.local/bin/harness" "$@"' …`
 /// rather than to a native managed runtime, launcher, or bare name. The CLI's
 /// only supported terminal backend is tmux, which is unavailable natively on
 /// Windows, so a native executable answering `version` is not a usable desktop

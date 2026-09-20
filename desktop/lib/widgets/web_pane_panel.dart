@@ -359,7 +359,9 @@ class _WebPanePanelState extends State<WebPanePanel> {
               // coverage:ignore-end
               _ViewerActions(
                 zoomed: widget.zoomed,
-                onReload: _controller == null && !_windowsViewer
+                onReload:
+                    _controller == null &&
+                        !(_windowsViewer && _browserUri() != null)
                     ? null
                     : _reload,
                 onBrowser: _browserUri() == null || _openingBrowser

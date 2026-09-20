@@ -635,6 +635,43 @@ void main() {
   );
 
   testWidgets(
+    'a CLI that cannot answer the sign-in check opens login, not an endless retry',
+    (tester) async {
+      final login = _ControlledCliLogin();
+      final app = AppNotifier(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: ConfigStore(storage: _FakeKeyValueStore()),
+        cliLogin: login,
+        environmentProvisioner: _ReadyEnvironmentProvisioner(),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [appStateProvider.overrideWithValue(app)],
+          child: HarnessApp(authenticatedScreen: _swarm),
+        ),
+      );
+      final boot = app.bootstrap();
+      await tester.pump();
+      login.status.completeError(
+        CliNotAvailableException('Could not run the harness CLI (exit 1).'),
+      );
+      await boot;
+      await tester.pump();
+      expect(app.status, AppStatus.unauthenticated);
+      expect(app.bootError, isNull);
+      expect(app.lastError, contains('Could not run the harness CLI'));
+      expect(
+        find.textContaining('Could not check your saved sign-in'),
+        findsNothing,
+      );
+      expect(find.text('Sign in'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+    },
+  );
+
+  testWidgets(
     'environment setup exposes per-step guidance and a scoped recheck',
     (tester) async {
       final app = makeNotifier(AppStatus.preparingEnvironment);

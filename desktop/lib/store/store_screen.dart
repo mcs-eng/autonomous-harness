@@ -713,7 +713,8 @@ Future<void> openStoreAgent(
     initialPrompt: prompt,
     swarmId: target,
   );
-  if (result != null) return;
+  // A companion handoff opened its own workspace; the draft tab is done with too.
+  if (result != null && result != NewAgentDialogResult.companionOpened) return;
   // Dismissed: back to the store page. A tab made for this is a draft and cancelling it returns there;
   // but newSwarm hands over an empty New Tab the window already had instead of making a second one,
   // and that tab is the person's own — it stays, and the store is selected again.

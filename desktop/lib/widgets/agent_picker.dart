@@ -686,7 +686,7 @@ class _AgentPickerState extends State<AgentPicker> {
             ? null
             : SearchResultText(
                 detail,
-                matches: matches(choice.detail, title: false),
+                matches: matches(detail, title: false),
                 style: const TextStyle(fontSize: 12, color: Colors.white60),
               ),
         trailing: highlighted

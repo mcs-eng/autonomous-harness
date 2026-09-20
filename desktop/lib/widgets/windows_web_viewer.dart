@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter_windows/webview_flutter_windows.dart';
 
 /// The Windows viewer owns its native surface for exactly as long as its pane.
-/// No host objects, filesystem mappings, or page-to-app command bridge are added.
+/// The app adds no host objects, filesystem mappings, or script injection, and
+/// listens to no page messages; WebView2's own message channel exists but has
+/// no reader here.
 class WindowsWebViewer extends StatefulWidget {
   const WindowsWebViewer({
     super.key,

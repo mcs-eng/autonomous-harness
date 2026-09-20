@@ -828,6 +828,13 @@ class AppNotifier extends ChangeNotifier {
       owner.focusedPaneId = pane.id;
     }
     if (owner.zoomedPaneId != null) owner.zoomedPaneId = pane.id;
+    // Leaving an untouched New Tab for an existing view abandons it, as
+    // selectSwarm does; otherwise the empty draft stays in the strip.
+    if (isDraftSwarm(activeSwarmId)) {
+      final abandoned = activeSwarmId;
+      swarms.removeWhere((swarm) => swarm.id == abandoned);
+      _draftSwarmReturns.remove(abandoned);
+    }
     _activeSwarmId = owner.id;
     railFocused = false;
     selectedMachineId = machineId;
@@ -2247,9 +2254,20 @@ class AppNotifier extends ChangeNotifier {
         'continueAfterEnvironmentReady: startup check failed: '
         '$error\n$stack',
       );
+      _bootStatusMessage = null;
+      if (error is CliNotAvailableException || error is FormatException) {
+        // The CLI itself could not answer: it did not run, or did not speak
+        // JSON. Trying again cannot change that, so the login screen, with its
+        // account-free and environment routes, is the surface that can help.
+        currentUser = null;
+        _lastError = '$error';
+        _lastErrorRetryable = false;
+        status = AppStatus.unauthenticated;
+        notifyListeners();
+        return;
+      }
       // A failed CLI check is not proof that the saved session is gone.
       // Keep the retry on the startup surface; never force a new browser login.
-      _bootStatusMessage = null;
       _bootError =
           'Could not check your saved sign-in. Try again to reconnect.';
       status = AppStatus.bootstrapping;
@@ -2595,7 +2613,16 @@ class AppNotifier extends ChangeNotifier {
         // out. "Try running `harness start` yourself" is advice that cannot work in that case — the
         // session file is gone, so every start exits again — and it is the advice this branch used to
         // give unconditionally.
-        final authStatus = await cliLogin.checkStatus();
+        final CliAuthStatus authStatus;
+        try {
+          authStatus = await cliLogin.checkStatus();
+        } catch (_) {
+          // The check itself failed, which says nothing about the session.
+          // The supervisor re-asks before every spawn, so it still takes over.
+          if (!_authWorkCurrent(revision)) return;
+          _startDaemonSupervision(discovery);
+          rethrow;
+        }
         if (!_authWorkCurrent(revision)) return;
         // Local mode has no session to lose, so a daemon that is down there is
         // down for an ordinary reason and gets the ordinary advice.

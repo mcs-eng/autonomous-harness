@@ -33,10 +33,13 @@ Choose a session to return to its existing tab, or reopen its view if closed.
 Project headings expand the list without starting agents. Non-Git folders work
 too; repositories with multiple checkouts list each host and working folder.
 
+![The Projects sidebar listing fictional projects and their sessions](../docs/images/project-sidebar.png)
+
 **Add folder** saves an existing location. **New project** opens the creation
 dialog; its folder is created only when you submit. The **+** beside a location
-opens **New agent here** with that exact machine and folder preselected, in a new
-tab. Shared or disconnected hosts cannot create agents from this action.
+(**New agent here**) opens the New Agent dialog with that exact machine and folder
+preselected, in a new tab. Shared or disconnected hosts cannot create agents from
+this action.
 On Windows with WSL, the folder picker browses the selected distribution.
 
 Rows show branch and current activity, including **Needs input**, **Start failed**,
@@ -52,10 +55,13 @@ This source change does not update an installed Preview 7 bundle or desktop shor
 
 An empty tab now shows **Continue working** with up to three existing sessions,
 their machine, folder, branch, and current state. Sessions needing input appear
-first; your visits during this app session come next. **Needs your input** opens
-the existing attention list. Opening a session reuses its existing view and does
+first; your visits during this app session come next. A **session needs your
+input** button opens the existing attention list. Opening a session reuses its
+existing view and does
 not create, restart, or send instructions to an agent. Search and the Harness
 Store remain available. A new installation keeps the introductory start page.
+
+![Continue working on an empty tab, with fictional sessions](../docs/images/workspace-resume.png)
 
 Unavailable project sessions now explain the problem and offer **Refresh status**
 or **Show machines**. Agent selection shows installation status even in a narrow
@@ -68,8 +74,8 @@ the saved session, rather than assuming you signed out. A failed local-service
 start reconnects through the existing supervisor. Sign-out or window disposal
 invalidates pending checks, so late replies cannot restart the service or change
 old session views. Windows preflight reuses its verified WSL result for the version
-check: fixture process calls fall from six to four, while rechecks still discover
-afresh and validate the packaged CLI. This is not a measured launch-time claim.
+check instead of discovering WSL a second time; rechecks still discover afresh and
+validate the packaged CLI. This is not a measured launch-time claim.
 
 These changes improve explicit project and agent choice. They do not automatically
 route tasks between providers, share credentials, or add model-server load.
@@ -185,12 +191,13 @@ Windows 11 normally includes the [WebView2 Runtime](https://developer.microsoft.
 the app reports when it is missing and does not install it silently. Older
 Windows previews and Linux retain the external-browser fallback.
 
-The embedded viewer uses its own browser profile, separate from your regular
-browser. Popups and device permissions (camera, microphone, location, clipboard
-reads, and notifications) are denied; use the external browser for pages that
-need them. Ordinary page navigation and downloads follow WebView2 behavior;
-downloads show a notice in the pane. No native command bridge, filesystem
-mapping, or disabled browser security is added. The Windows plugin is pinned in
+The embedded viewer uses the plugin's own WebView2 user-data folder under your
+local app data, separate from your regular browser. Popups and device permissions
+(camera, microphone, location, clipboard reads, and notifications) are denied; use
+the external browser for pages that need them. Ordinary page navigation and
+downloads follow WebView2 behavior; downloads show a notice in the pane. The app
+adds no host objects, script injection, or filesystem mapping, listens to no page
+messages, and disables no browser security. The Windows plugin is pinned in
 `pubspec.lock`; its WebView2/WIL build packages use the public NuGet feed in
 `desktop/nuget.config` without changing global NuGet settings.
 

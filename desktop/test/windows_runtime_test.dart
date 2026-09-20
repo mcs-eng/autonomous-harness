@@ -348,6 +348,15 @@ void main() {
         WslRuntime.tmuxCommandForDisplay(distro: 'Ubuntu'),
         contains("wsl -d Ubuntu -e bash -lc 'sudo apt-get install -y tmux"),
       );
+      expect(
+        WslRuntime.tmuxCommandForDisplay(distro: 'Ubuntu', username: 'dev'),
+        contains("wsl -d Ubuntu --user dev -e bash -lc 'sudo apt-get install"),
+      );
+      // root has no sudo to run, and a minimal image may not ship the package.
+      expect(
+        WslRuntime.tmuxCommandForDisplay(distro: 'Ubuntu', username: 'root'),
+        "wsl -d Ubuntu --user root -e bash -lc 'apt-get install -y tmux && tmux -V'",
+      );
     });
   });
 
@@ -804,6 +813,22 @@ void main() {
         expect(seen.every((args) => !args.contains('-d')), isTrue);
       },
     );
+
+    test('a pinned account still names a missing WSL2 as the problem', () async {
+      final readiness = await verify(
+        wslEnabled: false,
+        listing: '',
+        probe: 'cli missing\ntmux no\n',
+        selection: const WslSelection(distro: 'Ubuntu', username: 'dev'),
+      );
+      expect(readiness.isReady, isFalse);
+      expect(readiness.phase, EnvironmentSetupPhase.review);
+      expect(readiness.failure?.title, 'WSL2 is required on Windows');
+      expect(readiness.failure?.command, WslRuntime.enableWslCommand);
+      expect(readiness.failure?.detail, isNot(contains('selected distribution')));
+      expect(readiness.plan, hasLength(1));
+      expect(readiness.plan.single.command, WslRuntime.enableWslCommand);
+    });
 
     test('a failed tmux install stops before the CLI installer', () async {
       final seen = <List<String>>[];

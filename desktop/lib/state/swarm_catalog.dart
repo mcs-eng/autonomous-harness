@@ -69,7 +69,7 @@ class SavedSwarmProject {
 
   /// Explicit membership also works with daemons that predate project metadata.
   final List<({String machineId, String agentId})> members;
-  String get id => '$machineId\u0000$path';
+  String get id => '$machineId\u0000${projectFolderPath(path)}';
   Map<String, Object> toJson() => {
     'machineId': machineId,
     'path': path,

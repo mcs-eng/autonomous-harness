@@ -586,7 +586,8 @@ exec "$node" "$bundle_dir/cli.js" "$@"
   }) =>
       'wsl -d ${_displayArgument(distro)} '
       '${username == null ? '' : '--user ${_displayArgument(username)} '}'
-      "-e bash -lc 'sudo apt-get install -y tmux && tmux -V'";
+      // root runs apt-get directly, as installTmux does; sudo may not exist there.
+      "-e bash -lc '${username == 'root' ? '' : 'sudo '}apt-get install -y tmux && tmux -V'";
 }
 
 /// What one look for the CLI inside WSL found.

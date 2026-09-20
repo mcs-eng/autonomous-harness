@@ -18,7 +18,9 @@ check and install a package with the released CLI without building the platform.
 
 macOS is the primary supported and tested desktop experience. Linux builds and a Windows runner
 exist, but full Linux and Windows support remains work in progress. Embedded harness webviews
-currently run only on macOS; platform code being present does not imply feature parity.
+run on macOS (WKWebView) and on Windows (WebView2, which needs the WebView2 Runtime); Linux
+shows the viewer's address with an open-in-browser action. Platform code being present does not
+imply feature parity.
 Harness authors should list the operating systems and tool versions they actually tested.
 
 ## Account-free local use

@@ -99,7 +99,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                 Expanded(
                   child: MachineRail(
                     notifier: widget.app,
-                    onOpenAgent: widget.onOpenAgent,
+                    onOpenAgent: _openOrExplain,
                     onEscape: widget.onCollapse,
                   ),
                 )
@@ -336,20 +336,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
           leading: EngineMark.forAgent(row.agent, size: 16),
           tooltip:
               '${row.agent.name}\n$status${branch == null ? '' : ' · $branch'}\n${widget.app.projectMachineLabel(row.machineId)}\n${row.project?.cwd ?? 'Folder not reported'}${detail == null ? '' : '\n$detail'}',
-          onTap: () {
-            final hasView = widget.app.swarms.any(
-              (swarm) => swarm.panes.any(
-                (pane) =>
-                    pane.machineId == row.machineId &&
-                    pane.agentId == row.agent.id,
-              ),
-            );
-            if (row.agent.terminalAvailable || hasView) {
-              widget.onOpenAgent(row);
-            } else {
-              _showRecovery(row.machineId, row: row);
-            }
-          },
+          onTap: () => _openOrExplain(row),
         ),
         Padding(
           padding: const EdgeInsets.only(left: 36, bottom: 6),
@@ -367,6 +354,23 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         ),
       ],
     );
+  }
+
+  /// Open a session that has a view or a live terminal; otherwise say why it
+  /// cannot be opened. Both tabs of the sidebar route through here, so a tap or
+  /// Enter on the Machines tab never closes the drawer and then does nothing.
+  void _openOrExplain(SwarmAgentRef row) {
+    final hasView = widget.app.swarms.any(
+      (swarm) => swarm.panes.any(
+        (pane) =>
+            pane.machineId == row.machineId && pane.agentId == row.agent.id,
+      ),
+    );
+    if (row.agent.terminalAvailable || hasView) {
+      widget.onOpenAgent(row);
+    } else {
+      _showRecovery(row.machineId, row: row);
+    }
   }
 
   Future<void> _showRecovery(String machineId, {SwarmAgentRef? row}) async {
