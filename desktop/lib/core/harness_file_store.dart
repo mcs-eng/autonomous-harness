@@ -30,8 +30,9 @@ class HarnessFileStore implements BatchLocalKeyValueStore {
   static final Map<String, Future<void>> _pathTails = {};
 
   final Directory directory;
+  final bool recoverCorruption;
 
-  HarnessFileStore({Directory? directory})
+  HarnessFileStore({Directory? directory, this.recoverCorruption = true})
     : directory = directory ?? Directory(defaultDirectoryPath());
 
   /// [name] names the sibling under `~/.harness`; it defaults to this store's own.
@@ -154,6 +155,7 @@ class HarnessFileStore implements BatchLocalKeyValueStore {
     } on UnsupportedStateVersionException {
       rethrow;
     } on Object {
+      if (!recoverCorruption) rethrow;
       await _quarantineCorruptState(file);
       return <String, String>{};
     }
