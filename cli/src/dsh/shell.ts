@@ -28,10 +28,48 @@ export interface DshCommandResult {
  * `zsh -lic` with no tty cannot enable the line editor, and an rc file that sets `zle` makes zsh
  * complain once per option; the engine never sees this because its pane HAS a tty. Dropped so a
  * doctor's lines, which the desktop shows verbatim, are the doctor's.
+ *
+ * bash says more, all of it on stderr. Two lines at startup, when it tries to take a terminal
+ * process group it does not have (`cannot set terminal process group`, `no job control in this
+ * shell`); one more (`tcsetattr`) when a foreground child ends on a signal, as under the timeout
+ * below; and its `exit` builtin, interactive, echoes `exit` — `logout` in a login shell, which this
+ * is — so a doctor ending in `exit 1` said `logout`. Measured 2026-09-20 with SHELL=/bin/bash and
+ * no tty: the hosted CI runner's situation, and a Linux daemon's whenever it was not started from a
+ * terminal. Neither `+m` nor `set +m` silences the first two. The echo is matched as a whole line,
+ * on either stream, so a doctor whose own line is exactly `exit` or `logout` loses it; nothing
+ * else is close.
  */
 export function isShellNoise(line: string): boolean {
-  return /can't change option: zle$/.test(line) || /^\(eval\):\d+: can't change option: zle$/.test(line)
+  return /can't change option: zle$/.test(line)
+    || /^\(eval\):\d+: can't change option: zle$/.test(line)
+    || /^bash: cannot set terminal process group \(-?\d+\): /.test(line)
+    || line === 'bash: no job control in this shell'
+    || /^bash: \[\d+: \d+ \(\d+\)\] tcsetattr: /.test(line)
+    || line === 'exit'
+    || line === 'logout'
 }
+
+/**
+ * The first line of a script run in the user's interactive shell: what lets a timeout end the SHELL,
+ * not only the command it was running.
+ *
+ * An interactive shell ignores SIGTERM for its whole life — bash and zsh both, so that `kill 0` at a
+ * prompt does not take the prompt with it. That prompt is what the ignore is for, and this shell has
+ * none. Left alone, killProcessGroup's SIGTERM ended the command that was running (children get the
+ * default disposition back) and the shell went on with the REST of the script — `npm ci; rm -rf
+ * build; …` with a hung `npm ci` ran the `rm` — until the SIGKILL that follows the grace period.
+ * `trap - TERM` cannot undo the ignore (bash counts it as ignored on entry); an explicit trap can, and
+ * both shells run it as soon as the foreground command has ended, which that same SIGTERM sees to.
+ * 143 is what a SIGTERM death reports, so a stopped script reads as one whichever way it ended.
+ *
+ * The trap is in place only once the shell has read its rc files. A SIGTERM that lands before that is
+ * still ignored, and the SIGKILL after KILL_GRACE_MS is what ends such a shell — which is why the
+ * timeout tests advance through the grace period too, and why nothing here shortens it.
+ */
+export const DSH_STOP_TRAP = "trap 'exit 143' TERM"
+
+/** How long killProcessGroup waits after its SIGTERM before the SIGKILL. */
+export const KILL_GRACE_MS = 3_000
 
 /**
  * `[path, ...args]` that runs `script` through the user's shell, or `/bin/sh -c` when none is known.
@@ -46,12 +84,12 @@ export function isShellNoise(line: string): boolean {
  */
 export function dshShellArgv(script: string): { path: string; args: string[] } {
   const shell = interactiveEngineShell()
-  const body = `${dshNodeFallback()}\n${script}`
   if (shell) {
     const args = shell.args.map((a) => (a === '-ic' ? '-lic' : a))
-    return { path: shell.path, args: [...args, body] }
+    return { path: shell.path, args: [...args, `${DSH_STOP_TRAP}\n${dshNodeFallback()}\n${script}`] }
   }
-  return { path: '/bin/sh', args: ['-c', body] }
+  // `sh -c` is not interactive and dies of a SIGTERM as any process does; no trap needed.
+  return { path: '/bin/sh', args: ['-c', `${dshNodeFallback()}\n${script}`] }
 }
 
 /**
@@ -135,7 +173,7 @@ export function runDshCommand(script: string, opts: DshCommandOptions): Promise<
 }
 
 /** SIGTERM the child's whole group, then SIGKILL what is left a moment later. */
-export function killProcessGroup(child: ChildProcess, graceMs = 3_000): void {
+export function killProcessGroup(child: ChildProcess, graceMs = KILL_GRACE_MS): void {
   const pid = child.pid
   if (!pid) return
   const signalGroup = (signal: NodeJS.Signals): void => {
