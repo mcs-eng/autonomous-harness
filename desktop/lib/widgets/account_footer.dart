@@ -39,9 +39,22 @@ class _AccountFooterState extends State<AccountFooter> {
     grid.AppTheme.watch(context);
     final profile = widget.notifier.currentUser;
     final isLocal = widget.notifier.localManualFixture != null;
+    // No account at all, by choice: this computer's daemon serves its own
+    // agents and nothing else. Read as a third state beside the dev fixture,
+    // because it is one — there is no profile to show and no relay to reach.
+    final localMode = widget.notifier.localOnly;
     final primary =
-        profile?.email ?? (isLocal ? 'local terminal' : 'signed in');
-    final secondary = isLocal ? 'LOCAL SESSION' : null;
+        profile?.email ??
+        (isLocal
+            ? 'local terminal'
+            : localMode
+            ? 'this computer'
+            : 'signed in');
+    final secondary = isLocal
+        ? 'LOCAL SESSION'
+        : localMode
+        ? 'NO ACCOUNT'
+        : null;
 
     return MenuAnchor(
       controller: _menu,
@@ -71,15 +84,18 @@ class _AccountFooterState extends State<AccountFooter> {
       menuChildren: [
         _AccountSummary(notifier: widget.notifier),
         const AppMenuDivider(),
-        AppMenuItem(
-          key: const Key('link-a-machine-menu-item'),
-          icon: LucideIcons.link2300,
-          label: 'Remote into another machine…',
-          onPressed: () {
-            _menu.close();
-            unawaited(showLinkMachineDialog(context, widget.notifier));
-          },
-        ),
+        // Linking runs through the relay and needs the sign-in; in local mode
+        // the row would only open a dialog that ends in "not signed in".
+        if (!localMode)
+          AppMenuItem(
+            key: const Key('link-a-machine-menu-item'),
+            icon: LucideIcons.link2300,
+            label: 'Remote into another machine…',
+            onPressed: () {
+              _menu.close();
+              unawaited(showLinkMachineDialog(context, widget.notifier));
+            },
+          ),
         AppMenuItem(
           key: const Key('settings-menu-item'),
           icon: LucideIcons.settings300,
@@ -99,7 +115,11 @@ class _AccountFooterState extends State<AccountFooter> {
         AppMenuItem(
           key: const Key('sign-out-menu-item'),
           icon: LucideIcons.logOut300,
-          label: isLocal ? 'Disconnect local session' : 'Sign out',
+          label: isLocal
+              ? 'Disconnect local session'
+              : localMode
+              ? 'Leave local mode'
+              : 'Sign out',
           // The one row here that ENDS something. It sat in a group of its own
           // already, which said "this is different" — but drew in the same ink
           // as Settings, which said the opposite louder. [AppMenuItem] has
@@ -120,13 +140,15 @@ class _AccountFooterState extends State<AccountFooter> {
             ? Center(
                 child: _AvatarButton(
                   onTap: controller.isOpen ? controller.close : controller.open,
-                  initials: profile?.initials ?? (isLocal ? 'L' : '?'),
+                  initials:
+                      profile?.initials ?? (isLocal || localMode ? 'L' : '?'),
                 ),
               )
             : _AccountPill(
                 open: controller.isOpen,
                 onTap: controller.isOpen ? controller.close : controller.open,
-                initials: profile?.initials ?? (isLocal ? 'L' : '?'),
+                initials:
+                    profile?.initials ?? (isLocal || localMode ? 'L' : '?'),
                 primary: primary,
                 secondary: secondary,
               ),
@@ -264,6 +286,7 @@ class _AccountSummary extends StatelessWidget {
     grid.AppTheme.watch(context);
     final profile = notifier.currentUser;
     final isLocal = notifier.localManualFixture != null;
+    final localMode = notifier.localOnly;
     return Padding(
       // 15 = the row gutter (6) plus a row's own inner padding (9), so this
       // block starts on the same left edge as the glyphs under it instead of
@@ -272,7 +295,7 @@ class _AccountSummary extends StatelessWidget {
       child: Row(
         children: [
           _Avatar(
-            initials: profile?.initials ?? (isLocal ? 'L' : '?'),
+            initials: profile?.initials ?? (isLocal || localMode ? 'L' : '?'),
             large: true,
           ),
           const SizedBox(width: 12),
@@ -282,7 +305,11 @@ class _AccountSummary extends StatelessWidget {
               children: [
                 Text(
                   profile?.displayName ??
-                      (isLocal ? 'Local session' : 'Autonomous user'),
+                      (isLocal
+                          ? 'Local session'
+                          : localMode
+                          ? 'Local mode'
+                          : 'Autonomous user'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   // Semibold, not w700: the weight ladder has three steps and
@@ -307,7 +334,11 @@ class _AccountSummary extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                   profile?.email ??
-                      (isLocal ? 'loopback backend' : 'profile unavailable'),
+                      (isLocal
+                          ? 'loopback backend'
+                          : localMode
+                          ? 'this computer, no account'
+                          : 'profile unavailable'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
