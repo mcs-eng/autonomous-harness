@@ -6,6 +6,7 @@ import 'dart:io';
 import '../logging/cli_transcript.dart';
 import 'backend_path.dart';
 import 'bounded_process.dart';
+import 'local_mode.dart';
 import 'utf16_probe_encoding.dart';
 import 'wsl_runtime.dart';
 
@@ -71,6 +72,11 @@ class HarnessCliRunner {
   final bool _requiresWindowsBundle;
   final Directory _windowsBundleDirectory;
 
+  /// Whether the next command runs the CLI without an account
+  /// (`HARNESS_LOCAL_ONLY=true`). Read per command, never captured: the choice
+  /// changes while the app runs, on the login screen and in the account menu.
+  final bool Function() _localMode;
+
   static const bool windowsBundledCli = bool.fromEnvironment(
     'WINDOWS_BUNDLED_CLI',
   );
@@ -109,7 +115,9 @@ class HarnessCliRunner {
     bool? isWindows,
     bool? requiresWindowsBundle,
     Directory? windowsBundleDirectory,
+    bool Function()? localMode,
   }) : environment = environment ?? Platform.environment,
+       _localMode = localMode ?? (() => localModeStore.value),
        harnessHome = harnessHome ?? Directory(_defaultHarnessHome()),
        _wsl = wslRuntime ?? WslRuntime(runProcess: runProcess),
        _wslProbeMissTtl = wslProbeMissTtl ?? const Duration(seconds: 5),
@@ -425,6 +433,10 @@ class HarnessCliRunner {
             ).hasMatch(configuredLocale))) {
       commandEnvironment['LC_ALL'] = 'C.UTF-8';
     }
+    // Local mode rides the environment, not argv: the daemon's own restarts
+    // (a self-update, the rollback respawn) copy `process.env` into the child,
+    // so the flag survives them where an argument would not.
+    if (_localMode()) commandEnvironment['HARNESS_LOCAL_ONLY'] = 'true';
     return commandEnvironment;
   }
 
@@ -445,6 +457,7 @@ class HarnessCliRunner {
         if (entry.isNotEmpty) entry,
       if ((result['TASK_ROUTER'] ?? '').isNotEmpty) 'TASK_ROUTER',
       if ((result['TYPESAFE_API_KEY'] ?? '').isNotEmpty) 'TYPESAFE_API_KEY',
+      if ((result['HARNESS_LOCAL_ONLY'] ?? '').isNotEmpty) 'HARNESS_LOCAL_ONLY',
     };
     if (forwarded.isNotEmpty) result['WSLENV'] = forwarded.join(':');
     return result;
