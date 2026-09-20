@@ -58,6 +58,50 @@ final _choices = [
 ];
 
 void main() {
+  testWidgets(
+    'narrow picker shows host installation facts and an explicit companion action',
+    (tester) async {
+      tester.view.physicalSize = const Size(640, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AgentPicker(
+              value: 'codex',
+              choices: [
+                _choices.first,
+                AgentChoice(
+                  id: 'deepseek-web',
+                  label: 'DeepSeek Harness',
+                  actionLabel: 'Open browser workspace',
+                  mark: (size) => SizedBox.square(dimension: size),
+                ),
+              ],
+              statusOf: (id) => id == 'codex'
+                  ? 'Installs on Workstation before it starts'
+                  : 'Separate browser workspace on this PC',
+              onChanged: (_) {},
+            ),
+          ),
+        ),
+      );
+      await openAgentSearch(tester);
+      expect(
+        find.text('Installs on Workstation before it starts'),
+        findsOneWidget,
+      );
+      await tester.enterText(agentSearch, 'deepseek');
+      await tester.pump();
+      expect(find.text('Open browser workspace'), findsOneWidget);
+      expect(
+        find.text('Separate browser workspace on this PC'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   test(
     'remembers the agent across launches without replacing a newer choice',
     () async {

@@ -3,6 +3,7 @@ import '../stats/harness_stats.dart';
 import '../terminal/terminal_font_store.dart';
 import '../terminal/terminal_theme_store.dart';
 import 'local_mode.dart';
+import 'wsl_preferences.dart';
 
 /// Every preference that has to be in place BEFORE the first frame.
 ///
@@ -22,6 +23,7 @@ Future<void> loadPersistedSettings({
   AppearancePrefsStore? appearance,
   HarnessStats? stats,
   LocalModeStore? localMode,
+  WslPreferencesStore? wslPreferences,
 }) async {
   // Independent stores may load together, but all must finish before runApp.
   // Font and appearance share a serialized file store; each reads its related
@@ -42,5 +44,7 @@ Future<void> loadPersistedSettings({
     // without an account must not land on the login screen while its choice
     // is still on its way from disk.
     (localMode ?? localModeStore).load(),
+    // Runtime identity must be fixed before any WSL runner is constructed.
+    (wslPreferences ?? wslPreferencesStore).load(),
   ]);
 }

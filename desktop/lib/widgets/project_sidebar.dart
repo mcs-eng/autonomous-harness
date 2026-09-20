@@ -292,6 +292,15 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
               ),
             ),
           ),
+          if (machine == null ||
+              machine.needsLink ||
+              machine.nodeOnline == false ||
+              machine.connectionStatus != ConnectionStatus.connected)
+            AppIconButton(
+              icon: Icons.info_outline,
+              tooltip: 'Machine connection details',
+              onPressed: () => _showRecovery(location.machineId),
+            ),
           AppIconButton(
             key: ValueKey(
               'new-project-agent:${location.machineId}:${location.folder}',
@@ -325,10 +334,22 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
           label: row.agent.name,
           selected: selected,
           leading: EngineMark.forAgent(row.agent, size: 16),
-          enabled: row.agent.terminalAvailable,
           tooltip:
               '${row.agent.name}\n$status${branch == null ? '' : ' · $branch'}\n${widget.app.projectMachineLabel(row.machineId)}\n${row.project?.cwd ?? 'Folder not reported'}${detail == null ? '' : '\n$detail'}',
-          onTap: () => widget.onOpenAgent(row),
+          onTap: () {
+            final hasView = widget.app.swarms.any(
+              (swarm) => swarm.panes.any(
+                (pane) =>
+                    pane.machineId == row.machineId &&
+                    pane.agentId == row.agent.id,
+              ),
+            );
+            if (row.agent.terminalAvailable || hasView) {
+              widget.onOpenAgent(row);
+            } else {
+              _showRecovery(row.machineId, row: row);
+            }
+          },
         ),
         Padding(
           padding: const EdgeInsets.only(left: 36, bottom: 6),
@@ -346,5 +367,61 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         ),
       ],
     );
+  }
+
+  Future<void> _showRecovery(String machineId, {SwarmAgentRef? row}) async {
+    final machine = widget.app.stateOf(machineId);
+    final needsLink = machine?.needsLink == true;
+    final offline = machine == null || machine.nodeOnline == false;
+    final reason = needsLink
+        ? 'This machine needs to be linked before its sessions can reconnect. Open Machines to review its connection.'
+        : offline
+        ? 'This machine is offline. Make sure it is awake and connected, then refresh its status.'
+        : row?.agent.launchDetail ??
+              row?.agent.terminalUnavailableReason ??
+              'The session is not available yet. Refresh its status or open Machines for connection details.';
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          row?.agent.name ?? widget.app.projectMachineLabel(machineId),
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (row != null) ...[
+                Text(widget.app.projectMachineLabel(machineId)),
+                const SizedBox(height: 12),
+              ],
+              Text(reason),
+              const SizedBox(height: 12),
+              const Text(
+                'Refreshing checks the existing session. It does not create or restart an agent.',
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'machines'),
+            child: const Text('Show machines'),
+          ),
+          if (machine != null && !needsLink)
+            FilledButton(
+              onPressed: () => Navigator.pop(context, 'refresh'),
+              child: const Text('Refresh status'),
+            ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'machines') setState(() => _machines = true);
+    if (action == 'refresh') await widget.app.reloadMachineData(machineId);
   }
 }

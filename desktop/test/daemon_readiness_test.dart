@@ -21,6 +21,7 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
   void Function(LocalCliEndpoint endpoint)? onReady;
   void Function(LocalCliEndpoint endpoint)? onSnapshot;
   void Function(bool online)? onBackendOnline;
+  Future<bool> Function()? stillSignedIn;
 
   @override
   Future<LocalCliProbe> ensureRunning({
@@ -50,6 +51,7 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
     this.onReady = onReady;
     this.onSnapshot = onSnapshot;
     this.onBackendOnline = onBackendOnline;
+    this.stillSignedIn = stillSignedIn;
     return Timer(const Duration(days: 1), () {});
   }
 }
@@ -57,6 +59,14 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
 class _SignedInCli extends CliLogin {
   @override
   Future<CliAuthStatus> checkStatus() async => CliAuthStatus(loggedIn: true);
+}
+
+class _DelayedStatus extends CliLogin {
+  final pending = Completer<CliAuthStatus>();
+  var calls = 0;
+  @override
+  Future<CliAuthStatus> checkStatus() async =>
+      ++calls == 1 ? const CliAuthStatus(loggedIn: true) : await pending.future;
 }
 
 /// Stops at the machine list: this test is about the daemon gate, not what comes after it.
@@ -84,13 +94,13 @@ class _QuietConnection extends WsConn {
 
 class _Notifier extends AppNotifier {
   int refreshes = 0;
-  _Notifier(LocalCliDiscovery discovery)
+  _Notifier(LocalCliDiscovery discovery, {CliLogin? cliLogin})
     : super(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: null,
         localCliDiscovery: discovery,
-        cliLogin: _SignedInCli(),
+        cliLogin: cliLogin ?? _SignedInCli(),
         connectionForTest: (_) => _QuietConnection(),
       ) {
     // Already known, so the retry path does not go looking for it over the
@@ -116,6 +126,23 @@ final _endpoint = LocalCliEndpoint(
 );
 
 void main() {
+  test(
+    'a late sign-in check cannot authorize restart after disposal',
+    () async {
+      final discovery = _ScriptedDiscovery([
+        const LocalCliProbe.down('refused'),
+      ]);
+      final login = _DelayedStatus();
+      final notifier = _Notifier(discovery, cliLogin: login)
+        ..status = AppStatus.authenticated;
+      await notifier.retryMachines();
+      final check = discovery.stillSignedIn!();
+      notifier.dispose();
+      login.pending.complete(const CliAuthStatus(loggedIn: true));
+      expect(await check, isFalse);
+    },
+  );
+
   test('local folder snapshots refresh projects without leaking to peers or changing membership', () async {
     final discovery = _ScriptedDiscovery([LocalCliProbe.ready(_endpoint)]);
     final notifier = _Notifier(discovery);
@@ -273,7 +300,7 @@ void main() {
         ),
       ),
     );
-    expect(discovery.superviseCalls, 0);
+    expect(discovery.superviseCalls, 1);
   });
 
   test(
@@ -314,33 +341,59 @@ void main() {
     },
   );
 
-  test('the supervisor reporting ready after a not-ready boot retries the machines without a click', () async {
-    final discovery = _ScriptedDiscovery([
-      const LocalCliProbe.notReady('still scanning for agents'),
-      LocalCliProbe.ready(_endpoint),
-    ]);
-    final notifier = _Notifier(discovery)..status = AppStatus.authenticated;
-    addTearDown(notifier.dispose);
+  for (final failedStart in [false, true]) {
+    test(
+      'the supervisor recovers after ${failedStart ? 'a failed start' : 'a not-ready boot'} without a click',
+      () async {
+        final discovery = _ScriptedDiscovery([
+          failedStart
+              ? const LocalCliProbe.down('connection refused')
+              : const LocalCliProbe.notReady('still scanning for agents'),
+          LocalCliProbe.ready(_endpoint),
+        ]);
+        final notifier = _Notifier(discovery)..status = AppStatus.authenticated;
+        addTearDown(notifier.dispose);
 
-    // The boot path: the gate throws, the error strip shows, supervision is on.
-    await notifier.retryMachines();
-    expect(notifier.lastError, contains('still scanning for agents'));
-    expect(notifier.lastErrorRetryable, isTrue);
-    expect(notifier.refreshes, 0);
-    expect(discovery.onReady, isNotNull);
+        // The boot path: the gate throws, the error strip shows, supervision is on.
+        await notifier.retryMachines();
+        expect(
+          notifier.lastError,
+          contains(failedStart ? 'did not start' : 'still scanning for agents'),
+        );
+        expect(notifier.lastErrorRetryable, isTrue);
+        expect(notifier.refreshes, 0);
+        expect(discovery.onReady, isNotNull);
 
-    // …and the daemon finishes its handshake. The callback fires the retry
-    // without awaiting it; `retryMachines` hands back that same in-flight run.
-    discovery.onReady!(_endpoint);
-    await notifier.retryMachines();
+        // …and the daemon finishes its handshake. The callback fires the retry
+        // without awaiting it; `retryMachines` hands back that same in-flight run.
+        discovery.onReady!(_endpoint);
+        await notifier.retryMachines();
 
-    expect(notifier.lastError, isNull);
-    expect(notifier.refreshes, 1);
-    expect(discovery.ensureCalls, 2);
-    expect(
-      discovery.superviseCalls,
-      1,
-      reason: 'one supervisor for the app, not one per attempt',
+        expect(notifier.lastError, isNull);
+        expect(notifier.refreshes, 1);
+        expect(discovery.ensureCalls, 2);
+        expect(
+          discovery.superviseCalls,
+          1,
+          reason: 'one supervisor for the app, not one per attempt',
+        );
+      },
     );
-  });
+  }
+
+  test(
+    'a late supervisor callback cannot recover a disposed session',
+    () async {
+      final discovery = _ScriptedDiscovery([
+        const LocalCliProbe.down('refused'),
+      ]);
+      final notifier = _Notifier(discovery)..status = AppStatus.authenticated;
+      await notifier.retryMachines();
+      notifier.dispose();
+      discovery.onReady!(_endpoint);
+      await Future<void>.delayed(Duration.zero);
+      expect(notifier.refreshes, 0);
+      expect(discovery.ensureCalls, 1);
+    },
+  );
 }

@@ -511,6 +511,9 @@ class LocalCliDiscovery {
             onSignedOut?.call();
             return;
           }
+          // Canceling a periodic timer does not cancel its active async tick.
+          // A closed window during the auth check must not respawn the daemon.
+          if (!timer.isActive) return;
           try {
             await _spawnCommand();
           } catch (error) {
@@ -694,7 +697,9 @@ DaemonPathPlatform _daemonPathPlatform(LocalMachineIdentity identity) {
   // selected CLI is still the WSL one the moment it answers. Any Windows-rooted doubt
   // resolves POSIX: a `C:\...` cwd simply fails the POSIX check and is dropped, while the
   // reverse mistake dropped every real WSL project folder.
-  return identity.usesWsl || identity.wslSelected != null || identity.wslComputerId != null
+  return identity.usesWsl ||
+          identity.wslSelected != null ||
+          identity.wslComputerId != null
       ? DaemonPathPlatform.posix
       : DaemonPathPlatform.windows;
 }

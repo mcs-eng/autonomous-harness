@@ -55,6 +55,35 @@ Future<void> mountSidebar(
 }
 
 void main() {
+  testWidgets(
+    'an unavailable session exposes its reason without creating an agent',
+    (tester) async {
+      final app = projectApp();
+      addTearDown(app.dispose);
+      app.machineStates['m']!
+        ..nodeOnline = true
+        ..connectionStatus = ConnectionStatus.connected
+        ..agents = const [
+          Agent(
+            id: 'failed',
+            name: 'Unavailable session',
+            terminalAvailable: false,
+            terminalUnavailableReason: 'The terminal process has exited.',
+          ),
+        ];
+      var opens = 0;
+      await mountSidebar(tester, app, onOpen: (_) => opens++);
+      await tester.tap(find.byKey(const ValueKey('project-agent:m:failed')));
+      await tester.pumpAndSettle();
+      expect(find.text('The terminal process has exited.'), findsOneWidget);
+      expect(find.text('Refresh status'), findsOneWidget);
+      expect(opens, 0);
+      expect(app.panes, isEmpty);
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+    },
+  );
+
   test('same-named folders remain separate and picker trailing slash does not duplicate a project', () {
     final app = projectApp();
     addTearDown(app.dispose);
@@ -181,7 +210,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('project-agent:m:a0')), findsNothing);
       // Tab from the filter traverses actions and the project header to the row.
-      for (var i = 0; i < 4; i++) {
+      for (var i = 0; i < 5; i++) {
         await tester.sendKeyEvent(LogicalKeyboardKey.tab);
         await tester.pump();
       }

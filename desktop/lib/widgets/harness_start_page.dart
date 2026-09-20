@@ -21,6 +21,7 @@ class HarnessStartPage extends StatefulWidget {
     required this.onNew,
     required this.onChoose,
     this.onStore,
+    this.resume,
   });
   final FocusNode focusNode;
   final SwarmSearchController Function() createSearch;
@@ -29,6 +30,7 @@ class HarnessStartPage extends StatefulWidget {
 
   /// Open the Harness Store. Null hides its card (a build without one).
   final VoidCallback? onStore;
+  final Widget? resume;
   @override
   State<HarnessStartPage> createState() => _HarnessStartPageState();
 }
@@ -362,6 +364,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
   }
 
   Widget _page() {
+    if (widget.resume != null) return _returningPage();
     return LayoutBuilder(
       builder: (context, constraints) {
         return Padding(
@@ -433,4 +436,63 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
       },
     );
   }
+
+  Widget _returningPage() => Padding(
+    padding: const EdgeInsets.fromLTRB(24, 32, 24, 72),
+    child: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 900),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Keep the editor mounted while results open/close. Replacing its
+            // wrapper can let a retiring text-input connection clear the query
+            // during a dialog transition.
+            Flexible(flex: _showResults ? 1 : 0, child: _searchPanel()),
+            if (!_showResults) ...[
+              const SizedBox(height: 16),
+              HarnessEntryActions(
+                onOpen: _open,
+                onNew: _new,
+                openKey: const ValueKey('harness-start-open'),
+                newKey: const ValueKey('harness-start-new'),
+              ),
+              const SizedBox(height: 24),
+              Expanded(
+                child: ListView(
+                  children: [
+                    widget.resume!,
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 16,
+                      children: [
+                        if (widget.onStore != null)
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              foregroundColor: grid.AppPalette.accentOnSurface,
+                            ),
+                            onPressed: widget.onStore,
+                            key: const ValueKey('harness-store-link'),
+                            child: const Text('Harness Store'),
+                          ),
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            foregroundColor: grid.AppPalette.accentOnSurface,
+                          ),
+                          onPressed: _openDevicePage,
+                          key: const ValueKey('harness-device-link'),
+                          child: const Text('Explore Harness devices'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
 }

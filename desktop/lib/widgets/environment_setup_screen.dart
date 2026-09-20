@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../bootstrap/environment_provisioner.dart';
+import '../core/wsl_preferences.dart';
+import 'wsl_account_dialog.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/widgets/command_row.dart';
 import '../state/app_state.dart';
@@ -13,14 +15,21 @@ import '../theme/app_theme.dart';
 /// installation starts only after the user chooses the visible install action.
 class EnvironmentSetupScreen extends StatefulWidget {
   final AppNotifier notifier;
+  final WslPreferencesStore? wslPreferences;
 
-  const EnvironmentSetupScreen({super.key, required this.notifier});
+  const EnvironmentSetupScreen({
+    super.key,
+    required this.notifier,
+    this.wslPreferences,
+  });
 
   @override
   State<EnvironmentSetupScreen> createState() => _EnvironmentSetupScreenState();
 }
 
 class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
+  WslPreferencesStore get _wslPreferences =>
+      widget.wslPreferences ?? wslPreferencesStore;
   String? _copied;
   final _scroll = ScrollController();
   final _primaryFocus = FocusNode(debugLabel: 'Setup action');
@@ -52,7 +61,12 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _wslPreferences,
+    builder: (context, _) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     grid.AppTheme.watch(context);
     final state = widget.notifier.environmentReadiness;
     final phaseChanged = _lastPhase != state.phase;
@@ -107,7 +121,24 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
                         padding: EdgeInsets.all(compact ? 20 : 28),
                         child: Focus(
                           focusNode: _bodyFocus,
-                          child: _body(state),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (state.windowsHost) ...[
+                                _linuxAccount(state),
+                                const SizedBox(height: 16),
+                              ],
+                              if (state.windowsHost &&
+                                  _wslPreferences.restartRequired)
+                                _heading(
+                                  'Account saved',
+                                  'Reopen OpenHarness to continue',
+                                  'The next launch will check your selected Linux account. Your current installation and running agents have not been changed.',
+                                )
+                              else
+                                _body(state),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -119,6 +150,35 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _linuxAccount(EnvironmentReadiness state) {
+    final selection = _wslPreferences.savedSelection;
+    final canChange =
+        !widget.notifier.environmentSetupInFlight &&
+        const {
+          EnvironmentSetupPhase.review,
+          EnvironmentSetupPhase.chooseMethod,
+          EnvironmentSetupPhase.failed,
+          EnvironmentSetupPhase.ready,
+        }.contains(state.phase);
+    return Wrap(
+      spacing: 12,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text(
+          selection == null
+              ? 'Linux account: WSL default'
+              : 'Linux account: ${selection.username} in ${selection.distro}',
+        ),
+        TextButton(
+          onPressed: canChange
+              ? () => showWslAccountDialog(context, store: _wslPreferences)
+              : null,
+          child: const Text('Change Linux account'),
+        ),
+      ],
     );
   }
 
@@ -537,7 +597,9 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
   }
 
   Widget _footer(EnvironmentReadiness state) {
-    final busy = widget.notifier.environmentSetupInFlight;
+    final busy =
+        widget.notifier.environmentSetupInFlight ||
+        (state.windowsHost && _wslPreferences.restartRequired);
     final mode = state.mode ?? EnvironmentSetupMode.automatic;
     final missingCount = state.plan.length;
     final manual = mode == EnvironmentSetupMode.manual;
@@ -581,7 +643,9 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
       spacing: 8,
       runSpacing: 8,
       children: [
-        if (state.phase == EnvironmentSetupPhase.failed && !manual)
+        if (state.phase == EnvironmentSetupPhase.failed &&
+            !manual &&
+            (state.plan.isNotEmpty || state.failure?.command != null))
           TextButton(
             focusNode: _manualFocus,
             onPressed: busy
@@ -701,12 +765,41 @@ class _CheckRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (color, icon, statusLabel) = switch (status) {
-      EnvironmentStepStatus.ready => (AppColors.success, Icons.check_circle, 'Ready'),
-      EnvironmentStepStatus.failed => (AppColors.danger, Icons.cancel_outlined, 'Missing'),
-      EnvironmentStepStatus.needsTerminal => (AppColors.warning, Icons.circle_outlined, 'Terminal'),
-      EnvironmentStepStatus.running => (AppColors.accent, Icons.circle_outlined, 'Working'),
-      EnvironmentStepStatus.notApplicable => (AppColors.muted, Icons.remove_circle_outline, 'Not applicable'),
-      _ => (AppColors.muted, Icons.circle_outlined, checking ? 'Checking' : 'Required'),
+      EnvironmentStepStatus.ready => (
+        AppColors.success,
+        Icons.check_circle,
+        'Ready',
+      ),
+      EnvironmentStepStatus.failed => (
+        AppColors.danger,
+        Icons.cancel_outlined,
+        'Missing',
+      ),
+      EnvironmentStepStatus.unavailable => (
+        AppColors.warning,
+        Icons.help_outline,
+        'Not checked',
+      ),
+      EnvironmentStepStatus.needsTerminal => (
+        AppColors.warning,
+        Icons.circle_outlined,
+        'Terminal',
+      ),
+      EnvironmentStepStatus.running => (
+        AppColors.accent,
+        Icons.circle_outlined,
+        'Working',
+      ),
+      EnvironmentStepStatus.notApplicable => (
+        AppColors.muted,
+        Icons.remove_circle_outline,
+        'Not applicable',
+      ),
+      _ => (
+        AppColors.muted,
+        Icons.circle_outlined,
+        checking ? 'Checking' : 'Required',
+      ),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),

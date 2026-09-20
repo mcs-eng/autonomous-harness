@@ -7,6 +7,8 @@ import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_login.dart';
 import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/config.dart';
+import 'package:harness/core/local_key_value_store.dart';
+import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/environment_setup_screen.dart';
@@ -21,6 +23,21 @@ const _review = EnvironmentReadiness(
   // Nothing on this computer — the longest plan the screen renders on macOS.
   plan: [EnvironmentPlanItem.tmuxManaged, EnvironmentPlanItem.harnessCli],
 );
+
+class _MemoryPreferences implements LocalKeyValueStore {
+  final values = <String, String>{};
+  @override
+  Future<String?> read(String key) async => values[key];
+  @override
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
+
+  @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
+}
 
 class _Login extends CliLogin {
   @override
@@ -105,6 +122,52 @@ AppNotifier _app(_Provisioner provisioner) =>
       ..environmentReadiness = _review;
 
 void main() {
+  testWidgets(
+    'inconclusive Windows setup offers recheck and blocks work after account change',
+    (tester) async {
+      final provisioner = _Provisioner();
+      final app = _app(provisioner)
+        ..environmentReadiness = const EnvironmentReadiness(
+          windowsHost: true,
+          steps: {
+            EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
+            EnvironmentStep.tmux: EnvironmentStepStatus.unavailable,
+            EnvironmentStep.harness: EnvironmentStepStatus.unavailable,
+          },
+          phase: EnvironmentSetupPhase.failed,
+          failure: EnvironmentFailure(
+            title: 'Could not check Linux tools',
+            detail: 'Recheck the Linux connection.',
+          ),
+        );
+      final store = WslPreferencesStore(storage: _MemoryPreferences());
+      addTearDown(store.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: EnvironmentSetupScreen(notifier: app, wslPreferences: store),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Not checked'), findsNWidgets(2));
+      expect(find.text('Missing'), findsNothing);
+      expect(find.text('Switch to Manual'), findsNothing);
+      await store.save(
+        const WslSelection(distro: 'Ubuntu', username: 'developer'),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Reopen OpenHarness to continue'), findsOneWidget);
+      final recheck = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Recheck'),
+      );
+      expect(recheck.onPressed, isNull);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+    },
+  );
+
   testWidgets('manual setup keeps keyboard focus and never starts an install', (
     tester,
   ) async {

@@ -3,6 +3,7 @@
 // and a create that names the terminal engine with no folder at all (the daemon
 // opens it at home) or with the folder that was picked.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:flutter/material.dart';
@@ -15,6 +16,7 @@ import 'package:harness/core/project_folder.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_arrangement.dart';
 import 'package:harness/widgets/agent_picker.dart';
+import 'package:harness/widgets/companion_agent_dialog.dart';
 import 'package:harness/widgets/engine_identity.dart';
 import 'package:harness/widgets/new_agent_dialog.dart';
 
@@ -138,6 +140,28 @@ void main() {
 
   String engineField(WidgetTester tester) =>
       tester.widget<AgentPicker>(find.byType(AgentPicker)).value;
+
+  testWidgets(
+    'companion cancellation preserves the draft; success closes it without creating',
+    (tester) async {
+      final app = await open(tester);
+      final original = engineField(tester);
+      await chooseAgent(tester, 'zcode-desktop');
+      await tester.pumpAndSettle();
+      expect(find.byType(CompanionAgentDialog), findsOneWidget);
+      Navigator.of(tester.element(find.byType(CompanionAgentDialog)))
+          .pop(false);
+      await tester.pumpAndSettle();
+      expect(engineField(tester), original);
+      await chooseAgent(tester, 'zcode-desktop');
+      await tester.pumpAndSettle();
+      Navigator.of(tester.element(find.byType(CompanionAgentDialog))).pop(true);
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentPicker), findsNothing);
+      expect(app.launches, isEmpty);
+    },
+    skip: !Platform.isWindows,
+  );
 
   testWidgets(
     'the terminal is listed with what the machine has, and never needs installing',

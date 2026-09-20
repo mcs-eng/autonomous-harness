@@ -9,10 +9,13 @@ import 'package:harness/state/swarm_navigation.dart';
 import 'package:harness/state/swarm_search.dart';
 import 'package:harness/state/terminal_pane.dart';
 import 'package:harness/widgets/search_result_text.dart';
+import 'package:harness/widgets/swarm_switcher.dart';
 
 import 'swarm_interactions_test.dart' show chord;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
+
+final _resultRows = find.descendant(of: find.byType(SwarmSearchResults), matching: find.byType(ListTile));
 
 void main() {
   test(
@@ -351,8 +354,8 @@ void main() {
       );
       await tester.enterText(input, 'extensibility');
       await tester.pump();
-      expect(find.byType(ListTile), findsOneWidget);
-      final result = tester.widget<ListTile>(find.byType(ListTile));
+      expect(_resultRows, findsOneWidget);
+      final result = tester.widget<ListTile>(_resultRows);
       final subtitle = result.subtitle! as SearchResultText;
       expect(subtitle.text, 'Code · autonomous-harness · main · Test host');
       expect(subtitle.iconOffset, subtitle.text.indexOf('main'));
@@ -365,7 +368,7 @@ void main() {
       );
       await tester.enterText(input, 'Architecture review');
       await tester.pump();
-      expect(find.byType(ListTile), findsOneWidget);
+      expect(_resultRows, findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
       expect(app.activeSwarm, same(target));

@@ -10,14 +10,18 @@ import '../core/wsl_runtime.dart';
 
 /// Vendor interfaces that run beside Harness, rather than pretending to be
 /// terminal engines with transcript, routing or resume support.
-Future<void> showCompanionAgentDialog(
+Future<bool?> showCompanionAgentDialog(
   BuildContext context, {
   required String agent,
   String? initialFolder,
-}) => showDialog<void>(
+  bool closeOnLaunch = false,
+}) => showDialog<bool>(
   context: context,
-  builder: (_) =>
-      CompanionAgentDialog(agent: agent, initialFolder: initialFolder),
+  builder: (_) => CompanionAgentDialog(
+    agent: agent,
+    initialFolder: initialFolder,
+    closeOnLaunch: closeOnLaunch,
+  ),
 );
 
 class CompanionAgentDialog extends StatefulWidget {
@@ -29,6 +33,7 @@ class CompanionAgentDialog extends StatefulWidget {
     this.loadDistros,
     this.openBrowser,
     this.openZcode,
+    this.closeOnLaunch = false,
   });
 
   final String agent;
@@ -37,6 +42,7 @@ class CompanionAgentDialog extends StatefulWidget {
   final Future<List<String>> Function()? loadDistros;
   final Future<bool> Function(Uri)? openBrowser;
   final Future<void> Function()? openZcode;
+  final bool closeOnLaunch;
 
   @override
   State<CompanionAgentDialog> createState() => _CompanionAgentDialogState();
@@ -52,6 +58,7 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
   String? _error;
   bool _loading = true;
   bool _busy = false;
+  bool _opened = false;
   bool get _deepSeek => widget.agent == 'deepseek-web';
 
   @override
@@ -66,7 +73,12 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
 
   Future<void> _loadDistros() async {
     try {
-      final names = await (widget.loadDistros ?? WslRuntime().usableDistros)();
+      final available =
+          await (widget.loadDistros ?? WslRuntime().usableDistros)();
+      final account = _service.linuxAccount;
+      final names = account == null
+          ? available
+          : available.where((name) => name == account.distro).toList();
       if (!mounted) return;
       setState(() {
         _distros = names;
@@ -74,8 +86,14 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
             ? _service.distro
             : names.firstOrNull;
         _loading = false;
-        if (names.isEmpty) {
-          _error = 'Set up a WSL2 development distribution first.';
+        if (_service.linuxAccountError != null) {
+          _distros = [];
+          _distro = null;
+          _error = _service.linuxAccountError;
+        } else if (names.isEmpty) {
+          _error = account == null
+              ? 'Set up a WSL2 development distribution first.'
+              : 'The selected Linux distribution is unavailable. Check the Linux account in Customize OpenHarness → Terminal.';
         }
       });
     } catch (_) {
@@ -106,6 +124,15 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
       setState(
         () => _error = 'Could not open your browser. Try Open browser again.',
       );
+    }
+    if (opened) _didLaunch();
+  }
+
+  void _didLaunch() {
+    if (!mounted) return;
+    _opened = true;
+    if (widget.closeOnLaunch && ModalRoute.of(context)?.isCurrent == true) {
+      Navigator.of(context).pop(true);
     }
   }
 
@@ -152,6 +179,10 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
               ),
               const SizedBox(height: 16),
               if (_deepSeek) ...[
+                if (_service.linuxAccount != null)
+                  Text(
+                    'Linux account: ${_service.linuxAccount!.username} in ${_service.linuxAccount!.distro}',
+                  ),
                 if (_loading) const LinearProgressIndicator(),
                 if (!_loading && _distros.isNotEmpty)
                   DropdownButtonFormField<String>(
@@ -207,7 +238,7 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          onPressed: _busy ? null : () => Navigator.of(context).pop(_opened),
           child: const Text('Close'),
         ),
         if (_deepSeek && _service.running) ...[
@@ -247,6 +278,7 @@ class _CompanionAgentDialogState extends State<CompanionAgentDialog> {
                       await _openBrowser();
                     } else {
                       await (widget.openZcode ?? launchZcode)();
+                      _didLaunch();
                     }
                   }),
             child: Text(

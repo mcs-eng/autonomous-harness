@@ -108,8 +108,10 @@ void main() {
   late AppNotifier app;
   late MachineState machine;
   late _Connection connection;
+  var disposed = false;
 
   setUp(() {
+    disposed = false;
     connection = _Connection();
     app = AppNotifier(
       config: AppConfig.dev,
@@ -120,7 +122,9 @@ void main() {
     app.machines = [_machine];
     app.machineStates['m'] = machine;
   });
-  tearDown(() => app.dispose());
+  tearDown(() {
+    if (!disposed) app.dispose();
+  });
 
   test('agent inventory and capabilities are requested together', () async {
     final load = app.reloadMachineData('m');
@@ -270,6 +274,32 @@ void main() {
     expect(connection.calls, isEmpty);
     expect(app.panes, isEmpty);
   });
+
+  testWidgets(
+    'a background inventory reply cannot publish after its machine is replaced',
+    (tester) async {
+      app.onMachineConnectedForTest('m');
+      await tester.pump();
+      connection.agents.single.complete(_agents);
+      connection.capabilities.single.complete(_capabilities);
+      await tester.pump();
+      expect(machine.agents.single.id, 'a');
+      await tester.pump(AppNotifier.agentSyncInterval);
+      expect(connection.agents, hasLength(2));
+      final originalAgents = machine.agents;
+      final replacement = MachineState(_machine);
+      app.machineStates['m'] = replacement;
+      var updates = 0;
+      app.addListener(() => updates++);
+      connection.agents.last.complete(const {'agents': []});
+      await tester.pump();
+      expect(machine.agents, same(originalAgents));
+      expect(replacement.agents, isEmpty);
+      expect(updates, 0);
+      app.dispose();
+      disposed = true;
+    },
+  );
 
   group('pane colours reach the daemon', () {
     tearDown(() {
