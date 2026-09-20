@@ -289,6 +289,41 @@ void main() {
   });
 
   group('HarnessCliRunner on Windows', () {
+    test('a verified WSL probe still requires the packaged CLI bundle', () async {
+      final bundle = await Directory.systemTemp.createTemp('harness-probe-bundle');
+      addTearDown(() => bundle.deleteSync(recursive: true));
+      File('${bundle.path}/cli.js').writeAsStringSync('fixture CLI');
+      final runner = HarnessCliRunner(
+        isWindows: true,
+        requiresWindowsBundle: true,
+        windowsBundleDirectory: bundle,
+        verifiedWslProbe: const WslHarnessProbe(
+          distro: 'Ubuntu',
+          tmuxReady: true,
+        ),
+        wslRuntime: WslRuntime(
+          runProcess: fake((_, _) => throw StateError('Unexpected WSL probe')),
+        ),
+      );
+
+      await expectLater(
+        runner.resolve(['version']),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('notify.mjs'),
+          ),
+        ),
+      );
+      File('${bundle.path}/notify.mjs').writeAsStringSync('fixture notifier');
+      final invocation = await runner.resolve(['version']);
+      expect(invocation.source, HarnessCliSource.wsl);
+      expect(invocation.wslDistro, 'Ubuntu');
+      expect(invocation.arguments, contains(bundle.path));
+      expect(invocation.arguments.last, 'version');
+    });
+
     test('never spawns a bare harness when the CLI is absent', () async {
       if (!Platform.isWindows) return;
       final runner = HarnessCliRunner(
@@ -762,6 +797,32 @@ void main() {
       expect(readiness.plan, isEmpty);
     });
 
+    for (final checks in [1, 2]) {
+      test('each of $checks readiness checks discovers WSL only once', () async {
+        final seen = <List<String>>[];
+        final readiness = await verify(
+          wslEnabled: true,
+          listing: 'Ubuntu\r\n',
+          probe: 'cli launcher\ntmux yes\n',
+          seen: seen,
+          checks: checks,
+        );
+
+        expect(readiness.isReady, isTrue);
+        expect(seen.where((args) => args.contains('--status')), hasLength(checks));
+        expect(seen.where((args) => args.contains('-l')), hasLength(checks));
+        expect(
+          seen.where((args) => args.contains('harness-probe')),
+          hasLength(checks),
+        );
+        expect(seen.where((args) => args.last == 'version'), hasLength(checks));
+        expect(seen, hasLength(4 * checks));
+        for (final args in seen.where((args) => args.contains('-d'))) {
+          expect(args[1], 'Ubuntu');
+        }
+      });
+    }
+
     test('a signed-out CLI is still a ready ENVIRONMENT', () async {
       // Installation and sign-in are different questions. The install probe is
       // `harness version`, which says nothing about the session; the login
@@ -929,8 +990,9 @@ Future<EnvironmentReadiness> verify({
   bool sudoAllowed = false,
   bool readyOutput = false,
   bool tmuxInstallSucceeds = true,
+  int checks = 1,
   List<List<String>>? seen,
-}) {
+}) async {
   final calls = <List<String>>[];
   var currentProbe = probe;
   ProcessResult respond(String executable, List<String> arguments) {
@@ -997,7 +1059,7 @@ Future<EnvironmentReadiness> verify({
         : Process.start('/bin/echo', ['simulated install output']);
   }
 
-  return EnvironmentProvisioner(
+  final provisioner = EnvironmentProvisioner(
     harnessHome: Directory('${Directory.systemTemp.path}\\harness-none'),
     isMacOS: false,
     isLinux: false,
@@ -1009,8 +1071,17 @@ Future<EnvironmentReadiness> verify({
           respond(executable, arguments),
       startProcess: startSimulatedInstall,
     ),
-  ).ensureReady(onProgress: (_) {}, install: install).then((readiness) {
-    if (seen != null) seen.addAll(calls);
-    return readiness;
-  });
+  );
+  var readiness = await provisioner.ensureReady(
+    onProgress: (_) {},
+    install: install,
+  );
+  for (var check = 1; check < checks; check++) {
+    readiness = await provisioner.ensureReady(
+      onProgress: (_) {},
+      install: install,
+    );
+  }
+  if (seen != null) seen.addAll(calls);
+  return readiness;
 }

@@ -68,6 +68,9 @@ class HarnessCliRunner {
   })
   _startProcess;
   final WslRuntime _wsl;
+  // A successful probe from the current preflight, used only by that check's
+  // short-lived runner. A later preflight still discovers its runtime afresh.
+  final WslHarnessProbe? verifiedWslProbe;
   final bool _isWindows;
   final bool _requiresWindowsBundle;
   final Directory _windowsBundleDirectory;
@@ -110,6 +113,7 @@ class HarnessCliRunner {
     })?
     startProcess,
     WslRuntime? wslRuntime,
+    this.verifiedWslProbe,
     Duration? wslProbeMissTtl,
     DateTime Function()? now,
     bool? isWindows,
@@ -252,6 +256,8 @@ class HarnessCliRunner {
   /// app could see a CLI that had just appeared. A hit is cached for good.
   Future<WslHarnessProbe?> _wslHarness() {
     return _wslProbeCache.read(() async {
+      final verified = verifiedWslProbe;
+      if (verified != null && verified.found) return verified;
       try {
         final probe = await _wsl.findHarness();
         return probe.found ? probe : null;
