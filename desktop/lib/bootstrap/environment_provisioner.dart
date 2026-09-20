@@ -999,17 +999,6 @@ class EnvironmentProvisioner {
     );
     emit(output: '✓ Windows host · no POSIX toolchain required');
 
-    final runner = HarnessCliRunner(
-      harnessHome: harnessHome,
-      runProcess: _runWasInjected ? _run : null,
-      environment: _platformEnvironment,
-      // Forward the injected platform override: a test (or embedder) forcing
-      // isWindows on a non-Windows host must drive the runner's WINDOWS
-      // resolution — the WSL2 bridge — not the native path this host would
-      // otherwise pick (review cycle-3, P2; the fixtures reject native
-      // invocations, so without this the readiness assertions fail off-Windows).
-      isWindows: _isWindows,
-    );
     final wsl =
         _wslRuntime ?? WslRuntime(runProcess: _runWasInjected ? _run : null);
 
@@ -1136,9 +1125,18 @@ class EnvironmentProvisioner {
 
     if (probe.found) {
       // The CLI answered a probe; now make it RUN and prove it, through the
-      // same runner the app will use for every later call (which resolves to
-      // this distro). A distro that has a `harness` file that cannot execute is
-      // not a ready computer.
+      // same invocation path as later calls, using the distro just discovered.
+      // This runner belongs only to this check; a recheck probes WSL afresh.
+      // A distro with a `harness` file that cannot execute is not ready.
+      final runner = HarnessCliRunner(
+        harnessHome: harnessHome,
+        runProcess: _runWasInjected ? _run : null,
+        environment: _platformEnvironment,
+        // Preserve the injected platform when exercising Windows on another OS.
+        isWindows: _isWindows,
+        wslRuntime: wsl,
+        verifiedWslProbe: probe,
+      );
       final ProcessResult version;
       try {
         version = await runner.runBounded(['version']);
