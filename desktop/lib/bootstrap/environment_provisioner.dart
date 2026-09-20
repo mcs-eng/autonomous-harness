@@ -1,4 +1,5 @@
 import '../core/host_platform.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -1029,6 +1030,7 @@ class EnvironmentProvisioner {
         probe.distro ?? (usable.isEmpty ? null : usable.first);
 
     List<EnvironmentPlanItem> planFor(WslHarnessProbe current) {
+      if (current.failure != null) return const [];
       if (installTarget == null) {
         return [
           EnvironmentPlanItem.windowsWslPrerequisite(
@@ -1043,6 +1045,31 @@ class EnvironmentProvisioner {
       ];
     }
 
+    bool reportProbeFailure(WslHarnessProbe current) {
+      if (current.failure == null) return false;
+      final failure = EnvironmentFailure(
+        title: 'Could not check the tools in ${current.distroLabel}',
+        detail:
+            '${current.failureDetail} '
+            'Their installation status is unknown. Click Recheck to try again. '
+            'If it keeps failing, open that distribution in Windows Terminal '
+            'and check that its login shell starts normally.',
+        exitCode: current.exitCode,
+      );
+      for (final step in [EnvironmentStep.harness, EnvironmentStep.tmux]) {
+        emit(step: step, status: EnvironmentStepStatus.unavailable);
+      }
+      emit(
+        message: failure.detail,
+        output: failure.detail,
+        phase: EnvironmentSetupPhase.failed,
+        failure: failure,
+        plan: const [],
+      );
+      return true;
+    }
+
+    if (reportProbeFailure(probe)) return snapshot();
     emit(plan: planFor(probe));
 
     if ((!probe.found || !probe.tmuxReady) &&
@@ -1069,6 +1096,7 @@ class EnvironmentProvisioner {
             );
           }
           probe = await wsl.probeHarness(distro: installTarget);
+          if (reportProbeFailure(probe)) return snapshot();
           emit(plan: planFor(probe));
           if (!probe.tmuxReady) {
             if (!probe.found) {
@@ -1114,6 +1142,7 @@ class EnvironmentProvisioner {
             );
           }
           probe = await wsl.findHarness(distros: usable);
+          if (reportProbeFailure(probe)) return snapshot();
           emit(plan: planFor(probe));
         }
       } else {
@@ -1153,12 +1182,14 @@ class EnvironmentProvisioner {
           output: '✗ $error',
         );
         emit(
-          message: 'The Harness CLI shipped with this app is missing or damaged.',
+          message:
+              'The Harness CLI shipped with this app is missing or damaged.',
           phase: EnvironmentSetupPhase.failed,
           failure: EnvironmentFailure(
             step: EnvironmentStep.harness,
             title: 'The packaged Harness CLI is missing or damaged',
-            detail: 'The CLI bundled with this app could not be loaded '
+            detail:
+                'The CLI bundled with this app could not be loaded '
                 '($error). Reinstall the app, or restore the folder named in '
                 'the output, then click Recheck.',
           ),
@@ -1254,7 +1285,9 @@ class EnvironmentProvisioner {
     emit(step: EnvironmentStep.harness, status: EnvironmentStepStatus.failed);
     emit(
       step: EnvironmentStep.tmux,
-      status: usable.isEmpty
+      status: probe.tmuxReady
+          ? EnvironmentStepStatus.ready
+          : usable.isEmpty
           ? EnvironmentStepStatus.unavailable
           : EnvironmentStepStatus.failed,
     );
@@ -1262,6 +1295,7 @@ class EnvironmentProvisioner {
       wslAvailable: wslAvailable,
       usable: usable,
       dockerOnly: dockerOnly,
+      distro: probe.distro,
     );
     emit(
       message: failure.detail,
@@ -1282,6 +1316,7 @@ class EnvironmentProvisioner {
     required bool wslAvailable,
     required List<String> usable,
     required List<String> dockerOnly,
+    String? distro,
   }) {
     if (!wslAvailable) {
       return const EnvironmentFailure(
@@ -1315,14 +1350,17 @@ class EnvironmentProvisioner {
         command: WslRuntime.enableWslCommand,
       );
     }
+    final target = distro ?? usable.first;
     return EnvironmentFailure(
-      title: 'The Harness CLI is not installed in ${usable.first}',
+      title: 'The Harness CLI was not found in $target',
       detail:
-          'The distribution ${usable.first} answers, but has no Harness CLI. Run '
-          'the command below inside it — the installer provisions the managed '
+          'The current WSL user in $target answers, but the Harness CLI was not '
+          'found in that user\'s home or PATH. If Harness worked before, check '
+          'whether the distribution\'s default user changed before installing. '
+          'Otherwise run the command below — the installer provisions the managed '
           'Node runtime and tmux — then click Recheck. If it asks for a password, '
           'Harness cannot type it for you.',
-      command: WslRuntime.installCommandForDisplay(distro: usable.first),
+      command: WslRuntime.installCommandForDisplay(distro: target),
     );
   }
 

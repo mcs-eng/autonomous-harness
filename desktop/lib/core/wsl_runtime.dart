@@ -265,6 +265,7 @@ class WslRuntime {
   Future<WslHarnessProbe> findHarness({List<String>? distros}) async {
     final names = distros ?? await usableDistros();
     WslHarnessProbe? firstFound;
+    WslHarnessProbe? firstFailed;
     WslHarnessProbe? firstMissing;
     for (final distro in names) {
       if (isDockerDistro(distro)) continue;
@@ -272,11 +273,16 @@ class WslRuntime {
       if (probe.found) {
         if (probe.tmuxReady) return probe;
         firstFound ??= probe;
+      } else if (probe.failure != null) {
+        firstFailed ??= probe;
       } else {
         firstMissing ??= probe;
       }
     }
-    return firstFound ?? firstMissing ?? const WslHarnessProbe.notFound();
+    return firstFound ??
+        firstFailed ??
+        firstMissing ??
+        const WslHarnessProbe.notFound();
   }
 
   /// Looks for the CLI in one distro, run exactly as the app would run it, and
@@ -298,11 +304,37 @@ class WslRuntime {
       scriptName: 'harness-probe',
     );
     if (result.exitCode != 0) {
-      return WslHarnessProbe(distro: distro, found: false);
+      return WslHarnessProbe.failed(
+        distro: distro,
+        failure: result.exitCode == 124
+            ? WslProbeFailure.timedOut
+            : WslProbeFailure.commandFailed,
+        exitCode: result.exitCode,
+      );
     }
-    final answer = '${result.stdout}';
-    final tmuxReady = answer.contains('tmux yes');
-    if (answer.contains('cli launcher')) {
+    // Login shells can print banners. Accept only complete, unambiguous marker
+    // lines, never a substring or a partial response as evidence of absence.
+    final lines = '${result.stdout}'
+        .split(RegExp(r'\r?\n'))
+        .map((s) => s.trim());
+    final cli = lines.where((line) => line.startsWith('cli ')).toList();
+    final tmux = lines.where((line) => line.startsWith('tmux ')).toList();
+    if (cli.length != 1 ||
+        !const [
+          'cli launcher',
+          'cli path',
+          'cli missing',
+        ].contains(cli.single) ||
+        tmux.length != 1 ||
+        !const ['tmux yes', 'tmux no'].contains(tmux.single)) {
+      return WslHarnessProbe.failed(
+        distro: distro,
+        failure: WslProbeFailure.invalidResponse,
+        exitCode: result.exitCode,
+      );
+    }
+    final tmuxReady = tmux.single == 'tmux yes';
+    if (cli.single == 'cli launcher') {
       return WslHarnessProbe(
         distro: distro,
         viaPath: false,
@@ -310,7 +342,7 @@ class WslRuntime {
         tmuxReady: tmuxReady,
       );
     }
-    if (answer.contains('cli path')) {
+    if (cli.single == 'cli path') {
       return WslHarnessProbe(
         distro: distro,
         viaPath: true,
@@ -503,12 +535,16 @@ exec "$node" "$bundle_dir/cli.js" "$@"
 /// missing. It is null only when no usable distribution was available. This
 /// lets provisioning target the selected distro and preserve its independent
 /// tmux result without ever falling through to WSL's implicit default.
+enum WslProbeFailure { timedOut, commandFailed, invalidResponse }
+
 class WslHarnessProbe {
   final String? distro;
   final bool viaPath;
   final String executable;
   final bool found;
   final bool tmuxReady;
+  final WslProbeFailure? failure;
+  final int? exitCode;
 
   const WslHarnessProbe({
     required this.distro,
@@ -516,14 +552,37 @@ class WslHarnessProbe {
     this.executable = 'harness',
     this.found = true,
     this.tmuxReady = false,
-  });
+  }) : failure = null,
+       exitCode = null;
+
+  const WslHarnessProbe.failed({
+    required this.distro,
+    required this.failure,
+    this.exitCode,
+  }) : viaPath = false,
+       executable = 'harness',
+       found = false,
+       tmuxReady = false;
 
   const WslHarnessProbe.notFound()
     : distro = null,
       viaPath = false,
       executable = 'harness',
       found = false,
-      tmuxReady = false;
+      tmuxReady = false,
+      failure = null,
+      exitCode = null;
+
+  /// Authored diagnostics only: shell output can contain account secrets.
+  String? get failureDetail => switch (failure) {
+    WslProbeFailure.timedOut =>
+      'The tool check in $distroLabel did not answer before its timeout.',
+    WslProbeFailure.commandFailed =>
+      'The tool check in $distroLabel failed with exit code $exitCode.',
+    WslProbeFailure.invalidResponse =>
+      'The tool check in $distroLabel returned an incomplete or unrecognized response.',
+    null => null,
+  };
 
   /// The distro name a person reads, for a row on the setup screen.
   String get distroLabel => distro ?? 'no usable WSL distro';
