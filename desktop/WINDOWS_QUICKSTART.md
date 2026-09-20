@@ -172,10 +172,27 @@ The upstream **Grid** harness (`autonomous/autonomous-grid`) is available from
 distribution to inspect connected machines, model placement, and fleet telemetry.
 Install and authenticate Codex there before starting the agent.
 
-On Windows, choose **Open in browser** in the viewer pane. Keep Harness and the
-workspace running while using the dashboard. Viewer addresses can change after a
-restart; use the pane's button again instead of a saved browser bookmark. Viewers
-are embedded in Harness on macOS; Windows and Linux use the external browser.
+Current Windows source builds embed Grid and other Store viewers beside their
+terminals using Microsoft Edge WebView2. Click inside the page to interact with
+it; click a terminal or another app control to return keyboard focus. The pane
+header provides **Reload viewer**, **Open viewer in browser**, zoom, and close.
+Closing a viewer releases its browser surface and leaves the agent running.
+
+Keep Harness and the workspace running while using the dashboard. Viewer
+addresses can change after a restart; the pane follows the current address.
+If the embedded browser cannot start, use **Retry** or **Open in browser**.
+Windows 11 normally includes the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/);
+the app reports when it is missing and does not install it silently. Older
+Windows previews and Linux retain the external-browser fallback.
+
+The embedded viewer uses its own browser profile, separate from your regular
+browser. Popups and device permissions (camera, microphone, location, clipboard
+reads, and notifications) are denied; use the external browser for pages that
+need them. Ordinary page navigation and downloads follow WebView2 behavior;
+downloads show a notice in the pane. No native command bridge, filesystem
+mapping, or disabled browser security is added. The Windows plugin is pinned in
+`pubspec.lock`; its WebView2/WIL build packages use the public NuGet feed in
+`desktop/nuget.config` without changing global NuGet settings.
 
 Connect your own Grid before expecting live fleet data. Installing this package
 does not deploy models or enroll your GPU machines automatically.
