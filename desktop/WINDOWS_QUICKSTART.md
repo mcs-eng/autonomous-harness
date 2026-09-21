@@ -183,6 +183,8 @@ terminals using Microsoft Edge WebView2. Click inside the page to interact with
 it; click a terminal or another app control to return keyboard focus. The pane
 header provides **Reload viewer**, **Open viewer in browser**, zoom, and close.
 Closing a viewer releases its browser surface and leaves the agent running.
+Grid's **Pause motion** and **Rack** view stop the map's animation scheduling;
+telemetry continues updating. Hidden pages also stop motion until visible again.
 
 Keep Harness and the workspace running while using the dashboard. Viewer
 addresses can change after a restart; the pane follows the current address.
