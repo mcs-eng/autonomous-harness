@@ -1554,13 +1554,36 @@ class _TerminalHeader extends StatelessWidget {
             !isTerminalEngine(session.engineId)
         ? onToggleComposer
         : null;
-    // The icon cluster, plus the model picker that now sits at its left — without the extra the
-    // constraint clips the picker rather than the details it was measured for. Zero on an engine
-    // that gets no picker, so those headers keep the width they always had.
+    final showShare = !readOnly && machine?.machine.isShared != true;
+    final showViewer = agent?.viewerUrl != null || agent?.viewerError != null;
     final showModelPicker =
         status == null && !readOnly && modelPickerSupports(session.engineId);
-    final pickerWidth = showModelPicker ? 72.0 : 0.0;
-    final actionsWidth = (remoteComposer == null ? 118.0 : 148.0) + pickerWidth;
+    // PaneHeaderActions always shows four 28px buttons with 2px gaps, plus
+    // each available action. Reserve the model label at its actual text scale
+    // and its loading spinner before assigning the remaining title space.
+    var pickerWidth = 0.0;
+    if (showModelPicker) {
+      final modelLabel = TextPainter(
+        text: TextSpan(
+          text: 'Model',
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 11),
+        ),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+        locale: Localizations.maybeLocaleOf(context),
+        maxLines: 1,
+      )..layout();
+      // 12px padding, 14px arrow, 16px loading indicator/gap, 4px action gap.
+      pickerWidth = modelLabel.width.ceilToDouble() + 12 + 14 + 16 + 4;
+      modelLabel.dispose();
+    }
+    final actionsWidth =
+        118.0 +
+        (showShare ? 30 : 0) +
+        (showViewer ? 30 : 0) +
+        (remoteComposer != null ? 30 : 0) +
+        (onFork != null ? 30 : 0) +
+        pickerWidth;
     final folder =
         project?.cwd
             .split(RegExp(r'[/\\]'))
@@ -1586,271 +1609,276 @@ class _TerminalHeader extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: _stripPadding),
           child: LayoutBuilder(
-            builder: (context, constraints) => Row(
-              children: [
-                if (agent != null)
-                  EngineMark.forAgent(agent, size: 17)
-                else
-                  EngineMark(engine: session.engineId, size: 17),
-                // Icon and name, the same as every other pane (owner,
-                // 2026-09-15): a harness agent is its harness here, and the
-                // engine it runs on is the dialog's and the tooltip's to say.
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Row(
-                    children: [
-                      Flexible(
-                        child: Tooltip(
-                          message: identityDetail,
-                          waitDuration: const Duration(milliseconds: 700),
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onDoubleTap: () => unawaited(
-                              showAgentRenameDialog(
-                                context,
-                                notifier,
-                                session.machineId,
-                                session.agentId,
-                                session.agentName,
+            builder: (context, constraints) {
+              final overflowActions = constraints.maxWidth < actionsWidth + 110;
+              // Keep More, Stop, Close and the model/viewer controls directly
+              // reachable. Other actions remain in the overflow menu.
+              final headerActionsWidth = overflowActions
+                  ? 88.0 + (showModelPicker ? 32 : 0) + (showViewer ? 30 : 0)
+                  : actionsWidth;
+              return Row(
+                children: [
+                  if (agent != null)
+                    EngineMark.forAgent(agent, size: 17)
+                  else
+                    EngineMark(engine: session.engineId, size: 17),
+                  // Icon and name, the same as every other pane (owner,
+                  // 2026-09-15): a harness agent is its harness here, and the
+                  // engine it runs on is the dialog's and the tooltip's to say.
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Tooltip(
+                            message: identityDetail,
+                            waitDuration: const Duration(milliseconds: 700),
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onDoubleTap: () => unawaited(
+                                showAgentRenameDialog(
+                                  context,
+                                  notifier,
+                                  session.machineId,
+                                  session.agentId,
+                                  session.agentName,
+                                ),
                               ),
-                            ),
-                            child: Text(
-                              session.agentName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: AppColors.text,
-                                fontFamily: AppFonts.sans,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
+                              child: Text(
+                                session.agentName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: AppColors.text,
+                                  fontFamily: AppFonts.sans,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      if (status != null)
-                        ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxWidth: math.max(
-                              0,
-                              math.min(
-                                constraints.maxWidth * .22,
-                                constraints.maxWidth - actionsWidth - 110,
+                        const SizedBox(width: 8),
+                        if (status != null)
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: math.max(
+                                0,
+                                math.min(
+                                  constraints.maxWidth * .22,
+                                  constraints.maxWidth -
+                                      headerActionsWidth -
+                                      110,
+                                ),
                               ),
                             ),
-                          ),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Tooltip(
-                              message: status.detail,
-                              child: TextButton(
-                                onPressed: canReconnect
-                                    ? () => notifier.selectAgent(
-                                        session.machineId,
-                                        session.agentId,
-                                      )
-                                    : null,
-                                style: TextButton.styleFrom(
-                                  foregroundColor: color,
-                                  disabledForegroundColor: AppColors.textSoft,
-                                  minimumSize: Size.zero,
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 6,
-                                    vertical: 4,
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: Tooltip(
+                                message: status.detail,
+                                child: TextButton(
+                                  onPressed: canReconnect
+                                      ? () => notifier.selectAgent(
+                                          session.machineId,
+                                          session.agentId,
+                                        )
+                                      : null,
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: color,
+                                    disabledForegroundColor: AppColors.textSoft,
+                                    minimumSize: Size.zero,
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 4,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(status.icon, size: 14),
+                                      const SizedBox(width: 6),
+                                      Flexible(
+                                        child: Text(
+                                          status.label,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontSize: 11),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(status.icon, size: 14),
-                                    const SizedBox(width: 6),
-                                    Flexible(
-                                      child: Text(
-                                        status.label,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(fontSize: 11),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        )
-                      else if (!compact)
-                        Padding(
-                          padding: const EdgeInsets.all(4),
-                          child: Icon(Icons.circle, size: 8, color: color),
-                        ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Which of the three paths carries this pane's bytes. Absent for a local machine's own
-                // terminal, which has no such distinction and so gets no badge.
-                //
-                // The wire word and the word a person reads differ for the middle state, deliberately:
-                // the CLI sends 'turn' (it is a TURN allocation) but both middle and last are relays to
-                // a reader, so they read as "relay" and "ws". 'relay' on the wire kept its original
-                // meaning — the backend WebSocket — so an older CLI is never mislabelled.
-                if (!compact && session.linkMode != null)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                    child: _LinkModeMark(mode: session.linkMode!),
-                  ),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: math.max(
-                      actionsWidth,
-                      constraints.maxWidth * .55,
-                    ),
-                  ),
-                  child: PaneHeaderActions(
-                    // Where this agent runs, with the controls rather than beside the name — the
-                    // header has room for one of the two, and this is the half you only read while
-                    // reaching for it. Absent while a notice is showing: a header asking to
-                    // reconnect is not the moment to offer a menu.
-                    modelPicker: showModelPicker
-                        ? GridModelPicker(
-                            notifier: notifier,
-                            machineId: session.machineId,
-                            currentModel: agent?.gridModel,
-                            currentTargetId: agent?.gridTargetId,
-                            webSearch: agent?.gridWebSearch,
-                            engineLabel: session.engineId,
-                            onSelected: (model) => unawaited(
-                              notifier.retargetAgentToGridModel(
-                                session.machineId,
-                                session.agentId,
-                                model.id,
-                                gridName: model.grid,
-                                gridTarget: model.targetId,
-                              ),
-                            ),
-                            onUseOwnLogin: () => unawaited(
-                              notifier.clearAgentGrid(
-                                session.machineId,
-                                session.agentId,
-                              ),
-                            ),
-                            // The pane's own context, because the door opens New Agent — and
-                            // the pane's own MACHINE, because a picker on a remote agent's pane
-                            // is asking about the models that computer can serve, not this one's.
-                            onRunLocalModel: () => unawaited(
-                              notifier.runLocalModel(
-                                context,
-                                machineId: session.machineId,
                               ),
                             ),
                           )
-                        : null,
-                    onShare:
-                        readOnly ||
-                            notifier
-                                    .stateOf(session.machineId)
-                                    ?.machine
-                                    .isShared ==
-                                true
-                        ? null
-                        : () => showShareHarnessDialog(
-                            context,
-                            notifier,
-                            session.machineId,
-                            session.agentId,
-                            session.agentName,
+                        else if (!compact)
+                          Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Icon(Icons.circle, size: 8, color: color),
                           ),
-                    zoomed: zoomed,
-                    onZoom: onToggleZoom,
-                    onRestart: onRestart,
-                    onFork: onFork,
-                    onDelete: onDelete,
-                    onClose: onClose,
-                    terminal: isTerminalEngine(session.engineId),
-                    onToggleComposer: remoteComposer,
-                    composerVisible: composerVisible,
-                    // A harness agent's viewer, shown or hidden from the
-                    // pane it belongs to.
-                    onToggleViewer:
-                        agent?.viewerUrl == null && agent?.viewerError == null
-                        ? null
-                        : () => notifier.toggleViewerPane(
-                            session.machineId,
-                            agent!.id,
-                          ),
-                    viewerVisible:
-                        agent != null &&
-                        notifier.viewerPaneShown(session.machineId, agent.id),
-                    viewerColor: agent == null
-                        ? null
-                        : agentIdentity(agent).color,
-                    details: Tooltip(
-                      message: [
-                        if (forkedFrom != null)
-                          'Forked from ${forkedFrom.name}',
-                        if (project != null) project.cwd,
-                        if (project?.branch?.isNotEmpty == true)
-                          'Branch: ${project!.branch}',
-                        machineName,
-                      ].join('\n'),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          for (var i = 0; i < details.length; i++) ...[
-                            if (i > 0)
-                              Text(
-                                '  •  ',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: AppColors.mutedStrong,
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Which of the three paths carries this pane's bytes. Absent for a local machine's own
+                  // terminal, which has no such distinction and so gets no badge.
+                  //
+                  // The wire word and the word a person reads differ for the middle state, deliberately:
+                  // the CLI sends 'turn' (it is a TURN allocation) but both middle and last are relays to
+                  // a reader, so they read as "relay" and "ws". 'relay' on the wire kept its original
+                  // meaning — the backend WebSocket — so an older CLI is never mislabelled.
+                  if (!compact && session.linkMode != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2),
+                      child: _LinkModeMark(mode: session.linkMode!),
+                    ),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: math.max(
+                        headerActionsWidth,
+                        constraints.maxWidth * .55,
+                      ),
+                    ),
+                    child: PaneHeaderActions(
+                      compact: overflowActions,
+                      // Where this agent runs, with the controls rather than beside the name — the
+                      // header has room for one of the two, and this is the half you only read while
+                      // reaching for it. Absent while a notice is showing: a header asking to
+                      // reconnect is not the moment to offer a menu.
+                      modelPicker: showModelPicker
+                          ? GridModelPicker(
+                              iconOnly: overflowActions,
+                              notifier: notifier,
+                              machineId: session.machineId,
+                              currentModel: agent?.gridModel,
+                              currentTargetId: agent?.gridTargetId,
+                              webSearch: agent?.gridWebSearch,
+                              engineLabel: session.engineId,
+                              onSelected: (model) => unawaited(
+                                notifier.retargetAgentToGridModel(
+                                  session.machineId,
+                                  session.agentId,
+                                  model.id,
+                                  gridName: model.grid,
+                                  gridTarget: model.targetId,
                                 ),
                               ),
-                            Flexible(
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (i == branchIndex) ...[
-                                    Icon(
-                                      LucideIcons.gitBranch300,
-                                      size: 12,
-                                      color: AppColors.mutedStrong,
-                                    ),
-                                    const SizedBox(width: 4),
-                                  ],
-                                  if (i == forkIndex) ...[
-                                    Icon(
-                                      LucideIcons.gitFork300,
-                                      size: 12,
-                                      color: AppColors.mutedStrong,
-                                    ),
-                                    const SizedBox(width: 4),
-                                  ],
-                                  Flexible(
-                                    child: Text(
-                                      details[i],
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontFamily: AppFonts.sans,
-                                        fontSize: 12,
+                              onUseOwnLogin: () => unawaited(
+                                notifier.clearAgentGrid(
+                                  session.machineId,
+                                  session.agentId,
+                                ),
+                              ),
+                              // The pane's own context, because the door opens New Agent — and
+                              // the pane's own MACHINE, because a picker on a remote agent's pane
+                              // is asking about the models that computer can serve, not this one's.
+                              onRunLocalModel: () => unawaited(
+                                notifier.runLocalModel(
+                                  context,
+                                  machineId: session.machineId,
+                                ),
+                              ),
+                            )
+                          : null,
+                      onShare: showShare
+                          ? () => showShareHarnessDialog(
+                              context,
+                              notifier,
+                              session.machineId,
+                              session.agentId,
+                              session.agentName,
+                            )
+                          : null,
+                      zoomed: zoomed,
+                      onZoom: onToggleZoom,
+                      onRestart: onRestart,
+                      onFork: onFork,
+                      onDelete: onDelete,
+                      onClose: onClose,
+                      terminal: isTerminalEngine(session.engineId),
+                      onToggleComposer: remoteComposer,
+                      composerVisible: composerVisible,
+                      // A harness agent's viewer, shown or hidden from the
+                      // pane it belongs to.
+                      onToggleViewer: showViewer
+                          ? () => notifier.toggleViewerPane(
+                              session.machineId,
+                              agent!.id,
+                            )
+                          : null,
+                      viewerVisible:
+                          agent != null &&
+                          notifier.viewerPaneShown(session.machineId, agent.id),
+                      viewerColor: agent == null
+                          ? null
+                          : agentIdentity(agent).color,
+                      details: Tooltip(
+                        message: [
+                          if (forkedFrom != null)
+                            'Forked from ${forkedFrom.name}',
+                          if (project != null) project.cwd,
+                          if (project?.branch?.isNotEmpty == true)
+                            'Branch: ${project!.branch}',
+                          machineName,
+                        ].join('\n'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            for (var i = 0; i < details.length; i++) ...[
+                              if (i > 0)
+                                Text(
+                                  '  •  ',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: AppColors.mutedStrong,
+                                  ),
+                                ),
+                              Flexible(
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (i == branchIndex) ...[
+                                      Icon(
+                                        LucideIcons.gitBranch300,
+                                        size: 12,
                                         color: AppColors.mutedStrong,
                                       ),
+                                      const SizedBox(width: 4),
+                                    ],
+                                    if (i == forkIndex) ...[
+                                      Icon(
+                                        LucideIcons.gitFork300,
+                                        size: 12,
+                                        color: AppColors.mutedStrong,
+                                      ),
+                                      const SizedBox(width: 4),
+                                    ],
+                                    Flexible(
+                                      child: Text(
+                                        details[i],
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontFamily: AppFonts.sans,
+                                          fontSize: 12,
+                                          color: AppColors.mutedStrong,
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
-                            ),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              );
+            },
           ),
         ),
       ),

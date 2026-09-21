@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/screens/swarm_screen.dart';
+import 'package:harness/widgets/harness_start_page.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 
 import 'support/real_fonts.dart';
@@ -104,29 +105,24 @@ void main() {
           'Find a harness',
         );
         expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
-        expect(find.byType(ListTile), findsNothing);
+        expect(find.text('Continue working'), findsOneWidget);
         final fieldRect = tester.getRect(field);
         final createRect = tester.getRect(create);
         final openRect = tester.getRect(open);
-        final deviceRect = tester.getRect(device);
-        final storeRect = tester.getRect(store);
         expect(createRect.center.dy, closeTo(openRect.center.dy, 1));
         expect(openRect.top, greaterThan(fieldRect.bottom));
         expect(openRect.left, closeTo(fieldRect.left, 1));
         expect(createRect.left, greaterThan(openRect.right));
-        expect(fieldRect.center.dx, closeTo(width / 2, 1));
-        // The store card leads the footer row under the search; the device
-        // card follows it on the same row, never wrapped below it.
-        expect(storeRect.left, closeTo(fieldRect.left, 1));
-        expect(deviceRect.left, closeTo(storeRect.right + 16, 1));
-        expect(deviceRect.bottom, closeTo(height - 80, 1));
-        expect(storeRect.bottom, closeTo(height - 80, 1));
-        expect(find.text('Meet the\nHarness device'), findsOneWidget);
+        final workspace = tester.getRect(
+          find.byKey(ValueKey('harness-start:${app.activeSwarmId}')),
+        );
+        expect(fieldRect.center.dx, closeTo(workspace.center.dx, 1));
+        // Returning owners see their work; Store/device remain reachable in
+        // the scrollable section instead of reserving space below the search.
         expect(create.hitTestable(), findsOneWidget);
         expect(open.hitTestable(), findsOneWidget);
         expect(createRect.bottom, lessThanOrEqualTo(height));
         expect(openRect.bottom, lessThanOrEqualTo(height));
-        expect(deviceRect.top, greaterThanOrEqualTo(createRect.bottom + 24));
         final output = Platform.environment['HARNESS_ENTRY_CAPTURE_DIR'];
         if (output != null) {
           final boundary =
@@ -155,17 +151,13 @@ void main() {
         expect(tester.getRect(field).left, closeTo(fieldRect.left, 1));
         expect(tester.getRect(field).right, closeTo(fieldRect.right, 1));
         expect(tester.getRect(field).top, closeTo(fieldRect.top, 1));
-        expect(tester.getRect(device), deviceRect);
-        expect(
-          tester.getRect(results).bottom,
-          lessThanOrEqualTo(deviceRect.top - 24),
-        );
+        expect(device, findsNothing);
+        expect(tester.getRect(results).bottom, lessThanOrEqualTo(height - 72));
         expect(create, findsNothing);
         expect(open, findsNothing);
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pump();
         expect(tester.getRect(field).width, closeTo(fieldRect.width, 1));
-        expect(tester.getRect(device), deviceRect);
         await tester.ensureVisible(create);
         expect(create.hitTestable(), findsOneWidget);
         await tester.tap(create);
@@ -177,8 +169,19 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsNothing);
         expect(tester.widget<TextField>(field).focusNode!.hasFocus, isFalse);
-        await tester.ensureVisible(device);
+        await tester.scrollUntilVisible(
+          device,
+          200,
+          scrollable: find.descendant(
+            of: find.descendant(
+              of: find.byType(HarnessStartPage),
+              matching: find.byType(ListView),
+            ),
+            matching: find.byType(Scrollable),
+          ),
+        );
         await tester.pumpAndSettle();
+        expect(store.hitTestable(), findsOneWidget);
         expect(device.hitTestable(), findsOneWidget);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());

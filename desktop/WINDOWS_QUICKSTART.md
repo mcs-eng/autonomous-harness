@@ -26,6 +26,80 @@ Get-FileHash -Algorithm SHA256 .\harness-desktop-windows-x64-1.0.0-windows.7.zip
 Get-Content .\harness-desktop-windows-x64-1.0.0-windows.7.zip.sha256
 ```
 
+## Projects sidebar (source builds after Preview 7)
+
+The sidebar switches between **Projects** and the existing **Machines** view.
+Choose a session to return to its existing tab, or reopen its view if closed.
+Project headings expand the list without starting agents. Non-Git folders work
+too; repositories with multiple checkouts list each host and working folder.
+
+![The Projects sidebar listing fictional projects and their sessions](../docs/images/project-sidebar.png)
+
+**Add folder** saves an existing location. **New project** opens the creation
+dialog; its folder is created only when you submit. The **+** beside a location
+(**New agent here**) opens the New Agent dialog with that exact machine and folder
+preselected, in a new tab. Shared or disconnected hosts cannot create agents from
+this action.
+On Windows with WSL, the folder picker browses the selected distribution.
+
+Rows show branch and current activity, including **Needs input**, **Start failed**,
+and **Offline**. Closing a view keeps its agent running; stopping remains a
+separate **Stop** action. The sidebar button opens a drawer in narrow windows.
+Narrow pane headers retain Model, Viewer, Stop, and Close controls when available;
+other actions move into **More pane actions**. Tab and Enter operate the navigation
+controls without taking terminal input.
+
+This source change does not update an installed Preview 7 bundle or desktop shortcut.
+
+### Getting back to work and recovering
+
+An empty tab now shows **Continue working** with up to three existing sessions,
+their machine, folder, branch, and current state. Sessions needing input appear
+first; your visits during this app session come next. A **session needs your
+input** button opens the existing attention list. Opening a session reuses its
+existing view and does
+not create, restart, or send instructions to an agent. Search and the Harness
+Store remain available. A new installation keeps the introductory start page.
+
+![Continue working on an empty tab, with fictional sessions](../docs/images/workspace-resume.png)
+
+Unavailable project sessions now explain the problem and offer **Refresh status**
+or **Show machines**. Agent selection shows installation status even in a narrow
+window. Installed does not mean signed in or funded. DeepSeek and ZCode explicitly
+open their separate browser/desktop workspaces; a successful handoff closes the
+managed-agent draft, while cancellation preserves it.
+
+Startup identifies the sign-in check and offers **Try again** when it cannot read
+the saved session, rather than assuming you signed out. A failed local-service
+start reconnects through the existing supervisor. Sign-out or window disposal
+invalidates pending checks, so late replies cannot restart the service or change
+old session views. Windows preflight reuses its verified WSL result for the version
+check instead of discovering WSL a second time; rechecks still discover afresh and
+validate the packaged CLI. This is not a measured launch-time claim.
+
+These changes improve explicit project and agent choice. They do not automatically
+route tasks between providers, share credentials, or add model-server load.
+
+### Recovering an existing Linux installation
+
+If setup suddenly reports a missing CLI after changing Ubuntu's default user,
+the existing installation may belong to a different Linux account. In setup,
+choose **Change Linux account**, turn off **Use WSL default accounts**, then
+select the distribution and enter the account that owns that installation.
+The same choice is under **Customize OpenHarness → Terminal**.
+
+Save, close, and reopen OpenHarness. The selected distribution and account are
+used together for tool checks, CLI commands, project folders, and machine
+identity. Saving never switches an active session. This preference does not
+change WSL's default user, copy credentials, or migrate project files. Select
+`root` only when deliberately reconnecting to an existing root installation;
+agents in that account have administrator access inside the distribution.
+
+An unavailable selected account/distribution is an error, not permission to
+switch to another installation. A timed-out or malformed tool check shows
+**Not checked** with **Recheck** rather than an install action. A confirmed
+missing CLI no longer incorrectly marks an available tmux as missing.
+
 ## Prerequisites
 
 Windows 11 x64, virtualization enabled, internet access, and a WSL2 Ubuntu
@@ -104,10 +178,28 @@ The upstream **Grid** harness (`autonomous/autonomous-grid`) is available from
 distribution to inspect connected machines, model placement, and fleet telemetry.
 Install and authenticate Codex there before starting the agent.
 
-On Windows, choose **Open in browser** in the viewer pane. Keep Harness and the
-workspace running while using the dashboard. Viewer addresses can change after a
-restart; use the pane's button again instead of a saved browser bookmark. Viewers
-are embedded in Harness on macOS; Windows and Linux use the external browser.
+Current Windows source builds embed Grid and other Store viewers beside their
+terminals using Microsoft Edge WebView2. Click inside the page to interact with
+it; click a terminal or another app control to return keyboard focus. The pane
+header provides **Reload viewer**, **Open viewer in browser**, zoom, and close.
+Closing a viewer releases its browser surface and leaves the agent running.
+
+Keep Harness and the workspace running while using the dashboard. Viewer
+addresses can change after a restart; the pane follows the current address.
+If the embedded browser cannot start, use **Retry** or **Open in browser**.
+Windows 11 normally includes the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/);
+the app reports when it is missing and does not install it silently. Older
+Windows previews and Linux retain the external-browser fallback.
+
+The embedded viewer uses the plugin's own WebView2 user-data folder under your
+local app data, separate from your regular browser. Popups and device permissions
+(camera, microphone, location, clipboard reads, and notifications) are denied; use
+the external browser for pages that need them. Ordinary page navigation and
+downloads follow WebView2 behavior; downloads show a notice in the pane. The app
+adds no host objects, script injection, or filesystem mapping, listens to no page
+messages, and disables no browser security. The Windows plugin is pinned in
+`pubspec.lock`; its WebView2/WIL build packages use the public NuGet feed in
+`desktop/nuget.config` without changing global NuGet settings.
 
 Connect your own Grid before expecting live fleet data. Installing this package
 does not deploy models or enroll your GPU machines automatically.

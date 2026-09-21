@@ -20,6 +20,7 @@ class AgentChoice {
     this.creator,
     this.keywords,
     this.description,
+    this.actionLabel,
   });
 
   /// `claude`, or `owner/name` for a harness.
@@ -39,6 +40,9 @@ class AgentChoice {
 
   /// A sentence or two for the preview.
   final String? description;
+
+  /// Companion launchers describe their handoff instead of promising a pane.
+  final String? actionLabel;
 
   /// The agent's mark at [size].
   final Widget Function(double size) mark;
@@ -616,6 +620,9 @@ class _AgentPickerState extends State<AgentPicker> {
     final scaler = MediaQuery.textScalerOf(context);
     final highlighted = index == cursor;
     final current = choice.id == widget.value;
+    final detail = panelWidth < 760
+        ? widget.statusOf?.call(choice.id) ?? choice.detail
+        : choice.detail;
     final needle = _needle;
     List<SearchFieldMatch> matches(String? text, {required bool title}) {
       if (needle.isEmpty || text == null) return const [];
@@ -675,11 +682,11 @@ class _AgentPickerState extends State<AgentPicker> {
             ],
           ],
         ),
-        subtitle: choice.detail == null
+        subtitle: detail == null
             ? null
             : SearchResultText(
-                choice.detail!,
-                matches: matches(choice.detail, title: false),
+                detail,
+                matches: matches(detail, title: false),
                 style: const TextStyle(fontSize: 12, color: Colors.white60),
               ),
         trailing: highlighted
@@ -692,7 +699,8 @@ class _AgentPickerState extends State<AgentPicker> {
                   onPressed: () => _choose(choice),
                   style: TextButton.styleFrom(foregroundColor: Colors.white),
                   child: SwarmSearchActionLabel(
-                    current ? 'Keep agent' : 'Use agent',
+                    choice.actionLabel ??
+                        (current ? 'Keep agent' : 'Use agent'),
                     compact: compactAction,
                   ),
                 ),

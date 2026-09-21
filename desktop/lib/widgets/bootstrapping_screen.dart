@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-
 import '../shared/theme/app_theme.dart' as grid;
 import 'login_relay_diagram.dart';
 
@@ -11,9 +10,16 @@ import 'login_relay_diagram.dart';
 /// shares the sign-in and pre-flight visual language so startup feels like one
 /// product instead of a framework spinner between two designed screens.
 class BootstrappingScreen extends StatelessWidget {
-  const BootstrappingScreen({super.key, this.statusMessage});
+  const BootstrappingScreen({
+    super.key,
+    this.statusMessage,
+    this.error,
+    this.onRetry,
+  });
 
   final String? statusMessage;
+  final String? error;
+  final VoidCallback? onRetry;
 
   static const double _cardWidth = 420;
   static const String _fallbackStatus = 'Opening OpenHarness…';
@@ -22,7 +28,7 @@ class BootstrappingScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final status = statusMessage ?? _fallbackStatus;
+    final status = error ?? statusMessage ?? _fallbackStatus;
 
     return Scaffold(
       backgroundColor: grid.AppPalette.panelBg,
@@ -83,17 +89,20 @@ class BootstrappingScreen extends StatelessWidget {
                               mainAxisAlignment: MainAxisAlignment.center,
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                TickerMode(
-                                  key: const Key('boot-status-ticker'),
-                                  enabled: !reduceMotion,
-                                  child: const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
+                                if (error != null)
+                                  const Icon(Icons.info_outline, size: 18)
+                                else
+                                  TickerMode(
+                                    key: const Key('boot-status-ticker'),
+                                    enabled: !reduceMotion,
+                                    child: const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
                                     ),
                                   ),
-                                ),
                                 const SizedBox(width: 12),
                                 Flexible(
                                   child: AnimatedSwitcher(
@@ -116,12 +125,19 @@ class BootstrappingScreen extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      Text(
-                        'This usually takes a few seconds.',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.labelSmall
-                            ?.copyWith(color: grid.AppPalette.textSecondary),
-                      ),
+                      if (error != null)
+                        FilledButton.icon(
+                          onPressed: onRetry,
+                          icon: const Icon(Icons.refresh, size: 18),
+                          label: const Text('Try again'),
+                        )
+                      else
+                        Text(
+                          'Your workspace will open when the service is ready.',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(color: grid.AppPalette.textSecondary),
+                        ),
                     ],
                   ),
                 ),

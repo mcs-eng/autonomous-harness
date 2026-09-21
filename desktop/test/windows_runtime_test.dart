@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/harness_cli_runner.dart';
 import 'package:harness/core/wsl_runtime.dart';
+import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 
 /// The Windows port's own decisions, pinned where they can be pinned without a
@@ -205,28 +206,31 @@ void main() {
       expect(probe.tmuxReady, isTrue);
     });
 
-    test('findHarness retains the first CLI distro when none is ready', () async {
-      final runtime = WslRuntime(
-        runProcess: fake((executable, arguments) {
-          final distro = arguments[1];
-          return ProcessResult(
-            0,
-            0,
-            distro == 'Missing'
-                ? 'cli missing\ntmux yes\n'
-                : 'cli launcher\ntmux no\n',
-            '',
-          );
-        }),
-      );
+    test(
+      'findHarness retains the first CLI distro when none is ready',
+      () async {
+        final runtime = WslRuntime(
+          runProcess: fake((executable, arguments) {
+            final distro = arguments[1];
+            return ProcessResult(
+              0,
+              0,
+              distro == 'Missing'
+                  ? 'cli missing\ntmux yes\n'
+                  : 'cli launcher\ntmux no\n',
+              '',
+            );
+          }),
+        );
 
-      final probe = await runtime.findHarness(
-        distros: ['FirstCli', 'SecondCli', 'Missing'],
-      );
-      expect(probe.distro, 'FirstCli');
-      expect(probe.found, isTrue);
-      expect(probe.tmuxReady, isFalse);
-    });
+        final probe = await runtime.findHarness(
+          distros: ['FirstCli', 'SecondCli', 'Missing'],
+        );
+        expect(probe.distro, 'FirstCli');
+        expect(probe.found, isTrue);
+        expect(probe.tmuxReady, isFalse);
+      },
+    );
 
     test('the probe reports the CLI and tmux separately', () async {
       final runtime = WslRuntime(
@@ -271,24 +275,134 @@ void main() {
         ),
       );
 
-      expect((await runtime.findHarness(distros: ['Ubuntu'])).found, isFalse);
+      final probe = await runtime.findHarness(distros: ['Ubuntu']);
+      expect(probe.found, isFalse);
+      expect(probe.failure, WslProbeFailure.commandFailed);
+      expect(probe.exitCode, 1);
     });
+
+    for (final answer in [
+      '',
+      'cli missing\n',
+      'banner: cli launcher\ntmux yes\n',
+      'cli missing\ncli launcher\ntmux yes\n',
+      'cli launcher\ntmux yes\ntmux no\n',
+    ]) {
+      test(
+        'an incomplete or ambiguous probe is inconclusive: $answer',
+        () async {
+          final runtime = WslRuntime(
+            runProcess: fake((_, _) => ProcessResult(0, 0, answer, '')),
+          );
+          final probe = await runtime.probeHarness(distro: 'Ubuntu');
+          expect(probe.failure, WslProbeFailure.invalidResponse);
+          expect(probe.found, isFalse);
+        },
+      );
+    }
+
+    test('a login banner does not invalidate complete marker lines', () async {
+      final runtime = WslRuntime(
+        runProcess: fake(
+          (_, _) =>
+              ProcessResult(0, 0, 'Welcome\r\ncli path\r\ntmux yes\r\n', ''),
+        ),
+      );
+      final probe = await runtime.probeHarness(distro: 'Ubuntu');
+      expect(probe.failure, isNull);
+      expect(probe.found, isTrue);
+      expect(probe.tmuxReady, isTrue);
+    });
+
+    test(
+      'failed discovery is retained unless another distro is usable',
+      () async {
+        final runtime = WslRuntime(
+          runProcess: fake(
+            (_, arguments) => switch (arguments[1]) {
+              'Stalled' => ProcessResult(0, 124, '', 'synthetic timeout'),
+              'Ready' => ProcessResult(0, 0, 'cli launcher\ntmux yes\n', ''),
+              _ => ProcessResult(0, 0, 'cli missing\ntmux yes\n', ''),
+            },
+          ),
+        );
+        final stalled = await runtime.findHarness(
+          distros: ['Missing', 'Stalled'],
+        );
+        expect(stalled.distro, 'Stalled');
+        expect(stalled.failure, WslProbeFailure.timedOut);
+        final ready = await runtime.findHarness(distros: ['Stalled', 'Ready']);
+        expect(ready.distro, 'Ready');
+        expect(ready.failure, isNull);
+      },
+    );
 
     test('the displayed commands name the distro', () {
       expect(
         WslRuntime.installCommandForDisplay(distro: 'Ubuntu'),
-        contains('wsl -d Ubuntu --'),
+        contains('wsl -d Ubuntu -e'),
       );
-      expect(WslRuntime.installCommandForDisplay(), startsWith('wsl --'));
+      expect(WslRuntime.installCommandForDisplay(), startsWith('wsl -e'));
       expect(WslRuntime.installCommandForDisplay(), contains('install.sh'));
       expect(
         WslRuntime.tmuxCommandForDisplay(distro: 'Ubuntu'),
-        contains("wsl -d Ubuntu -- bash -lc 'sudo apt-get install -y tmux"),
+        contains("wsl -d Ubuntu -e bash -lc 'sudo apt-get install -y tmux"),
+      );
+      expect(
+        WslRuntime.tmuxCommandForDisplay(distro: 'Ubuntu', username: 'dev'),
+        contains("wsl -d Ubuntu --user dev -e bash -lc 'sudo apt-get install"),
+      );
+      // root has no sudo to run, and a minimal image may not ship the package.
+      expect(
+        WslRuntime.tmuxCommandForDisplay(distro: 'Ubuntu', username: 'root'),
+        "wsl -d Ubuntu --user root -e bash -lc 'apt-get install -y tmux && tmux -V'",
       );
     });
   });
 
   group('HarnessCliRunner on Windows', () {
+    test(
+      'a verified WSL probe still requires the packaged CLI bundle',
+      () async {
+        final bundle = await Directory.systemTemp.createTemp(
+          'harness-probe-bundle',
+        );
+        addTearDown(() => bundle.deleteSync(recursive: true));
+        File('${bundle.path}/cli.js').writeAsStringSync('fixture CLI');
+        final runner = HarnessCliRunner(
+          isWindows: true,
+          requiresWindowsBundle: true,
+          windowsBundleDirectory: bundle,
+          verifiedWslProbe: const WslHarnessProbe(
+            distro: 'Ubuntu',
+            tmuxReady: true,
+          ),
+          wslRuntime: WslRuntime(
+            runProcess: fake(
+              (_, _) => throw StateError('Unexpected WSL probe'),
+            ),
+          ),
+        );
+
+        await expectLater(
+          runner.resolve(['version']),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'message',
+              contains('notify.mjs'),
+            ),
+          ),
+        );
+        File('${bundle.path}/notify.mjs').writeAsStringSync('fixture notifier');
+        final invocation = await runner.resolve(['version']);
+        expect(invocation.source, HarnessCliSource.wsl);
+        expect(invocation.wslDistro, 'Ubuntu');
+        expect(invocation.arguments, contains(bundle.path));
+        expect(invocation.arguments.last, 'version');
+      },
+    );
+
     test('never spawns a bare harness when the CLI is absent', () async {
       if (!Platform.isWindows) return;
       final runner = HarnessCliRunner(
@@ -633,6 +747,89 @@ void main() {
       }
     });
 
+    test('automatic setup and subsequent CLI verification keep the selected account', () async {
+      final seen = <List<String>>[];
+      final readiness = await verify(
+        wslEnabled: true,
+        listing: 'Debian\r\nUbuntu\r\n',
+        probe: 'cli missing\ntmux no\n',
+        selection: const WslSelection(distro: 'Ubuntu', username: 'root'),
+        install: true,
+        sudoAllowed: true,
+        seen: seen,
+      );
+      expect(readiness.isReady, isTrue);
+      final named = seen.where((args) => args.contains('-d'));
+      expect(named, isNotEmpty);
+      for (final args in named) {
+        expect(args.take(4), ['-d', 'Ubuntu', '--user', 'root']);
+      }
+      expect(
+        named.any((args) => args.contains('harness-tmux-install')),
+        isTrue,
+      );
+      expect(named.any((args) => args.contains('harness-install')), isTrue);
+      expect(named.any((args) => args.last == 'version'), isTrue);
+    });
+
+    test(
+      'manual setup recipes target the same explicit user as discovery',
+      () async {
+        final readiness = await verify(
+          wslEnabled: true,
+          listing: 'Ubuntu\r\n',
+          probe: 'cli missing\ntmux no\n',
+          selection: const WslSelection(distro: 'Ubuntu', username: 'root'),
+        );
+        expect(readiness.plan, hasLength(2));
+        for (final item in readiness.plan) {
+          expect(item.command, contains('wsl -d Ubuntu --user root -e'));
+        }
+        expect(readiness.failure?.command, contains('--user root'));
+        expect(readiness.failure?.detail, contains('selected user root'));
+      },
+    );
+
+    test(
+      'an unavailable selected distro cannot trigger installation elsewhere',
+      () async {
+        final seen = <List<String>>[];
+        final readiness = await verify(
+          wslEnabled: true,
+          listing: 'Debian\r\n',
+          probe: 'cli launcher\ntmux yes\n',
+          selection: const WslSelection(distro: 'Ubuntu', username: 'root'),
+          install: true,
+          sudoAllowed: true,
+          seen: seen,
+        );
+        expect(readiness.phase, EnvironmentSetupPhase.failed);
+        expect(readiness.plan, isEmpty);
+        expect(readiness.failure?.command, isNull);
+        expect(
+          readiness.failure?.detail,
+          contains('selected distribution Ubuntu'),
+        );
+        expect(seen.every((args) => !args.contains('-d')), isTrue);
+      },
+    );
+
+    test('a pinned account still names a missing WSL2 as the problem', () async {
+      final readiness = await verify(
+        wslEnabled: false,
+        listing: '',
+        probe: 'cli missing\ntmux no\n',
+        selection: const WslSelection(distro: 'Ubuntu', username: 'dev'),
+      );
+      expect(readiness.isReady, isFalse);
+      expect(readiness.phase, EnvironmentSetupPhase.review);
+      expect(readiness.failure?.title, 'WSL2 is required on Windows');
+      expect(readiness.failure?.command, WslRuntime.enableWslCommand);
+      expect(readiness.failure?.detail, isNot(contains('selected distribution')));
+      expect(readiness.plan, hasLength(1));
+      expect(readiness.plan.single.command, WslRuntime.enableWslCommand);
+    });
+
     test('a failed tmux install stops before the CLI installer', () async {
       final seen = <List<String>>[];
       final readiness = await verify(
@@ -662,16 +859,16 @@ void main() {
 
       expect(
         readiness.failure?.title,
-        'The Harness CLI is not installed in Ubuntu',
+        'The Harness CLI was not found in Ubuntu',
       );
-      expect(readiness.failure?.command, contains('wsl -d Ubuntu --'));
+      expect(readiness.failure?.command, contains('wsl -d Ubuntu -e'));
       expect(readiness.failure?.command, contains('install.sh'));
       expect(readiness.plan.map((item) => item.title), [
         'tmux in Ubuntu',
         'Managed Node 20+ & Harness CLI in Ubuntu',
       ]);
       for (final item in readiness.plan) {
-        expect(item.command, contains('wsl -d Ubuntu --'));
+        expect(item.command, contains('wsl -d Ubuntu -e'));
       }
     });
 
@@ -693,7 +890,7 @@ void main() {
         seen.any((arguments) => arguments.join(' ').contains('install.sh')),
         isFalse,
       );
-      expect(readiness.failure?.command, contains('wsl -d Ubuntu --'));
+      expect(readiness.failure?.command, contains('wsl -d Ubuntu -e'));
     });
 
     test('a read-only check never installs, even in a usable distro', () async {
@@ -761,6 +958,117 @@ void main() {
       );
       expect(readiness.plan, isEmpty);
     });
+
+    test('a missing CLI does not mark working tmux as missing', () async {
+      final readiness = await verify(
+        wslEnabled: true,
+        listing: 'Ubuntu\r\n',
+        probe: 'cli missing\ntmux yes\n',
+      );
+      expect(
+        readiness.steps[EnvironmentStep.tmux],
+        EnvironmentStepStatus.ready,
+      );
+      expect(
+        readiness.steps[EnvironmentStep.harness],
+        EnvironmentStepStatus.failed,
+      );
+      expect(readiness.plan, hasLength(1));
+      expect(readiness.plan.single.title, contains('Harness CLI'));
+      expect(readiness.failure?.detail, contains('default user changed'));
+    });
+
+    for (final exitCode in [0, 1, 124]) {
+      test(
+        'inconclusive probe ($exitCode) offers retry without installation',
+        () async {
+          final seen = <List<String>>[];
+          final readiness = await verify(
+            wslEnabled: true,
+            listing: 'Ubuntu\r\n',
+            probe: '',
+            probeAnswers: [
+              ProcessResult(0, exitCode, 'synthetic shell output', ''),
+            ],
+            install: true,
+            sudoAllowed: true,
+            seen: seen,
+          );
+          expect(readiness.phase, EnvironmentSetupPhase.failed);
+          expect(
+            readiness.failure?.title,
+            'Could not check the tools in Ubuntu',
+          );
+          expect(readiness.failure?.detail, contains('Click Recheck'));
+          expect(
+            readiness.failure?.detail,
+            isNot(contains('synthetic shell output')),
+          );
+          expect(readiness.failure?.exitCode, exitCode);
+          expect(readiness.failure?.command, isNull);
+          expect(readiness.plan, isEmpty);
+          for (final step in [EnvironmentStep.harness, EnvironmentStep.tmux]) {
+            expect(readiness.steps[step], EnvironmentStepStatus.unavailable);
+          }
+          expect(seen, hasLength(3)); // status, distro list, tool probe only
+        },
+      );
+    }
+
+    test('failed post-install probe stops before the next installer', () async {
+      final seen = <List<String>>[];
+      final readiness = await verify(
+        wslEnabled: true,
+        listing: 'Ubuntu\r\n',
+        probe: 'cli missing\ntmux no\n',
+        probeAnswers: [
+          ProcessResult(0, 0, 'cli missing\ntmux no\n', ''),
+          ProcessResult(0, 124, '', 'synthetic timeout'),
+        ],
+        install: true,
+        sudoAllowed: true,
+        seen: seen,
+      );
+      expect(readiness.failure?.title, 'Could not check the tools in Ubuntu');
+      expect(readiness.failure?.command, isNull);
+      expect(readiness.plan, isEmpty);
+      expect(seen.any((a) => a.join(' ').contains('install.sh')), isFalse);
+    });
+
+    for (final checks in [1, 2]) {
+      test(
+        'each of $checks readiness checks discovers WSL only once',
+        () async {
+          final seen = <List<String>>[];
+          final readiness = await verify(
+            wslEnabled: true,
+            listing: 'Ubuntu\r\n',
+            probe: 'cli launcher\ntmux yes\n',
+            seen: seen,
+            checks: checks,
+          );
+
+          expect(readiness.isReady, isTrue);
+          expect(
+            seen.where((args) => args.contains('--status')),
+            hasLength(checks),
+          );
+          expect(seen.where((args) => args.contains('-l')), hasLength(checks));
+          expect(
+            seen.where((args) => args.contains('harness-probe')),
+            hasLength(checks),
+          );
+          expect(
+            seen.where((args) => args.last == 'version'),
+            hasLength(checks),
+          );
+          expect(seen, hasLength(4 * checks));
+          for (final args in seen.where((args) => args.contains('-d'))) {
+            expect(args[1], 'Ubuntu');
+          }
+        },
+      );
+    }
 
     test('a signed-out CLI is still a ready ENVIRONMENT', () async {
       // Installation and sign-in are different questions. The install probe is
@@ -929,8 +1237,11 @@ Future<EnvironmentReadiness> verify({
   bool sudoAllowed = false,
   bool readyOutput = false,
   bool tmuxInstallSucceeds = true,
+  int checks = 1,
   List<List<String>>? seen,
-}) {
+  List<ProcessResult>? probeAnswers,
+  WslSelection? selection,
+}) async {
   final calls = <List<String>>[];
   var currentProbe = probe;
   ProcessResult respond(String executable, List<String> arguments) {
@@ -955,6 +1266,9 @@ Future<EnvironmentReadiness> verify({
           : ProcessResult(0, 1, '', 'tmux not found');
     }
     if (joined.contains('harness-probe')) {
+      if (probeAnswers != null && probeAnswers.isNotEmpty) {
+        return probeAnswers.removeAt(0);
+      }
       return ProcessResult(0, 0, currentProbe, '');
     }
     // Anything left that never named a distro is the NATIVE-CLI check (WSL
@@ -997,7 +1311,7 @@ Future<EnvironmentReadiness> verify({
         : Process.start('/bin/echo', ['simulated install output']);
   }
 
-  return EnvironmentProvisioner(
+  final provisioner = EnvironmentProvisioner(
     harnessHome: Directory('${Directory.systemTemp.path}\\harness-none'),
     isMacOS: false,
     isLinux: false,
@@ -1005,12 +1319,22 @@ Future<EnvironmentReadiness> verify({
     run: (executable, arguments, {environment}) async =>
         respond(executable, arguments),
     wslRuntime: WslRuntime(
+      selection: selection,
       runProcess: (executable, arguments, {environment}) async =>
           respond(executable, arguments),
       startProcess: startSimulatedInstall,
     ),
-  ).ensureReady(onProgress: (_) {}, install: install).then((readiness) {
-    if (seen != null) seen.addAll(calls);
-    return readiness;
-  });
+  );
+  var readiness = await provisioner.ensureReady(
+    onProgress: (_) {},
+    install: install,
+  );
+  for (var check = 1; check < checks; check++) {
+    readiness = await provisioner.ensureReady(
+      onProgress: (_) {},
+      install: install,
+    );
+  }
+  if (seen != null) seen.addAll(calls);
+  return readiness;
 }

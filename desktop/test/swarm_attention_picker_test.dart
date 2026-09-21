@@ -57,7 +57,7 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
         await tester.pump();
         final row = tester.getRect(selectedRow);
-        final list = tester.getRect(find.byType(ListView));
+        final list = tester.getRect(find.descendant(of: find.byType(Dialog), matching: find.byType(ListView)));
         expect(row.top, greaterThanOrEqualTo(list.top));
         expect(row.bottom, lessThanOrEqualTo(list.bottom));
         expect(tester.takeException(), isNull);
@@ -153,14 +153,14 @@ void main() {
         await tester.pump();
         expect(selectedRow, findsOneWidget);
         final row = tester.getRect(selectedRow);
-        final list = tester.getRect(find.byType(ListView));
+        final list = tester.getRect(find.descendant(of: find.byType(Dialog), matching: find.byType(ListView)));
         expect(row.top, greaterThanOrEqualTo(list.top));
         expect(row.bottom, lessThanOrEqualTo(list.bottom));
       }
       await tester.pump();
       final selection = tester.widget<ListTile>(selectedRow).key;
       expect(selection, ValueKey(agentDestinationId('m', 'a12')));
-      final list = tester.getRect(find.byType(ListView));
+      final list = tester.getRect(find.descendant(of: find.byType(Dialog), matching: find.byType(ListView)));
       final row = tester.getRect(selectedRow);
       expect(row.top, greaterThanOrEqualTo(list.top));
       expect(row.bottom, lessThanOrEqualTo(list.bottom));

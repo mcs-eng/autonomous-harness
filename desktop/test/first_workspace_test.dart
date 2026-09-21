@@ -10,6 +10,7 @@ import 'package:harness/core/engine_availability.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/shared/widgets/app_choice_picker.dart';
 import 'package:harness/widgets/agent_picker.dart';
+import 'package:harness/widgets/harness_start_page.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/core/project_folder.dart';
 import 'package:harness/state/pane_arrangement.dart';
@@ -38,6 +39,11 @@ Future<void> _browseLocal(WidgetTester tester) async {
 }
 
 final _startInput = find.byKey(const ValueKey('harness-start-search'));
+
+Finder _startText(String text) => find.descendant(
+  of: find.byType(HarnessStartPage),
+  matching: find.text(text),
+);
 
 class _FirstUseApp extends AppNotifier {
   _FirstUseApp()
@@ -261,7 +267,7 @@ void main() {
     expect(tester.widget<TextField>(_startInput).focusNode!.hasFocus, isTrue);
     expect(find.byType(ListTile), findsNothing);
     expect(find.byType(AlertDialog), findsNothing);
-    expect(find.text('Saved project'), findsNothing);
+    expect(_startText('Saved project'), findsNothing);
     expect(find.byKey(const ValueKey('harness-device-link')), findsOneWidget);
     expect(app.launches, isEmpty);
     expect(app.probes, 0);
@@ -324,7 +330,7 @@ void main() {
     app.dismissError();
     await tester.pump();
     expect(focus.hasPrimaryFocus, isTrue);
-    expect(find.text('Machines'), findsNothing);
+    expect(_startText('Machines'), findsNothing);
     expect(find.byType(AlertDialog), findsNothing);
     expect(app.launches, isEmpty);
     await tester.pumpWidget(const SizedBox());
@@ -349,7 +355,7 @@ void main() {
       addTearDown(() => FileSelectorPlatform.instance = oldPicker);
       await mount(tester, app);
       expect(_newHarness, findsOneWidget);
-      expect(find.text('Machines'), findsNothing);
+      expect(_startText('Machines'), findsNothing);
       await tester.tap(_newHarness);
       await tester.pump();
       expect(picker.opened, 0);
@@ -522,7 +528,13 @@ void main() {
         }
         await tester.pump();
         expect(find.byType(AlertDialog), findsOneWidget);
-        expect(find.text('/work/existing'), findsNothing);
+        expect(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.text('/work/existing'),
+          ),
+          findsNothing,
+        );
         expect(tester.widget<AppChoiceTile>(_newProject).selected, isTrue);
         final machineField = tester.widget<AppChoicePicker<String>>(
           find.byKey(const Key('new-agent-machine-field')),
@@ -692,8 +704,8 @@ void main() {
     await mount(tester, app);
 
     expect(find.text('New Harness'), findsWidgets);
-    expect(find.text('Machines'), findsNothing);
-    expect(find.text('Projects'), findsNothing);
+    expect(_startText('Machines'), findsNothing);
+    expect(_startText('Projects'), findsNothing);
     expect(app.launches, isEmpty);
     expect(_startInput, findsOneWidget);
     expect(tester.widget<TextField>(_startInput).focusNode!.hasFocus, isTrue);

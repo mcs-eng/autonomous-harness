@@ -267,7 +267,8 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(find.text('/work/neighbor'), findsNothing);
+      expect(find.descendant(of: find.byType(AlertDialog),
+        matching: find.text('/work/neighbor')), findsNothing);
       expect(find.byKey(const ValueKey('swarm-search-input')), findsNothing);
       expect(app.focusedPaneId, first.id);
       expect(tester.getRect(target), before);

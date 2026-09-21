@@ -15,6 +15,7 @@ import '../theme/app_theme.dart';
 import 'engine_identity.dart';
 import 'pane_header_actions.dart';
 import 'verdict_marks.dart';
+import 'windows_web_viewer.dart';
 
 /// A domain harness's viewer, in a tile beside its agent's terminal.
 ///
@@ -24,9 +25,9 @@ import 'verdict_marks.dart';
 /// that follows [TerminalPane.url] when the daemon names a new one, and a
 /// small notice while the viewer is not answering yet.
 ///
-/// The webview is a native view (WKWebView through `webview_flutter`), and a
+/// The webview is a native view (WKWebView on macOS, WebView2 on Windows), and a
 /// native view cannot exist where no platform implementation is registered:
-/// under `flutter test`, and on Windows and Linux today. There the panel offers
+/// under `flutter test`, and on Linux today. There the panel offers
 /// an explicit browser action instead, without opening a page on its own.
 class WebPanePanel extends StatefulWidget {
   const WebPanePanel({
@@ -72,7 +73,8 @@ class WebPanePanel extends StatefulWidget {
 
   /// Whether this build can put a real webview on screen. One place, so the
   /// panel and its tests agree on when the placeholder is the right answer.
-  static bool get webviewAvailable => !kUnderTest && Platform.isMacOS;
+  static bool get webviewAvailable =>
+      !kUnderTest && (Platform.isMacOS || Platform.isWindows);
 
   @override
   State<WebPanePanel> createState() => _WebPanePanelState();
@@ -87,6 +89,9 @@ class _WebPanePanelState extends State<WebPanePanel> {
   String? _browserFailure;
   bool _openingBrowser = false;
   int _browserLaunch = 0;
+  int _windowsReload = 0;
+  bool get _windowsViewer =>
+      WebPanePanel.webviewAvailable && Platform.isWindows;
 
   /// The appearance last stamped on the page, so a rebuild that changed nothing runs no script.
   Brightness? _stampedBrightness;
@@ -95,48 +100,49 @@ class _WebPanePanelState extends State<WebPanePanel> {
   void initState() {
     super.initState();
     _browserUrl = widget.pane.url;
-    if (WebPanePanel.webviewAvailable) _mountController();
+    if (WebPanePanel.webviewAvailable && !_windowsViewer) _mountController();
   }
 
   void _mountController() {
     // WebKit's default media policy wants a click before any playback, which
     // leaves a viewer's muted video sitting at 00:00 with a play button; a
     // pane whose whole point is the render the harness just made autoplays it.
-    final controller = WebViewController.fromPlatformCreationParams(
-      WebViewPlatform.instance is WebKitWebViewPlatform
-          ? WebKitWebViewControllerCreationParams(
-              allowsInlineMediaPlayback: true,
-              mediaTypesRequiringUserAction: const <PlaybackMediaTypes>{},
-            )
-          : const PlatformWebViewControllerCreationParams(),
-    )
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (_) => _set(() {
-            _loading = true;
-            _failure = null;
-          }),
-          onPageFinished: (_) {
-            _set(() => _loading = false);
-            // A fresh document has no stamp; give it the app's appearance before it is looked at.
-            _stampedBrightness = null;
-            _stampTheme();
-          },
-          onWebResourceError: (error) {
-            // Only the page itself: a harness's viewer pulls fonts, models
-            // and images of its own, and one of those failing is its business
-            // to show, not ours to call a dead viewer.
-            if (error.isForMainFrame == false) return;
-            _set(() {
-              _loading = false;
-              _failure = error.description.isNotEmpty
-                  ? error.description
-                  : 'The viewer did not answer.';
-            });
-          },
-        ),
-      );
+    final controller =
+        WebViewController.fromPlatformCreationParams(
+            WebViewPlatform.instance is WebKitWebViewPlatform
+                ? WebKitWebViewControllerCreationParams(
+                    allowsInlineMediaPlayback: true,
+                    mediaTypesRequiringUserAction: const <PlaybackMediaTypes>{},
+                  )
+                : const PlatformWebViewControllerCreationParams(),
+          )
+          ..setJavaScriptMode(JavaScriptMode.unrestricted)
+          ..setNavigationDelegate(
+            NavigationDelegate(
+              onPageStarted: (_) => _set(() {
+                _loading = true;
+                _failure = null;
+              }),
+              onPageFinished: (_) {
+                _set(() => _loading = false);
+                // A fresh document has no stamp; give it the app's appearance before it is looked at.
+                _stampedBrightness = null;
+                _stampTheme();
+              },
+              onWebResourceError: (error) {
+                // Only the page itself: a harness's viewer pulls fonts, models
+                // and images of its own, and one of those failing is its business
+                // to show, not ours to call a dead viewer.
+                if (error.isForMainFrame == false) return;
+                _set(() {
+                  _loading = false;
+                  _failure = error.description.isNotEmpty
+                      ? error.description
+                      : 'The viewer did not answer.';
+                });
+              },
+            ),
+          );
     _controller = controller;
     _load();
   }
@@ -178,11 +184,17 @@ class _WebPanePanelState extends State<WebPanePanel> {
     _stampedBrightness = brightness;
     final theme = brightness == Brightness.dark ? 'dark' : 'light';
     controller
-        .runJavaScript("document.documentElement.setAttribute('data-theme','$theme')")
+        .runJavaScript(
+          "document.documentElement.setAttribute('data-theme','$theme')",
+        )
         .catchError((_) {});
   }
 
   void _reload() {
+    if (_windowsViewer) {
+      setState(() => ++_windowsReload);
+      return;
+    }
     if (_controller == null) return;
     if (_loadedUrl != widget.pane.url) {
       _load();
@@ -295,10 +307,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
               // would only repeat what the pane shows. A status, not a history.
               Expanded(
                 child: Tooltip(
-                  message: [
-                    widget.ownerName,
-                    ?widget.pane.url,
-                  ].join('\n'),
+                  message: [widget.ownerName, ?widget.pane.url].join('\n'),
                   waitDuration: const Duration(milliseconds: 700),
                   child: Row(
                     children: [
@@ -350,7 +359,14 @@ class _WebPanePanelState extends State<WebPanePanel> {
               // coverage:ignore-end
               _ViewerActions(
                 zoomed: widget.zoomed,
-                onReload: _controller == null ? null : _reload,
+                onReload:
+                    _controller == null &&
+                        !(_windowsViewer && _browserUri() != null)
+                    ? null
+                    : _reload,
+                onBrowser: _browserUri() == null || _openingBrowser
+                    ? null
+                    : _openBrowser,
                 onZoom: widget.onToggleZoom,
                 onClose: widget.onClose,
               ),
@@ -372,8 +388,33 @@ class _WebPanePanelState extends State<WebPanePanel> {
     }
     final controller = _controller;
     final url = widget.pane.url;
+    final uri = _browserUri();
+    if (_windowsViewer && uri != null) {
+      return WindowsWebViewer(
+        uri: uri,
+        brightness: grid.AppTheme.brightness.value,
+        backgroundColor: grid.AppPalette.windowBg,
+        reload: _windowsReload,
+        fallbackBuilder: (title, detail, retry) => _Notice(
+          icon: LucideIcons.unplug,
+          title: title,
+          detail: _browserFailure ?? detail,
+          action: Wrap(
+            spacing: 8,
+            alignment: WrapAlignment.center,
+            children: [
+              TextButton(onPressed: retry, child: const Text('Retry')),
+              TextButton.icon(
+                onPressed: _openingBrowser ? null : _openBrowser,
+                icon: const Icon(LucideIcons.externalLink, size: 16),
+                label: Text(_openingBrowser ? 'Opening…' : 'Open in browser'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     if (controller == null) {
-      final uri = _browserUri();
       return _Notice(
         key: const ValueKey('web-pane-placeholder'),
         icon: LucideIcons.globe,
@@ -422,12 +463,13 @@ class _ViewerActions extends StatelessWidget {
   const _ViewerActions({
     required this.zoomed,
     this.onReload,
+    this.onBrowser,
     this.onZoom,
     this.onClose,
   });
 
   final bool zoomed;
-  final VoidCallback? onReload, onZoom, onClose;
+  final VoidCallback? onReload, onBrowser, onZoom, onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -462,6 +504,7 @@ class _ViewerActions extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         action('Reload viewer', LucideIcons.refreshCw, onReload),
+        action('Open viewer in browser', LucideIcons.externalLink, onBrowser),
         const SizedBox(width: 2),
         action(
           zoomed ? 'Restore agents' : 'Zoom viewer',

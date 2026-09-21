@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
@@ -10,6 +11,8 @@ import '../../shared/widgets/setting_row.dart';
 import '../../terminal/terminal_font_store.dart';
 import '../../terminal/terminal_theme.dart';
 import '../../terminal/terminal_theme_store.dart';
+import '../../core/wsl_preferences.dart';
+import '../../widgets/wsl_account_dialog.dart';
 
 /// Customize OpenHarness ▸ Terminal: the colours and the face the agent's output is drawn in.
 ///
@@ -57,6 +60,36 @@ class _Controls extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (Platform.isWindows) ...[
+          ListenableBuilder(
+            listenable: wslPreferencesStore,
+            builder: (context, _) {
+              final selected = wslPreferencesStore.savedSelection;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Linux account',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    selected == null
+                        ? 'WSL default accounts'
+                        : '${selected.username} in ${selected.distro}',
+                  ),
+                  if (wslPreferencesStore.restartRequired)
+                    const Text('Saved. Close and reopen OpenHarness to apply.'),
+                  TextButton(
+                    onPressed: () => showWslAccountDialog(context),
+                    child: const Text('Change Linux account'),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 16),
+        ],
         // Colour first, then face, then size: the scheme is the change a
         // person notices from across the room, and it is the one that
         // makes the two rows under it look different while they choose.

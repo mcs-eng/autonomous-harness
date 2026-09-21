@@ -26,6 +26,7 @@ import '../state/pane_arrangement.dart';
 import '../terminal/terminal_viewport.dart';
 import '../usage/models_menu_controller.dart';
 import '../state/swarm_catalog.dart';
+import '../state/project_navigation.dart';
 import '../state/swarm_attention.dart';
 import '../state/swarm_navigation.dart';
 import '../state/swarm_search.dart';
@@ -41,6 +42,8 @@ import '../widgets/link_machine_screen.dart';
 import '../widgets/machine_actions.dart';
 import '../widgets/machines_manager.dart';
 import '../widgets/new_agent_dialog.dart';
+import '../widgets/project_sidebar.dart';
+import '../widgets/workspace_resume.dart';
 import '../widgets/pane_grid.dart';
 import '../widgets/shortcuts_sheet.dart';
 import '../widgets/swarm_dialogs.dart';
@@ -108,6 +111,108 @@ class _SwarmScreenState extends State<SwarmScreen> {
   String? _nativeKeyContext;
   String _pendingKeys = '';
   AppNotifier get app => widget.notifier;
+  final _scaffold = GlobalKey<ScaffoldState>();
+  final _sidebarKey = GlobalKey();
+  bool _sidebarVisible = true;
+
+  bool get _narrowSidebar => MediaQuery.sizeOf(context).width < 1000;
+
+  Widget _sidebar() => ProjectSidebar(
+    key: _sidebarKey,
+    app: app,
+    projects: _projects,
+    onCollapse: () {
+      if (_narrowSidebar) {
+        _scaffold.currentState?.closeDrawer();
+      } else {
+        setState(() => _sidebarVisible = false);
+        _shellFocus.requestFocus();
+      }
+    },
+    onAddProject: () {
+      _scaffold.currentState?.closeDrawer();
+      unawaited(_addProject());
+    },
+    onNewProject: () => unawaited(_createInProject()),
+    onNewAgent: (location) => unawaited(_createInProject(location)),
+    onOpenAgent: _openProjectSession,
+  );
+
+  void _openProjectSession(SwarmAgentRef row) {
+    _scaffold.currentState?.closeDrawer();
+    _closeSearch();
+    _preparePaneFocus();
+    unawaited(openProjectAgent(app, row));
+  }
+
+  Widget? _resumeWork() {
+    final rows = workspaceResumeAgents(app, _navigation.recent);
+    if (rows.isEmpty && workspaceWaitingCount(app) == 0) return null;
+    return WorkspaceResume(
+      app: app,
+      rows: rows,
+      onOpen: _openProjectSession,
+      onAttention: _notifications,
+    );
+  }
+
+  Future<void> _createInProject([ProjectLocation? location]) async {
+    if (_dialogOpen || _spokenPaletteOpen) return;
+    if (location != null) {
+      final machine = app.stateOf(location.machineId);
+      if (machine == null ||
+          machine.machine.isShared ||
+          machine.nodeOnline == false ||
+          machine.connectionStatus != ConnectionStatus.connected) {
+        return;
+      }
+    }
+    _scaffold.currentState?.closeDrawer();
+    // A fresh agent belongs to its own tab. The dialog captures this target;
+    // cancelling an untouched draft returns to the previous work.
+    app.newSwarm(draft: true);
+    final target = app.activeSwarmId;
+    try {
+      await _newAgent(
+        machineId: location?.machineId,
+        folder: location?.folder,
+        swarmId: target,
+      );
+    } finally {
+      app.cancelSwarmDraft(target);
+    }
+  }
+
+  Widget _sidebarButton() => IconButton(
+    key: const ValueKey('project-sidebar-toggle'),
+    tooltip: 'Projects and machines',
+    icon: const Icon(Icons.view_sidebar_outlined, size: 20),
+    onPressed: () {
+      if (_narrowSidebar) {
+        _scaffold.currentState?.openDrawer();
+      } else {
+        setState(() => _sidebarVisible = !_sidebarVisible);
+        if (!_sidebarVisible) _shellFocus.requestFocus();
+      }
+    },
+  );
+
+  Widget _workspaceWithSidebar(Widget workspace) => Row(
+    children: [
+      if (!_narrowSidebar) ...[
+        Offstage(
+          offstage: !_sidebarVisible,
+          child: ExcludeFocus(
+            excluding: !_sidebarVisible,
+            child: SizedBox(width: 280, child: _sidebar()),
+          ),
+        ),
+        if (_sidebarVisible)
+          VerticalDivider(width: 1, color: grid.AppPalette.divider),
+      ],
+      Expanded(child: workspace),
+    ],
+  );
 
   @override
   void initState() {
@@ -553,7 +658,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
         .toList();
     if (sections.any((s) => s.own)) return sections;
     return [
-      GridSection(name: answer.gridName ?? '', own: true, models: answer.models),
+      GridSection(
+        name: answer.gridName ?? '',
+        own: true,
+        models: answer.models,
+      ),
       ...sections,
     ];
   }
@@ -1507,10 +1616,24 @@ class _SwarmScreenState extends State<SwarmScreen> {
             focusNode: _shellFocus,
             autofocus: app.panes.isNotEmpty,
             child: Scaffold(
+              key: _scaffold,
+              drawer: _narrowSidebar
+                  ? Drawer(
+                      width: MediaQuery.sizeOf(context).width
+                          .clamp(0, 320)
+                          .toDouble(),
+                      child: SafeArea(child: _sidebar()),
+                    )
+                  : null,
               backgroundColor: grid.AppPalette.swarmField,
               body: Column(
                 children: [
                   if (!_native) _tabStrip(),
+                  if (_native)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: _sidebarButton(),
+                    ),
                   if (_keymap.error != null)
                     Material(
                       color: grid.AppPalette.panelBg,
@@ -1589,84 +1712,87 @@ class _SwarmScreenState extends State<SwarmScreen> {
                       ),
                     ),
                   Expanded(
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        if (app.panes.isEmpty)
-                          const RepaintBoundary(
-                            key: ValueKey('harness-start-background'),
-                            child: SwarmWallpaper(),
-                          ),
-                        if (app.activeSwarm.isOrchestrator)
-                          OrchestratorWorkspace(
-                            key: ValueKey(
-                              'orchestrator:${app.activeSwarm.orchestratorId}',
+                    child: _workspaceWithSidebar(
+                      Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          if (app.panes.isEmpty)
+                            const RepaintBoundary(
+                              key: ValueKey('harness-start-background'),
+                              child: SwarmWallpaper(),
                             ),
-                            notifier: app,
-                            machineId: app.activeSwarm.orchestratorMachineId!,
-                            projectId: app.activeSwarm.orchestratorId!,
-                          )
-                        else if (app.activeSwarm.isStore)
-                          StoreTab(
-                            key: ValueKey('store-tab:${app.activeSwarmId}'),
-                            notifier: app,
-                            source: 'tab',
-                          )
-                        else
-                          Padding(
-                            padding: app.panes.isEmpty
-                                ? EdgeInsets.zero
-                                : const EdgeInsets.all(10),
-                            child: Focus.withExternalFocusNode(
-                              focusNode: _canvasFocus,
-                              includeSemantics: false,
-                              child: Stack(
-                                children: [
-                                  Positioned.fill(
-                                    child: PaneGrid(
-                                      notifier: app,
-                                      swarmMode: true,
-                                      onSplit: (paneId, axis) => unawaited(
-                                        _splitAgent(axis, paneId: paneId),
-                                      ),
-                                      onNewSplit: (paneId, axis) => unawaited(
-                                        _splitAgent(
-                                          axis,
-                                          paneId: paneId,
-                                          create: true,
+                          if (app.activeSwarm.isOrchestrator)
+                            OrchestratorWorkspace(
+                              key: ValueKey(
+                                'orchestrator:${app.activeSwarm.orchestratorId}',
+                              ),
+                              notifier: app,
+                              machineId: app.activeSwarm.orchestratorMachineId!,
+                              projectId: app.activeSwarm.orchestratorId!,
+                            )
+                          else if (app.activeSwarm.isStore)
+                            StoreTab(
+                              key: ValueKey('store-tab:${app.activeSwarmId}'),
+                              notifier: app,
+                              source: 'tab',
+                            )
+                          else
+                            Padding(
+                              padding: app.panes.isEmpty
+                                  ? EdgeInsets.zero
+                                  : const EdgeInsets.all(10),
+                              child: Focus.withExternalFocusNode(
+                                focusNode: _canvasFocus,
+                                includeSemantics: false,
+                                child: Stack(
+                                  children: [
+                                    Positioned.fill(
+                                      child: PaneGrid(
+                                        notifier: app,
+                                        swarmMode: true,
+                                        onSplit: (paneId, axis) => unawaited(
+                                          _splitAgent(axis, paneId: paneId),
                                         ),
+                                        onNewSplit: (paneId, axis) => unawaited(
+                                          _splitAgent(
+                                            axis,
+                                            paneId: paneId,
+                                            create: true,
+                                          ),
+                                        ),
+                                        empty: app.panes.isEmpty
+                                            ? HarnessStartPage(
+                                                key: ValueKey(
+                                                  'harness-start:${app.activeSwarmId}',
+                                                ),
+                                                focusNode: _startSearchFocus,
+                                                createSearch: () =>
+                                                    SwarmSearchController(
+                                                      app,
+                                                      _navigation.recent,
+                                                      projects: _projects,
+                                                      commands: _searchCommands,
+                                                      adding: true,
+                                                      catalog: _searchCatalog,
+                                                    ),
+                                                onNew: _newAgent,
+                                                resume: _resumeWork(),
+                                                onStore: app.openStore,
+                                                onChoose: (selection) =>
+                                                    _activateSearch(
+                                                      selection,
+                                                      app.activeSwarmId,
+                                                    ),
+                                              )
+                                            : null,
                                       ),
-                                      empty: app.panes.isEmpty
-                                          ? HarnessStartPage(
-                                              key: ValueKey(
-                                                'harness-start:${app.activeSwarmId}',
-                                              ),
-                                              focusNode: _startSearchFocus,
-                                              createSearch: () =>
-                                                  SwarmSearchController(
-                                                    app,
-                                                    _navigation.recent,
-                                                    projects: _projects,
-                                                    commands: _searchCommands,
-                                                    adding: true,
-                                                    catalog: _searchCatalog,
-                                                  ),
-                                              onNew: _newAgent,
-                                              onStore: app.openStore,
-                                              onChoose: (selection) =>
-                                                  _activateSearch(
-                                                    selection,
-                                                    app.activeSwarmId,
-                                                  ),
-                                            )
-                                          : null,
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -1682,7 +1808,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
   /// ~48 each, the two harness buttons ~150 each once icon and padding are counted, plus 32 of gaps —
   /// about 430 before the tab list gets a single pixel. Rather than let the Row overflow, the two
   /// labelled buttons drop to their icons, which is what their tooltips are for.
-  static const double _labelledStripMinWidth = 560;
+  static const double _labelledStripMinWidth = 608;
 
   Widget _tabStrip() => LayoutBuilder(
     builder: (context, constraints) {
@@ -1696,6 +1822,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
         color: grid.AppPalette.swarmTabBar,
         child: Row(
           children: [
+            _sidebarButton(),
             IconButton(
               key: const ValueKey('swarm-notifications-button'),
               onPressed: _notifications,

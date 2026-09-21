@@ -6,6 +6,22 @@ import '../core/local_key_value_store.dart';
 import '../core/models.dart';
 import 'app_state.dart';
 
+/// Remove picker-only trailing separators without resolving symlinks or
+/// changing case. Backslashes are ordinary filename characters on POSIX.
+String projectFolderPath(String path) {
+  final windows =
+      RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path) || path.startsWith(r'\\');
+  final minimum = RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path) ? 3 : 1;
+  while (path.length > minimum &&
+      (path.endsWith('/') || (windows && path.endsWith(r'\')))) {
+    path = path.substring(0, path.length - 1);
+  }
+  return path;
+}
+
+String _folderKey(String machineId, String path) =>
+    '$machineId\u0000${projectFolderPath(path)}';
+
 class SwarmAgentRef {
   const SwarmAgentRef(this.machine, this.agent);
   final MachineState machine;
@@ -53,7 +69,7 @@ class SavedSwarmProject {
 
   /// Explicit membership also works with daemons that predate project metadata.
   final List<({String machineId, String agentId})> members;
-  String get id => '$machineId\u0000$path';
+  String get id => '$machineId\u0000${projectFolderPath(path)}';
   Map<String, Object> toJson() => {
     'machineId': machineId,
     'path': path,
@@ -99,13 +115,15 @@ List<SwarmProjectGroup> swarmProjects(
       () => SwarmProjectGroup(id: id, name: project.name),
     );
     group.agents.add(entry);
-    folders['${entry.machineId}\u0000${project.cwd}'] = id;
+    folders[_folderKey(entry.machineId, project.cwd)] = id;
     if (project.root != null) {
-      folders['${entry.machineId}\u0000${project.root}'] = id;
+      folders[_folderKey(entry.machineId, project.root!)] = id;
     }
   }
   for (final item in saved) {
-    final id = folders[item.id] ?? 'folder:${item.machineId}:${item.path}';
+    final id =
+        folders[_folderKey(item.machineId, item.path)] ??
+        'folder:${item.machineId}:${projectFolderPath(item.path)}';
     final group = groups.putIfAbsent(
       id,
       () => SwarmProjectGroup(id: id, name: item.name),

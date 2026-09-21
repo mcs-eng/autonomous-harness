@@ -7,6 +7,7 @@ import 'package:harness/core/harness_file_store.dart';
 import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/core/snapshot_store.dart';
 import 'package:harness/core/startup.dart';
+import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/shared/theme/appearance_prefs_store.dart';
 import 'package:harness/shared/theme/color_palette.dart';
 import 'package:harness/stats/harness_stats.dart';
@@ -72,6 +73,11 @@ void main() {
     await appearance.setUiFamily('Helvetica Neue');
     await appearance.setUiSize(16);
     await appearance.setPalette(HarnessPalette.forest);
+    final wsl = WslPreferencesStore(storage: storage);
+    await wsl.save(const WslSelection(distro: 'Ubuntu', username: 'developer'));
+    final nextWsl = WslPreferencesStore(storage: storage);
+    addTearDown(wsl.dispose);
+    addTearDown(nextWsl.dispose);
     final at = DateTime.utc(2026, 9, 13);
     stats.onAgentSpawned(at: at);
     stats.onTurnStarted('synthetic-agent', at: at);
@@ -94,12 +100,18 @@ void main() {
     addTearDown(nextStats.dispose);
     await loadPersistedSettings(
       terminalFont: nextFont,
+      wslPreferences: nextWsl,
       terminalTheme: nextScheme,
       appearance: nextAppearance,
       stats: nextStats,
     );
 
     expect(nextFont.family, TerminalFontChoice.menlo);
+    expect(
+      nextWsl.value,
+      const WslSelection(distro: 'Ubuntu', username: 'developer'),
+    );
+    expect(nextWsl.restartRequired, isFalse);
     expect(nextFont.size, 17);
     expect(nextScheme.value, TerminalThemeChoice.tango);
     expect(
