@@ -540,8 +540,11 @@ class NewHarnessController extends ChangeNotifier {
     return '${_machineLabel(id)}:${tildePath(path, id)}';
   }
 
-  String? _homeOf(String id) =>
-      app.stateOf(id)?.isLocalMachine == true ? _home : _homes[id];
+  /// Whether [id]'s folders are this app's own disk. A local machine that runs
+  /// in WSL is not: its folders are asked of the daemon, like a remote one's.
+  bool _readsOwnDisk(String id) => app.machineSharesGuiFilesystem(id);
+
+  String? _homeOf(String id) => _readsOwnDisk(id) ? _home : _homes[id];
 
   String tildePath(String path, [String? machineId]) {
     final home = _homeOf(machineId ?? _machineId);
@@ -1022,7 +1025,7 @@ class NewHarnessController extends ChangeNotifier {
       if (home == null) return;
       final root = p.join(home, 'harnesses');
       final List<String> names;
-      if (app.stateOf(id)?.isLocalMachine == true) {
+      if (_readsOwnDisk(id)) {
         names = await Isolate.run(
           () =>
               Directory(root)
@@ -1856,7 +1859,7 @@ class NewHarnessController extends ChangeNotifier {
   /// ~ always means the home of the selected machine's account. The browser
   /// protocol resolves an omitted path to that home; no local path is guessed.
   Future<String?> _ensureHome(String id) {
-    if (app.stateOf(id)?.isLocalMachine == true) return Future.value(_home);
+    if (_readsOwnDisk(id)) return Future.value(_home);
     return _homeRequests.putIfAbsent(id, () async {
       try {
         final answer = await app.listRemoteFolder(id, null);
@@ -1880,7 +1883,7 @@ class NewHarnessController extends ChangeNotifier {
     if (_listing == folder) return;
     _listing = folder;
     _listDebounce?.cancel();
-    if (_machine?.isLocalMachine == true) {
+    if (_readsOwnDisk(_machineId)) {
       unawaited(_list(folder));
     } else {
       _listDebounce = Timer(
@@ -1895,7 +1898,7 @@ class NewHarnessController extends ChangeNotifier {
     final revision = _machineRevision;
     var names = <String>[];
     try {
-      if (_machine?.isLocalMachine == true) {
+      if (_readsOwnDisk(machineId)) {
         // Five thousand entries streamed through the UI isolate's event loop
         // is five thousand events between two frames; read them elsewhere.
         names = await Isolate.run(() {

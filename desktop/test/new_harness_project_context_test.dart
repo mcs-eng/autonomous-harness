@@ -1,6 +1,7 @@
 import 'support/launch_menu.dart';
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -637,6 +638,43 @@ void main() {
       await tester.pump(const Duration(milliseconds: 200));
       await tester.pumpWidget(const SizedBox());
     },
+  );
+
+  testWidgets(
+    'a local machine in WSL completes folders through its daemon',
+    (tester) async {
+      final connections = <String, _Folders>{};
+      final app = createApp(
+        connectionForTest: (id) =>
+            connections.putIfAbsent(id, () => _Folders(id)),
+      );
+      seedMixedAgents(app);
+      // This computer's own machine, with its CLI inside WSL: the GUI runs on
+      // Windows and cannot list the distribution's folders.
+      app.stateOf('m')!.localOnly = true;
+      app.debugSetLocalCliInWsl(true);
+      final box = NewHarnessController(
+        app,
+        machineId: 'm',
+        engine: 'codex',
+        folder: '/home/m/work/payments',
+        home: '/gui-only-home',
+      );
+      addTearDown(box.dispose);
+      addTearDown(app.dispose);
+      await mount(tester, box);
+      box.focusField(NewHarnessField.project);
+      box.setQuery('~/work/pa');
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump();
+      expect(box.selected!.project!.folder, '/home/m/work/payments');
+      expect(box.complete(), '~/work/payments/');
+      expect(connections['m']!.paths, contains('/home/m/work'));
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pumpWidget(const SizedBox());
+    },
+    // Only a Windows GUI has a local machine whose folders are not its own.
+    skip: !Platform.isWindows,
   );
 
   testWidgets(

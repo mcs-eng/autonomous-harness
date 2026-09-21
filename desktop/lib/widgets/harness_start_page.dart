@@ -440,7 +440,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                       builder: (context, entryConstraints) {
                         // Reserve the footer before laying out search, keeping
                         // both its top edge and the device still as results open.
-                        final top = (constraints.maxHeight * 0.21)
+                        final open = (constraints.maxHeight * 0.21)
                             .clamp(72.0, 220.0)
                             .clamp(
                               0.0,
@@ -449,6 +449,9 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                 220.0,
                               ),
                             );
+                        // This fork's resume list needs the height that an
+                        // empty page spends above the search.
+                        final top = widget.resume == null ? open : 24.0;
                         return Padding(
                           padding: EdgeInsets.only(top: top),
                           child: Column(
@@ -536,12 +539,20 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                     children: [
                       if (widget.onStore != null) ...[
                         Flexible(
-                          child: _store(compact: constraints.maxHeight < 600),
+                          child: _store(
+                            compact:
+                                widget.resume != null ||
+                                constraints.maxHeight < 600,
+                          ),
                         ),
                         const SizedBox(width: 16),
                       ],
                       Flexible(
-                        child: _device(compact: constraints.maxHeight < 600),
+                        child: _device(
+                          compact:
+                              widget.resume != null ||
+                              constraints.maxHeight < 600,
+                        ),
                       ),
                     ],
                   ),
