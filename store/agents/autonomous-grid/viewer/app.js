@@ -204,11 +204,24 @@
     }
     for(let ring=0;ring<3;ring++){ctx.beginPath();ctx.strokeStyle=ring===0?P.ring0:ring===1?P.ring1:P.ring2;ctx.lineWidth=ring===0?1.7:1;const angle=t*.075*(ring%2?-1:1);ctx.arc(hub.x,hub.y,88+ring*13,angle,angle+Math.PI*(ring===0?1.85:1.4));ctx.stroke();}
   }
-  function frame(time) {
-    if(!paused&&!document.hidden&&view==='topology') {t+=Math.min((time-previousFrame)/1000,.08)||0;position();draw();}
-    previousFrame=time;requestAnimationFrame(frame);
+  let animationFrame = null;
+  const motionActive=()=>!paused&&!document.hidden&&view==='topology';
+  function updateAnimation() {
+    if(!motionActive()) {
+      if(animationFrame!==null)cancelAnimationFrame(animationFrame);
+      animationFrame=null;
+    } else if(animationFrame===null) {
+      previousFrame=performance.now();animationFrame=requestAnimationFrame(frame);
+    }
   }
-  function setView(value) {view=value;$('topology').hidden=value!=='topology';$('rack').hidden=value!=='rack';$('topology-button').setAttribute('aria-pressed',String(value==='topology'));$('rack-button').setAttribute('aria-pressed',String(value==='rack'));resize();}
+  function frame(time) {
+    animationFrame=null;
+    if(!motionActive())return;
+    t+=Math.min((time-previousFrame)/1000,.08)||0;position();draw();
+    previousFrame=time;animationFrame=requestAnimationFrame(frame);
+  }
+  document.addEventListener('visibilitychange',updateAnimation);
+  function setView(value) {view=value;$('topology').hidden=value!=='topology';$('rack').hidden=value!=='rack';$('topology-button').setAttribute('aria-pressed',String(value==='topology'));$('rack-button').setAttribute('aria-pressed',String(value==='rack'));resize();updateAnimation();}
   $('topology-button').addEventListener('click',()=>setView('topology'));
   $('rack-button').addEventListener('click',()=>setView('rack'));
   // The two pickers are menus of this page's own, drawn the way the app's pane menu is
@@ -271,7 +284,7 @@
     },
   });
   function renderGridSelect(){if(!selecting)gridMenu.draw();}
-  $('motion').addEventListener('click',()=>{paused=!paused;$('motion').textContent=paused?'Resume motion':'Pause motion';$('motion').setAttribute('aria-pressed',String(paused));});
+  $('motion').addEventListener('click',()=>{paused=!paused;updateAnimation();$('motion').textContent=paused?'Resume motion':'Pause motion';$('motion').setAttribute('aria-pressed',String(paused));});
   $('motion').textContent=paused?'Resume motion':'Pause motion';$('motion').setAttribute('aria-pressed',String(paused));
   $('hub').addEventListener('click',()=>{selected=null;render();});
   document.addEventListener('click',async event=>{
@@ -285,5 +298,5 @@
   stream.onerror=()=>{transportLost=true;status();};
   const fetchSnapshot=()=>fetch('api/snapshot',{signal:AbortSignal.timeout(12_000)}).then(r=>{if(!r.ok)throw new Error();return r.json();}).then(consume).catch(()=>{transportLost=true;status();});
   fetchSnapshot();setInterval(()=>{status();if(transportLost)fetchSnapshot();},8000);
-  requestAnimationFrame(frame);
+  updateAnimation();
 })();
