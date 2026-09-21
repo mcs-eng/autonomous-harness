@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
+import 'package:harness/core/harness_catalog.dart';
 import 'package:harness/widgets/engine_identity.dart';
 
 /// A bundle with no pictures in it: every load fails, as a missing or corrupt
@@ -23,6 +24,55 @@ class _NoPictures extends CachingAssetBundle {
 }
 
 void main() {
+  testWidgets('Local AI frameworks load their real logos without initials', (
+    tester,
+  ) async {
+    const ids = [
+      'autonomous/ollama',
+      'autonomous/mlx-lm',
+      'autonomous/vllm',
+      'local/ollama',
+      'local/mlx-lm',
+      'local/vllm',
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Row(
+          children: [
+            for (final id in ids)
+              EngineMark(key: ValueKey('sample-$id'), engine: id, size: 32),
+          ],
+        ),
+      ),
+    );
+    final context = tester.element(find.byType(Row));
+    await tester.runAsync(() async {
+      for (final id in ids) {
+        final identity = engineIdentity(id);
+        expect(identity.asset, isNotNull, reason: '$id must have a logo');
+        await precacheImage(AssetImage(identity.asset!), context);
+      }
+    });
+    await tester.pump();
+    for (final id in ids) {
+      final sample = find.byKey(ValueKey('sample-$id'));
+      final canonical = canonicalHarnessId(id);
+      expect(
+        find.descendant(
+          of: sample,
+          matching: find.byKey(ValueKey('engine-icon-$canonical')),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(ValueKey('engine-fallback-$canonical')), findsNothing);
+      expect(
+        find.descendant(of: sample, matching: find.byType(RawImage)),
+        findsOneWidget,
+      );
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   test(
     'every first-party harness has a face and a base engine this build knows',
     () {
@@ -82,7 +132,11 @@ void main() {
     for (final dir in Directory(
       '../store/agents',
     ).listSync().whereType<Directory>()) {
-      if (!File('${dir.path}/brand/icon.svg').existsSync()) continue;
+      final facts = File('${dir.path}/store.json');
+      if (!facts.existsSync() ||
+          jsonDecode(facts.readAsStringSync())['listed'] == false) {
+        continue;
+      }
       final manifest = jsonDecode(
         File('${dir.path}/harness.json').readAsStringSync(),
       );
@@ -90,8 +144,9 @@ void main() {
       expect(
         engineIdentity(id).asset,
         isNotNull,
-        reason: '$id ships an original mark but still draws a fallback initial',
+        reason: '$id is published but still draws a fallback initial',
       );
+      expect(retiredHarnessIds, isNot(contains(id)), reason: '$id is retired');
     }
     for (final identity in knownHarnesses) {
       final asset = identity.asset!;

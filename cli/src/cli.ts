@@ -32,6 +32,7 @@ import { homedir, hostname } from 'os'
 import { env } from './config/env.js'
 import { VERSION } from './version.js'
 import { sqlitePreflightMessage } from './lib/sqliteAvailability.js'
+import { AttachTracker } from './lib/attachTracker.js'
 import { binaryOnPath } from './lib/binaryOnPath.js'
 import { warmLoginShellEnvironment } from './lib/loginShellEnv.js'
 import { ensureUtf8Locale } from './lib/childLocale.js'
@@ -55,7 +56,7 @@ import { stopDaemonProcess } from './lib/daemonStop.js'
 import { ensureTmuxOnPath, requireTmuxAvailable } from './lib/tmuxOnPath.js'
 import { flashCommand } from './lib/flash.js'
 import { readOrMintComputerId } from './lib/computerIdentity.js'
-import { renderLoginSuccessHtml } from './lib/loginPage.js'
+import { awaitLoginCallback, extractCallbackParams, LOGIN_TIMEOUT_MESSAGE } from './lib/loginCallback.js'
 import { AuthSessionError, AuthSessionManager, clearAuthSession, readAuthSession, writeAuthSession, type AuthSession } from './lib/authSession.js'
 import { handOffToGrid } from './lib/gridHandoff.js'
 import { ensureGridInstalled, type GridInstallResult } from './lib/gridInstall.js'
@@ -71,24 +72,27 @@ import { gridAvailable } from './lib/gridExec.js'
 import { ENGINE_CLI_COMMANDS, ENGINES, PROCESS_ENGINES, engineBin, enginePathOverride } from './lib/engineBin.js'
 import { isTerminalEngine, type AgentEngine } from './engines/types.js'
 import { engineInstallRecipe } from './lib/engineInstall.js'
-import { buildEngineCommandArgv, buildEngineLaunchArgv, commandAvailableInInteractiveShell, namedAgentArgs } from './lib/engineLaunch.js'
+import { buildEngineCommandArgv, buildEngineLaunchArgv, commandAvailableInInteractiveShell, commandSupportsFlagInInteractiveShell, namedAgentArgs, permissionModeFlags } from './lib/engineLaunch.js'
 import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, gridEnvVarNames, type GridLaunchMachine, type GridLaunchOverride, type GridWebSearchStatus } from './lib/gridLaunch.js'
 import { HERMES_SYSTEM_MANAGED_DIR } from './lib/gridWebMcp.js'
 import { writeGridConfigDir } from './lib/gridConfigDir.js'
 import { tmuxSupportsSessionEnv, TMUX_SESSION_ENV_MIN } from './lib/tmuxVersion.js'
 import { clearDeleted, isRecentlyDeleted, markDeleted } from './lib/deletedSessions.js'
 import { terminateDeletedAgent, checkPidRuntime } from './lib/deleteAgentFallback.js'
-import { restartAgent, type RestartAgentDeps } from './lib/restartAgent.js'
-import { claudeContinuation, findCorroboratedResumeSession, findLiveSession } from './lib/sessionRepair.js'
+import { AgentRestartCoordinator, bypassPermissionFor, restartAgent, type RestartAgentDeps } from './lib/restartAgent.js'
+import { claudeContinuation, findCorroboratedResumeSession, findLiveSession, findResumedTranscript } from './lib/sessionRepair.js'
 import { TmuxBackend } from './lib/tmuxBackend.js'
 import { DEFAULT_HOST_THEME, loadHostTheme, saveHostTheme, type HostTheme } from './lib/hostTheme.js'
 import { createAndRegisterPane } from './lib/createAgentPane.js'
 import { forkName, planFork } from './lib/forkAgent.js'
 import { restoreAgents } from './lib/restoreAgents.js'
+import { stoppedAgents } from './lib/stoppedAgents.js'
+import { createStopAgentService } from './lib/stopAgentService.js'
+import { createResumeAgentService } from './lib/resumeAgentService.js'
 import { buildLaunchOverrides, validateLaunchOverrides, type LaunchOverrides, type LaunchOverridesDeps, type LaunchOverridesResult, type LaunchSource } from './lib/launchOverrides.js'
 import { prepareCodexResume } from './engines/codex/portableHistory.js'
 import { buildHarnessSessionLabel } from './lib/harnessSessionLabel.js'
-import { listTmuxPanes } from './lib/tmuxAgentDiscovery.js'
+import { adoptLegacyHarnessSessions, listTmuxPanes } from './lib/tmuxAgentDiscovery.js'
 import { installedDsh } from './dsh/installed.js'
 import { dshVerdictPath, dshViewerName } from './dsh/manifest.js'
 import { catalogEntry } from './dsh/catalog.js'
@@ -103,9 +107,11 @@ import type { AgentDshContext } from './lib/agentFrame.js'
 import { basename } from 'node:path'
 import {
   bypassPermissionActive,
+  permissionModeFromArgv,
   clearPaneRemainOnExit,
   processArgvIsBoundaryFaithful,
   resolvePaneEngineProcess,
+  checkSessionRuntime,
   tmuxPaneState,
 } from './lib/tmux.js'
 import { HerdrBackend } from './lib/herdrBackend.js'
@@ -123,6 +129,8 @@ import { terminalRouteKey, terminalRuntimeLabel } from './lib/terminalRuntime.js
 import { TerminalAgentReconciler } from './lib/terminalAgentReconciler.js'
 import { processRows, type DiscoveredTerminalAgent } from './lib/terminalAgentDiscovery.js'
 import { remoteCommand } from './remoteCommand.js'
+import { newCommand } from './lib/newCommand.js'
+import { WebSocket as NewCommandSocket } from 'ws'
 import {
   terminalActionNotStarted,
   type HookTerminalHint,
@@ -133,6 +141,7 @@ import {
 import { readTerminalConfigSnapshot, writeTerminalConfigSnapshot } from './lib/terminalConfigSnapshot.js'
 import { Watcher, type HistoryEvent, type LineEvent } from './watcher/watcher.js'
 import { chooseHookAgent, startHookServer } from './hookServer.js'
+import { commandBarService } from './lib/commandBar.js'
 import { BackendSocket, isLocalClientId } from './backendSocket.js'
 import { AutonomousDeviceService } from './lib/autonomous-device/service.js'
 import { autonomousDeviceLocalRequest } from './lib/autonomous-device/localApi.js'
@@ -143,7 +152,7 @@ import { RemoteRelayPool } from './lib/remoteRelay.js'
 import { TERMINAL_BINARY_VERSION } from './lib/terminalBinary.js'
 import { foldTranscript, lastTurnTextFromRawLines, lineToEvents, newTurnState, type LiveEvent, type TurnState } from './lib/normalize.js'
 import { AskQuestionController, pollsQuestions, QuestionWatcher } from './lib/askQuestion.js'
-import { CommanderMirror, type CommanderMirrorOpts } from './lib/commander.js'
+import { CommanderMirror, SUBAGENT_IDLE_MS, type CommanderMirrorOpts } from './lib/commander.js'
 import {
   setSummaryPoolDeviceConnected,
   shutdownSummaryPool,
@@ -237,6 +246,8 @@ const COMPUTER_ID_FILE = env.ADAPTER_COMPUTER_ID_FILE
 // The machine's display name, mirrored from the backend (`machine_meta` on connect + web renames) by the
 // daemon so the separate `harness status` process can print it. Absent = unnamed machine.
 const MACHINE_NAME_FILE = join(env.ADAPTER_DATA_DIR, 'machine-name')
+/** Pairing labels that stand in for a name rather than being one (manager.ts `addPaired` callers). */
+const GENERIC_PAIR_LABELS: ReadonlySet<string> = new Set(['harness link', 'browser'])
 /** The name a new terminal tile greets with: the machine's display name the backend gave it, else the host's. */
 function terminalHintMachineName(): string {
   try { return readFileSync(MACHINE_NAME_FILE, 'utf-8').trim() || hostname() } catch { return hostname() }
@@ -281,6 +292,9 @@ const KILO_DB = join(env.KILO_DATA_DIR, 'kilo.db')
 const HERMES_DB = join(env.HERMES_HOME, 'state.db')
 // Devin likewise keeps all history in one SQLite store (WAL) — polled per session by DevinReader.
 const DEVIN_DB = join(env.DEVIN_HOME, 'sessions.db')
+/** How many agents' histories are read at once — the first reconcile pass after a boot asks for every
+ *  agent's, and each read is a tmux probe, a `ps`, and the whole transcript or store (see `attaches`). */
+const ATTACH_CONCURRENCY = 4
 
 // How long a control-plane call the daemon proxies for a local client (`/api/machines`, `/api/auth/me`)
 // may wait on the backend. Under the desktop app's own 30s receive timeout, so a slow backend is
@@ -336,6 +350,8 @@ Machine:
   harness reset                stop the adapter and clear local CLI state
   harness status               show whether it's running (+ version)
   harness logs export          zip the last 7 days of logs (app, CLI, dial, daemon) to the Desktop
+  harness new [agent] [@machine] [folder|name] [-- task]
+                               make a harness from a shell: \`harness new\` is claude here; see \`harness new -h\`
   harness machines             list the machines on this account (this computer's is marked)
   harness machines delete <id> remove ANOTHER machine (refuses this one; use \`harness logout\`)
   harness remote               from a Harness terminal tile: open a terminal on another of your machines and move this tile to it
@@ -788,25 +804,9 @@ async function browserSignIn(
     const manual = !json && process.stdin.isTTY ? promptForCallbackUrl(redirectUri) : null
     let callbackResult: { code: string; state: string }
     try {
-      callbackResult = await new Promise<{ code: string; state: string }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('SSO login timed out')), 5 * 60_000)
-        callback.on('request', (req, res) => {
-          const url = new URL(req.url ?? '/', redirectUri)
-          const code = url.searchParams.get('code')
-          const state = url.searchParams.get('state')
-          const error = url.searchParams.get('error')
-          res.writeHead(error || !code || !state ? 400 : 200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(error || !code || !state
-            ? '<h1>Harness login failed</h1><p>You can close this window.</p>'
-            : renderLoginSuccessHtml())
-          clearTimeout(timeout)
-          if (error) reject(new Error(`SSO login failed: ${error}`))
-          else if (code && state) resolve({ code, state })
-        })
-        manual?.promise.then(resolve, reject)
-      })
+      callbackResult = await awaitLoginCallback({ server: callback, redirectUri, manual: manual?.promise ?? null, timeoutMs: 5 * 60_000 })
     } catch (err) {
-      const timedOut = (err as Error).message === 'SSO login timed out'
+      const timedOut = (err as Error).message === LOGIN_TIMEOUT_MESSAGE
       if (json) { emit({ type: 'result', status: 'error', code: timedOut ? 'TIMEOUT' : 'CALLBACK_ERROR', message: (err as Error).message }); process.exitCode = 1; return { signedIn: false } }
       throw err
     } finally {
@@ -842,6 +842,9 @@ async function browserSignIn(
     }
     return await succeed()
   } finally {
+    // A keep-alive socket the browser left open would hold `close()` until it idles out (a pinned
+    // ADAPTER_LOGIN_CALLBACK_PORT behind an SSH tunnel is where that shows up); drop it first.
+    callback.closeAllConnections?.()
     await new Promise<void>((resolve) => callback.close(() => resolve()))
   }
 }
@@ -970,28 +973,6 @@ function gridProfileCommand(argv: string[]): void {
     return
   }
   throw new Error('Usage: harness grid profile list|set|remove')
-}
-
-/**
- * Pulls `code`/`state`/`error` out of whatever the user pasted — the full callback URL, just its query
- * string (with or without a leading `?`), or a bare `code=...&state=...` pair with no URL shape at all.
- * `new URL(input, redirectUri)` never throws (a base makes it permissive), but a bare `code=...&state=...`
- * parses as a relative PATH against that base, landing in an empty query — so a URL parse that comes up
- * empty falls back to treating the whole input as a raw query string instead.
- */
-function extractCallbackParams(input: string, redirectUri: string): {
-  code: string | null
-  state: string | null
-  error: string | null
-} {
-  const read = (params: URLSearchParams) => ({
-    code: params.get('code'),
-    state: params.get('state'),
-    error: params.get('error'),
-  })
-  const viaUrl = read(new URL(input, redirectUri).searchParams)
-  if (viaUrl.code || viaUrl.state || viaUrl.error) return viaUrl
-  return read(new URLSearchParams(input))
 }
 
 /**
@@ -1469,6 +1450,14 @@ async function runForeground(session: AuthSession): Promise<void> {
   }
   console.log(`[terminal] enabled backends: ${terminalConfig.backends.join(', ')}`)
   if (tmuxBackend) {
+    // Before the first inventory: sessions a pre-prefix build named `<engine>-<ts>` are renamed to
+    // `harness-<engine>-<ts>` so discovery's whitelist sees the registry's own panes again.
+    const ownedPanes = new Map(registry.list().flatMap((session) => session.runtimes
+      .filter((runtime) => runtime.backend === 'tmux')
+      .map((runtime) => [runtime.paneId, session.engine] as const)))
+    for (const adopted of await adoptLegacyHarnessSessions(ownedPanes)) {
+      console.log(`[terminal] renamed tmux session ${adopted.from} → ${adopted.to} (pane ${adopted.paneId}) · named by a build before the harness- prefix`)
+    }
     const tmuxStartup = await tmuxBackend.inventory()
     console.log(tmuxStartup.state === 'available'
       ? '[terminal] tmux: available'
@@ -1476,19 +1465,21 @@ async function runForeground(session: AuthSession): Promise<void> {
   }
   const sqliteWarning = sqlitePreflightMessage()
   if (sqliteWarning) console.warn(sqliteWarning)
-  // Capture the user's shell environment NOW, not on the first recap — paying it here, where the
-  // daemon is already doing blocking startup work, keeps it off the path of a live turn, where a
-  // slow profile (nvm, conda, …) would stall frame handling instead. Started above, alongside the
-  // tmux PATH probe, so this is usually just picking up an already-finished (or nearly so) capture
-  // rather than paying for it here — the logged "…ms" is residual wait, not the full capture time.
-  // See lib/loginShellEnv.ts: this is what lets a recap reach a credential the user exports from
-  // their rc file, which a launchd/systemd-parented daemon never read.
+  // The user's shell environment is captured at startup, not on the first recap — a slow profile
+  // (nvm, conda, …) then stalls nothing live. Started above alongside the tmux PATH probe, and LOGGED
+  // when it lands, never waited on: nothing before the control port binds needs it (lib/loginShellEnv
+  // caches the capture; engine one-shots read it through `loginShellEnvironment()`), and a second
+  // login shell held the port — and with it the app's "Starting local service…" — for as long as the
+  // slower of the two shells took. See lib/loginShellEnv.ts: this is what lets a recap reach a
+  // credential the user exports from their rc file, which a launchd/systemd-parented daemon never read.
   {
     const t0 = Date.now()
-    const captured = Object.keys(await loginShellEnvPromise).length
-    console.log(captured
-      ? `[env] read ${captured} variables from the login shell in ${Date.now() - t0}ms (engine one-shots only)`
-      : '[env] could not read a login shell environment — engine one-shots use the daemon environment only')
+    void loginShellEnvPromise.then((captured) => {
+      const count = Object.keys(captured).length
+      console.log(count
+        ? `[env] read ${count} variables from the login shell in ${Date.now() - t0}ms (engine one-shots only)`
+        : '[env] could not read a login shell environment — engine one-shots use the daemon environment only')
+    })
   }
   for (const target of herdrStartup) {
     console.log(target.state === 'available'
@@ -1843,6 +1834,15 @@ async function runForeground(session: AuthSession): Promise<void> {
     sendTarget: (connId, type, payload) => backend.sendTerminalTo(connId, type, payload),
     sendBinaryTarget: (connId, frame) => backend.sendTerminalBinaryTo(connId, frame),
     isLoopback: isLocalClientId,
+    // For a client that did not introduce itself on `terminal_open` (an older build). A loopback
+    // window can only be this computer's desktop; a paired peer is named by its pairing label unless
+    // that label is one of the placeholders pairing hands out — those name nothing.
+    describeClient: (connId) => {
+      if (isLocalClientId(connId)) return { kind: 'desktop', name: terminalHintMachineName() }
+      const label = backend.e2ee.sessionLabel(connId)
+      if (!label || GENERIC_PAIR_LABELS.has(label)) return null
+      return { kind: backend.e2ee.sessionRole(connId) === 'device' ? 'device' : 'web', name: label }
+    },
     streamingAvailable: tmuxBackend != null,
     diagnostic: (event, fields) => console.log(`[terminal-stream] ${event}`, fields),
   })
@@ -1976,7 +1976,7 @@ async function runForeground(session: AuthSession): Promise<void> {
     })
   })
 
-  const attachSession = async (
+  const attachSessionNow = async (
     session: RegisteredSession,
     reset = false,
     replayCursorFromStart = false,
@@ -2226,6 +2226,21 @@ async function runForeground(session: AuthSession): Promise<void> {
     if (pollsQuestions(session.engine)) questionWatcher.start(session.sessionId)
     return true
   }
+
+  /** One attach per session, a few sessions at a time, and a record of what is being read — see lib/attachTracker. */
+  const attaches = new AttachTracker<AgentEngine>({
+    concurrency: ATTACH_CONCURRENCY,
+    onSlow: (session, elapsedMs) => console.warn(
+      `[agent] ${sid(session.agentId)} attach still running · engine=${session.engine} · session=${sid(session.sessionId)} · ${Math.round(elapsedMs / 1000)}s`,
+    ),
+  })
+  const attachSession = (
+    session: RegisteredSession,
+    reset = false,
+    replayCursorFromStart = false,
+    replayFromStart = false,
+  ): Promise<boolean> =>
+    attaches.attach(session, reset, () => attachSessionNow(session, reset, replayCursorFromStart, replayFromStart))
   const input = new SessionInputController({
     getSession: (id) => registry.resolve(id),
     onDelivery: (event) => {
@@ -2426,6 +2441,25 @@ async function runForeground(session: AuthSession): Promise<void> {
     ...summarizer,
     nameFor: (sessionId) => { const s = registry.bySession(sessionId); return s ? projectDisplayName(s) : undefined },
     agentIdFor: (sessionId) => registry.bySession(sessionId)?.agentId,
+    // An Orchestrator specialist's turn end, or the Director's while specialists are still out, is not
+    // announced: the person asked to hear from the main agent once, not from every sub-agent.
+    isSubagent: (sessionId) => {
+      const agentId = registry.bySession(sessionId)?.agentId
+      if (!agentId) return false
+      const role = backend.orchestratorRoleOf(agentId)
+      return role?.role === 'worker' || (role?.role === 'director' && role.busy)
+    },
+    // A claude sub-agent still at work is one whose transcript is still growing:
+    // `<session>/subagents/agent-<id>.jsonl` beside the parent's (the same file enrichSubagentStats
+    // reads). Written in the last SUBAGENT_IDLE_MS = alive; the held turn end waits for it.
+    subagentActive: (sessionId, agentId) => {
+      const transcriptPath = registry.bySession(sessionId)?.transcriptPath
+      if (!transcriptPath) return false
+      try {
+        const at = statSync(join(transcriptPath.replace(/\.jsonl$/, ''), 'subagents', `agent-${agentId}.jsonl`)).mtimeMs
+        return Date.now() - at < SUBAGENT_IDLE_MS
+      } catch { return false }
+    },
     readLastTurn: async (sessionId) => {
       const s = registry.bySession(sessionId)
       if (!s) return null
@@ -2453,8 +2487,8 @@ async function runForeground(session: AuthSession): Promise<void> {
   // Recaps are STORED under the engine session id — that is what lets `--resume` bring the last recap
   // back under a brand-new agent — but they are ASKED FOR by agent id, which is the only id the device
   // and the voice router know. Resolve across the two, or every tile restores empty.
-  backend.recentProvider = (id, n) => mirror.recent(registry.resolve(id)?.sessionId || id, n)
-  backend.recentAsksProvider = (id, n) => mirror.recentAsks(registry.resolve(id)?.sessionId || id, n)
+  backend.recentProvider = (id, n) => mirror.recent(registry.resolve(id)?.sessionId || stoppedAgents.get(id)?.sessionId || id, n)
+  backend.recentAsksProvider = (id, n) => mirror.recentAsks(registry.resolve(id)?.sessionId || stoppedAgents.get(id)?.sessionId || id, n)
 
   const runtimeController = new RuntimeProfileController({
     manager: runtimeProfiles,
@@ -2629,6 +2663,7 @@ async function runForeground(session: AuthSession): Promise<void> {
       ? `[agent] ${sid(announceId)} released session ${sid(sessionId)}`
       : `[agent] ${sid(announceId)} forgotten`)
 
+    if (!opts.keepAgent && doomed) stoppedAgents.save(doomed)
     if (opts.keepAgent) registry.unbindSession(sessionId)
     else if (doomed) registry.removeAgent(doomed.agentId)
     else registry.remove(sessionId)
@@ -2668,9 +2703,23 @@ async function runForeground(session: AuthSession): Promise<void> {
     if (!opts.keepAgent) detachDsh(announceId)
     mirror.forget(sessionId) // aborts any in-flight recap + clears busy; KEEPS the persisted summary
     if (opts.keepAgent) return
-    backend.send({ type: 'agent_deleted', payload: { agentId: announceId } }) // web tab
+    backend.send({ type: 'agent_deleted', payload: { agentId: announceId, retained: !!doomed } }) // web tab
     backend.sendCommander({ type: 'agent_deleted', payload: { agentId: announceId } })
 
+  }
+
+  /** Retain the conversation's identity; a surviving shell gets its own live identity. */
+  const retainExitedSession = (entry: RegisteredSession, paneAlive: boolean): void => {
+    stoppedAgents.save(entry)
+    const saved = stoppedAgents.get(entry.agentId)!
+    invalidateTerminalControl(entry.agentId)
+    input.forget(entry.agentId)
+    detachDsh(entry.agentId)
+    const terminal = paneAlive ? registry.releaseEngine(entry.agentId, true) : null
+    if (!paneAlive) registry.removeAgent(entry.agentId)
+    syncRecapPool()
+    void backend.publishStoppedAgent(saved).catch(error => console.warn('[resume] could not announce saved harness', error))
+    if (terminal) announceSession(terminal, { device: false })
   }
 
   type RegisteredMeta = {
@@ -2759,6 +2808,11 @@ async function runForeground(session: AuthSession): Promise<void> {
       announceSession(entry)
       return
     }
+    const confirmed = registry.byAgent(entry.agentId)
+    if (confirmed?.sessionId === entry.sessionId) {
+      stoppedAgents.save(confirmed)
+      if (confirmed.resumeOnly) stoppedAgents.finishResume(confirmed.agentId)
+    }
     syncRecapPool()
     if (!meta.isNew) return
     registry.inheritName(entry.agentId, entry.sessionId)
@@ -2786,6 +2840,7 @@ async function runForeground(session: AuthSession): Promise<void> {
     //
     // The switch leaves exactly one trace — the `inuse.<pid>.lock` Copilot takes on the new session
     // directory. It writes nothing to the transcript and fires no hook until the next prompt.
+    if (agent.resumeOnly && agent.launch && agent.launch.state !== 'ready') return
     if (agent.sessionId) {
       if (observed.engine === 'copilot') {
         const current = await copilotSessionForPid(env.COPILOT_HOME, observed.processIdentity.pid)
@@ -2877,8 +2932,13 @@ async function runForeground(session: AuthSession): Promise<void> {
             ? await findAgyTranscript(env.AGY_HOME, sessionId) ?? undefined
             : observed.engine === 'copilot'
               ? await findCopilotTranscript(env.COPILOT_HOME, sessionId) ?? undefined
-              : undefined
-      if ((observed.engine === 'cursor' || observed.engine === 'grok') && !transcriptPath) return
+              : observed.engine === 'claude' || observed.engine === 'codex'
+                ? await findResumedTranscript(observed.engine, sessionId, { codexHome: agent.codexHome ?? undefined }) ?? undefined
+                : undefined
+      // The registry refuses a claude/codex session without its file, so a resume of a transcript this
+      // machine does not have is not a session — the hook that follows the user's next prompt will say.
+      if ((observed.engine === 'cursor' || observed.engine === 'grok' || observed.engine === 'claude' || observed.engine === 'codex')
+        && !transcriptPath) return
     } else {
       const attempts = repairAttempts.get(agent.agentId) ?? 0
       const lastAttempt = lastRepairAttempt.get(agent.agentId) ?? 0
@@ -2993,8 +3053,18 @@ async function runForeground(session: AuthSession): Promise<void> {
       // (review cycle-6, P1 security). No faithful evidence here leaves the stored state alone.
       // `observed.engine`, not `current.engine`: for a terminal that just adopted one, the row's
       // engine was `terminal` a line ago, which has no bypass flag and would read every launch as "no".
+      // Flattened `ps` args are no evidence of flags (see `processArgvIsBoundaryFaithful`): read the
+      // bypass state and the mode only from boundary-faithful argv.
       if (observed.argsBoundaryFaithful) {
         registry.setBypassPermission(current.agentId, bypassPermissionActive(observed.engine, observed.args))
+        // And the exact MODE, fill-only: a row that recorded one at create is authoritative, and one
+        // that never did (adopted from a terminal, written by an older build, created by a path that
+        // passes no mode) learns it from the same argv — so its restart brings back
+        // `--dangerously-skip-permissions`, not the auto mode `bypassPermission` alone would pick.
+        if (!current.permissionMode) {
+          const mode = permissionModeFromArgv(observed.engine, observed.args)
+          if (mode) registry.setPermissionMode(current.agentId, mode)
+        }
       }
       // Same idea for a Codex profile: a row that never learned which CODEX_HOME its process runs
       // under learns it from the process, before the hook path validates a transcript against it.
@@ -3005,17 +3075,29 @@ async function runForeground(session: AuthSession): Promise<void> {
       if (observed.dsh && !current.dsh) registry.setDsh(current.agentId, observed.dsh)
       const withDsh = registry.byAgent(current.agentId)
       if (withDsh?.dsh) attachDsh(withDsh)
-      if (wasLaunching) registry.setLaunch(current.agentId, { state: 'ready' })
+      if (wasLaunching && !current.resumeOnly) registry.setLaunch(current.agentId, { state: 'ready' })
       await bindObservedAgent(observed)
       if (wasDormant || wasLaunching || adopted) {
         const active = registry.byAgent(current.agentId)
         if (!active) return
-        if (active.sessionId && !await attachSession(active)) {
-          registry.setActive(active.agentId, false)
+        if (!active.sessionId) {
+          syncRecapPool()
+          announceSession(active)
           return
         }
-        syncRecapPool()
-        announceSession(active)
+        // Not awaited: the attach reads this agent's whole history, and this callback runs inside the
+        // reconcile pass whose completion is what publishes `discoveryReady`. One agent's slow store
+        // must not hold the pass — or, at boot, the app. The tracker runs a few of these at a time.
+        void attachSession(active).then((attached) => {
+          if (!attached) {
+            registry.setActive(active.agentId, false)
+            return
+          }
+          syncRecapPool()
+          announceSession(active)
+        }).catch((err) => {
+          console.error(`[discovery] ${sid(active.agentId)} attach failed:`, err instanceof Error ? err.message : err)
+        })
         return
       }
       // An agent that was already awake changed grid under us. Nobody was told: this branch wrote the
@@ -3028,7 +3110,7 @@ async function runForeground(session: AuthSession): Promise<void> {
       const refreshed = registry.byAgent(current.agentId)
       if (refreshed) announceSession(refreshed)
     },
-    onDormant: (agent, reason) => {
+    onDormant: async (agent, reason) => {
       if (!agent.active) return
       invalidateTerminalControl(agent.agentId)
       input.forget(agent.agentId)
@@ -3036,23 +3118,19 @@ async function runForeground(session: AuthSession): Promise<void> {
         questionWatcher.stop(agent.sessionId)
         stopHeartbeat(agent.sessionId)
       }
-      // The engine has exited and its pane is a shell at its prompt (every launch runs the engine
-      // inside the pane's shell — engineLaunch.ts `harness_engine` — and so does a terminal somebody
-      // typed it into): the row becomes a terminal — live, not dormant — and the dial, which only
-      // ever knew it as an agent, is told it is gone. The app gets the same row with its engine
-      // now `terminal` and draws it as one. Not while the launch is still `starting`: a pane with
-      // no engine process yet is an install in progress, not an exit, and releasing it would wipe
-      // the grid/profile/DSH the launch is about to use. Not for a pane that is dead either — that
-      // one is on its way to `onRemoved`.
+      // Preserve the conversation's public identity and give the surviving shell its own row.
+      // A starting install is not an exited engine; strict uncertain starts keep their reservation.
+      if (agent.resumeOnly && agent.launch?.state === 'failed') {
+        const pane = await tmuxPaneState(agent.tmuxPane)
+        // An unconfirmed install/startup can still be about to launch the engine. Do not
+        // turn its live shell into permission to start another one.
+        if (!pane || (!pane.dead && pane.engineExit == null)) return
+      }
       if (agent.launch?.state !== 'starting') {
-        const released = registry.releaseEngine(agent.agentId)
-        if (released) {
-          syncRecapPool()
-          console.log(`[discovery] ${sid(agent.agentId)} ${agent.engine} → terminal · ${reason}`)
-          announceSession(released, { device: false })
-          backendRef?.sendCommander({ type: 'agent_deleted', payload: { agentId: agent.agentId } })
-          return
-        }
+        retainExitedSession(agent, true)
+        if (agent.resumeOnly) stoppedAgents.finishResume(agent.agentId)
+        console.log(`[discovery] ${sid(agent.agentId)} retained · ${reason}`)
+        return
       }
       registry.setActive(agent.agentId, false)
       console.log(`[discovery] ${sid(agent.agentId)} dormant · ${reason}`)
@@ -3211,6 +3289,7 @@ async function runForeground(session: AuthSession): Promise<void> {
   let handoffChild: ReturnType<typeof spawn> | null = null
 
   const { server: hookServer, port: hookPort } = await startHookServer(env.PORT, {
+    onCommandBar: commandBarService,
     onAutonomousDeviceRequest: async (method, target, body) => {
       if (!autonomousDeviceService) return { status: 503, body: { error: { code: 'UNAVAILABLE', message: 'Autonomous device service is starting' } } }
       return autonomousDeviceLocalRequest({
@@ -3271,9 +3350,9 @@ async function runForeground(session: AuthSession): Promise<void> {
        * process that POSTs is not a descendant of the pane's engine, so no session ever binds. It is not
        * a Herdr problem; tmux fails identically.
        *
-       * The pane is itself proof: the hook knew a runtime id, that runtime carries exactly one agent of
-       * this engine, and the caller already had to read the 0600 hook credential to be heard at all. So
-       * fall back to that, and only when it is unambiguous.
+       * Keep that exception specific to Cursor. A delayed hook from an exited process can still name
+       * a pane now owned by its replacement; the pane and hook credential alone cannot prove that a
+       * Codex (or other engine's) old transcript belongs to the new process.
        */
       const onHintedRuntime = new Map<string, RegisteredSession>()
       for (const runtime of resolved) {
@@ -3297,7 +3376,7 @@ async function runForeground(session: AuthSession): Promise<void> {
           }
         }
       }
-      const choice = chooseHookAgent([...candidates.values()], [...onHintedRuntime.values()])
+      const choice = chooseHookAgent([...candidates.values()], [...onHintedRuntime.values()], engine)
       if (choice.agent) {
         if (choice.reason === 'runtime') {
           console.log(`[hooks] ${engine} hook accepted on runtime evidence alone`
@@ -3546,6 +3625,10 @@ async function runForeground(session: AuthSession): Promise<void> {
       restarting,
       discoveryReady,
       discoveryError,
+      // Agents whose history is being read right now, and how many wait their turn. Normally empty or
+      // gone in a second; one that stays here names the store that is slow, which no other field does.
+      attaching: attaches.attaching(),
+      attachQueue: attaches.queued(),
       fingerprint: backend.e2eeFingerprint(),
       config: {
         watching: `${terminalConfig.backends.join(' + ')} terminals across all supported engines`,
@@ -3596,6 +3679,10 @@ async function runForeground(session: AuthSession): Promise<void> {
     onSharedHarnesses: () => session.local
       ? Promise.resolve({ status: 200, body: { success: true, data: { machines: [] } } })
       : proxyBackend('GET', '/api/harness-shares'),
+    // The account's desk — see backend routes/desk.ts. The window edits its tabs through the ops
+    // route and hears about everyone else's edits as `desk_changed` (backendSocket.ts).
+    onDeskRead: () => proxyBackend('GET', '/api/desk'),
+    onDeskOps: (body) => proxyBackend('POST', '/api/desk/ops', body),
     onStore: (method, path, body) => proxyBackend(method, path, body),
   })
   // Claim the pid file for OURSELVES, and only now that the control port is bound. It used to be
@@ -3876,6 +3963,10 @@ async function runForeground(session: AuthSession): Promise<void> {
     backend,
     relayPool,
     autonomousEnv: readAuthSession()?.autonomousEnv ?? session.autonomousEnv,
+    // A window from before it introduced itself still gets named on the far side's "took control"
+    // banner: the relay knows it is this machine's desktop. Same source as `describeClient` above.
+    // Cut to the wire's limit here rather than let the far daemon drop the whole claim over a long name.
+    localClient: () => ({ kind: 'desktop', name: terminalHintMachineName().slice(0, 64), machineId: backend.machineId }),
   })
   // Install both CLI hooks with the port the local server actually bound.
   if (!env.DISABLE_HOOK_INSTALL) {
@@ -4013,17 +4104,11 @@ async function runForeground(session: AuthSession): Promise<void> {
       console.error(`[cli] history handler error (session ${batch.sessionId}):`, err instanceof Error ? err.message : err)
     }
   })
-  for (const session of registry.list()) {
-    // An UNBOUND process agent has no transcript to attach to yet. Discovery keeps it visible and the
-    // hook/store repair path binds it as soon as the engine reports a session. Attaching an
-    // empty session id here would tear down an agent the user can see running in their pane, which is
-    // exactly what a self-update restart must never do.
-    if (!session.active || !session.sessionId) continue
-    if (!await attachSession(session)) registry.setActive(session.agentId, false)
-    else {
-      input.setTurnOpen(session.agentId, sessionTurnOpen(session.sessionId))
-    }
-  }
+  // Nothing re-attaches the registry's agents here. Every one of them is dormant from the moment the
+  // registry loads (see the `setActive(false)` transaction at the top of this function), and the first
+  // reconcile pass is what reactivates each one it finds a live process for — and attaches it, in the
+  // background and a few at a time (`onObserved` above, `attaches` below). Readiness never waits on an
+  // agent's history being read: one slow store used to hold the app out of every agent on the machine.
   /**
    * What the launch builder needs to know about THIS machine, read at launch time.
    *
@@ -4093,9 +4178,15 @@ async function runForeground(session: AuthSession): Promise<void> {
   // pass five seconds later would drop the agents for good. Pane creation is awaited so the first
   // announce already shows every restored agent with a terminal; binding their engine processes
   // continues in the background, the same way `agent_create` does it.
+  for (const entry of registry.list()) {
+    const saved = isTerminalEngine(entry.engine) ? stoppedAgents.get(entry.agentId) : null
+    if (saved && !isTerminalEngine(saved.engine)) retainExitedSession(entry, true)
+  }
   if (tmuxBackend) {
     const backend = tmuxBackend
+    let paneInventory: ReturnType<typeof listTmuxPanes> | null = null
     const summary = await restoreAgents({
+      retainStopped: retainExitedSession,
       registry,
       // "Alive" means the pane still runs THIS row's engine — not merely that tmux knows the id.
       // A new tmux server hands out `%N` from zero again, so a stale id can name someone's shell;
@@ -4103,7 +4194,10 @@ async function runForeground(session: AuthSession): Promise<void> {
       // engine, which a second pane resuming the same session would collide with.
       liveProcess: (entry, runtime) => resolvePaneEngineProcess(runtime.paneId, entry.engine),
       livePane: async (runtime) => {
-        const inventory = await listTmuxPanes()
+        // One inventory for the whole restore, not one `tmux list-panes` per row: this runs between
+        // the control port binding and the first reconcile pass, i.e. on the app's "starting" screen.
+        paneInventory ??= listTmuxPanes()
+        const inventory = await paneInventory
         // Only a harness pane counts (the inventory is already that whitelist): a new tmux server
         // hands out `%N` from zero again, and a stale id can name somebody's own shell.
         return inventory.ok && inventory.panes.some((pane) => pane.tmuxPane === runtime.paneId)
@@ -4349,8 +4443,14 @@ async function runForeground(session: AuthSession): Promise<void> {
         // "Start failed" tile they cannot type into.
         if (paneState.engineExit !== null) {
           await clearPaneRemainOnExit(spawned.runtime.paneId)
-          const released = registry.releaseEngine(pending.agentId)
-          if (released) announceSession(released)
+          // A hook may have bound a conversation while this watcher was awaiting its probe.
+          // Archive the current row, not the pre-hook pending snapshot.
+          const row = registry.byAgent(pending.agentId)
+          if (row?.sessionId) retainExitedSession(row, true)
+          else {
+            const released = registry.releaseEngine(pending.agentId)
+            if (released) announceSession(released)
+          }
           console.warn(`[agent] create · ${engine} exited (${paneState.engineExit}) before ready · agent ${pending.agentId} kept as a terminal`)
           return
         }
@@ -4375,6 +4475,27 @@ async function runForeground(session: AuthSession): Promise<void> {
       if (!statSync(cwd).isDirectory()) return { ok: false, error: 'CWD_NOT_FOUND' }
     } catch {
       return { ok: false, error: 'CWD_NOT_FOUND' }
+    }
+    // `--approve-for-me` was added after older Codex CLI releases. Refuse the
+    // incompatible Auto mode before opening a pane, rather than letting Codex
+    // reject the flag and leaving the person in an unexpected fallback shell.
+    // Ask mode has no flag and remains a useful workaround until Codex updates.
+    const codexAutoApprove =
+      engine === 'codex' &&
+      (permissionMode !== null
+        ? permissionModeFlags(engine, permissionMode)?.includes('--approve-for-me') === true
+        : bypassPermission)
+    if (codexAutoApprove) {
+      const support = await commandSupportsFlagInInteractiveShell(
+        engineBin('codex'),
+        '--approve-for-me',
+      )
+      if (support === 'unsupported') {
+        const detail =
+          'Your installed Codex CLI does not support --approve-for-me, which Harness uses for Auto approvals. Update Codex and try again, or choose Ask permissions for this harness.'
+        console.warn(`[agent] create codex refused · ${detail}`)
+        return { ok: false, error: 'CODEX_CLI_TOO_OLD', detail }
+      }
     }
     // A domain-specific harness: put its files into the workspace first (template, AGENTS.md, skill
     // links) and take its env/argv for the launch. Refused, never approximated, when it is not here.
@@ -4635,6 +4756,13 @@ async function runForeground(session: AuthSession): Promise<void> {
    * is the only thing this takes. Written once because two copies of a kill sequence drift, and the
    * half that drifts is the half nobody ran today.
    */
+  const restartJobs = new AgentRestartCoordinator()
+  const sameRestartTarget = (session: RegisteredSession): boolean => {
+    const current = registry.byAgent(session.agentId)
+    return !!current && current.registeredAt === session.registeredAt
+      && current.tmuxPane === session.tmuxPane && current.engine === session.engine
+  }
+
   const paneSwapDeps = (
     session: RegisteredSession,
     runtime: TmuxRuntimeRef,
@@ -4700,8 +4828,9 @@ async function runForeground(session: AuthSession): Promise<void> {
     log: (message) => console.log(message),
   })
 
-  /** The bypass-permission mode the LIVE process was launched with — there is nowhere to read it from
-   *  once that process is dead, so both swap paths read it before signalling anything. Only
+  /** The bypass-permission flag the LIVE process was launched with. The fallback behind
+   *  `bypassPermissionFor` for a row that recorded neither a mode nor the flag (written before either
+   *  was persisted, and not yet seen by a discovery scan); read before anything is signalled. Only
    *  boundary-faithful argv counts: flattened `ps` args let one prompt argument carrying the flag
    *  text flip the state that the relaunch then re-applies (review cycle-6, P1 security), so a
    *  non-faithful row is NO EVIDENCE and the relaunch proceeds without a bypass flag. */
@@ -4818,6 +4947,7 @@ async function runForeground(session: AuthSession): Promise<void> {
     if (!capture) return { ok: false, error: 'TMUX_FAILED' }
     if (!inspectRuntimePane(session.engine, capture).idle) return { ok: false, error: 'AGENT_BUSY' }
     // Nothing may type into the pane while it is being replaced.
+    if (restartJobs.busy(session.agentId)) return { ok: false, error: 'AGENT_BUSY' }
     const release = acquireTerminalControl(session.agentId)
     if (!release) return { ok: false, error: 'AGENT_BUSY' }
     // The grid's env and argv, config directory written (keyed on the agent, so moving it between
@@ -4882,7 +5012,7 @@ async function runForeground(session: AuthSession): Promise<void> {
       }
       const outcome = await restartAgent(
         { engine: session.engine, sessionId: session.sessionId },
-        await liveBypassPermission(session),
+        await bypassPermissionFor(session, () => liveBypassPermission(session)),
         paneSwapDeps(session, pane, built.overrides),
       )
       if (!outcome.ok) {
@@ -4930,54 +5060,21 @@ async function runForeground(session: AuthSession): Promise<void> {
   }
 
   /**
-   * Web or device deleted an agent (`agent_delete`): end the AGENT, not the user's window.
-   *
-   * This used to `tmux kill-pane`, which took the pane down — and with it the window, and the session if
-   * that pane was the last one. The pane is the user's; only the exact discovered engine process is
-   * signalled. Its PID and start marker are re-validated before SIGTERM/SIGKILL.
-   *
-   * `registry.remove` + `mirror.forget` keep the recap AND the agent-name override for a later resume.
+   * Stop Harness (`agent_delete`) archives its conversation and launch settings, removes the live
+   * registry entry, and kills its containing tmux session. Exact PID/start-marker validation guards the engine's
+   * SIGTERM/SIGKILL fallback. Engine conversation files, recaps and the Harness name remain on disk.
    */
-  backend.onDeleteAgent = (sessionId) => {
-    const s = registry.resolve(sessionId) // BEFORE forgetSession — that removes it from the registry
-    // The engine outlives this call by a second or two now, and its catch hook fires on every turn
-    // boundary. Without the tombstone that hook re-registers the session and the tile comes straight back.
-    markDeleted(sessionId)
-    if (s?.processIdentity) {
-      agentReconciler.suppress(s)
-    }
-    forgetSession(sessionId, { force: true })
-    if (!s) return
-    // Stopping is closing the pane. Every pane is a shell with the engine inside it now, so signalling
-    // the engine alone would leave a shell running in a pane nobody can see any more — a leak, and
-    // for a bare terminal there is no engine pid to signal at all. The engine's own termination
-    // below stays as the belt to this: a pane kill that does not land must not leave a live engine
-    // the UI already calls gone.
-    if (tmuxBackend) {
-      const runtimes = s.runtimes.filter((runtime): runtime is TmuxRuntimeRef => runtime.backend === 'tmux')
-      void Promise.all(runtimes.map((runtime) => tmuxBackend.kill(runtime))).then(() => {
-        console.log(`[delete] ${sid(sessionId)} ${s.engine} · pane closed`)
-        if (isTerminalEngine(s.engine)) clearDeleted(sessionId)
-        void agentReconciler.trigger()
-      }).catch((err) => {
-        console.error('[delete] terminal pane close failed:', err instanceof Error ? err.message : err)
-      })
-      if (isTerminalEngine(s.engine)) return
-    }
-    void terminateDeletedAgent(s, {
-      checkRuntime: checkPidRuntime,
-      kill: (pid, signal) => process.kill(pid, signal),
-      sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.() }),
-      log: (message) => console.log(message),
-    }, 0).then((outcome) => {
-      console.log(`[delete] ${sid(sessionId)} ${s.engine} · ${outcome}`)
-      // Provably gone ⇒ nothing left that could re-register, so stop blocking the id early.
-      if (outcome !== 'failed') clearDeleted(sessionId)
-      void agentReconciler.trigger()
-    }).catch((err) => {
-      console.error('[delete] process termination failed:', err instanceof Error ? err.message : err)
-    })
-  }
+  const stopJobs = new Map<string, Promise<void>>()
+  backend.onDeleteAgent = createStopAgentService({
+    registry, stoppedAgents, restartJobs, stopJobs, tmuxBackend, agentReconciler,
+    forgetSession, markDeleted, clearDeleted,
+  })
+
+  backend.onResumeAgent = createResumeAgentService({
+    registry, stoppedAgents, tmuxBackend, restartJobs, stopJobs, pinnedControls,
+    retainExitedSession, announceSession, relaunchOverrides, prepareSessionResume,
+    refreshGridWebSearch, clearDeleted, attachDsh,
+  })
 
   /**
    * Web or device restarted an agent (`agent_restart`): exit the live engine process and relaunch it in
@@ -4992,15 +5089,21 @@ async function runForeground(session: AuthSession): Promise<void> {
    *    mid-kill, or — worse — mint a brand-new agent for the relaunched process the instant it appears,
    *    before this handler gets to rebind it.
    *
-   * The bypass-permission mode is read from the LIVE process argv before anything is signalled (there is
-   * nowhere else to read it from once the process is dead); the sessionId to resume comes from the
-   * registry's live-synced field, not from the original launch argv (the user may have resumed/switched
-   * sessions from inside the engine's own terminal since launch).
+   * The permission mode comes from the registry row (`bypassPermissionFor`): what create recorded, or
+   * what discovery read off the live argv since — the live process is probed only for a row that has
+   * neither, and before anything is signalled. The sessionId to resume comes from the registry's
+   * live-synced field, not from the original launch argv (the user may have resumed/switched sessions
+   * from inside the engine's own terminal since launch).
    */
-  backend.onRestartAgent = async (agentId) => {
+  backend.onRestartAgent = (agentId) => restartJobs.run(registry.resolve(agentId)?.agentId ?? agentId, async (operationCurrent) => {
+    if (stopJobs.has(agentId) || pinnedControls.has(agentId)) return { ok: false, error: 'AGENT_BUSY' }
     const session = registry.resolve(agentId)
     if (!session) return { ok: false, error: 'AGENT_NOT_FOUND' }
     if (!session.tmuxPane || !tmuxBackend) return { ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' }
+    const target = { ...session }
+    const current = () => operationCurrent() && sameRestartTarget(target)
+    const changed = { ok: false, error: 'AGENT_CHANGED', detail: 'The agent changed or stopped during restart.' } as const
+    if (!current()) return changed
     const pane = session.tmuxPane
     const engine = session.engine
     const runtime: TmuxRuntimeRef = { backend: 'tmux', paneId: pane }
@@ -5012,12 +5115,19 @@ async function runForeground(session: AuthSession): Promise<void> {
     if (isTerminalEngine(engine)) {
       agentReconciler.holdRoute(routeKey)
       try {
+        // The same opening a fresh terminal tile prints (`onCreateAgent`'s `terminalHint`): a
+        // restarted tile is a fresh shell too, and should look like one.
         const respawned = await tmuxBackend.respawn(runtime, {
-          command: buildEngineLaunchArgv(engine, session.cwd ? { cwd: session.cwd } : {}),
+          command: buildEngineLaunchArgv(engine, {
+            ...(session.cwd ? { cwd: session.cwd } : {}),
+            terminalHint: { machineName: terminalHintMachineName() },
+          }),
           cwd: homedir(),
         })
+        if (!current()) return changed
         if (respawned.state !== 'succeeded') return { ok: false, error: 'RESTART_FAILED', detail: respawned.reason }
         await clearPaneRemainOnExit(pane)
+        if (!current()) return changed
         registry.setActive(session.agentId, true)
         const refreshed = registry.byAgent(session.agentId)
         if (!refreshed) return { ok: false, error: 'RESTART_FAILED', detail: 'agent vanished from the registry mid-restart' }
@@ -5036,17 +5146,19 @@ async function runForeground(session: AuthSession): Promise<void> {
     // Codex profile. Refused before anything is killed, so a restart that cannot honour the grid
     // leaves the running process alone.
     const built = await relaunchOverrides(session)
+    if (!current()) return changed
     if (!built.ok) return { ok: false, error: built.error, detail: built.detail }
 
     agentReconciler.holdRoute(routeKey)
     try {
-      const bypassPermission = await liveBypassPermission(session)
+      const bypassPermission = await bypassPermissionFor(session, () => liveBypassPermission(session))
       const outcome = await restartAgent(
         { engine, sessionId: session.sessionId },
         bypassPermission,
-        paneSwapDeps(session, runtime, built.overrides),
+        { ...paneSwapDeps(session, runtime, built.overrides), isCurrent: current },
       )
 
+      if (!current()) return changed
       if (!outcome.ok) return { ok: false, error: 'RESTART_FAILED', detail: outcome.detail }
       refreshGridWebSearch(session.agentId, built.overrides)
 
@@ -5062,9 +5174,11 @@ async function runForeground(session: AuthSession): Promise<void> {
           session.gridLaunch ?? undefined,
         ),
       ])
+      if (!current()) return changed
       registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind, assignment)
       registry.setActive(session.agentId, true)
       await clearPaneRemainOnExit(pane)
+      if (!current()) return changed
       const refreshed = registry.byAgent(session.agentId)
       if (!refreshed) return { ok: false, error: 'RESTART_FAILED', detail: 'agent vanished from the registry mid-restart' }
       announceSession(refreshed)
@@ -5074,7 +5188,7 @@ async function runForeground(session: AuthSession): Promise<void> {
     } finally {
       agentReconciler.releaseRoute(routeKey)
     }
-  }
+  })
 
   const submitAgent = (id: string, content: string, deliveryId?: string): void => {
     const record = registry.resolve(id)
@@ -5414,8 +5528,11 @@ async function runForeground(session: AuthSession): Promise<void> {
     // Both of these are LOCAL-ONLY on purpose (backend.sendLocal, not backend.send): they describe a hand
     // at this desk, not a change in what the machine is doing, and the cloud web audience may be sitting
     // at another computer entirely.
-    // A notification tap, which asks for a tile of its OWN — see CableHost.openAgent.
-    opened: (machineId, agentId) => backend.sendLocal({ type: 'dial_open', payload: { machineId, agentId } }),
+    // A notification tap, which asks for a tile of its OWN — see CableHost.openAgent. `reason` rides
+    // along only when the dial gave one ('question'): the window then brings the agent forward rather
+    // than opening a tab, and an older window that does not know the field opens one as before.
+    opened: (machineId, agentId, reason) =>
+      backend.sendLocal({ type: 'dial_open', payload: { machineId, agentId, ...(reason ? { reason } : {}) } }),
     forked: (machineId, agentId, sourceAgentId) => backend.sendLocal({ type: 'dial_forked', payload: { machineId, agentId, sourceAgentId } }),
     // The dial's Fork: the same path the window's `agent_fork` takes, then `forked` above lands on it.
     forkAgent: async (agentId) => {
@@ -5508,10 +5625,10 @@ async function runForeground(session: AuthSession): Promise<void> {
     if (event.kind === 'processing') void cable.turnStarted(event.agentId, event.text)
     else if (event.kind === 'done') void cable.turnDone(event.agentId)
     else if (event.kind === 'summary') {
-      // Quiet when the window already has this agent on screen. The tile still
-      // updates — the recap is what it draws — only the beep and the drawer
-      // entry are withheld, because they exist for a turn nobody is watching.
-      void cable.summary(event.agentId, event.recap || event.text, event.text, openPaneAgents.has(event.agentId))
+      // Quiet when the window already has this agent on screen; silent when the
+      // turn was a sub-agent's. The tile still updates — the recap is what it
+      // draws — only the beep and the drawer entry are withheld.
+      void cable.summary(event.agentId, event.recap || event.text, event.text, openPaneAgents.has(event.agentId), event.subagent)
     }
     else void cable.turnError(event.agentId, event.text)
   }
@@ -5534,10 +5651,11 @@ async function runForeground(session: AuthSession): Promise<void> {
     if (event.kind === 'processing') void cable.turnStarted(event.agentId, event.text)
     else if (event.kind === 'done') void cable.turnDone(event.agentId)
     else if (event.kind === 'summary') {
-      // Quiet when the window already has this agent on screen. The tile still
+      // Quiet when the window already has this agent on screen; silent when the
+      // turn was a sub-agent's (decided on its own machine). The tile still
       // updates — the recap is what it draws — only the beep and the drawer
-      // entry are withheld, because they exist for a turn nobody is watching.
-      void cable.summary(event.agentId, event.recap || event.text, event.text, openPaneAgents.has(event.agentId))
+      // entry are withheld.
+      void cable.summary(event.agentId, event.recap || event.text, event.text, openPaneAgents.has(event.agentId), event.subagent === true)
     }
     else void cable.turnError(event.agentId, event.text)
   })
@@ -6514,6 +6632,29 @@ switch (cmd) {
     dshCommand(args[0], args[0] === undefined ? rest : withoutFirst(rest, args[0]))
       .then((code) => { process.exitCode = code })
       .catch(onError)
+    break
+  case 'new':
+    // `rest`, not args/flags: a first message and a folder are words in the order they were typed.
+    newCommand({
+      argv: rest,
+      cwd: process.cwd(),
+      home: homedir(),
+      port: daemonPort(),
+      localMachineId: readAuthSession()?.machineId ?? null,
+      daemonRunning: isDaemonRunning,
+      listMachines: async () => {
+        const { session, headers } = await controlPlaneAuth()
+        return (await fetchMachines(headers)).map((machine) => ({
+          machineId: machine.machineId,
+          label: machineLabel(machine),
+          status: machine.status || 'unknown',
+          current: machine.machineId === session.machineId,
+        }))
+      },
+      connect: (url) => new NewCommandSocket(url),
+      output: (line) => console.log(line),
+      error: (line) => console.error(line),
+    }).then((code) => { process.exitCode = code }).catch(onError)
     break
   case 'remote':
     remoteCommand({

@@ -74,6 +74,7 @@ class _ReadyProvisioner extends EnvironmentProvisioner {
         for (final step in EnvironmentStep.values)
           step: EnvironmentStepStatus.ready,
       },
+      phase: EnvironmentSetupPhase.ready,
     );
     onProgress(ready);
     return ready;
@@ -176,8 +177,9 @@ class _Notifier extends AppNotifier {
   int refreshes = 0;
 
   @override
-  Future<void> refreshMachines() async {
+  Future<bool> refreshMachines() async {
     refreshes++;
+    return true;
   }
 }
 

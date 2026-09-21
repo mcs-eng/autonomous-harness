@@ -44,16 +44,18 @@ On Windows with WSL, the folder picker browses the selected distribution.
 
 Rows show branch and current activity, including **Needs input**, **Start failed**,
 and **Offline**. Closing a view keeps its agent running; stopping remains a
-separate **Stop** action. The sidebar button opens a drawer in narrow windows.
-Narrow pane headers retain Model, Viewer, Stop, and Close controls when available;
-other actions move into **More pane actions**. Tab and Enter operate the navigation
-controls without taking terminal input.
+separate **Stop** action. The sidebar sits beside the workspace in windows at
+least 1400 pixels wide; in a narrower window the sidebar button opens it as a
+drawer, so two panes keep their full header controls. A narrow pane header uses
+upstream's **Pane actions** menu. Tab and Enter operate the navigation controls
+without taking terminal input.
 
 This source change does not update an installed Preview 7 bundle or desktop shortcut.
 
 ### Getting back to work and recovering
 
-An empty tab now shows **Continue working** with up to three existing sessions,
+An empty tab now shows **Continue working** under the New Tab and New Pane
+buttons, with up to three existing sessions,
 their machine, folder, branch, and current state. Sessions needing input appear
 first; your visits during this app session come next. A **session needs your
 input** button opens the existing attention list. Opening a session reuses its
@@ -136,6 +138,17 @@ The next preview's CLI also stops showing bash's own `no job control` and `logou
 lines in package doctor and setup output when the daemon runs without a terminal,
 as it does under WSL, and a timed-out doctor, setup, or workspace init now ends the
 whole script rather than only the command that was running.
+
+Source builds after Preview 7 also incorporate upstream `a0b6d204` (September 21):
+the Harness branding, the New Harness box and New Pane entry flow, named
+permission modes, the shared desk, and the manual update check. The fork keeps its
+Windows and WSL paths, local mode, the projects sidebar, and its hardened reading
+of agent arguments. Two fork changes gave way to upstream's own versions: the
+compact pane-header menu and its header width rules. Continue working now sits
+inside upstream's start page instead of replacing it. The desktop updater stays
+off on Windows, local mode does not request the account desk, and the New Harness
+box treats agent folders as POSIX paths on a Windows host. This source change
+does not update an installed Preview 7 bundle.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.

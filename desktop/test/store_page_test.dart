@@ -280,10 +280,8 @@ void main() {
         );
         expect(find.text('Your projects and files are kept.'), findsOneWidget);
         expect(find.text('aaaaaaaa'), findsOneWidget);
-        expect(
-          _key('store-open-current'),
-          viewer ? findsNothing : findsOneWidget,
-        );
+        expect(find.text('Resume Harness'), findsNothing);
+        expect(find.text('New Harness'), findsNothing);
         app.updateGate = Completer<String?>();
         await tester.tap(_key('store-primary-action'));
         await tester.pump();
@@ -301,6 +299,7 @@ void main() {
           _in('store-primary-action', find.text('Update')),
           findsOneWidget,
         );
+        expect(find.text('New Harness'), findsNothing);
         app.updateGate = null;
         await tester.tap(_key('store-primary-action'));
         await tester.pumpAndSettle();
@@ -328,7 +327,7 @@ void main() {
   }
 
   testWidgets(
-    'an Update on a shelf opens its page and a linked checkout offers Open',
+    'a row with an update opens details; launch and update actions stay on the page',
     (tester) async {
       const entry = DshEntry(
         id: 'acme/updateable',
@@ -345,13 +344,12 @@ void main() {
       );
       await tester.enterText(_key('store-search'), 'Updateable');
       await tester.pumpAndSettle();
-      expect(
-        _in('store-action:${entry.id}', find.text('Update')),
-        findsOneWidget,
-      );
-      await tester.tap(_key('store-action:${entry.id}'));
+      expect(find.text('New Harness'), findsNothing);
+      await tester.tap(_key('store-card:${entry.id}'));
       await tester.pumpAndSettle();
       expect(_key('store-page:${entry.id}'), findsOneWidget);
+      expect(_in('store-primary-action', find.text('Update')), findsOneWidget);
+      expect(find.text('New Harness'), findsNothing);
       expect(app.updates, isEmpty);
       app.machineStates['machine-1']!.dsh.replace(const [
         DshEntry(
@@ -365,7 +363,10 @@ void main() {
       ]);
       app.changed();
       await tester.pumpAndSettle();
-      expect(_in('store-primary-action', find.text('Open')), findsOneWidget);
+      expect(
+        _in('store-primary-action', find.text('New Harness')),
+        findsOneWidget,
+      );
     },
   );
   // Real glyph widths: the review dialog's buttons are laid out against Arial,
@@ -577,7 +578,10 @@ void main() {
       (tester) async {
         final (app, _) = await _open(tester, initialHarness: 'autonomous/marp');
         final tabs = app.swarms.length;
-        expect(_in('store-primary-action', find.text('Open')), findsOneWidget);
+        expect(
+          _in('store-primary-action', find.text('New Harness')),
+          findsOneWidget,
+        );
         await tester.tap(_key('store-primary-action'));
         await tester.pumpAndSettle();
         expect(
@@ -681,10 +685,53 @@ void main() {
         ..apply(DshInstallProgress(id: _typst.id, phase: 'failed'));
       app.changed();
       await tester.pumpAndSettle();
-      says('miss typst-cli (cargo install typst-cli)');
+      says(
+        'Missing on this machine: typst-cli (cargo install typst-cli) Install it, then try again.',
+      );
       await tester.tap(_key('store-primary-action'));
       await tester.pumpAndSettle();
       expect(app.installs, [('machine-1', _typst.id)]);
+
+      // A fetch the network dropped (issue #109): the line says so, says what
+      // to do, and keeps git's own words a hover away. A broken package says
+      // that retrying is not the fix.
+      local.dsh.runs[_typst.id] = DshInstallRun(_typst.id)
+        ..apply(DshInstallProgress(id: _typst.id, phase: 'clone'))
+        ..apply(
+          DshInstallProgress(
+            id: _typst.id,
+            phase: 'failed',
+            code: 'CLONE_FAILED',
+            detail: 'git clone exited 128: error: RPC failed; curl 28 Operation too slow · gave up after 3 attempts',
+          ),
+        );
+      app.changed();
+      await tester.pumpAndSettle();
+      says(
+        'Could not download Typst. Tried 3 times. Check the connection on this machine, then try again.',
+      );
+      expect(
+        tester.widget<Tooltip>(_key('store-install-failure-detail')).message,
+        contains('curl 28 Operation too slow'),
+      );
+      expect(
+        _in('store-primary-action', find.text('Try again')),
+        findsOneWidget,
+      );
+      local.dsh.runs[_typst.id] = DshInstallRun(_typst.id)
+        ..apply(
+          DshInstallProgress(
+            id: _typst.id,
+            phase: 'failed',
+            code: 'INVALID_MANIFEST',
+            detail: 'no harness.json in /tmp/x',
+          ),
+        );
+      app.changed();
+      await tester.pumpAndSettle();
+      says(
+        'The Typst package is broken. Trying again will not help — this needs a fix in the Store.',
+      );
 
       local.dsh.runs.clear();
       local.dsh.loaded = false;
@@ -720,7 +767,10 @@ void main() {
       app.changed();
       await tester.pumpAndSettle();
       says('Installed · linked to a checkout');
-      expect(_in('store-primary-action', find.text('Open')), findsOneWidget);
+      expect(
+        _in('store-primary-action', find.text('New Harness')),
+        findsOneWidget,
+      );
       expect(_key('store-remove:machine-1'), findsOneWidget);
     },
   );
@@ -829,7 +879,10 @@ void main() {
       ]);
       app.changed();
       await tester.pumpAndSettle();
-      expect(_in('store-primary-action', find.text('Open')), findsOneWidget);
+      expect(
+        _in('store-primary-action', find.text('New Harness')),
+        findsOneWidget,
+      );
     },
   );
 
@@ -1100,10 +1153,13 @@ void main() {
 
   group('shelves', () {
     testWidgets(
-      'See all lists every harness, and the engines See all is Code',
+      'Browse all lists every harness, and All coding agents opens Coding',
       (tester) async {
         await _open(tester);
-        await tester.tap(find.widgetWithText(TextButton, 'See all').first);
+        await tester.ensureVisible(
+          find.widgetWithText(TextButton, 'Browse all'),
+        );
+        await tester.tap(find.widgetWithText(TextButton, 'Browse all'));
         await tester.pumpAndSettle();
         expect(_key('store-catalog:All harnesses'), findsOneWidget);
         expect(
@@ -1115,11 +1171,17 @@ void main() {
 
         await tester.tap(_key('store-shelf-discover'));
         await tester.pumpAndSettle();
-        await tester.tap(find.widgetWithText(TextButton, 'See all').last);
+        await tester.ensureVisible(
+          find.widgetWithText(TextButton, 'All coding agents'),
+        );
+        await tester.tap(find.widgetWithText(TextButton, 'All coding agents'));
         await tester.pumpAndSettle();
-        expect(_key('store-catalog:Code'), findsOneWidget);
+        expect(_key('store-catalog:Coding'), findsOneWidget);
         expect(_key('store-card:autonomous/marp'), findsNothing);
-        expect(find.textContaining('harnesses to explore.'), findsOneWidget);
+        expect(
+          find.textContaining(RegExp(r'^\d+ coding agents$')),
+          findsOneWidget,
+        );
       },
     );
 
@@ -1145,10 +1207,10 @@ void main() {
         expect(_key('store-shelf-category:Other'), findsOneWidget);
         await tester.tap(_key('store-shelf-category:Other'));
         await tester.pumpAndSettle();
-        expect(find.text('1 harness to explore.'), findsOneWidget);
+        expect(find.text('1 harness'), findsOneWidget);
         expect(_key('store-card:someone/loom'), findsOneWidget);
 
-        await tester.tap(_key('store-shelf-category:Media'));
+        await tester.tap(_key('store-shelf-category:Productivity'));
         await tester.pumpAndSettle();
         // The machine answers again without Typst while the shelf is open.
         app.machineStates['machine-1']!.dsh.replace(const []);
@@ -1158,7 +1220,8 @@ void main() {
         // And with no machine left to ask, it is still asking.
         app.machineStates.clear();
         app.changed();
-        await tester.pumpAndSettle();
+        // The loading skeleton keeps animating until the local catalog arrives.
+        await tester.pump(const Duration(milliseconds: 200));
         expect(find.text('Asking this computer…'), findsOneWidget);
       },
     );
@@ -1227,15 +1290,13 @@ void main() {
           );
         },
       );
-      await tester.tap(_key('store-shelf-category:Media'));
+      await tester.tap(_key('store-shelf-category:Productivity'));
       await tester.pumpAndSettle();
       final tabs = app.swarms.length;
 
-      expect(
-        _in('store-action:autonomous/typst', find.text('Get')),
-        findsOneWidget,
-      );
-      await tester.tap(_key('store-action:autonomous/typst'));
+      expect(find.text('Get'), findsNothing);
+      await tester.ensureVisible(_key('store-card:autonomous/typst'));
+      await tester.tap(_key('store-card:autonomous/typst'));
       await tester.pumpAndSettle();
       expect(_key('store-page:autonomous/typst'), findsOneWidget);
       expect(_in('store-primary-action', find.text('Get')), findsOneWidget);
@@ -1251,17 +1312,23 @@ void main() {
       await tester.tap(_key('store-back'));
       await tester.pumpAndSettle();
 
-      // Once installed locally, the same card becomes Open and stays local.
+      // Installation never changes browsing into a launch action. The same
+      // card opens details, whose New Harness action stays local.
       app.machineStates['machine-1']!.dsh.replace(
         app.machineStates['remote']!.dsh.entries,
       );
       app.changed();
       await tester.pumpAndSettle();
+      expect(find.text('New Harness'), findsNothing);
+      await tester.ensureVisible(_key('store-card:autonomous/typst'));
+      await tester.tap(_key('store-card:autonomous/typst'));
+      await tester.pumpAndSettle();
+      expect(_key('store-page:autonomous/typst'), findsOneWidget);
       expect(
-        _in('store-action:autonomous/typst', find.text('Open')),
+        _in('store-primary-action', find.text('New Harness')),
         findsOneWidget,
       );
-      await tester.tap(_key('store-action:autonomous/typst'));
+      await tester.tap(_key('store-primary-action'));
       await tester.pumpAndSettle();
       expect(
         tester
@@ -1273,13 +1340,16 @@ void main() {
       await tester.pumpAndSettle();
 
       // Remote-only packages never leak into the local catalog.
-      expect(_key('store-action:autonomous/manim'), findsNothing);
+      await tester.enterText(_key('store-search'), 'Manim');
+      await tester.pumpAndSettle();
+      expect(_key('store-card:autonomous/manim'), findsNothing);
+      expect(find.text('0 results'), findsOneWidget);
       expect(app.swarms.length, tabs);
     });
 
     for (final (id, name, category) in [
-      ('autonomous/marp', 'Marp', 'Media'),
-      ('claude', 'Claude Code', 'Code'),
+      ('autonomous/marp', 'Marp', 'Productivity'),
+      ('claude', 'Claude Code', 'Coding'),
     ]) {
       testWidgets(
         '$name uses local installation state in every store listing',
@@ -1309,16 +1379,21 @@ void main() {
               );
             },
           );
-          void expectGet() =>
-              expect(_in('store-action:$id', find.text('Get')), findsOneWidget);
-          expectGet(); // Discover.
+          void expectBrowseOnly() {
+            expect(_key('store-card:$id'), findsOneWidget);
+            expect(find.text('Resume Harness'), findsNothing);
+            expect(find.text('New Harness'), findsNothing);
+            expect(find.text('Get'), findsNothing);
+          }
+
+          expectBrowseOnly(); // Discover.
           await tester.tap(_key('store-shelf-category:$category'));
           await tester.pumpAndSettle();
-          expectGet();
+          expectBrowseOnly();
           await tester.enterText(_key('store-search'), name);
           await tester.pumpAndSettle();
-          expectGet();
-          await tester.tap(_key('store-action:$id'));
+          expectBrowseOnly();
+          await tester.tap(_key('store-card:$id'));
           await tester.pumpAndSettle();
           expect(_key('store-page:$id'), findsOneWidget);
           expect(_in('store-primary-action', find.text('Get')), findsOneWidget);

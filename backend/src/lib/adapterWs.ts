@@ -20,12 +20,13 @@ import { prisma } from './prisma.js'
 import {
   publishUp, claimMachineOwner, releaseMachineOwner, publishDeviceE2eePair,
   publishTerminalUp, subscribeTerminalDown,
-  setMachineAppState, clearMachineAppState,
+  setMachineAppState, clearMachineAppState, subscribeDeskChanged,
 } from './bus.js'
 import { trackSocketLiveness } from './hub.js'
 import { guardedSend, guardedSendJson } from './wsSend.js'
 import { attachNodeRole, PRESENCE_TTL_SEC } from './nodeRole.js'
 import { presenceWriteDue, recordTurnStarted, touchMachineOnlineDay, touchUserOnlineDay, type PresenceWriteState } from './dailyTracking.js'
+import { countryCodeFromHeaders } from './clientGeo.js'
 import { recordCreatedAgent, recordDeletedAgent } from './agentTracker.js'
 import type { Frame } from './tunnel.js'
 import { logger } from '../utils/logger.js'
@@ -162,6 +163,9 @@ export function handleAdapterUpgrade(req: IncomingMessage, socket: Duplex, head:
     autonomousEnv = parseAutonomousEnvironment(params.get('autonomousEnv'))
   } catch { deny(); return }
   if (!computerId) { deny(); return }
+  // Where this computer is, per Cloudflare (absent off-Cloudflare). Read once here, at the only point
+  // that still has the upgrade request, and carried into the machine row + its daily presence.
+  const countryCode = countryCodeFromHeaders(req.headers)
   void (async () => {
     let user
     try { user = await authenticateAccessToken(accessToken, autonomousEnv) } catch (err) {
@@ -179,7 +183,7 @@ export function handleAdapterUpgrade(req: IncomingMessage, socket: Duplex, head:
     if (!machineBillingAllowsDataPlane(machine)) { denyPayment(); return }
     // Single-computer claim BEFORE upgrade/attach, so a rejected second computer never supersedes the first.
     if (!(await claimMachineOwner(machineId, computerId, PRESENCE_TTL_SEC))) { denyBusy(); return }
-    wss.handleUpgrade(req, socket, head, (ws) => void attachAdapter(ws, machineId, machine.userId, machine.name, label, computerId, clientVersion))
+    wss.handleUpgrade(req, socket, head, (ws) => void attachAdapter(ws, machineId, machine.userId, machine.name, label, computerId, clientVersion, countryCode))
   })().catch((err) => {
     if (err instanceof AppError) {
       // 403 is the revoked-machine answer from `resolveOrCreateForComputer`; the CLI keys off the
@@ -195,7 +199,7 @@ export function handleAdapterUpgrade(req: IncomingMessage, socket: Duplex, head:
   })
 }
 
-async function attachAdapter(ws: WebSocket, machineId: string, userId: string, currentName: string | null, label?: string, computerId?: string, clientVersion?: string): Promise<void> {
+async function attachAdapter(ws: WebSocket, machineId: string, userId: string, currentName: string | null, label?: string, computerId?: string, clientVersion?: string, countryCode?: string): Promise<void> {
   // A different computer was already rejected at the upgrade (denyBusy), so this only closes our OWN
   // stale local socket on a same-computer reconnect landing on this worker.
   owners.get(machineId)?.close(4000, 'superseded')
@@ -203,6 +207,12 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
   const send = (obj: unknown): boolean => guardedSendJson(ws, obj, 'must', { machineId, kind: 'adapter' })
   logger.info('adapter connected', { machineId, computer: label })
   send({ t: 'connected', machineId })
+  // The account's tabs changed on some worker: this computer's app re-fetches `/api/desk` through its
+  // daemon (backendSocket.ts relays `desk_changed` to the window). One frame, no payload beyond the
+  // revision — the doc itself is fetched, so a burst of edits collapses into one read.
+  const deskUnsub = await subscribeDeskChanged(userId, (msg) => {
+    send({ t: 'down', connId: '', frame: { type: 'desk_changed', payload: { revision: msg.revision } } })
+  })
 
   // Last desktop-app state THIS socket asserted. Socket-scoped on purpose: a new adapter connection
   // starts with no claim and must re-assert, so a fresh value can never renew a stale one.
@@ -239,7 +249,7 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
   // (see the upgrade handler): that key is a self-consistent liveness token nothing joins against, and
   // re-keying it would 409 every already-connected adapter until its old claim aged out.
   const boundComputer = computerId ? normalizeComputerId(computerId) : null
-  if (label || seededName || clientVersion || boundComputer) {
+  if (label || seededName || clientVersion || boundComputer || countryCode) {
     void prisma.machine.update({
       where: { machineId },
       data: {
@@ -248,6 +258,8 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
         // Same overwrite-every-connect rule as `hostname`; absent (old client) leaves the last value.
         ...(clientVersion ? { clientVersion } : {}),
         ...(boundComputer ? { computerId: boundComputer } : {}),
+        // Same rule again; absent (not behind Cloudflare) leaves the last value.
+        ...(countryCode ? { countryCode } : {}),
       },
     }).catch(() => { /* best effort */ })
   }
@@ -273,14 +285,15 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
     const now = new Date()
     if (kind === 'heartbeat' && (machinePresenceInFlight || !presenceWriteDue(lastMachinePresence, now, MACHINE_PRESENCE_WRITE_MS))) return
     machinePresenceInFlight = true
-    touchMachineOnlineDay(userId, machineId, now, { isNewConnection: kind === 'connect' })
+    touchMachineOnlineDay(userId, machineId, now, { isNewConnection: kind === 'connect', countryCode })
       .then(() => { lastMachinePresence.dayKey = utcDayKey(now); lastMachinePresence.wroteAt = now.getTime() })
       .catch((err) => logger.warn('machine presence tracking failed', { machineId, kind, error: String(err) }))
       .finally(() => { machinePresenceInFlight = false })
   }
   // Same shape for the person behind the app: `open` bypasses the interval the way `connect` does
   // above, `ping` is rate-floored. `userId` is the machine's owner — the only person a desktop app
-  // on this computer can be signed in as.
+  // on this computer can be signed in as. The row is keyed by THIS machine too, so the same person
+  // on a second computer lands in a second row rather than in this one.
   const lastUserPresence: PresenceWriteState = { dayKey: null, wroteAt: 0 }
   let userPresenceInFlight = false
   let lastUserOpenAt = 0
@@ -292,7 +305,7 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
       lastUserOpenAt = now.getTime()
     }
     userPresenceInFlight = true
-    touchUserOnlineDay(userId, now, { isNewConnection: kind === 'open' })
+    touchUserOnlineDay(userId, machineId, now, { isNewConnection: kind === 'open' })
       .then(() => { lastUserPresence.dayKey = utcDayKey(now); lastUserPresence.wroteAt = now.getTime() })
       .catch((err) => logger.warn('user presence tracking failed', { machineId, userId, kind, error: String(err) }))
       .finally(() => { userPresenceInFlight = false })
@@ -474,6 +487,7 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
   const cleanup = (): void => {
     releaseLiveness()
     terminalDownUnsub()
+    void deskUnsub()
     // Only the CURRENT owner tears the role down — a superseded socket must not mark the fresh
     // connection offline. A superseded socket still releases its own liveness tracking above.
     if (owners.get(machineId) === ws) {

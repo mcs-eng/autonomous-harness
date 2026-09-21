@@ -1,18 +1,25 @@
 import '../core/dsh_catalog.dart';
-
-/// Broad browsing sections; packages keep their own precise domain labels.
-const storeCategoryDomains = <String, Set<String>>{
-  'Design': {'3D', 'CAD', 'Diagrams'},
-  'Engineering': {'PCB', 'Circuits', 'Chips'},
-  'Media': {'Documents', 'Slides', 'Video', 'Math animation', 'Music'},
-  'Science': {'Chemistry', 'Notebooks', 'Simulation'},
-  'Games': {'Games'},
-  'Code': {'Code', 'Compute'},
-};
+import '../core/harness_catalog.dart';
+import 'store_categories.g.dart';
+import 'store_project_examples.dart';
+export 'store_categories.g.dart';
 
 String storeCategoryFor(DshEntry entry) {
-  if (entry.isEngine) return 'Code';
-  final domain = entry.category?.trim().toLowerCase();
+  if (entry.isEngine) return 'Coding';
+  // Legacy Grid/Ollama packages used Compute before Local AI existed.
+  if (const {
+    'autonomous/autonomous-grid',
+    'autonomous/ollama',
+    'autonomous/mlx-lm',
+    'autonomous/vllm',
+  }.contains(canonicalHarnessId(entry.id))) {
+    return 'Local AI';
+  }
+  // Published Home Assistant packages also use the older Automation domain.
+  final domain = switch (entry.category?.trim().toLowerCase()) {
+    'automation' => 'home automation',
+    final domain => domain,
+  };
   for (final category in storeCategoryDomains.entries) {
     if (category.key.toLowerCase() == domain ||
         category.value.any((value) => value.toLowerCase() == domain)) {
@@ -49,7 +56,7 @@ const _pcb = StoreStory(
   headline: 'That board in your head?\nMake it real.',
   description: 'Design circuits, lay out a board, and inspect it in 3D.',
   asset: 'assets/store/copper-board.png',
-  caption: 'Terminal keyboard · Copper example board',
+  caption: 'Terminal keyboard · Autonomous Circuit example board',
   prompts: [
     'Design a six-key USB macropad. Start with the schematic.',
     'Walk me through the components on this board and what they do.',
@@ -79,7 +86,6 @@ const storeStories = <String, StoreStory>{
       'Design a ceramic mug with a rounded handle. Show me a turntable view.',
     ],
   ),
-  'autonomous/copper': _pcb,
   'autonomous/autonomous-circuit': _pcb,
   'autonomous/text-to-cad': StoreStory(
     benefit: 'Describe a part. Make it yours.',
@@ -155,60 +161,76 @@ const storeStories = <String, StoreStory>{
     benefit: 'Build logic. See it become a chip.',
     prompts: ['Design a four-bit counter and show its simulated waveform.'],
   ),
+  'autonomous/openmontage': StoreStory(
+    benefit: 'Take a film from the first idea to the final cut.',
+    prompts: ['Make a short launch film for a product I am building.'],
+  ),
+  'autonomous/music-studio': StoreStory(
+    benefit: 'Compose a piece, shape every part, and make it yours.',
+    prompts: ['Compose a warm instrumental theme for a short product film.'],
+  ),
+  'autonomous/data-studio': StoreStory(
+    benefit: 'Turn a dataset into evidence you can inspect.',
+    prompts: [
+      'Explore this dataset and show which patterns are worth investigating.',
+    ],
+  ),
+  'autonomous/roundtable': StoreStory(
+    benefit: 'Explore a decision from more than one point of view.',
+    prompts: [
+      'Compare two approaches to my project. Research the tradeoffs and preserve the disagreements.',
+    ],
+  ),
+  'autonomous/jev-sheets': StoreStory(
+    benefit: 'Ask a question of every row in your spreadsheet.',
+    prompts: [
+      'Group these customer reviews by theme and show the uncertain answers.',
+    ],
+  ),
+  'autonomous/ollama': StoreStory(
+    benefit: 'Find a model that fits your machine and put it to work.',
+    prompts: ['Show which local models fit this machine and help me try one.'],
+  ),
+  'autonomous/machine-monitor': StoreStory(
+    benefit: 'See every computer you own, and say what should change.',
+    prompts: [
+      'Show my machines and link the one that is waiting.',
+      'I am setting up a new computer. Walk me through bringing it in.',
+    ],
+  ),
 };
 
-class StoreCollection {
-  const StoreCollection({
-    required this.id,
-    required this.title,
-    required this.subtitle,
-    required this.categories,
-    required this.featuredIds,
-  });
+/// Brief captions for icon lists. Full technical descriptions stay on each
+/// harness page and in package metadata; community tools retain their own copy.
+const _browseBenefits = <String, String>{
+  'autonomous/ableton-ai': 'Turn a small loop into a whole mood.',
+  'autonomous/autoresearch-mlx': 'Train, compare, and follow the evidence.',
+  'autonomous/bonsai-mcp': 'Shape a building. Explore its spaces.',
+  'autonomous/comfy-mcp': 'Explore images. Keep the recipe.',
+  'autonomous/creative-direction': 'Give your next idea an identity.',
+  'autonomous/dimos': 'Send a rover on a new adventure.',
+  'autonomous/drone-pilot': 'Plan a flight. See the bigger picture.',
+  'autonomous/foam-agent': 'Change a shape. Follow the flow.',
+  'autonomous/freecad': 'Make a custom part that fits your idea.',
+  'autonomous/game-master': 'Invent a game. Play with the rules.',
+  'autonomous/generative-art': 'Draw with code. Explore the variations.',
+  'autonomous/godogen': 'Build a world you can play.',
+  'autonomous/home-assistant': 'Make your home work your way.',
+  'autonomous/jev-browser': 'Turn web pages into answers you can use.',
+  'autonomous/juce-agent-toolkit': 'Shape a synth. Find your sound.',
+  'autonomous/kicad': 'Design a board. Explore every connection.',
+  'autonomous/lab-bench': 'Turn a good question into an experiment.',
+  'autonomous/mlx-lm': 'Explore language models on your Mac.',
+  'autonomous/openscad': 'Code a shape. Make it your own.',
+  'autonomous/orca-slicer': 'Prepare your next 3D print.',
+  'autonomous/score': 'Put the music in your head on the page.',
+  'autonomous/simskill': 'Change the lights. Make a city flow.',
+  'autonomous/vllm': 'Put your own models to work.',
+  'autonomous/voxel-worlds': 'Build a place you can step inside.',
+};
 
-  final String id;
-  final String title;
-  final String subtitle;
-  final Set<String> categories;
-  final List<String> featuredIds;
-
-  bool includes(DshEntry entry) =>
-      !entry.isEngine &&
-      !entry.isViewerPackage &&
-      (categories.contains(entry.category) || featuredIds.contains(entry.id));
-}
-
-const storeCollections = [
-  StoreCollection(
-    id: 'shape',
-    title: 'Give your ideas shape.',
-    subtitle: '3D scenes. Custom parts. Your design.',
-    categories: {'3D', 'CAD'},
-    featuredIds: ['autonomous/blender', 'autonomous/text-to-cad'],
-  ),
-  StoreCollection(
-    id: 'hardware',
-    title: 'Build something real.',
-    subtitle: 'From your first circuit to your own board.',
-    categories: {'PCB', 'Circuits', 'Chips'},
-    featuredIds: [
-      'autonomous/copper',
-      'autonomous/autonomous-circuit',
-      'autonomous/circuitjs',
-    ],
-  ),
-  StoreCollection(
-    id: 'play',
-    title: 'Make something play.',
-    subtitle: 'Invent a game. Find a sound. Set it in motion.',
-    categories: {'Games', 'Music', 'Simulation'},
-    featuredIds: [
-      'autonomous/phaser',
-      'autonomous/strudel',
-      'autonomous/mujoco',
-    ],
-  ),
-];
+String storeBrowseBenefit(DshEntry entry) =>
+    _browseBenefits[entry.id] ?? storeBenefit(entry);
 
 String storeBenefit(DshEntry entry) =>
     storeStories[entry.id]?.benefit ??
@@ -221,11 +243,40 @@ bool storeMatches(DshEntry entry, String query) {
   final text = [
     entry.name,
     entry.id,
+    // Old names remain searchable, but lead to the one current product page.
+    for (final alias in retiredHarnessIds.entries)
+      if (alias.value == canonicalHarnessId(entry.id)) alias.key,
     entry.author,
     entry.category,
     storeCategoryFor(entry),
     entry.description,
+    entry.tagline,
     storeBenefit(entry),
+    storeBrowseBenefit(entry),
+    ...?storeStories[entry.id]?.prompts,
+    storeProjectExamples[entry.id]?.prompt,
+    storeProjectExamples[entry.id]?.title,
+    ...entry.examples.map((example) => example.prompt),
   ].join(' ').toLowerCase();
   return terms.every(text.contains);
+}
+
+/// A named tool comes before incidental mentions in another tool's prompts.
+List<DshEntry> storeSearch(Iterable<DshEntry> entries, String query) {
+  final needle = query.trim().toLowerCase();
+  int relevance(DshEntry entry) {
+    final name = entry.name.toLowerCase();
+    if (name == needle) return 0;
+    if (name.startsWith(needle)) return 1;
+    if (name.contains(needle)) return 2;
+    return 3;
+  }
+
+  return entries.where((entry) => storeMatches(entry, query)).toList()
+    ..sort((a, b) {
+      final order = relevance(a).compareTo(relevance(b));
+      return order != 0
+          ? order
+          : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
 }

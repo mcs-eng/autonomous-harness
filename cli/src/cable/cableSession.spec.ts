@@ -195,13 +195,13 @@ describe('cable session', () => {
   })
 
   it('names the swarms once and again only when they change, and relays a pick', async () => {
-    let swarms = { selected: 's1', swarms: [{ id: 's1', name: 'Workshop', agents: 2 }, { id: 's2', name: 'Launch', agents: 0 }] }
+    let swarms = { selected: 's1', swarms: [{ id: 's1', name: 'Workshop', agents: 2, panes: 2 }, { id: 's2', name: 'Launch', agents: 0, panes: 0 }] }
     const host = makeHost({ listSwarms: () => swarms })
     const { session, port } = await connect(host)
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
     await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
     expect(port.sent.filter((m) => m.t === 'swarms')).toEqual([
-      { t: 'swarms', selected: 's1', items: [{ id: 's1', name: 'Workshop', agents: 2 }, { id: 's2', name: 'Launch', agents: 0 }] },
+      { t: 'swarms', selected: 's1', items: [{ id: 's1', name: 'Workshop', agents: 2, panes: 2 }, { id: 's2', name: 'Launch', agents: 0, panes: 0 }] },
     ])
 
     // Ticks with nothing new say nothing new — the same rule as the wheel.
@@ -216,6 +216,24 @@ describe('cable session', () => {
     swarms = { ...swarms, selected: 's2' }
     await vi.waitFor(() => expect(port.sent.filter((m) => m.t === 'swarms')).toHaveLength(2))
     expect(port.sent.filter((m) => m.t === 'swarms')[1]).toMatchObject({ selected: 's2' })
+    await session.stop()
+  })
+
+  it('pushes again when a tab gains a tile but no agent', async () => {
+    // The change this field exists for: a terminal opened on a tab that holds no agent moves the
+    // TILE count and nothing else. A diff watching only `agents` swallowed that push and left the
+    // dial showing a row it still believed was empty — the row it would then refuse to list.
+    let swarms = { selected: 's1', swarms: [{ id: 's1', name: 'Shell', agents: 0, panes: 0 }] }
+    const host = makeHost({ listSwarms: () => swarms })
+    const { session, port } = await connect(host)
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+    await vi.waitFor(() => expect(port.sent.filter((m) => m.t === 'swarms')).toHaveLength(1))
+
+    swarms = { selected: 's1', swarms: [{ id: 's1', name: 'Shell', agents: 0, panes: 1 }] }
+    await vi.waitFor(() => expect(port.sent.filter((m) => m.t === 'swarms')).toHaveLength(2))
+    expect(port.sent.filter((m) => m.t === 'swarms')[1]).toMatchObject({
+      items: [{ id: 's1', agents: 0, panes: 1 }],
+    })
     await session.stop()
   })
 
@@ -376,6 +394,23 @@ describe('cable session', () => {
     expect(order[0]).toBe('agents.end')                      // the ring the focus lands on, first
     expect(order).toContain('focus')
     expect(port.sent.filter((m) => m.t === 'focus').every((m) => m.agentId === 'a2')).toBe(true)
+    await session.stop()
+  })
+
+  it('hands an open to the host with why the dial sent it — a tap says nothing, a question says so', async () => {
+    // A question screen that came up on its own opens with reason 'question'; the window then only brings
+    // the agent forward. A tap carries no reason, and so does anything the daemon does not know.
+    const host = makeHost()
+    const { session, port } = await connect(host)
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+    await settle()
+
+    port.say({ t: 'agent.open', agentId: 'a2' })
+    port.say({ t: 'agent.open', agentId: 'a2', reason: 'question' })
+    port.say({ t: 'agent.open', agentId: 'a2', reason: 'whim' })
+    await settle()
+
+    expect(vi.mocked(host.openAgent).mock.calls).toEqual([['a2', undefined], ['a2', 'question'], ['a2', undefined]])
     await session.stop()
   })
 
@@ -959,6 +994,12 @@ describe('cable session', () => {
     expect(sent.find((m) => m.agentId === 'a1')).not.toHaveProperty('quiet')
     // The recap still travels — the tile draws it either way. Only the beep and the drawer are withheld.
     expect(sent.find((m) => m.agentId === 'a2')).toMatchObject({ quiet: true, recap: 'recap two' })
+
+    // A sub-agent's turn: silent — no beep, no drawer row — and the recap still travels.
+    await session.summary('a1', 'recap three', 'body three', false, true)
+    const silent = port.sent.filter((m) => m.t === 'summary' && m.agentId === 'a1').pop()
+    expect(silent).toMatchObject({ silent: true, recap: 'recap three' })
+    expect(silent).not.toHaveProperty('quiet')
   })
 
   it('redraws a reattached dial with what each agent was last doing', async () => {

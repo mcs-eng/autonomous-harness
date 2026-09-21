@@ -98,6 +98,7 @@ class _ReadyEnvironmentProvisioner extends EnvironmentProvisioner {
         for (final step in EnvironmentStep.values)
           step: EnvironmentStepStatus.ready,
       },
+      phase: EnvironmentSetupPhase.ready,
     );
     onProgress(ready);
     return ready;
@@ -323,6 +324,7 @@ void main() {
           for (final step in EnvironmentStep.values)
             step: EnvironmentStepStatus.ready,
         },
+        phase: EnvironmentSetupPhase.ready,
       );
       final storage = _FakeKeyValueStore();
       final provisioner = _ScriptedEnvironmentProvisioner([stuck, ready]);
@@ -529,8 +531,8 @@ void main() {
     // covered as well as the standalone screen's presentation tests.
     expect(find.byType(BootstrappingScreen), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(find.text('Getting OpenHarness ready'), findsOneWidget);
-    expect(find.text('Opening OpenHarness…'), findsOneWidget);
+    expect(find.text('Getting Harness ready'), findsOneWidget);
+    expect(find.text('Opening Harness…'), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
   });
 
@@ -696,7 +698,7 @@ void main() {
       expect(find.text('Finish setup in Terminal'), findsOneWidget);
       expect(find.text('Managed Node 20+ & Harness CLI'), findsOneWidget);
       expect(find.text('Recheck now'), findsOneWidget);
-      expect(find.text('OpenHarness cannot see your password'), findsOneWidget);
+      expect(find.text('Harness cannot see your password'), findsOneWidget);
     },
   );
 
@@ -924,7 +926,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('New Harness'), findsWidgets);
+      expect(find.text('New Pane'), findsWidgets);
       expect(
         tester
             .widget<TextField>(
@@ -934,15 +936,20 @@ void main() {
             .hasFocus,
         isTrue,
       );
-      expect(find.byKey(const ValueKey('harness-start-open')), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('harness-start-new')));
+      expect(
+        find.byKey(const ValueKey('harness-start-new-tab')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('harness-start-new-pane')));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
       // With no machine to open an agent on, the start page's New goes to
-      // linking one — the fork between a computer and a server, first.
+      // linking one, with the desktop and server setup choices in its picker.
       expect(find.text('Link another machine'), findsOneWidget);
-      expect(find.text('A computer with a screen'), findsOneWidget);
-      expect(find.text('A server over SSH'), findsOneWidget);
-      await tester.tap(find.text('Close'));
+      expect(find.text('Set up a desktop'), findsOneWidget);
+      expect(find.text('Set up a server over SSH'), findsOneWidget);
+      await tester.tap(find.text('esc  close'));
       await tester.pumpAndSettle();
       expect(app.panes, isEmpty);
       await tester.pumpWidget(const SizedBox());
@@ -998,7 +1005,7 @@ void main() {
     // Endless animation on the sign-in screen underneath; pump instead.
     await tester.pump(const Duration(milliseconds: 200));
 
-    expect(find.text('OpenHarness 1.2.3 is available'), findsOneWidget);
+    expect(find.text('Harness 1.2.3 is available'), findsOneWidget);
     expect(find.byKey(const Key('install-update-button')), findsOneWidget);
     expect(find.byKey(const Key('skip-update-button')), findsOneWidget);
   });
@@ -1013,11 +1020,13 @@ void main() {
       tester.element(find.byType(Placeholder)),
       app,
       const ManualUpdateCheck(
-        update: UpdateInfo(
-          version: '1.2.3',
-          url: 'https://example.test/Harness-macos.zip',
-          sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          size: 1,
+        check: DesktopUpdateCheck.available(
+          UpdateInfo(
+            version: '1.2.3',
+            url: 'https://example.test/Harness-macos.zip',
+            sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            size: 1,
+          ),
         ),
         isSkipped: true,
       ),
@@ -1078,6 +1087,11 @@ void main() {
       );
       await tester.pump();
 
+      expect(find.text('Harness is offline'), findsOneWidget);
+      expect(app.panes.single.agentId, 'offline-agent');
+      await tester.binding.setSurfaceSize(const Size(800, 560));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pump();
       expect(
         find.text('Harness is not running on this computer.'),
         findsOneWidget,
@@ -1135,10 +1149,7 @@ void main() {
 
     expect(find.text('Link this machine'), findsOneWidget);
     expect(
-      find.text(
-        "This computer isn't linked to remote-mac yet. Enter the remote password set "
-        'on that machine to connect.',
-      ),
+      find.text('Enter the remote password set on this machine.'),
       findsOneWidget,
     );
     expect(find.text('Harness is offline'), findsNothing);
@@ -1202,10 +1213,7 @@ void main() {
 
     expect(find.text('Link this machine'), findsOneWidget);
     expect(
-      find.text(
-        "This computer isn't linked to link-mac yet. Enter the remote password set "
-        'on that machine to connect.',
-      ),
+      find.text('Enter the remote password set on this machine.'),
       findsOneWidget,
     );
     app.dispose();

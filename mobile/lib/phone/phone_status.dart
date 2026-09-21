@@ -26,13 +26,47 @@ enum PhoneMachineStatus {
 }
 
 PhoneMachineStatus phoneMachineStatusOf(MachineState machine) {
-  if (machine.needsLink) return PhoneMachineStatus.needsPassword;
+  // ⚠️ Offline FIRST. A machine that is switched off is almost always also unlinked from here — the
+  // relay refuses the dial before the other computer is ever reached — so asking about the link
+  // first called a powered-down machine "Needs its password" and offered a form that could only
+  // fail. The password is worth asking for once there is something to give it to, which is what the
+  // desktop's "Offline · Link required" already says.
   if (machine.nodeOnline == false) return PhoneMachineStatus.offline;
+  if (machine.needsLink) return PhoneMachineStatus.needsPassword;
   final answering =
       machine.connectionStatus == ConnectionStatus.connected &&
       machine.agentLoadStatus != AgentLoadStatus.loading;
   return answering ? PhoneMachineStatus.ready : PhoneMachineStatus.connecting;
 }
+
+/// Whether [machine]'s agents belong on the agent screens: it is answering, or it answered and its
+/// socket is only dialling again.
+///
+/// ⚠️ **The second half is what keeps a terminal on screen through a dropped socket.** Backgrounding
+/// the app drops it every time, and a machine counted only while [PhoneMachineStatus.ready] took its
+/// agents out of the list for the length of the redial — the pager, whose pages ARE that list, was
+/// thrown away and the screen fell back to "Connecting to your machine…" on every return to the app.
+/// A first connect has no list yet, so it still waits like one.
+/// ⚠️ **Agents restored from the last run count too, and that is the whole
+/// point of restoring them.** A warm-started machine is `connecting` (its socket
+/// is genuinely still coming up) and `loading` (it genuinely still owes a list),
+/// so the `loaded` test below hid exactly the agents the cache exists to show —
+/// the phone read nine of them off disk at 520ms and still sat on "Connecting to
+/// your machine…" until the handshake finished two seconds later.
+///
+/// Showing them is safe for the same reason showing a RECONNECTING machine's
+/// agents is safe, which is what the paragraph above describes: the names are
+/// last known good, the real list replaces them the moment it lands, and
+/// `_replaceAgents` retires anything that has gone. The difference is only how
+/// long ago "last known" was.
+bool phoneMachineListsAgents(MachineState machine) =>
+    switch (phoneMachineStatusOf(machine)) {
+      PhoneMachineStatus.ready => true,
+      PhoneMachineStatus.connecting =>
+        machine.agentLoadStatus == AgentLoadStatus.loaded ||
+            machine.agentsFromCache,
+      PhoneMachineStatus.needsPassword || PhoneMachineStatus.offline => false,
+    };
 
 PhoneSummary phoneMachineSummary(MachineState machine) =>
     switch (phoneMachineStatusOf(machine)) {
@@ -80,9 +114,12 @@ PhoneSummary phoneAgentSummary(MachineState machine, Agent agent) {
 
 /// The terminal's own state, for the header over it. No session yet reads as attaching: the
 /// page opens before the pane has one.
+/// [takerName]: who took the terminal, when known ([phoneTakerName]) — the
+/// dot's tooltip then says "Taken over by Mac mini" rather than just that it was.
 PhoneSummary phoneSessionSummary(
-  TerminalSession? session,
-) => switch (session?.status) {
+  TerminalSession? session, {
+  String? takerName,
+}) => switch (session?.status) {
   null ||
   TerminalSessionStatus.opening => (label: 'Attaching…', tone: PhoneTone.busy),
   TerminalSessionStatus.resyncing => (
@@ -91,12 +128,30 @@ PhoneSummary phoneSessionSummary(
   ),
   TerminalSessionStatus.controlling => (label: 'Live', tone: PhoneTone.good),
   TerminalSessionStatus.takenOver => (
-    label: 'Taken over',
+    label: takerName == null ? 'Taken over' : 'Taken over by $takerName',
     tone: PhoneTone.attention,
   ),
   TerminalSessionStatus.error => (label: 'Disconnected', tone: PhoneTone.bad),
   TerminalSessionStatus.closed => (label: 'Closed', tone: PhoneTone.quiet),
 };
+
+/// Who took this session's terminal, by the fleet's current name for their
+/// machine when this phone knows it, else the name they declared; null while
+/// nobody has, or when the daemon did not say (an older one, or a taker that
+/// did not introduce itself).
+String? phoneTakerName(
+  TerminalSession? session,
+  String? Function(String machineId) resolveMachine,
+) => session?.status == TerminalSessionStatus.takenOver
+    ? session?.takenOverBy?.label(resolveMachine)
+    : null;
+
+/// The one line under the header while another client drives this terminal —
+/// the desktop's banner, at phone size. Null in every other state.
+String? phoneTakeoverNotice(TerminalSession? session, String? takerName) =>
+    session?.status == TerminalSessionStatus.takenOver
+    ? '${takerName ?? 'Another app'} took control of this terminal'
+    : null;
 
 /// The way back into a session this device is not driving, or is no longer
 /// driving — and what the button offers to do about it.
@@ -114,9 +169,7 @@ PhoneSummary? phoneReclaimAction(TerminalSession? session) =>
         label: 'Take control',
         tone: PhoneTone.attention,
       ),
-      TerminalSessionStatus.error || TerminalSessionStatus.closed => (
-        label: 'Reconnect',
-        tone: PhoneTone.bad,
-      ),
+      TerminalSessionStatus.error ||
+      TerminalSessionStatus.closed => (label: 'Reconnect', tone: PhoneTone.bad),
       _ => null,
     };

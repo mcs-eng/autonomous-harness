@@ -11,6 +11,7 @@ import 'control_chord.dart';
 import 'terminal_binary.dart';
 import 'terminal_input.dart';
 import 'terminal_viewport.dart';
+import 'utf8_chunks.dart';
 
 typedef TerminalFrameSender = Future<bool> Function(
   String type,
@@ -25,6 +26,67 @@ enum TerminalSessionStatus {
   resyncing,
   takenOver,
   error,
+}
+
+/// Who a terminal client is, as it says on `terminal_open` (`client`) and as
+/// the daemon repeats to the client it displaces (`terminal_closed.takenBy`) —
+/// so the banner can say "Mac mini took control" rather than "another app".
+/// Self-declared: every client of a machine is the same account's, and the
+/// daemon has no better name for a relayed desktop or a phone. [machineId] is
+/// a desktop's own machine in the fleet, so the receiver can show that
+/// machine's current name over the one declared.
+class TerminalClientDescriptor {
+  const TerminalClientDescriptor({
+    required this.kind,
+    required this.name,
+    this.machineId,
+  });
+
+  /// `desktop`, `phone`, … — one lower-case word.
+  final String kind;
+  final String name;
+  final String? machineId;
+
+  static const nameMax = 64;
+
+  Map<String, dynamic> toJson() => {
+    'kind': kind,
+    'name': name,
+    if (machineId != null) 'machineId': machineId,
+  };
+
+  /// The wire shape, or null for anything else — a daemon that predates the
+  /// field sends nothing, and a malformed one is treated the same.
+  static TerminalClientDescriptor? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final kind = raw['kind'];
+    final name = raw['name'];
+    final machineId = raw['machineId'];
+    if (kind is! String || !RegExp(r'^[a-z]{1,16}$').hasMatch(kind)) {
+      return null;
+    }
+    if (name is! String) return null;
+    final clean = name.replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), ' ').trim();
+    if (clean.isEmpty || clean.length > nameMax) return null;
+    if (machineId != null &&
+        (machineId is! String ||
+            !RegExp(r'^[a-f0-9]{16,64}$').hasMatch(machineId))) {
+      return null;
+    }
+    return TerminalClientDescriptor(
+      kind: kind,
+      name: clean,
+      machineId: machineId as String?,
+    );
+  }
+
+  /// The name to show: the fleet's current name for [machineId] when the
+  /// caller knows one, else the name the client declared.
+  String label(String? Function(String machineId) resolveMachine) {
+    final id = machineId;
+    final fleet = id == null ? null : resolveMachine(id)?.trim();
+    return fleet == null || fleet.isEmpty ? name : fleet;
+  }
 }
 
 /// Transient progress for an in-flight [TerminalSession.pasteImage]/[TerminalSession.pasteFile]
@@ -86,7 +148,17 @@ class TerminalSession extends ChangeNotifier {
   /// going stale silently (the relayed machine's own Harness process restarted, dropping its E2EE
   /// session without the transport ever closing) so a reconnect looks like a couple of extra seconds
   /// of "attaching" instead of a hang the user has to notice and manually retry.
-  final Future<void> Function()? onOpenStalled;
+  /// Force a fresh transport dial for a stream that opened and then went silent.
+  ///
+  /// Returns whether a reconnect was actually started. False means the caller
+  /// declined — the transport is not up yet, so there is nothing to reconnect —
+  /// and [_recoverAndResend] then keeps its one-per-open budget rather than
+  /// spending it on a no-op.
+  final Future<bool> Function()? onOpenStalled;
+
+  /// This client's own introduction, sent with every `terminal_open`; null
+  /// for a viewer that never takes control and so is never anyone's taker.
+  final TerminalClientDescriptor? client;
 
   TerminalSession({
     required this.machineId,
@@ -95,6 +167,7 @@ class TerminalSession extends ChangeNotifier {
     required this.engineId,
     required this.send,
     required this.sendBinary,
+    this.client,
     this.onOpenStalled,
     this.resyncTimeout = const Duration(seconds: 4),
   }) {
@@ -117,6 +190,11 @@ class TerminalSession extends ChangeNotifier {
   String? linkMode;
   String? errorCode;
   String? errorMessage;
+
+  /// Who took this terminal, while [status] is [TerminalSessionStatus.takenOver]
+  /// and the daemon said (`terminal_closed.takenBy`); null from an older daemon
+  /// or a taker that did not introduce itself — "another app", then.
+  TerminalClientDescriptor? takenOverBy;
   int cols = 80;
   int rows = 24;
 
@@ -127,6 +205,20 @@ class TerminalSession extends ChangeNotifier {
 
   String? _openRequestId;
   int? _expectedSeq;
+
+  /// Whether this session has drawn anything yet.
+  ///
+  /// False from the moment the session opens until the machine's first
+  /// `terminal_keyframe` lands — the window in which [status] already reads
+  /// `controlling` and the emulator's buffer is still empty, so a terminal built
+  /// on it paints a blank screen. The phone shows its skeleton across exactly
+  /// this gap (`phone/terminal_page.dart`), which is why the flag is public
+  /// rather than inferred from [status].
+  ///
+  /// Reads `_expectedSeq`, the sequence cursor set by that first frame and
+  /// cleared by every reopen (see `_armInitialKeyframeWatchdog`, which treats
+  /// the same null as "no keyframe arrived").
+  bool get hasRenderedFrame => _expectedSeq != null;
   int _lastRenderedSeq = -1;
   int _framesSinceAck = 0;
   int _renderedSinceAckBytes = 0;
@@ -238,6 +330,7 @@ class TerminalSession extends ChangeNotifier {
     linkMode = null;
     errorCode = null;
     errorMessage = null;
+    takenOverBy = null;
     _expectedSeq = null;
     _lastRenderedSeq = -1;
     _framesSinceAck = 0;
@@ -292,6 +385,7 @@ class TerminalSession extends ChangeNotifier {
       'cols': cols,
       'rows': rows,
       'compression': const ['zlib', 'none'],
+      if (client != null) 'client': client!.toJson(),
     };
     var sent = await send('terminal_open', openPayload);
     if (!_isCurrent(generation) ||
@@ -372,12 +466,21 @@ class TerminalSession extends ChangeNotifier {
   ) async {
     final recover = onOpenStalled;
     if (_openStallRecovered || recover == null) return false;
-    _openStallRecovered = true;
+    var reconnected = false;
     try {
-      await recover();
+      reconnected = await recover();
     } catch (_) {
-      // Still worth polling for readiness even if the forced reconnect itself errored.
+      // A forced reconnect that threw still started one; poll for readiness.
+      reconnected = true;
     }
+    // ⚠️ **The one forced reconnect per open is spent only if one happened.**
+    // The hook declines while the transport is still connecting — there is
+    // nothing to recover there, and redialling would destroy the dial in
+    // progress (see `onOpenStalled` in `app_state.dart`). Marking the budget
+    // spent on a decline would leave a stream that later stalls for real with no
+    // recovery left, which is the failure this whole path exists to handle.
+    if (!reconnected) return false;
+    _openStallRecovered = true;
     for (var attempt = 0; attempt < 10; attempt++) {
       if (!_isCurrent(generation) ||
           status != TerminalSessionStatus.opening ||
@@ -470,8 +573,13 @@ class TerminalSession extends ChangeNotifier {
             ? TerminalSessionStatus.takenOver
             : TerminalSessionStatus.closed;
         errorCode = takenOver ? code : null;
+        takenOverBy = takenOver
+            ? TerminalClientDescriptor.fromJson(payload['takenBy'])
+            : null;
         errorMessage = takenOver
-            ? 'Another client connected to this terminal.'
+            ? (takenOverBy == null
+                  ? 'Another client connected to this terminal.'
+                  : '${takenOverBy!.name} connected to this terminal.')
             : payload['reason']?.toString();
         streamId = null;
         linkMode = null;
@@ -567,7 +675,7 @@ class TerminalSession extends ChangeNotifier {
             }
             // Publish a complete screen atomically. A damaged snapshot must
             // leave the retained screen available while resync recovers.
-            final decoded = _decodeUtf8(_prepareKeyframeBytes(bytes));
+            final decoded = decodeUtf8Chunk(_prepareKeyframeBytes(bytes));
             final replacement = _newTerminal(bindCallbacks: false)
               ..resize(_clampCols(nextCols), _clampRows(nextRows))
               ..write(decoded.text);
@@ -585,6 +693,7 @@ class TerminalSession extends ChangeNotifier {
             _autoReopenAttempts = 0;
             errorCode = null;
             errorMessage = null;
+            takenOverBy = null;
             _resyncTimer?.cancel();
             _resyncTimer = null;
             status = TerminalSessionStatus.controlling;
@@ -687,6 +796,25 @@ class TerminalSession extends ChangeNotifier {
     if (identical(_viewport, viewport)) _viewport = null;
   }
 
+  /// Empties the prompt being typed into: Ctrl+E to its end, then Ctrl+U to
+  /// delete back to its start — what a shell and Claude Code's prompt both
+  /// read as "clear the line" — and the keyboard's own buffer with it (see
+  /// [TerminalViewport.clearInputBuffer]).
+  ///
+  /// ⚠️ Not Ctrl+C: to Claude Code an empty prompt's Ctrl+C is the first half
+  /// of quitting.
+  void clearPrompt() {
+    if (!acceptsInput) return;
+    terminal.keyInput(TerminalKey.keyE, ctrl: true);
+    terminal.keyInput(TerminalKey.keyU, ctrl: true);
+    resetInputBuffer();
+  }
+
+  /// Empties the keyboard's own buffer after a key sent from outside it — Tab
+  /// completing a word, a `/` typed from the key strip — changed the prompt
+  /// behind its back. See [TerminalViewport.clearInputBuffer].
+  void resetInputBuffer() => _viewport?.clearInputBuffer();
+
   /// Changes only the local paint phase of the cursor. Incoming terminal data
   /// is always parsed against [_remoteCursorVisible], so blinking cannot turn
   /// a remote DECTCEM hide/show command into terminal input or corrupt its
@@ -714,41 +842,10 @@ class TerminalSession extends ChangeNotifier {
     // Most packets end on a scalar boundary. Decode their existing byte view
     // directly; only a split UTF-8 scalar needs a joined buffer.
     final combined = _utf8Tail.isEmpty ? bytes : <int>[..._utf8Tail, ...bytes];
-    final decoded = _decodeUtf8(combined);
+    final decoded = decodeUtf8Chunk(combined);
     if (decoded.text.isNotEmpty) _writeTerminalText(decoded.text);
     _utf8Tail = decoded.tail;
     return true;
-  }
-
-  ({String text, List<int> tail}) _decodeUtf8(List<int> combined) {
-    for (
-      var tailLength = 0;
-      tailLength <= min(3, combined.length);
-      tailLength++
-    ) {
-      try {
-        final text = utf8.decoder.convert(
-          combined,
-          0,
-          combined.length - tailLength,
-        );
-        return (
-          text: text,
-          tail: tailLength == 0
-              ? const []
-              : combined.sublist(combined.length - tailLength),
-        );
-      } on FormatException {
-        // A UTF-8 scalar can span at most four bytes; retain only a trailing
-        // partial scalar before falling back to replacement rendering below.
-      }
-    }
-    // PTY output is byte-oriented. A snapshot cut can rarely land between the
-    // leading and continuation bytes of a scalar, leaving a continuation byte
-    // at the start of the post-cut frame. Real terminals render malformed UTF-8
-    // as U+FFFD; resyncing the entire screen creates a second keyframe race and
-    // cannot recover the missing pre-cut byte anyway.
-    return (text: utf8.decode(combined, allowMalformed: true), tail: const []);
   }
 
   List<int> _prepareKeyframeBytes(Uint8List bytes) {

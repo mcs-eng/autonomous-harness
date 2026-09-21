@@ -10,7 +10,7 @@ import 'window_chrome.dart';
 
 import '../clipboard/image_bytes.dart';
 import '../core/dsh_catalog.dart' show DshEntry;
-import '../core/models.dart' show Agent;
+import '../core/models.dart' show Agent, kUntitledPane;
 import '../clipboard/native_clipboard.dart';
 import '../shared/theme/app_theme.dart' as grid;
 // `hide TerminalKey`: this file's own shortcut-label class, unused here, collides with xterm's
@@ -33,6 +33,7 @@ import 'restart_agent_action.dart';
 import 'terminal_panel.dart';
 import 'web_pane_panel.dart';
 import 'pane_resize_handle.dart';
+import 'box_chrome.dart';
 import 'pane_split_edges.dart';
 
 /// Terminal views arranged by the chosen preset. Swarms keep each view under
@@ -44,14 +45,12 @@ class PaneGrid extends StatelessWidget {
     this.swarmMode = false,
     this.empty,
     this.onSplit,
-    this.onNewSplit,
   });
 
   final AppNotifier notifier;
   final bool swarmMode;
   final Widget? empty;
   final void Function(int paneId, PaneResizeAxis axis)? onSplit;
-  final void Function(int paneId, PaneResizeAxis axis)? onNewSplit;
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +63,6 @@ class PaneGrid extends StatelessWidget {
             dragging: dragging,
             empty: empty,
             onSplit: onSplit,
-            onNewSplit: onNewSplit,
           );
         }
         final panes = notifier.panes;
@@ -231,20 +229,19 @@ class _SwarmCanvas extends StatefulWidget {
     required this.dragging,
     this.empty,
     this.onSplit,
-    this.onNewSplit,
   });
   final AppNotifier notifier;
   final AgentDragRef? dragging;
   final Widget? empty;
   final void Function(int paneId, PaneResizeAxis axis)? onSplit;
-  final void Function(int paneId, PaneResizeAxis axis)? onNewSplit;
   @override
   State<_SwarmCanvas> createState() => _SwarmCanvasState();
 }
 
 class _SwarmCanvasState extends State<_SwarmCanvas> {
   final _scroll = ScrollController(keepScrollOffset: false);
-  final _offsets = <String, double>{};
+  final _horizontalScroll = ScrollController(keepScrollOffset: false);
+  final _offsets = <String, Offset>{};
   final _inputLayers = <int, GlobalKey<_PaneLayerState>>{};
   final _idleFocus = FocusNode(
     debugLabel: 'Swarm navigation',
@@ -289,6 +286,7 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
       _resizeRequest = widget.notifier.paneResizeRequest;
       _lastInputDestination = _inputDestination;
       if (_scroll.hasClients) _scroll.jumpTo(0);
+      if (_horizontalScroll.hasClients) _horizontalScroll.jumpTo(0);
     }
   }
 
@@ -305,11 +303,16 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
     }
     if (_activeId != app.activeSwarmId) {
       if (_resizeHelp.isShowing) _resizeHelp.hide();
-      if (_scroll.hasClients) _offsets[_activeId] = _scroll.offset;
+      _offsets[_activeId] = Offset(
+        _horizontalScroll.hasClients ? _horizontalScroll.offset : 0,
+        _scroll.hasClients ? _scroll.offset : 0,
+      );
       _activeId = app.activeSwarmId;
       // The notification precedes the frame. Restore before layout/paint so
       // switching never briefly displays the previous Swarm's scroll offset.
-      if (_scroll.hasClients) _scroll.jumpTo(_offsets[_activeId] ?? 0);
+      final offset = _offsets[_activeId] ?? Offset.zero;
+      if (_scroll.hasClients) _scroll.jumpTo(offset.dy);
+      if (_horizontalScroll.hasClients) _horizontalScroll.jumpTo(offset.dx);
       final open = app.swarms.map((s) => s.id).toSet();
       _offsets.removeWhere((id, _) => !open.contains(id));
     }
@@ -360,25 +363,43 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
       sizes: app.activeSwarm.paneSizes,
     );
     final rect = geometry.rectangles[index];
-    final current = _scroll.offset;
-    final offset = rect.top < current || rect.height > viewport.height
-        ? rect.top
-        : rect.bottom > current + viewport.height
-        ? rect.bottom - viewport.height
-        : current;
-    final target = offset.clamp(
-      0.0,
-      (geometry.height - viewport.height).clamp(0.0, double.infinity),
-    );
-    if (target != current) {
-      if (correctingLayout) {
-        // The incoming viewport size will lay out the scroll view immediately
-        // after this LayoutBuilder. Correct without notifying during layout.
-        _scroll.position.correctPixels(target);
-      } else {
-        _scroll.jumpTo(target);
+    void reveal(
+      ScrollController scroll,
+      double start,
+      double end,
+      double viewportExtent,
+      double canvasExtent,
+    ) {
+      if (!scroll.hasClients) return;
+      final current = scroll.offset;
+      final offset = start < current || end - start > viewportExtent
+          ? start
+          : end > current + viewportExtent
+          ? end - viewportExtent
+          : current;
+      final target = offset.clamp(
+        0.0,
+        (canvasExtent - viewportExtent).clamp(0.0, double.infinity),
+      );
+      if (target != current) {
+        if (correctingLayout) {
+          // Correct before the scroll view lays out, without notifying during
+          // layout. Both axes retain their controllers and terminal children.
+          scroll.position.correctPixels(target);
+        } else {
+          scroll.jumpTo(target);
+        }
       }
     }
+
+    reveal(_scroll, rect.top, rect.bottom, viewport.height, geometry.height);
+    reveal(
+      _horizontalScroll,
+      rect.left,
+      rect.right,
+      viewport.width,
+      geometry.width,
+    );
   }
 
   void _onFontChanged() => setState(() {});
@@ -390,6 +411,7 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
     _resizeFocus.dispose();
     _idleFocus.dispose();
     _scroll.dispose();
+    _horizontalScroll.dispose();
     super.dispose();
   }
 
@@ -434,10 +456,10 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
       zoomed: app.zoomedPaneId == pane.id,
       canSplit: app.canAddPane,
       splitRight:
-          (widget.onSplit != null || widget.onNewSplit != null) &&
+          widget.onSplit != null &&
           app.preparePaneSplit(PaneResizeAxis.x, paneId: pane.id) != null,
       splitDown:
-          (widget.onSplit != null || widget.onNewSplit != null) &&
+          widget.onSplit != null &&
           app.preparePaneSplit(PaneResizeAxis.y, paneId: pane.id) != null,
       composer: pane.composerVisible,
       blocked:
@@ -473,7 +495,7 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
         app.activeSwarm.arrangedKey = layout.key;
         final minimum = _MinTile.of();
         app.activeSwarm.arrangedMinimum = Size(
-          (minimum.width + kPaneGap) / (constraints.maxWidth + kPaneGap),
+          (minimum.width + kPaneGap) / (layout.width + kPaneGap),
           (minimum.height + kPaneGap) / (layout.height + kPaneGap),
         );
       }
@@ -484,59 +506,78 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
       };
       final retainedIds = app.allPanes.map((pane) => pane.id).toSet();
       _inputLayers.removeWhere((id, _) => !retainedIds.contains(id));
-      // The scroll view stays mounted even when content fits. Its maximum
-      // extent is then zero; keeping its ancestry is what avoids grafting.
+      final scrollBehavior = ScrollConfiguration.of(context);
+      // Both scroll views stay mounted when content fits. Stable ancestry
+      // retains terminal views as a split grows or shrinks the canvas.
       return Focus(
         focusNode: _idleFocus,
         includeSemantics: false,
-        child: SingleChildScrollView(
-          controller: _scroll,
-          child: SizedBox(
-            width: constraints.maxWidth,
-            height: layout.height,
-            child: Stack(
-              children: [
-                if (visible.isEmpty)
-                  Positioned.fill(
-                    child: widget.empty ?? _EmptyGrid(notifier: app),
-                  ),
-                for (final pane in app.allPanes)
-                  if (rectangles.containsKey(pane.id) ||
-                      pane.lastViewSize != null)
-                    Positioned.fromRect(
-                      key: ValueKey(pane.id),
-                      rect:
-                          rectangles[pane.id] ??
-                          Offset.zero & pane.lastViewSize!,
-                      child: _PaneLayer(
-                        key: _inputLayers.putIfAbsent(
-                          pane.id,
-                          () => GlobalKey<_PaneLayerState>(),
-                        ),
-                        session: pane.session,
-                        visible: rectangles.containsKey(pane.id),
-                        presentation: _presentation(
-                          pane,
-                          rectangles.containsKey(pane.id),
-                        ),
-                        child: _PaneCell(
-                          key: pane.cellKey,
-                          notifier: app,
-                          pane: pane,
-                          dragging: widget.dragging,
-                          visible: rectangles.containsKey(pane.id),
-                          swarmMode: true,
-                          onSplit: widget.onSplit,
-                          onNewSplit: widget.onNewSplit,
-                        ),
-                      ),
+        child: Scrollbar(
+          key: const ValueKey('swarm-horizontal-scrollbar'),
+          controller: _horizontalScroll,
+          thumbVisibility: layout.width > constraints.maxWidth,
+          scrollbarOrientation: ScrollbarOrientation.bottom,
+          notificationPredicate: (notification) =>
+              notification.depth == 1 &&
+              notification.metrics.axis == Axis.horizontal,
+          // Keep the horizontal thumb at the viewport's bottom even when the
+          // workspace also scrolls vertically. Terminals retain their bars.
+          child: SingleChildScrollView(
+            controller: _scroll,
+            child: ScrollConfiguration(
+              behavior: scrollBehavior.copyWith(scrollbars: false),
+              child: SingleChildScrollView(
+                controller: _horizontalScroll,
+                scrollDirection: Axis.horizontal,
+                child: ScrollConfiguration(
+                  behavior: scrollBehavior,
+                  child: SizedBox(
+                    width: layout.width,
+                    height: layout.height,
+                    child: Stack(
+                      children: [
+                        if (visible.isEmpty)
+                          Positioned.fill(
+                            child: widget.empty ?? _EmptyGrid(notifier: app),
+                          ),
+                        for (final pane in app.allPanes)
+                          if (rectangles.containsKey(pane.id) ||
+                              pane.lastViewSize != null)
+                            Positioned.fromRect(
+                              key: ValueKey(pane.id),
+                              rect:
+                                  rectangles[pane.id] ??
+                                  Offset.zero & pane.lastViewSize!,
+                              child: _PaneLayer(
+                                key: _inputLayers.putIfAbsent(
+                                  pane.id,
+                                  () => GlobalKey<_PaneLayerState>(),
+                                ),
+                                session: pane.session,
+                                visible: rectangles.containsKey(pane.id),
+                                presentation: _presentation(
+                                  pane,
+                                  rectangles.containsKey(pane.id),
+                                ),
+                                child: _PaneCell(
+                                  key: pane.cellKey,
+                                  notifier: app,
+                                  pane: pane,
+                                  dragging: widget.dragging,
+                                  visible: rectangles.containsKey(pane.id),
+                                  swarmMode: true,
+                                  onSplit: widget.onSplit,
+                                ),
+                              ),
+                            ),
+                        if (app.zoomedPaneId == null &&
+                            layout.arrangement?.dividers.isNotEmpty == true)
+                          Positioned.fill(child: _resizeLayer(layout)),
+                      ],
                     ),
-                if (app.zoomedPaneId == null &&
-                    layout.arrangement?.dividers.isNotEmpty == true)
-                  Positioned.fill(
-                    child: _resizeLayer(layout, constraints.biggest),
                   ),
-              ],
+                ),
+              ),
             ),
           ),
         ),
@@ -544,7 +585,7 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
     },
   );
 
-  Widget _resizeLayer(_SwarmGeometry layout, Size viewport) {
+  Widget _resizeLayer(_SwarmGeometry layout) {
     final app = widget.notifier;
     final swarmId = app.activeSwarmId;
     final arrangement = layout.arrangement!;
@@ -554,7 +595,7 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
     final preferred = arrangement.dividers
         .where((divider) => divider.touches(focused))
         .firstOrNull;
-    final extent = Size(viewport.width + kPaneGap, layout.height + kPaneGap);
+    final extent = Size(layout.width + kPaneGap, layout.height + kPaneGap);
     final floor = _MinTile.of();
     final minimum = Size(
       (floor.width + kPaneGap) / extent.width,
@@ -568,18 +609,44 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
         right: 24,
         child: IgnorePointer(
           child: Center(
-            child: Container(
+            child: TerminalBox(
               key: const ValueKey('pane-resize-hint'),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                border: Border.all(color: AppColors.borderStrong),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                'Arrow keys resize · Shift for larger steps · Tab next divider · Esc done',
-                style: TextStyle(fontSize: 13, color: AppColors.textSoft),
-                textAlign: TextAlign.center,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                child: Wrap(
+                  spacing: 18,
+                  runSpacing: 6,
+                  children: [
+                    Text(
+                      'resize >',
+                      style: boxMonoStyle(
+                        size: 12,
+                        color: grid.AppPalette.swarmAccent,
+                      ),
+                    ),
+                    for (final (key, action) in const [
+                      ('arrows', 'resize'),
+                      ('shift', 'larger steps'),
+                      ('tab', 'next divider'),
+                      ('esc', 'done'),
+                    ])
+                      Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(
+                              text: '$key  ',
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                            TextSpan(text: action),
+                          ],
+                        ),
+                        style: boxMonoStyle(size: 12, color: kBoxFaint),
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -645,7 +712,8 @@ class _SwarmGeometry {
     required PanePreset? preset,
     required Size minimum,
     Map<String, PaneArrangement> sizes = const {},
-  }) : height = viewport.height {
+  }) : width = viewport.width,
+       height = viewport.height {
     if (count == 0) return;
     if (count == 1) {
       rectangles = [Offset.zero & viewport];
@@ -675,6 +743,12 @@ class _SwarmGeometry {
     arrangement =
         sizes[key] ?? PaneArrangement(shape.tilesFor(count, columns: columns));
     for (final tile in arrangement!.tiles) {
+      if (manual != null) {
+        width = ((minimum.width + kPaneGap) / tile.width - kPaneGap).clamp(
+          width,
+          double.infinity,
+        );
+      }
       height = ((minimum.height + kPaneGap) / tile.height - kPaneGap).clamp(
         height,
         double.infinity,
@@ -683,9 +757,9 @@ class _SwarmGeometry {
     rectangles = [
       for (final tile in arrangement!.tiles)
         Rect.fromLTWH(
-          tile.left * (viewport.width + kPaneGap),
+          tile.left * (width + kPaneGap),
           tile.top * (height + kPaneGap),
-          (tile.width * (viewport.width + kPaneGap) - kPaneGap).clamp(
+          (tile.width * (width + kPaneGap) - kPaneGap).clamp(
             0,
             double.infinity,
           ),
@@ -698,7 +772,7 @@ class _SwarmGeometry {
   }
   String? key;
   PaneArrangement? arrangement;
-  double height;
+  double width, height;
   int? columns;
   List<Rect> rectangles = const [];
 }
@@ -1081,7 +1155,7 @@ class _Gap extends StatelessWidget {
 
 /// How round a card's corners are — a pane, and the rail beside it. Public for the same reason
 /// [kPaneGap] is: the rail is a card now, and two places typing 10 is how they drift apart.
-const double kPaneRadius = 10;
+const double kPaneRadius = kTerminalCornerRadius;
 
 /// How round a pane's corners are — the shared card radius, so a terminal does not read as a different
 /// KIND of surface from the rail beside it.
@@ -1096,7 +1170,6 @@ class _PaneCell extends StatelessWidget {
     this.visible = true,
     this.swarmMode = false,
     this.onSplit,
-    this.onNewSplit,
   });
 
   final AppNotifier notifier;
@@ -1105,7 +1178,6 @@ class _PaneCell extends StatelessWidget {
   final bool visible;
   final bool swarmMode;
   final void Function(int paneId, PaneResizeAxis axis)? onSplit;
-  final void Function(int paneId, PaneResizeAxis axis)? onNewSplit;
 
   bool get _single => notifier.panes.length == 1;
 
@@ -1133,28 +1205,34 @@ class _PaneCell extends StatelessWidget {
       onPointerDown: (_) => notifier.focusPane(pane.id),
       child: ValueListenableBuilder<PaneDragRef?>(
         valueListenable: paneDragging,
-        builder: (context, inFlight, child) => PaneSplitEdges(
-          enabled:
-              swarmMode &&
-              visible &&
-              agentId != null &&
-              (onSplit != null || onNewSplit != null) &&
-              notifier.zoomedPaneId == null &&
-              notifier.canAddPane &&
-              dragging == null &&
-              inFlight == null,
-          canSplitRight:
-              notifier.preparePaneSplit(PaneResizeAxis.x, paneId: pane.id) !=
-              null,
-          canSplitDown:
-              notifier.preparePaneSplit(PaneResizeAxis.y, paneId: pane.id) !=
-              null,
-          onSplit: onSplit == null ? null : (axis) => onSplit!(pane.id, axis),
-          onNewSplit: onNewSplit == null
-              ? null
-              : (axis) => onNewSplit!(pane.id, axis),
-          child: child!,
-        ),
+        builder: (context, inFlight, child) => onSplit == null
+            ? child!
+            : PaneSplitEdges(
+                enabled:
+                    swarmMode &&
+                    visible &&
+                    agentId != null &&
+                    notifier.zoomedPaneId == null &&
+                    notifier.canAddPane &&
+                    dragging == null &&
+                    inFlight == null,
+                canSplitRight:
+                    notifier.preparePaneSplit(
+                      PaneResizeAxis.x,
+                      paneId: pane.id,
+                    ) !=
+                    null,
+                canSplitDown:
+                    notifier.preparePaneSplit(
+                      PaneResizeAxis.y,
+                      paneId: pane.id,
+                    ) !=
+                    null,
+                onSplit: onSplit == null
+                    ? null
+                    : (axis) => onSplit!(pane.id, axis),
+                child: child!,
+              ),
         child: Container(
           decoration: BoxDecoration(
             // UNCHANGED, and deliberately: the terminal renders its own background
@@ -1318,7 +1396,7 @@ class _PaneContent extends StatelessWidget {
     final agent = machine?.agents
         .where((agent) => agent.id == wantedAgentId)
         .firstOrNull;
-    final agentName = agent?.name;
+    final agentName = agent?.displayName;
     final needsLink =
         machine != null &&
         machine.isRemote &&
@@ -1351,7 +1429,9 @@ class _PaneContent extends StatelessWidget {
         notice = (
           label: 'Unavailable',
           icon: Icons.cloud_off,
-          detail: 'Waiting for this machine. Retained output is read only.',
+          detail: notifier.machineInventoryLoaded
+              ? 'This machine isn’t available. Retained output is read only.'
+              : 'Waiting for this machine. Retained output is read only.',
         );
       } else if (needsLink) {
         notice = (
@@ -1422,7 +1502,7 @@ class _PaneContent extends StatelessWidget {
                   notifier,
                   pane.machineId,
                   agent.id,
-                  agent.name,
+                  agent.displayName,
                   engine: agent.engine,
                 ),
           // The same confirmation the rail's row menu opens. Only for an
@@ -1435,7 +1515,7 @@ class _PaneContent extends StatelessWidget {
                   notifier,
                   pane.machineId,
                   agent.id,
-                  agent.name,
+                  agent.displayName,
                   engine: agent.engine,
                 ),
           zoomed: notifier.zoomedPaneId == pane.id,
@@ -1459,24 +1539,27 @@ class _PaneContent extends StatelessWidget {
 
     // A never-attached view has no output to preserve: keep its setup guidance.
     if (machine == null) {
-      // "Waiting" is only honest while there is still something to wait FOR. When the machine list
-      // itself could not be read, this machine is not slow — it is unknown, and a spinner that never
-      // ends is the wrong answer. Keyed off `machineListError`, not `lastError`: that slot is shared
-      // with agent-launch failures and is cleared by `dismissError`.
+      // Waiting ends once the inventory has answered, even when it has no row
+      // for this saved pane. Keep Retry mounted during refresh so keyboard focus
+      // survives. Repeated activation joins the same retry in AppNotifier.
       final listFailed = notifier.machineListError != null;
       final retrying = notifier.machinesRefreshing;
+      final waiting = !listFailed && !notifier.machineInventoryLoaded;
+      final stale = notifier.machinesAreStale;
       return _PaneStatus(
-        title: wantedAgentId ?? pane.machineId,
-        icon: listFailed ? Icons.cloud_off : Icons.hourglass_empty,
+        title: wantedAgentId == null ? 'Machine' : kUntitledPane,
+        icon: listFailed || stale ? Icons.cloud_off : Icons.link_off,
         message: listFailed
-            ? 'Could not reach the Harness backend, so this machine is unknown right now.'
-            : 'Waiting for this machine to answer…',
+            ? 'Could not load machines. Retry to reconnect.'
+            : waiting
+            ? 'Waiting for this machine to answer…'
+            : stale
+            ? 'Could not confirm this machine’s status. Retry to reconnect.'
+            : 'This machine isn’t available. Check that it’s still linked to your account.',
         onClose: single && !swarmMode ? null : close,
-        busy: !listFailed || retrying,
-        // The automatic recovery is already retrying in the background; this is for someone who does not
-        // want to wait for the next tick. `retryMachines` coalesces, so pressing it during a run joins it.
-        actionLabel: listFailed && !retrying ? 'RETRY' : null,
-        onAction: listFailed ? notifier.retryMachines : null,
+        busy: waiting || retrying,
+        actionLabel: waiting ? null : 'Retry',
+        onAction: waiting ? null : notifier.retryMachines,
       );
     }
     if (needsLink) {
@@ -1982,14 +2065,19 @@ class _PaneStatus extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (busy)
-                    const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  else
-                    Icon(icon, size: 26, color: AppColors.mutedStrong),
+                  SizedBox(
+                    width: 26,
+                    height: 26,
+                    child: busy
+                        ? const Center(
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : Icon(icon, size: 26, color: AppColors.mutedStrong),
+                  ),
                   const SizedBox(height: 10),
                   Text(
                     message,

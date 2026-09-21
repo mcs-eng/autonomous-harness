@@ -6,7 +6,7 @@ import '../shared/theme/appearance_prefs_store.dart';
 import '../shared/theme/harness_background.dart';
 import '../state/swarm_navigation.dart';
 import '../state/swarm_search.dart';
-import 'harness_entry_actions.dart';
+import 'box_chrome.dart';
 import 'harness_customize_pane.dart';
 import 'swarm_search_input.dart';
 import 'swarm_switcher.dart';
@@ -19,6 +19,12 @@ class HarnessStartPage extends StatefulWidget {
     required this.focusNode,
     required this.createSearch,
     required this.onNew,
+    this.onNewTab,
+    this.onNewPane,
+    this.onCommands,
+    this.onQuickStart,
+    this.onPractice,
+    this.onNewWithTask,
     required this.onChoose,
     this.onStore,
     this.resume,
@@ -26,10 +32,19 @@ class HarnessStartPage extends StatefulWidget {
   final FocusNode focusNode;
   final SwarmSearchController Function() createSearch;
   final VoidCallback onNew;
+  final VoidCallback? onNewTab, onNewPane;
+  final VoidCallback? onCommands;
+  final VoidCallback? onQuickStart, onPractice;
+
+  /// New Harness with what was typed in the search as its first message: the
+  /// button and ⌘N must not throw away what the create row would have kept.
+  final ValueChanged<String>? onNewWithTask;
   final ValueChanged<SwarmSearchSelection> onChoose;
 
   /// Open the Harness Store. Null hides its card (a build without one).
   final VoidCallback? onStore;
+
+  /// This fork's Continue working list, shown under the entry buttons.
   final Widget? resume;
   @override
   State<HarnessStartPage> createState() => _HarnessStartPageState();
@@ -43,7 +58,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
     canRequestFocus: false,
   );
   final _searchGroup = Object();
-  final _customizeButtonFocus = FocusNode(debugLabel: 'Customize OpenHarness');
+  final _customizeButtonFocus = FocusNode(debugLabel: 'Customize Harness');
   bool _customizing = false;
   SwarmSearchController? _search;
   SwarmSearchDraft? _draft;
@@ -89,8 +104,13 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
   }
 
   void _new() {
+    final task = _search?.createTask;
     _close();
-    widget.onNew();
+    if (task != null && widget.onNewWithTask != null) {
+      widget.onNewWithTask!(task);
+    } else {
+      widget.onNew();
+    }
   }
 
   Widget _searchPanel() => TextFieldTapRegion(
@@ -114,12 +134,18 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
           onClose: _close,
           onOpen: _open,
           onNewAgent: _new,
+          onCommands: widget.onCommands == null
+              ? null
+              : () {
+                  _close();
+                  widget.onCommands!();
+                },
           onRefocus: _focus.requestFocus,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Semantics(
-                label: 'Find a harness',
+                label: kHarnessPickerHint,
                 child: SwarmSearchInput(
                   inputKey: const ValueKey('harness-start-search'),
                   controller: _query,
@@ -132,9 +158,13 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                   groupId: _searchGroup,
                   autofocus: true,
                   showClose: _showResults,
-                  hintText: 'Find a harness',
+                  hintText: kHarnessPickerHint,
                   rounded: true,
                   prominent: true,
+                  // The same `4 of 31` the box shows: this is the same box.
+                  trailing: _search == null
+                      ? null
+                      : SwarmSearchCount(search: _search!),
                 ),
               ),
               if (_showResults) ...[
@@ -142,13 +172,44 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                   child: Padding(
                     padding: const EdgeInsets.only(bottom: 12),
                     child: SizedBox(
-                      height: 480,
-                      child: SwarmSearchResults(
-                        key: const ValueKey('harness-start-results'),
-                        search: _search!,
-                        sideBySideMinWidth: 700,
-                        onChoose: _choose,
-                        onRefocus: _focus.requestFocus,
+                      // The results keep their 480; the hint line is extra.
+                      height: 480 + 32,
+                      child: LayoutBuilder(
+                        builder: (context, box) => Column(
+                          children: [
+                            Expanded(
+                              child: SwarmSearchResults(
+                                key: const ValueKey('harness-start-results'),
+                                search: _search!,
+                                sideBySideMinWidth: 700,
+                                onChoose: _choose,
+                                onRefocus: _focus.requestFocus,
+                              ),
+                            ),
+                            // The same bottom line ⌘P has: this is the first box a
+                            // new person sees, and the one that most needs to say
+                            // what the keys are. On a window too short for both,
+                            // the results keep the room.
+                            if (box.maxHeight >= 500)
+                              SwarmSearchHints(
+                                search: _search!,
+                                onSubmit: () {
+                                  final choice = _search!.submit();
+                                  if (choice != null) _choose(choice);
+                                },
+                                onQuery: (text) {
+                                  _query.value = TextEditingValue(
+                                    text: text,
+                                    selection: TextSelection.collapsed(
+                                      offset: text.length,
+                                    ),
+                                  );
+                                  _search!.setQuery(text);
+                                  _focus.requestFocus();
+                                },
+                              ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -315,7 +376,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                             key: const ValueKey('harness-customize-button'),
                             focusNode: _customizeButtonFocus,
                             onPressed: onPressed,
-                            tooltip: 'Customize OpenHarness',
+                            tooltip: 'Customize Harness',
                             icon: const Icon(Icons.edit_outlined, size: 18),
                             style: IconButton.styleFrom(
                               backgroundColor: grid.AppPalette.swarmAccent,
@@ -330,7 +391,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                           focusNode: _customizeButtonFocus,
                           onPressed: onPressed,
                           icon: const Icon(Icons.edit_outlined, size: 16),
-                          label: const Text('Customize OpenHarness'),
+                          label: const Text('Customize Harness'),
                           style: FilledButton.styleFrom(
                             backgroundColor: grid.AppPalette.swarmAccent,
                             foregroundColor: grid.AppPalette.swarmTabBar,
@@ -364,7 +425,6 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
   }
 
   Widget _page() {
-    if (widget.resume != null) return _returningPage();
     return LayoutBuilder(
       builder: (context, constraints) {
         return Padding(
@@ -394,15 +454,72 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Flexible(child: _searchPanel()),
+                              // The same wrapper at every flex keeps the editor mounted.
+                              // With the resume list below, the search keeps its own
+                              // height and the list takes the space that is left.
+                              Flexible(
+                                flex: widget.resume != null && !_showResults
+                                    ? 0
+                                    : 1,
+                                child: _searchPanel(),
+                              ),
                               if (!_showResults) ...[
                                 const SizedBox(height: 20),
-                                HarnessEntryActions(
-                                  onOpen: _open,
-                                  onNew: _new,
-                                  openKey: const ValueKey('harness-start-open'),
-                                  newKey: const ValueKey('harness-start-new'),
+                                Wrap(
+                                  spacing: 12,
+                                  runSpacing: 12,
+                                  children: [
+                                    OutlinedButton.icon(
+                                      key: const ValueKey(
+                                        'harness-start-new-tab',
+                                      ),
+                                      onPressed: widget.onNewTab ?? _open,
+                                      icon: const Icon(Icons.add, size: 18),
+                                      label: const Text('New Tab'),
+                                    ),
+                                    OutlinedButton.icon(
+                                      key: const ValueKey(
+                                        'harness-start-new-pane',
+                                      ),
+                                      onPressed: widget.onNewPane ?? _open,
+                                      icon: const Icon(
+                                        Icons.add_box_outlined,
+                                        size: 18,
+                                      ),
+                                      label: const Text('New Pane'),
+                                    ),
+                                    if (widget.onQuickStart != null)
+                                      TextButton(
+                                        key: const ValueKey(
+                                          'harness-start-quick-start',
+                                        ),
+                                        onPressed: widget.onQuickStart,
+                                        child: Text(
+                                          'Quick start · 4 steps',
+                                          style: boxMonoStyle(size: 12),
+                                        ),
+                                      ),
+                                    if (widget.onPractice != null)
+                                      TextButton(
+                                        key: const ValueKey(
+                                          'harness-start-practice',
+                                        ),
+                                        onPressed: widget.onPractice,
+                                        child: Text(
+                                          'Keyboard practice',
+                                          style: boxMonoStyle(size: 12),
+                                        ),
+                                      ),
+                                  ],
                                 ),
+                                if (widget.resume != null) ...[
+                                  const SizedBox(height: 20),
+                                  Flexible(
+                                    child: SingleChildScrollView(
+                                      child: widget.resume!,
+                                    ),
+                                  ),
+                                ],
                               ],
                             ],
                           ),
@@ -436,63 +553,4 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
       },
     );
   }
-
-  Widget _returningPage() => Padding(
-    padding: const EdgeInsets.fromLTRB(24, 32, 24, 72),
-    child: Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 900),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Keep the editor mounted while results open/close. Replacing its
-            // wrapper can let a retiring text-input connection clear the query
-            // during a dialog transition.
-            Flexible(flex: _showResults ? 1 : 0, child: _searchPanel()),
-            if (!_showResults) ...[
-              const SizedBox(height: 16),
-              HarnessEntryActions(
-                onOpen: _open,
-                onNew: _new,
-                openKey: const ValueKey('harness-start-open'),
-                newKey: const ValueKey('harness-start-new'),
-              ),
-              const SizedBox(height: 24),
-              Expanded(
-                child: ListView(
-                  children: [
-                    widget.resume!,
-                    const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 16,
-                      children: [
-                        if (widget.onStore != null)
-                          TextButton(
-                            style: TextButton.styleFrom(
-                              foregroundColor: grid.AppPalette.accentOnSurface,
-                            ),
-                            onPressed: widget.onStore,
-                            key: const ValueKey('harness-store-link'),
-                            child: const Text('Harness Store'),
-                          ),
-                        TextButton(
-                          style: TextButton.styleFrom(
-                            foregroundColor: grid.AppPalette.accentOnSurface,
-                          ),
-                          onPressed: _openDevicePage,
-                          key: const ValueKey('harness-device-link'),
-                          child: const Text('Explore Harness devices'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    ),
-  );
 }

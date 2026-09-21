@@ -78,6 +78,18 @@ export type AgentFrame = {
   /** Whether `agent_fork` can do anything for this engine (lib/forkAgent.ts) — natively, or by a
    *  handoff. A client hides the Fork action on a false rather than offering a button that refuses. */
   forkable: boolean
+  /**
+   * The launch choices a client needs to open ANOTHER agent like this one — the desktop's Clone
+   * (`agent_create` with the same `permissionMode`, `bypassPermission` and `agent`). Read off the
+   * registry row, never off the live process. Each null is a real answer: a row from before the
+   * choice existed, or an agent Harness did not launch, has none to report — and a clone of one
+   * falls back to the client's own defaults rather than to a guess made here.
+   */
+  permissionMode: string | null
+  bypassPermission: boolean | null
+  /** The engine's named agent (`agent_create`'s `agent`); `namedAgent` on the wire so an agent
+   *  object never carries a key called `agent`. */
+  namedAgent: string | null
 }
 
 /** What the daemon knows about an agent's DSH — looked up by the caller, never here. */
@@ -102,22 +114,31 @@ export interface AgentFrameContext {
 }
 
 /**
- * One agent as every client consumes it.
+ * When the conversation last moved, in epoch ms: the transcript's mtime, else the last time the engine
+ * reported in (a hook, or a session bind — the agent's creation at the latest).
  *
- * `updatedAt` prefers the transcript's mtime over the registry's own bookkeeping so a client sorting
- * by recency follows the conversation rather than the daemon's housekeeping; an unreadable or absent
- * transcript falls back to the registry, never to "now".
+ * ⚠️ Never the registry's `updatedAt`. That is bookkeeping: discovery rewrites it on every pass
+ * (`updateRuntimes`), so falling back to it stamped every agent without a readable transcript "now"
+ * — and a client sorting by recency put exactly those agents above the ones just used.
  */
+export async function lastActivityAt(s: RegisteredSession): Promise<number> {
+  const st = s.transcriptPath ? await stat(s.transcriptPath).catch(() => null) : null
+  return st?.mtimeMs ?? s.lastHookAt
+}
+
 function frameTitle(s: RegisteredSession): string | null {
   const title = sessionDisplayTitle(s)
   return title && title !== projectDisplayName(s) ? title : null
 }
 
+/**
+ * One agent as every client consumes it. `updatedAt` is {@link lastActivityAt}, so a client sorting by
+ * recency follows the conversation rather than the daemon's housekeeping.
+ */
 export async function agentFrame(
   s: RegisteredSession,
   { selectedModel, terminalAvailable, dsh }: AgentFrameContext,
 ): Promise<AgentFrame> {
-  const st = s.transcriptPath ? await stat(s.transcriptPath).catch(() => null) : null
   return {
     id: s.agentId,
     sessionId: s.sessionId,
@@ -127,7 +148,7 @@ export async function agentFrame(
     status: s.active ? 'active' : 'offline',
     launch: s.launch ?? { state: 'ready' },
     createdAt: new Date(s.registeredAt).toISOString(),
-    updatedAt: new Date(st?.mtimeMs ?? s.updatedAt).toISOString(),
+    updatedAt: new Date(await lastActivityAt(s)).toISOString(),
     tmuxPane: s.tmuxPane || null,
     terminal: { available: terminalAvailable, primary: s.primaryRuntimeKey, runtimes: s.runtimes },
     engine: s.engine,
@@ -158,5 +179,8 @@ export async function agentFrame(
     verdict: dsh?.verdict ?? null,
     forkedFrom: s.forkedFrom ? { agentId: s.forkedFrom.agentId, name: s.forkedFrom.name } : null,
     forkable: engineCanFork(s.engine),
+    permissionMode: s.permissionMode ?? null,
+    bypassPermission: s.bypassPermission ?? null,
+    namedAgent: s.agent ?? null,
   }
 }

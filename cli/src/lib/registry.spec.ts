@@ -1382,6 +1382,32 @@ describe('registry across a reboot and pane loss', () => {
     expect(saved[0]).not.toHaveProperty('bypassPermission')
   })
 
+  it('fills in the permission mode discovery read off a live argv, and keeps it across a reload', async () => {
+    const { registry } = await loadRegistryModule()
+    registry.load()
+    const pending = registry.openPendingAgent({
+      engine: 'claude',
+      runtimes: [{ backend: 'tmux', paneId: '%9' }],
+      cwd: '/tmp/demo',
+      bypassPermission: true,
+    })
+    expect(pending).not.toHaveProperty('permissionMode')
+
+    expect(registry.setPermissionMode(pending!.agentId, 'full')).toBe(true)
+    expect(registry.byAgent(pending!.agentId)?.permissionMode).toBe('full')
+    // Idempotent; fill-only, so the recorded mode is never re-derived into another; and a name that
+    // is not a mode is refused as it is on load.
+    expect(registry.setPermissionMode(pending!.agentId, 'full')).toBe(true)
+    expect(registry.setPermissionMode(pending!.agentId, 'plan')).toBe(false)
+    expect(registry.setPermissionMode(pending!.agentId, '--dangerously-skip-permissions')).toBe(false)
+    expect(registry.setPermissionMode('nope', 'full')).toBe(false)
+    expect(registry.byAgent(pending!.agentId)?.permissionMode).toBe('full')
+
+    const { registry: reloaded } = await loadRegistryModule()
+    reloaded.load()
+    expect(reloaded.byAgent(pending!.agentId)?.permissionMode).toBe('full')
+  })
+
   const GRID_LAUNCH = {
     networkId: 'grid-abc',
     networkName: 'Team grid',
@@ -1455,6 +1481,47 @@ describe('registry across a reboot and pane loss', () => {
     const bound = reloaded.register({ sessionId: 'session-sub', transcriptPath, tmuxPane: '%21', cwd: '/tmp/demo' })
     expect(bound?.entry.agentId).toBe(pending.agentId)
     expect(bound?.entry.subscriptionModel).toBe('opus')
+  })
+
+  it('keeps strict conversation resume after the engine binds and the daemon reloads', async () => {
+    const transcriptPath = join(dataDir, 'session-resumed.jsonl')
+    writeFileSync(transcriptPath, '{}\n')
+    const { registry } = await loadRegistryModule()
+    registry.load()
+    const original = registerProcess(registry, {
+      engine: 'claude', sessionId: 'session-resumed', transcriptPath, tmuxPane: '%21', cwd: '/tmp/demo',
+    })!.entry
+    registry.removeAgent(original.agentId)
+    registry.resumePendingAgent(original, [{ backend: 'tmux', paneId: '%22' }])
+
+    // SessionStart rebuilds the row. It must retain the policy that prevents a
+    // later daemon restore from silently replacing this saved conversation.
+    const bound = registry.register({
+      engine: 'claude', sessionId: original.sessionId, transcriptPath, tmuxPane: '%22', cwd: '/tmp/demo', processIdentity: processIdentity(122),
+    })
+    expect(bound?.entry.agentId).toBe(original.agentId)
+    expect(bound?.entry.resumeOnly).toBe(true)
+    const { registry: reloaded } = await loadRegistryModule()
+    reloaded.load()
+    expect(reloaded.byAgent(original.agentId)).toMatchObject({
+      sessionId: original.sessionId, tmuxPane: '%22', resumeOnly: true,
+    })
+  })
+
+  it('requires the exact resumed session hook; process discovery alone stays starting', async () => {
+    const transcriptPath = join(dataDir, 'resume-target.jsonl')
+    writeFileSync(transcriptPath, '{}\n')
+    const { registry } = await loadRegistryModule()
+    const original = registerProcess(registry, { engine: 'claude', sessionId: 'resume-target', transcriptPath, tmuxPane: '%21' })!.entry
+    registry.removeAgent(original.agentId)
+    registry.resumePendingAgent(original, [{ backend: 'tmux', paneId: '%22' }])
+    registry.openProcessAgent({ engine: 'claude', runtimes: [{ backend: 'tmux', paneId: '%22' }], processIdentity: processIdentity(122) })
+    expect(registry.byAgent(original.agentId)?.launch?.state).toBe('starting')
+    expect(registry.byAgent(original.agentId)?.lastHookAt).toBe(0)
+    expect(registry.register({ engine: 'claude', sessionId: 'unexpected-new-session', transcriptPath, tmuxPane: '%22', processIdentity: processIdentity(122) })).toBeNull()
+    expect(registry.byAgent(original.agentId)).toMatchObject({ sessionId: 'resume-target', launch: { state: 'failed', error: 'RESUME_SESSION_MISMATCH' } })
+    const confirmed = registry.register({ engine: 'claude', sessionId: 'resume-target', transcriptPath, tmuxPane: '%22', processIdentity: processIdentity(122) })
+    expect(confirmed?.entry).toMatchObject({ agentId: original.agentId, sessionId: 'resume-target', launch: { state: 'ready' } })
   })
 
   it('drops any launch state on the hook that proves the engine is up', async () => {

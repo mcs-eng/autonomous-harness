@@ -157,7 +157,7 @@ void main() {
         PanePreset.columns,
         PanePreset.rows,
       ]) {
-        await chord(tester, LogicalKeyboardKey.keyS);
+        await chord(tester, LogicalKeyboardKey.keyL, shift: true);
         await tester.pump(const Duration(milliseconds: 200));
         await tester.tap(find.text(preset.label));
         await tester.pump();
@@ -257,9 +257,6 @@ void main() {
       view.widget.scrollController!.jumpTo(100);
       await tester.pump();
       await chord(tester, LogicalKeyboardKey.keyT);
-      // The pane-choosing picker is the Open Agent chooser; New Agent opens
-      // its dialog directly without a session list.
-      await chord(tester, LogicalKeyboardKey.keyO);
       await tester.enterText(
         find.byKey(const ValueKey('swarm-search-input')),
         'Agent 0',
