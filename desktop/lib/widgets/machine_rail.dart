@@ -254,7 +254,7 @@ class _MachineRailState extends State<MachineRail> {
                             children: [
                               Expanded(
                                 child: Text(
-                                  'OpenHarness',
+                                  'Harness',
                                   style: TextStyle(
                                     color: grid.AppPalette.textPrimary,
                                     fontSize: 16,
@@ -1063,7 +1063,7 @@ class _AgentRowState extends State<_AgentRow> {
     notifier,
     state.machine.machineId,
     agent.id,
-    agent.name,
+    agent.displayName,
   );
 
   /// The row's way into the shared confirmation — see delete_agent_dialog.dart.
@@ -1072,7 +1072,7 @@ class _AgentRowState extends State<_AgentRow> {
     notifier,
     state.machine.machineId,
     agent.id,
-    agent.name,
+    agent.displayName,
     engine: agent.engine,
   );
 
@@ -1084,7 +1084,7 @@ class _AgentRowState extends State<_AgentRow> {
     notifier,
     state.machine.machineId,
     agent.id,
-    agent.name,
+    agent.displayName,
     engine: agent.engine,
   );
 
@@ -1153,7 +1153,7 @@ class _AgentRowState extends State<_AgentRow> {
                     agentId: agent.id,
                   ),
           child: SidebarItem(
-            label: agent.name,
+            label: agent.displayName,
             selected: selected,
             enabled: enabled,
             dimmed: !visuallyEnabled,
@@ -1272,7 +1272,9 @@ class _AgentRowState extends State<_AgentRow> {
                       const AppMenuDivider(),
                       AppMenuItem(
                         icon: LucideIcons.refreshCw300,
-                        label: 'Restart Harness',
+                        label: isTerminalEngine(agent.engine)
+                            ? 'Restart Terminal'
+                            : 'Restart Harness',
                         onPressed: () {
                           _agentMenu.close();
                           _restartAgent();
@@ -1320,7 +1322,7 @@ class _AgentRowState extends State<_AgentRow> {
       data: AgentDragRef(
         machineId: machineId,
         agentId: agent.id,
-        name: agent.name,
+        name: agent.displayName,
       ),
       // Horizontal only, and the rail is a scrolling list — that is the whole
       // reason. An unrestricted Draggable competes with the list's own vertical
@@ -1332,11 +1334,14 @@ class _AgentRowState extends State<_AgentRow> {
       onDragStarted: () => agentDrag.value = AgentDragRef(
         machineId: machineId,
         agentId: agent.id,
-        name: agent.name,
+        name: agent.displayName,
       ),
       onDragEnd: (_) => agentDrag.value = null,
       onDraggableCanceled: (_, _) => agentDrag.value = null,
-      feedback: _DragChip(name: agent.name, engine: agent.identityEngine),
+      feedback: _DragChip(
+        name: agent.displayName,
+        engine: agent.identityEngine,
+      ),
       // The row stays put and dims. Removing it would reflow the list under the
       // pointer mid-drag, moving every other row out from under the place the
       // hand had already aimed at.
@@ -1696,7 +1701,7 @@ class _AgentLoadError extends StatelessWidget {
   }
 }
 
-/// "New Harness…", drawn as the row it would create.
+/// "New Harness", drawn as the row it would create.
 ///
 /// The rail is a LIST, and every framed control put in it has read as a foreign object — there is
 /// nothing else in this column with a border or a fill of its own. So this is not a button placed in a
@@ -1737,7 +1742,7 @@ class _NewAgentRow extends StatelessWidget {
       // one. A different indent here would bend the trunk at the last branch.
       padding: const EdgeInsets.only(left: 28),
       child: SidebarItem(
-        label: 'New Harness…',
+        label: 'New Harness',
         // Dimmed rather than a colour of its own: this row is a placeholder until it is reached for, and
         // the hover state SidebarItem already owns is what says it is live.
         dimmed: true,

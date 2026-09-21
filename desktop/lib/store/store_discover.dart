@@ -4,22 +4,24 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../core/dsh_catalog.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/widgets/skeleton.dart';
-import '../widgets/engine_identity.dart';
+import 'store_collections.dart';
 import 'store_editorial.dart';
+import 'store_exploration.dart';
+import 'store_explore_widgets.dart';
+import 'store_featured_art.dart';
+import 'store_listing.dart';
 import 'store_models.dart';
 
-/// The curated front page. Nothing here invents availability, popularity or
-/// ratings: the live catalog supplies the products; editorial supplies context.
+/// Three editorial features invite exploration before the icon collections. The catalog itself
+/// uses the same recognizable icons and rows as categories and search.
 class StoreDiscover extends StatelessWidget {
   const StoreDiscover({
     super.key,
     required this.entries,
     required this.loaded,
     required this.ratingFor,
-    required this.installed,
     required this.onOpen,
-    required this.onAction,
-    required this.onCollection,
+    required this.onCategory,
     required this.onAll,
     required this.onEngines,
   });
@@ -27,157 +29,252 @@ class StoreDiscover extends StatelessWidget {
   final List<DshEntry> entries;
   final bool loaded;
   final StoreRating Function(DshEntry) ratingFor;
-  final bool Function(String) installed;
   final ValueChanged<String> onOpen;
-  final ValueChanged<DshEntry> onAction;
-  final ValueChanged<StoreCollection> onCollection;
+  final ValueChanged<String> onCategory;
   final VoidCallback onAll;
   final VoidCallback onEngines;
 
   @override
   Widget build(BuildContext context) {
-    final byId = {for (final e in entries) e.id: e};
-    final featured = [
-      for (final id in [
-        'autonomous/blender',
-        'autonomous/copper',
-        'autonomous/autonomous-circuit',
-        'autonomous/phaser',
-      ])
-        ?byId[id],
+    grid.AppTheme.watch(context);
+    final byId = {for (final entry in entries) entry.id: entry};
+    // Editorial stories share an art direction and open actual catalog entries.
+    final features = [
+      ?(byId['codex'] ?? byId['claude']),
+      ?byId['autonomous/blender'],
+      ?byId['autonomous/autonomous-circuit'],
     ];
-    final collections = storeCollections
-        .where((c) => entries.any(c.includes))
-        .toList();
+    final engines = [
+      for (final id in ['claude', 'codex', 'cursor']) ?byId[id],
+    ];
     final crafts = entries
-        .where((e) => !e.isEngine && !e.isViewerPackage)
+        .where((entry) => !entry.isEngine && !entry.isViewerPackage)
         .toList();
     const picks = [
       'autonomous/text-to-cad',
       'autonomous/strudel',
-      'autonomous/marp',
-      'autonomous/manim',
-      'autonomous/excalidraw',
       'autonomous/marimo',
-      'autonomous/typst',
       'autonomous/remotion',
-      'autonomous/rdkit',
+      'autonomous/roundtable',
+      'autonomous/marp',
     ];
     crafts.sort((a, b) {
       final ai = picks.indexOf(a.id), bi = picks.indexOf(b.id);
-      return (ai < 0 ? 999 : ai).compareTo(bi < 0 ? 999 : bi);
+      final rank = (ai < 0 ? 999 : ai).compareTo(bi < 0 ? 999 : bi);
+      return rank == 0 ? a.name.compareTo(b.name) : rank;
     });
-    final engines = [
-      for (final id in ['codex', 'claude', 'opencode']) ?byId[id],
+    final recent = storeRecentlyUpdated(crafts).take(6).toList();
+    final topRated = storeTopRated(entries, ratingFor).take(6).toList();
+    final categories = [
+      for (final name in [...storeCategoryDomains.keys, 'Other'])
+        if (name != 'Coding' &&
+            crafts.any((entry) => storeCategoryFor(entry) == name))
+          name,
     ];
     return LayoutBuilder(
-      builder: (context, constraints) {
-        final padding = constraints.maxWidth < 680 ? 20.0 : 36.0;
+      builder: (context, box) {
+        final padding = box.maxWidth < 680 ? 20.0 : 36.0;
         return SingleChildScrollView(
           key: const PageStorageKey('store-discover-scroll'),
-          padding: EdgeInsets.fromLTRB(padding, 28, padding, 48),
+          padding: EdgeInsets.fromLTRB(padding, 12, padding, 40),
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 1440),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    'Discover',
-                    style: TextStyle(
-                      fontSize: 30,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: -.8,
-                      color: grid.AppPalette.textPrimary,
-                    ),
+                  Column(
+                    key: const ValueKey('store-curiosity-hero'),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Follow your curiosity.',
+                        style: TextStyle(
+                          fontSize: 34,
+                          height: 1.15,
+                          letterSpacing: -1.1,
+                          fontWeight: FontWeight.w700,
+                          color: grid.AppPalette.textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Start with code. Build across disciplines.',
+                        style: TextStyle(
+                          fontSize: 15,
+                          height: 1.4,
+                          color: grid.AppPalette.textSecondary,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Your next superpower starts here.',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: grid.AppPalette.textSecondary,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  if (featured.isNotEmpty)
-                    _Feature(
-                      entry: featured.first,
-                      onOpen: () => onOpen(featured.first.id),
-                    )
-                  else if (!loaded)
-                    const SkeletonBlock(
-                      child: Skeleton(height: 340, radius: 18),
-                    ),
-                  if (collections.isNotEmpty) ...[
-                    const SizedBox(height: 22),
+                  if (features.isNotEmpty) ...[
+                    const SizedBox(height: 24),
                     LayoutBuilder(
-                      builder: (context, box) {
-                        final columns = box.maxWidth >= 780
-                            ? 3
-                            : box.maxWidth >= 540
-                            ? 2
-                            : 1;
+                      builder: (context, constraints) {
+                        final scale =
+                            MediaQuery.textScalerOf(context).scale(14) / 14;
+                        final wide =
+                            constraints.maxWidth >= 980 &&
+                            scale <= 1.25 &&
+                            features.length == 3;
+                        final width = wide
+                            ? (constraints.maxWidth - 40) / 3
+                            : (constraints.maxWidth * .86).clamp(280.0, 520.0);
+                        final cards = [
+                          for (final entry in features)
+                            SizedBox(
+                              width: width,
+                              child: _FeaturedStory(
+                                entry: entry,
+                                onTap: () => onOpen(entry.id),
+                              ),
+                            ),
+                        ];
+                        return SingleChildScrollView(
+                          key: const PageStorageKey('store-featured-scroll'),
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (var i = 0; i < cards.length; i++) ...[
+                                if (i > 0) const SizedBox(width: 20),
+                                cards[i],
+                              ],
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                  if (engines.isNotEmpty) ...[
+                    const SizedBox(height: 24),
+                    StoreExploreHeading(
+                      title: 'Your starting point: code.',
+                      action: 'All coding agents',
+                      onAction: onEngines,
+                    ),
+                    const SizedBox(height: 6),
+                    StoreListing(
+                      entries: engines,
+                      ratingFor: ratingFor,
+                      onOpen: onOpen,
+                    ),
+                  ],
+                  if (recent.isNotEmpty) ...[
+                    const SizedBox(height: 28),
+                    const StoreExploreHeading(
+                      title: 'New & updated',
+                      subtitle:
+                          'The latest additions and updates in this release.',
+                    ),
+                    const SizedBox(height: 8),
+                    StoreListing(
+                      key: const ValueKey('store-recent-collection'),
+                      rowKeyPrefix: 'store-recent',
+                      entries: recent,
+                      ratingFor: ratingFor,
+                      onOpen: onOpen,
+                    ),
+                  ],
+                  if (topRated.length >= 2) ...[
+                    const SizedBox(height: 28),
+                    const StoreExploreHeading(
+                      title: 'Top rated',
+                      subtitle: 'Rated by the people building with them.',
+                    ),
+                    const SizedBox(height: 8),
+                    StoreListing(
+                      key: const ValueKey('store-top-rated-collection'),
+                      rowKeyPrefix: 'store-top-rated',
+                      showRanks: true,
+                      entries: topRated,
+                      ratingFor: ratingFor,
+                      onOpen: onOpen,
+                    ),
+                  ],
+                  if (crafts.isNotEmpty) ...[
+                    const SizedBox(height: 32),
+                    StoreExploreHeading(
+                      title: 'A little beyond your comfort zone.',
+                      subtitle: 'Pick a tool. Try a small idea. See where it takes you.',
+                      action: 'Browse all',
+                      onAction: onAll,
+                    ),
+                    const SizedBox(height: 8),
+                    StoreListing(
+                      entries: crafts.take(6).toList(),
+                      ratingFor: ratingFor,
+                      onOpen: onOpen,
+                    ),
+                    const SizedBox(height: 32),
+                    const StoreExploreHeading(title: 'Explore disciplines'),
+                    const SizedBox(height: 16),
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final scale =
+                            MediaQuery.textScalerOf(context).scale(14) / 14;
+                        final columns = (constraints.maxWidth / (320 * scale))
+                            .floor()
+                            .clamp(1, 3);
                         final width =
-                            (box.maxWidth - (columns - 1) * 18) / columns;
+                            (constraints.maxWidth - (columns - 1) * 16) /
+                            columns;
                         return Wrap(
-                          spacing: 18,
-                          runSpacing: 18,
+                          spacing: 16,
+                          runSpacing: 16,
                           children: [
-                            for (final collection in collections)
+                            for (final name in categories)
                               SizedBox(
                                 width: width,
-                                child: _CollectionCard(
-                                  collection: collection,
-                                  entries: entries
-                                      .where(collection.includes)
+                                child: _DisciplineLink(
+                                  key: ValueKey('store-category:$name'),
+                                  name: name,
+                                  entries: crafts
+                                      .where(
+                                        (entry) =>
+                                            storeCategoryFor(entry) == name,
+                                      )
                                       .toList(),
-                                  onTap: () => onCollection(collection),
+                                  onTap: () => onCategory(name),
                                 ),
                               ),
                           ],
                         );
                       },
                     ),
-                  ],
-                  if (crafts.isNotEmpty) ...[
-                    const SizedBox(height: 34),
-                    _Heading(
-                      'More to explore',
-                      action: 'See all',
-                      onTap: onAll,
-                    ),
-                    const SizedBox(height: 10),
-                    StoreListing(
-                      entries: crafts.take(9).toList(),
-                      ratingFor: ratingFor,
-                      installed: installed,
-                      onOpen: onOpen,
-                      onAction: onAction,
-                    ),
-                  ],
-                  if (engines.isNotEmpty) ...[
-                    const SizedBox(height: 30),
-                    _Heading(
-                      'Coding engines',
-                      action: 'See all',
-                      onTap: onEngines,
-                    ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 32),
                     Text(
-                      'Your everyday companions for building software.',
+                      'For polymaths in the making.',
                       style: TextStyle(
-                        fontSize: 13,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: grid.AppPalette.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Learn the next craft through the things you build.',
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.5,
                         color: grid.AppPalette.textSecondary,
                       ),
                     ),
-                    const SizedBox(height: 10),
-                    StoreListing(
-                      entries: engines,
-                      ratingFor: ratingFor,
-                      installed: installed,
-                      onOpen: onOpen,
-                      onAction: onAction,
+                  ] else if (!loaded) ...[
+                    const SizedBox(height: 32),
+                    const SkeletonBlock(
+                      child: Skeleton(height: 160, radius: 16),
+                    ),
+                  ] else ...[
+                    const SizedBox(height: 32),
+                    Text(
+                      'Start with a coding agent. More disciplines will appear here as harnesses become available.',
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.5,
+                        color: grid.AppPalette.textSecondary,
+                      ),
                     ),
                   ],
                 ],
@@ -190,425 +287,156 @@ class StoreDiscover extends StatelessWidget {
   }
 }
 
-class _Heading extends StatelessWidget {
-  const _Heading(this.title, {required this.action, required this.onTap});
-  final String title;
-  final String action;
+class _FeaturedStory extends StatelessWidget {
+  const _FeaturedStory({required this.entry, required this.onTap});
+  final DshEntry entry;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      Expanded(
-        child: Text(
-          title,
-          style: TextStyle(
-            fontSize: 21,
-            fontWeight: FontWeight.w600,
-            letterSpacing: -.4,
-            color: grid.AppPalette.textPrimary,
-          ),
-        ),
-      ),
-      TextButton(onPressed: onTap, child: Text(action)),
-    ],
-  );
-}
-
-class _Feature extends StatelessWidget {
-  const _Feature({required this.entry, required this.onOpen});
-  final DshEntry entry;
-  final VoidCallback onOpen;
-
-  @override
   Widget build(BuildContext context) {
-    final story = storeStories[entry.id]!;
-    return LayoutBuilder(
-      builder: (context, box) {
-        final narrow =
-            box.maxWidth < 660 ||
-            MediaQuery.textScalerOf(context).scale(14) > 20;
-        final art = Image.asset(
-          story.asset!,
-          fit: BoxFit.cover,
-          alignment: Alignment.centerRight,
-          excludeFromSemantics: true,
-        );
-        final copy = Padding(
-          padding: EdgeInsets.all(narrow ? 28 : 40),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              minHeight: narrow ? 0 : 310,
-              maxWidth: narrow ? double.infinity : 470,
-            ),
+    final category = entry.isEngine
+        ? 'Coding'
+        : entry.id == 'autonomous/blender'
+        ? 'Design'
+        : 'Engineering';
+    final headline = switch (category) {
+      'Coding' => 'Build what comes next.',
+      'Design' => 'Give your ideas shape.',
+      _ => 'Build something real.',
+    };
+    final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    return StoreExploreCard(
+      key: ValueKey('store-feature:${entry.id}'),
+      color: storeDiscipline(category).color,
+      onTap: onTap,
+      semanticLabel: 'Explore ${entry.name}',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(18),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text(
-                  'YOUR NEXT SUPERPOWER',
+                Text(
+                  category.toUpperCase(),
                   style: TextStyle(
                     fontSize: 10,
+                    letterSpacing: 1.1,
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 1.8,
-                    color: Color(0xffadf3d3),
+                    color: grid.AppPalette.accentOnSurface,
                   ),
                 ),
-                const SizedBox(height: 18),
-                Text(
-                  story.headline!,
-                  style: TextStyle(
-                    fontSize: narrow ? 39 : 52,
-                    height: 1.02,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -1.8,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  story.description!,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    height: 1.5,
-                    color: Color(0xffdcece5),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    EngineMark(
-                      engine: entry.id,
-                      displayName: entry.name,
-                      size: 26,
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 50 * scale,
+                  child: Text(
+                    headline,
+                    style: TextStyle(
+                      fontSize: 21,
+                      height: 1.15,
+                      letterSpacing: -.4,
+                      fontWeight: FontWeight.w700,
+                      color: grid.AppPalette.textPrimary,
                     ),
-                    const SizedBox(width: 10),
-                    Flexible(
+                  ),
+                ),
+                Row(
+                  children: [
+                    StoreAppIcon(entry: entry, size: 24),
+                    const SizedBox(width: 8),
+                    Expanded(
                       child: Text(
-                        entry.name,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white,
+                        'Explore ${entry.name}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: grid.AppPalette.textSecondary,
                         ),
                       ),
                     ),
-                    const SizedBox(width: 20),
-                    FilledButton(
-                      onPressed: onOpen,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: const Color(0xff132c25),
-                        minimumSize: const Size(100, 36),
-                        shape: const StadiumBorder(),
-                      ),
-                      child: const Text('Explore'),
+                    Icon(
+                      LucideIcons.arrowRight300,
+                      size: 15,
+                      color: grid.AppPalette.textSecondary,
                     ),
                   ],
                 ),
               ],
             ),
           ),
-        );
-        return Material(
-          key: ValueKey('store-feature:${entry.id}'),
-          color: const Color(0xff102b24),
-          borderRadius: BorderRadius.circular(18),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: onOpen,
-            child: narrow
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      copy,
-                      AspectRatio(aspectRatio: 2.1, child: art),
-                    ],
-                  )
-                : Stack(
-                    children: [
-                      Positioned.fill(child: art),
-                      Positioned.fill(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                Colors.black.withValues(alpha: .5),
-                                Colors.transparent,
-                              ],
-                              stops: const [0, .85],
-                            ),
-                          ),
-                        ),
-                      ),
-                      copy,
-                    ],
-                  ),
+          AspectRatio(
+            aspectRatio: 2,
+            child: StoreFeaturedArt(
+              key: ValueKey('store-feature-art:${entry.id}'),
+              category: category,
+              entry: entry,
+            ),
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 }
 
-class _CollectionCard extends StatelessWidget {
-  const _CollectionCard({
-    required this.collection,
+class _DisciplineLink extends StatelessWidget {
+  const _DisciplineLink({
+    super.key,
+    required this.name,
     required this.entries,
     required this.onTap,
   });
-  final StoreCollection collection;
+  final String name;
   final List<DshEntry> entries;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final withArt = [
-      for (final id in collection.featuredIds)
-        if (entries.any((e) => e.id == id) && storeStories[id]?.asset != null)
-          id,
-    ];
-    final story = withArt.isEmpty ? null : storeStories[withArt.first];
-    return Material(
-      key: ValueKey('store-collection:${collection.id}'),
-      color: grid.AppPalette.cardBg,
-      borderRadius: BorderRadius.circular(14),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    final discipline = storeDiscipline(name);
+    final example = discipline.example(entries)!;
+    return StoreExploreCard(
+      color: discipline.color,
+      onTap: onTap,
+      semanticLabel: 'Explore $name',
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
           children: [
-            SizedBox(
-              height: 162,
-              width: double.infinity,
-              child: story?.asset != null
-                  ? Image.asset(
-                      story!.asset!,
-                      fit: BoxFit.cover,
-                      alignment: collection.id == 'shape'
-                          ? const Alignment(.8, .4)
-                          : Alignment.center,
-                      excludeFromSemantics: true,
-                    )
-                  : ColoredBox(
-                      color: grid.AppSurface.recess,
-                      child: Center(
-                        child: EngineMark(
-                          engine: entries.first.id,
-                          displayName: entries.first.name,
-                          size: 70,
-                        ),
-                      ),
-                    ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 17, 18, 16),
+            StoreAppIcon(entry: example, size: 48),
+            const SizedBox(width: 14),
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    collection.title,
+                    name,
                     style: TextStyle(
-                      fontSize: 19,
+                      fontSize: 16,
                       fontWeight: FontWeight.w600,
-                      letterSpacing: -.4,
                       color: grid.AppPalette.textPrimary,
                     ),
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 5),
                   Text(
-                    collection.subtitle,
+                    '${entries.length} ${entries.length == 1 ? 'harness' : 'harnesses'}',
                     style: TextStyle(
                       fontSize: 12,
-                      height: 1.4,
                       color: grid.AppPalette.textSecondary,
                     ),
                   ),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '${entries.length} harness${entries.length == 1 ? '' : 'es'} to explore',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: grid.AppPalette.textFaint,
-                          ),
-                        ),
-                      ),
-                      Icon(
-                        LucideIcons.arrowRight300,
-                        size: 16,
-                        color: grid.AppPalette.textSecondary,
-                      ),
-                    ],
-                  ),
                 ],
               ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              LucideIcons.chevronRight300,
+              size: 16,
+              color: grid.AppPalette.textSecondary,
             ),
           ],
         ),
       ),
     );
   }
-}
-
-/// Compact, responsive rows shared by Discover, search and categories.
-class StoreListing extends StatelessWidget {
-  const StoreListing({
-    super.key,
-    required this.entries,
-    required this.ratingFor,
-    required this.installed,
-    required this.onOpen,
-    required this.onAction,
-  });
-  final List<DshEntry> entries;
-  final StoreRating Function(DshEntry) ratingFor;
-  final bool Function(String) installed;
-  final ValueChanged<String> onOpen;
-  final ValueChanged<DshEntry> onAction;
-
-  @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, box) {
-      final columns = box.maxWidth >= 1120
-          ? 3
-          : box.maxWidth >= 720
-          ? 2
-          : 1;
-      final width = (box.maxWidth - (columns - 1) * 24) / columns;
-      return Wrap(
-        spacing: 24,
-        children: [
-          for (final entry in entries)
-            SizedBox(
-              width: width,
-              child: _ProductRow(
-                key: ValueKey('store-card:${entry.id}'),
-                entry: entry,
-                rating: ratingFor(entry),
-                installed: installed(entry.id),
-                onOpen: () => onOpen(entry.id),
-                onAction: () => onAction(entry),
-              ),
-            ),
-        ],
-      );
-    },
-  );
-}
-
-class _ProductRow extends StatelessWidget {
-  const _ProductRow({
-    super.key,
-    required this.entry,
-    required this.rating,
-    required this.installed,
-    required this.onOpen,
-    required this.onAction,
-  });
-  final DshEntry entry;
-  final StoreRating rating;
-  final bool installed;
-  final VoidCallback onOpen;
-  final VoidCallback onAction;
-
-  @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.transparent,
-    child: InkWell(
-      onTap: onOpen,
-      borderRadius: BorderRadius.circular(10),
-      child: Container(
-        constraints: const BoxConstraints(minHeight: 94),
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 6),
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: grid.AppPalette.divider)),
-        ),
-        child: Row(
-          children: [
-            EngineMark(engine: entry.id, displayName: entry.name, size: 42),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    entry.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: grid.AppPalette.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    storeBenefit(entry),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.3,
-                      color: grid.AppPalette.textSecondary,
-                    ),
-                  ),
-                  if (!rating.isEmpty) ...[
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.star_rounded,
-                          size: 12,
-                          color: grid.AppPalette.textSecondary,
-                        ),
-                        const SizedBox(width: 3),
-                        Text(
-                          '${rating.average.toStringAsFixed(1)} · ${rating.count}',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: grid.AppPalette.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            TextButton(
-              key: ValueKey('store-action:${entry.id}'),
-              onPressed: entry.isViewerPackage ? onOpen : onAction,
-              style: TextButton.styleFrom(
-                backgroundColor: grid.AppSurface.selectedFill,
-                foregroundColor: grid.AppPalette.accentOnSurface,
-                minimumSize: const Size(62, 30),
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                shape: const StadiumBorder(),
-              ),
-              child: Text(
-                entry.isViewerPackage
-                    ? 'View'
-                    : entry.hasUpdate
-                    ? 'Update'
-                    : installed
-                    ? 'Open'
-                    : 'Get',
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
 }

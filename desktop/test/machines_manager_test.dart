@@ -8,6 +8,7 @@ import 'package:harness/terminal/terminal_binary.dart';
 import 'package:xterm/xterm.dart';
 
 import 'keymap_runtime_test.dart' show native;
+import 'keymap_host_test.dart' show key;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
 
@@ -56,21 +57,17 @@ void main() {
         final input = <TerminalBinaryFrame>[];
         app.adoptSessionForTest(terminal('a0', input));
         await mount(tester, app, nativeTabs: true);
-        final opened = native(tester, 'manageMachines');
+        // 'manageMachines' now opens the Machines harness; the plain list is 'machineList'.
+        final opened = native(tester, 'machineList');
         await tester.pumpAndSettle();
         await opened;
         expect(find.text('Machines Manager'), findsOneWidget);
+        await key(tester, LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
         await tester.tap(find.text('Rename'));
         await tester.pumpAndSettle();
         expect(find.text('Rename Machine'), findsOneWidget);
-        final renameDialog = find.ancestor(
-          of: find.text('Rename Machine'),
-          matching: find.byType(AlertDialog),
-        );
-        final field = find.descendant(
-          of: renameDialog,
-          matching: find.byType(TextField),
-        );
+        final field = find.byType(TextField);
         await tester.enterText(field, '   ');
         await tester.testTextInput.receiveAction(TextInputAction.done);
         await tester.pump();
@@ -78,17 +75,19 @@ void main() {
         expect(api.calls, isEmpty);
         await tester.enterText(field, '  Office Mac  ');
         if (fail) api.error = 'Connection unavailable';
-        await tester.tap(find.text('Save'));
+        await key(tester, LogicalKeyboardKey.enter);
         await tester.pumpAndSettle();
         expect(api.calls, [('m', 'Office Mac')]);
         if (fail) {
           expect(find.textContaining('Connection unavailable'), findsOneWidget);
           expect(app.stateOf('m')!.machine.displayName, isNot('Office Mac'));
           api.error = null;
-          await tester.tap(find.text('Save'));
+          await key(tester, LogicalKeyboardKey.enter);
           await tester.pumpAndSettle();
         }
         expect(find.text('Rename Machine'), findsNothing);
+        await key(tester, LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('managed-machine-m')),
@@ -98,7 +97,7 @@ void main() {
         );
         expect(app.machines.single.displayName, 'Office Mac');
         expect((updates.last['machines'] as List).single['name'], 'Office Mac');
-        await tester.tap(find.text('Done'));
+        await key(tester, LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();
         expect(find.text('Machines Manager'), findsNothing);
         expect(

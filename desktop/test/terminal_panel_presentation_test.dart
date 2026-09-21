@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/terminal/terminal_session.dart';
+import 'package:harness/terminal/terminal_font_store.dart';
 import 'package:harness/widgets/terminal_panel.dart';
 import 'package:harness/widgets/pane_header_actions.dart';
 import 'package:harness/widgets/transient_menus.dart';
@@ -13,101 +14,6 @@ import 'swarm_screen_test.dart' show terminal;
 import 'swarm_state_test.dart' show createApp;
 
 void main() {
-  testWidgets('narrow header keeps models, actions, Stop and Close reachable', (
-    tester,
-  ) async {
-    final app = createApp();
-    app.stateOf('m')!.agents = const [
-      Agent(
-        id: 'a0',
-        name: 'Narrow project',
-        engine: 'codex',
-        terminalAvailable: true,
-        viewerUrl: 'http://fixture.invalid/viewer',
-      ),
-    ];
-    final session = terminal('a0', []);
-    final actions = <String>[];
-    tester.view.devicePixelRatio = 1;
-    tester.view.physicalSize = const Size(720, 500);
-    addTearDown(tester.view.reset);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Center(
-          child: SizedBox(
-            width: 320,
-            height: 320,
-            child: TerminalPanel(
-              notifier: app,
-              session: session,
-              focused: false,
-              compactHeader: true,
-              onClose: () => actions.add('close'),
-              onDelete: () => actions.add('stop'),
-              onRestart: () => actions.add('restart'),
-              onFork: () => actions.add('fork'),
-              onToggleZoom: () => actions.add('zoom'),
-              onToggleComposer: () => actions.add('compose'),
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
-    final controls = find.byType(PaneHeaderActions);
-    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    await mouse.addPointer(location: tester.getCenter(controls));
-    await tester.pump(const Duration(milliseconds: 120));
-    final model = find.byTooltip('Where this agent runs');
-    expect(model.hitTestable(), findsOneWidget);
-    expect(tester.getSize(model), const Size(28, 28));
-    expect(find.byTooltip('Show viewer').hitTestable(), findsOneWidget);
-    expect(find.byTooltip('Stop Harness').hitTestable(), findsOneWidget);
-    expect(find.byTooltip('Close Pane').hitTestable(), findsOneWidget);
-    await tester.tap(find.byTooltip('More pane actions'));
-    await tester.pumpAndSettle();
-    for (final label in [
-      'Share harness',
-      'Show message composer',
-      'Zoom Pane',
-      'Restart Harness',
-      'Fork Harness',
-    ]) {
-      expect(find.widgetWithText(MenuItemButton, label), findsOneWidget);
-    }
-    dismissTransientMenus();
-    await tester.pumpAndSettle();
-    expect(find.byType(MenuItemButton), findsNothing);
-    await tester.tap(find.byTooltip('More pane actions'));
-    await tester.pumpAndSettle();
-    final forkFocus = Focus.of(tester.element(find.text('Fork Harness')));
-    for (var i = 0; i < 8 && !forkFocus.hasFocus; i++) {
-      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-      await tester.pump();
-    }
-    expect(forkFocus.hasFocus, isTrue);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pumpAndSettle();
-    expect(actions, ['fork']);
-    expect(find.byType(MenuItemButton), findsNothing);
-    await tester.tap(model);
-    await tester.pumpAndSettle();
-    expect(find.text('Subscription'), findsOneWidget);
-    await tester.tapAt(const Offset(10, 450));
-    await tester.pump();
-    await mouse.moveTo(tester.getCenter(controls));
-    await tester.pump(const Duration(milliseconds: 120));
-    await tester.tap(find.byTooltip('Stop Harness'));
-    expect(actions, ['fork', 'stop']);
-    await tester.tap(find.byTooltip('Close Pane'));
-    expect(actions, ['fork', 'stop', 'close']);
-    expect(tester.takeException(), isNull);
-    await mouse.removePointer();
-    await tester.pumpWidget(const SizedBox());
-    session.dispose();
-    app.dispose();
-  });
-
   testWidgets(
     'retained header uses current callbacks, names, projects and status',
     (tester) async {
@@ -183,12 +89,25 @@ void main() {
       session.status = TerminalSessionStatus.takenOver;
       revision.value = 3;
       await tester.pump();
-      expect(find.text('Take control'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'Take control'), findsOneWidget);
+      expect(
+        find.widgetWithText(FilledButton, 'Take control'),
+        findsOneWidget,
+        reason: 'the in-pane banner offers it too',
+      );
       expect(
         find.byTooltip(
           'Read only: another app controls this terminal. Take control moves input ownership to this app.',
         ),
         findsOneWidget,
+      );
+      final previousFont = terminalFontStore.value;
+      addTearDown(() => terminalFontStore.value = previousFont);
+      terminalFontStore.value = const TerminalStyle(fontFamily: 'Monaco');
+      await tester.pump();
+      expect(
+        tester.widget<Text>(find.text('Renamed terminal')).style!.fontFamily,
+        'Monaco',
       );
       await mouse.removePointer();
       await tester.pumpWidget(const SizedBox());
@@ -247,16 +166,16 @@ void main() {
         expect(find.text('harness'), findsOneWidget);
         expect(find.text('main'), findsOneWidget);
         expect(
-          tester.getRect(find.text('harness')).left,
+          tester.getRect(find.text('Test host')).left,
           greaterThan(titleBounds.right),
+        );
+        expect(
+          tester.getRect(find.text('harness')).left,
+          greaterThan(tester.getRect(find.text('Test host')).right),
         );
         expect(
           tester.getRect(find.text('main')).left,
           greaterThan(tester.getRect(find.text('harness')).right),
-        );
-        expect(
-          tester.getRect(find.text('Test host')).left,
-          greaterThan(tester.getRect(find.text('main')).right),
         );
         expect(find.byTooltip('Stop Harness').hitTestable(), findsNothing);
         expect(
@@ -289,4 +208,122 @@ void main() {
       },
     );
   }
+  testWidgets(
+    'narrow headers preserve identity and keyboard actions at large text',
+    (tester) async {
+      final app = createApp();
+      final session = terminal('a0', []);
+      session.agentName = 'Review the release notes';
+      app.machineStates['m']!.agents = [
+        const Agent(
+          id: 'a0',
+          name: 'Review the release notes',
+          engine: 'codex',
+          terminalAvailable: true,
+          viewerUrl: 'http://fixture.invalid/viewer',
+          project: AgentProject(
+            name: 'release-notes',
+            cwd: '/work/release-notes',
+            branch: 'feature/very-long-branch',
+          ),
+        ),
+      ];
+      var zooms = 0;
+      var forks = 0;
+      final revision = ValueNotifier(0);
+      tester.view.devicePixelRatio = 1;
+      tester.platformDispatcher.textScaleFactorTestValue = 1.7;
+      addTearDown(tester.view.reset);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      for (final width in [240.0, 280.0, 420.0]) {
+        tester.view.physicalSize = Size(width, 600);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ValueListenableBuilder<int>(
+              valueListenable: revision,
+              builder: (_, _, _) => TerminalPanel(
+                notifier: app,
+                session: session,
+                focused: false,
+                compactHeader: true,
+                onToggleZoom: () => zooms++,
+                onFork: () => forks++,
+                onRestart: () {},
+                onClose: () {},
+                onDelete: () {},
+                onToggleComposer: () {},
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        final title = find.text(session.agentName);
+        expect(tester.getSize(title).width, greaterThan(64));
+        expect(tester.takeException(), isNull);
+        final titleBefore = tester.getRect(title);
+        final button = tester.widget<IconButton>(
+          find.widgetWithIcon(IconButton, Icons.more_horiz),
+        );
+        button.focusNode!.requestFocus();
+        await tester.pump(const Duration(milliseconds: 120));
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(find.text('Zoom Pane'), findsOneWidget);
+        expect(find.text('Show viewer'), findsOneWidget);
+        expect(find.text('Fork Harness'), findsOneWidget);
+        expect(find.text('Stop Harness'), findsOneWidget);
+        expect(tester.getRect(title), titleBefore);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(zooms, [240.0, 280.0, 420.0].indexOf(width) + 1);
+        expect(find.text('Zoom Pane'), findsNothing);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        for (var i = 0; i < 5; i++) {
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+          await tester.pump();
+        }
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(forks, zooms);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(find.text('Zoom Pane'), findsNothing);
+        expect(button.focusNode!.hasFocus, isTrue);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        dismissTransientMenus();
+        await tester.pumpAndSettle();
+        expect(find.text('Zoom Pane'), findsNothing);
+        expect(tester.takeException(), isNull);
+        for (final status in [
+          TerminalSessionStatus.opening,
+          TerminalSessionStatus.takenOver,
+          TerminalSessionStatus.closed,
+        ]) {
+          session.status = status;
+          revision.value++;
+          await tester.pump();
+          expect(tester.getSize(title).width, greaterThan(40));
+          expect(tester.takeException(), isNull);
+        }
+        expect(find.byTooltip('Reconnect'), findsOneWidget);
+        expect(
+          tester
+              .widget<IconButton>(
+                find.widgetWithIcon(IconButton, Icons.refresh),
+              )
+              .onPressed,
+          isNotNull,
+        );
+        session.status = TerminalSessionStatus.controlling;
+      }
+      await tester.pumpWidget(const SizedBox());
+      revision.dispose();
+      session.dispose();
+      app.dispose();
+    },
+  );
 }

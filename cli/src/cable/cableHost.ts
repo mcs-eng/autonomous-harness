@@ -12,12 +12,11 @@ import { join } from 'node:path'
 
 import { AuthSessionManager, readAuthSession } from '../lib/authSession.js'
 import { registry, projectDisplayName, type RegisteredSession } from '../lib/registry.js'
-import { isTerminalEngine } from '../engines/types.js'
 import { fetchRelease, loadImage, shouldOffer } from './fwPush.js'
 import { routeVoiceTask, type RouterAgent, type RouterContinuity } from '../lib/voiceRouter.js'
 import { env } from '../config/env.js'
 
-import type { AppSwarms, CableAgent, CableHost, CableMachine, CableMachineSource, CableSwarm, DialStatus, RouteDecision } from './cableSession.js'
+import type { AppSwarms, CableAgent, CableHost, CableMachine, CableMachineSource, CableSwarm, DialStatus, OpenReason, RouteDecision } from './cableSession.js'
 import type { WindowRoute } from './windowRoute.js'
 import { FleetError, type FleetMachine, type MachineFleet } from './machineFleet.js'
 
@@ -51,8 +50,11 @@ export interface CableHostWiring {
   listModels?: (agentId: string) => Promise<Array<{ id: string }>>
   /** The dial moved to another agent — the desktop window should show that agent on its own machine. */
   focused?: (machineId: string, agentId: string) => void
-  /** A notification was tapped: the window gives that agent a tile of its own. */
-  opened?: (machineId: string, agentId: string) => void
+  /**
+   * A notification was tapped: the window gives that agent a tile of its own. With `reason`
+   * `'question'` it was a question screen instead, and the window only brings the agent forward.
+   */
+  opened?: (machineId: string, agentId: string, reason?: OpenReason) => void
   /** A fork the dial asked for is open: the window puts it beside its source and focuses it. */
   forked?: (machineId: string, agentId: string, sourceAgentId: string) => void
   /** The dial asked for a fork of a LOCAL agent — see lib/forkAgent.ts. Resolves to the new agent's id. */
@@ -285,10 +287,17 @@ export class DaemonCableHost implements CableHost {
     // `advertised()`, not `list()` — the SAME set `agents_list` answers the web and the desktop app with. They
     // read one registry and must not disagree about what is on it: a dead agent holding a tile on the dial
     // and nowhere else is a tile that cannot be driven and cannot be explained.
-    // Minus the terminals: the dial drives agents, and a shell with nobody in it has no turn to
-    // watch or model to switch (`deviceAgentRow` keeps `agents_list` to the same set for the
-    // device). A terminal that has adopted an engine is that engine here, as everywhere.
-    const sessions = registry.advertised().filter((s) => !isTerminalEngine(s.engine))
+    // Terminals INCLUDED. A shell has no turn to watch and no model to switch, and the dial does not
+    // pretend otherwise — it draws the tile and offers no Voice on it. What it does offer is the
+    // thing that was missing: the tile can be reached. The window draws a shell as a tile like any
+    // other, so a dial that skipped it disagreed with the app about what was on the desk, and a pane
+    // the carousel cannot walk to is a pane the dial cannot explain either. A terminal that has
+    // adopted an engine is that engine here, as everywhere.
+    //
+    // ⚠️ NOT the same question as `deviceAgentRow` in backendSocket.ts, which keeps shells out of the
+    // `agents_list` RPC a CLOUD device asks over the backend. This is the cable's own list, pulled by
+    // `listAgents()` on the session's tick; the two surfaces answer separately and always did.
+    const sessions = registry.advertised()
     // Oldest → newest, and TOTAL: the id breaks a tie so the order cannot fall through to array position,
     // which is Map insertion order and differs between daemon runs. Both producers sort identically, so
     // the dial and the app cannot drift apart while reading the same registry.
@@ -367,7 +376,7 @@ export class DaemonCableHost implements CableHost {
     if (!app) return { selected: '', swarms: [] }
     return {
       selected: app.active,
-      swarms: app.swarms.map((s) => ({ id: s.id, name: s.name, agents: s.agentIds.length })),
+      swarms: app.swarms.map((s) => ({ id: s.id, name: s.name, agents: s.agentIds.length, panes: s.panes })),
     }
   }
 
@@ -415,7 +424,8 @@ export class DaemonCableHost implements CableHost {
   }
 
   /** How many agents the account has across every machine — the overview's number, sent beside the
-   *  tab's list rather than as 70 rows the dial would hold for a digit. Read from the last flat list. */
+   *  tab's list rather than as 70 rows the dial would hold for a digit. Read from the last flat list,
+   *  minus the terminals in it: the list is every TILE, this is every AGENT. */
   agentTotal(): number {
     return this.flatCount
   }
@@ -508,7 +518,11 @@ export class DaemonCableHost implements CableHost {
     }
     for (const id of [...this.deskHeld]) if (!missing.includes(id)) this.deskHeld.delete(id)
 
-    this.flatCount = out.length
+    // The overview's number is AGENTS, and a shell is not one. The carousel carries shell tiles now —
+    // they are panes the window has and the dial can reach — but "12 agents · all idle" is read as how
+    // much work is in flight, and counting empty terminals in it would answer a question nobody asked.
+    // Two different numbers about the same desk, each honest about what it counts.
+    this.flatCount = out.filter((a) => a.engine !== 'terminal').length
     return out
   }
 
@@ -522,7 +536,7 @@ export class DaemonCableHost implements CableHost {
     return this.agentMachine.get(agentId) ?? this.seenOn.get(agentId) ?? ''
   }
 
-  openAgent(agentId: string): void {
+  openAgent(agentId: string, reason?: OpenReason): void {
     const machineId = this.machineOf(agentId)
     if (!machineId) {
       // Same rule as focus: an agent id without its machine is not routable, and guessing is how a
@@ -530,8 +544,8 @@ export class DaemonCableHost implements CableHost {
       this.wiring.log(`cable: ignored open for unknown agent ${agentId}`)
       return
     }
-    this.wiring.log(`cable: open ${machineId}/${agentId} (notification)`)
-    this.wiring.opened?.(machineId, agentId)
+    this.wiring.log(`cable: open ${machineId}/${agentId} (${reason ?? 'notification'})`)
+    this.wiring.opened?.(machineId, agentId, reason)
   }
 
   /**
@@ -973,12 +987,13 @@ export function multipart(file: Buffer, filename: string, mimeType: string, boun
  * kind reaches the cable the day it reaches the socket.
  */
 export function cableEventFor(
-  frame: { type?: string; agentId?: string; payload?: { kind?: string; text?: string; recap?: string } },
-): { kind: 'processing' | 'done' | 'summary' | 'error'; agentId: string; text: string; recap: string } | null {
+  frame: { type?: string; agentId?: string; payload?: { kind?: string; text?: string; recap?: string; subagent?: unknown } },
+): { kind: 'processing' | 'done' | 'summary' | 'error'; agentId: string; text: string; recap: string; subagent: boolean } | null {
   if (frame.type !== 'commander_event' || !frame.agentId) return null
   const kind = frame.payload?.kind
   if (kind !== 'processing' && kind !== 'done' && kind !== 'summary' && kind !== 'error') return null
-  return { kind, agentId: frame.agentId, text: frame.payload?.text ?? '', recap: frame.payload?.recap ?? '' }
+  // `subagent`: a sub-agent's turn end — the tile redraws, nobody is told (CommanderMirrorOpts.isSubagent).
+  return { kind, agentId: frame.agentId, text: frame.payload?.text ?? '', recap: frame.payload?.recap ?? '', subagent: frame.payload?.subagent === true }
 }
 
 /**

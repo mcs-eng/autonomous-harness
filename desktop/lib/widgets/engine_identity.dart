@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../core/harness_catalog.dart';
 import '../core/models.dart';
 import '../theme/app_theme.dart';
 
@@ -232,12 +233,104 @@ const _engines = <String, EngineIdentity>{
 /// own. It is only a face. A harness absent here still draws — the daemon
 /// sends its name, and [engineIdentity] falls back to an initial.
 const _harnesses = <String, EngineIdentity>{
+  'autonomous/ableton-ai': EngineIdentity(
+    id: "autonomous/ableton-ai",
+    label: "Ableton AI",
+    category: "Music",
+    tagline: "Control Ableton Live from an AI assistant via MCP",
+    creator: "Freek Van der Herten and contributors",
+    color: Color(0xffeba67d),
+    asset: 'assets/engine-icons/ableton-ai.png',
+  ),
+  'autonomous/autoresearch-mlx': EngineIdentity(
+    id: "autonomous/autoresearch-mlx",
+    label: "autoresearch-mlx",
+    category: "Science",
+    tagline: "Karpathy's autoresearch on Apple Silicon, no PyTorch required",
+    creator: "Trevin creator; Andrej Karpathy",
+    color: Color(0xffc7b2e6),
+    asset: 'assets/engine-icons/autoresearch-mlx.png',
+  ),
+  'autonomous/foam-agent': EngineIdentity(
+    id: "autonomous/foam-agent",
+    label: "Foam-Agent",
+    category: "Simulation",
+    tagline: "Composable multi-agent framework for CFD simulations in OpenFOAM",
+    creator: "Foam-Agent team",
+    color: Color(0xff8cd0c8),
+    asset: 'assets/engine-icons/foam-agent.png',
+  ),
+  'autonomous/juce-agent-toolkit': EngineIdentity(
+    id: "autonomous/juce-agent-toolkit",
+    label: "JUCE Agent Toolkit",
+    category: "Audio",
+    tagline: "JUCE workflow skills for Codex, Cursor, Claude Code and other agent CLIs",
+    creator: "Daniel Raffel",
+    color: Color(0xffa2c995),
+    asset: 'assets/engine-icons/juce-agent-toolkit.png',
+  ),
+  'autonomous/machine-monitor': EngineIdentity(
+    id: "autonomous/machine-monitor",
+    label: "Machine Monitor",
+    category: "Compute",
+    tagline: "Every computer you own, on one live map",
+    creator: "Autonomous",
+    color: Color(0xff9bd9dd),
+    asset: 'assets/engine-icons/machine-monitor.png',
+  ),
+  'autonomous/simskill': EngineIdentity(
+    id: "autonomous/simskill",
+    label: "SimSkill",
+    category: "Simulation",
+    tagline: "A lifelong-learning AI agent for mastering traffic simulation",
+    creator: "Qiliu Chen and contributors",
+    color: Color(0xff8bb8d5),
+    asset: 'assets/engine-icons/simskill.png',
+  ),
+
+  'autonomous/vllm': EngineIdentity(
+    id: 'autonomous/vllm',
+    tagline:
+        'High-performance LLM inference on Apple Silicon using MLX and vLLM',
+    label: 'vLLM',
+    category: 'Local AI',
+    creator: 'OpenHarness contributors',
+    color: Color(0xffffc743),
+    asset: 'assets/engine-icons/vllm.png',
+    homepage: 'https://github.com/vllm-project/vllm-metal',
+    blurb: 'Serve models with vLLM Metal and measure concurrent request performance.',
+  ),
+  'autonomous/mlx-lm': EngineIdentity(
+    id: 'autonomous/mlx-lm',
+    tagline:
+        'Generating text with large language models on Apple silicon with MLX',
+    label: 'MLX-LM',
+    category: 'Local AI',
+    creator: 'OpenHarness contributors',
+    color: Color(0xffa9caff),
+    asset: 'assets/engine-icons/mlx.png',
+    homepage: 'https://github.com/ml-explore/mlx-lm',
+    blurb:
+        'Run and compare language models directly on Apple Silicon with MLX.',
+  ),
+  'autonomous/ollama': EngineIdentity(
+    id: 'autonomous/ollama',
+    tagline: 'Start building with open models.',
+    label: 'Ollama',
+    category: 'Local AI',
+    creator: 'OpenHarness contributors',
+    color: Color(0xfff4f6ef),
+    asset: 'assets/engine-icons/ollama.png',
+    homepage: 'https://ollama.com',
+    blurb:
+        'Run and benchmark Ollama models on your Mac through natural language.',
+  ),
   // Original creative identities; source vectors ship in each package under brand/.
   'autonomous/voxel-worlds': EngineIdentity(
     id: 'autonomous/voxel-worlds',
     label: 'Voxel Worlds',
     category: 'Games',
-    tagline: 'Build and walk a seeded voxel island',
+    tagline: 'Build original worlds. Keep every piece.',
     creator: 'Autonomous',
     color: Color(0xffaac785),
     asset: 'assets/engine-icons/voxel-worlds.png',
@@ -246,7 +339,8 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/generative-art',
     label: 'Generative Art',
     category: 'Original art',
-    tagline: 'Design reproducible generative editions',
+    tagline:
+        'Turn a visual brief into editable artwork and complete asset sets',
     creator: 'Autonomous',
     color: Color(0xffce7645),
     asset: 'assets/engine-icons/generative-art.png',
@@ -255,7 +349,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/music-studio',
     label: 'Music Studio',
     category: 'Audio',
-    tagline: 'Compose a seeded eight-bar track, edit five instrument patterns, shape swing and',
+    tagline: 'Compose original music with editable notes, audio and stems for your DAW',
     creator: 'Autonomous',
     color: Color(0xffd6c7e9),
     asset: 'assets/engine-icons/music-studio.png',
@@ -264,7 +358,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/creative-direction',
     label: 'Creative Direction',
     category: 'Design',
-    tagline: 'Build a coherent visual identity with coordinated posters, typography and palett',
+    tagline: 'Turn your business brief into an editable brand and complete launch kit',
     creator: 'Autonomous',
     color: Color(0xffd89478),
     asset: 'assets/engine-icons/creative-direction.png',
@@ -273,7 +367,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/drone-pilot',
     label: 'Drone Pilot',
     category: 'Simulation',
-    tagline: 'Fly a seeded canyon course in first person',
+    tagline: 'Turn your site into a survey plan you can inspect and keep',
     creator: 'Autonomous',
     color: Color(0xffd3eb9c),
     asset: 'assets/engine-icons/drone-pilot.png',
@@ -282,7 +376,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/game-master',
     label: 'Game Master',
     category: 'Games',
-    tagline: 'Design and compare strategies in a seeded arena',
+    tagline: 'Create a game. Play it. Put it on the table.',
     creator: 'Autonomous',
     color: Color(0xffed9075),
     asset: 'assets/engine-icons/game-master.png',
@@ -291,7 +385,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/lab-bench',
     label: 'Lab Bench',
     category: 'Science',
-    tagline: 'Explore an experiment with reproducible synthetic data',
+    tagline: 'Turn a question into evidence you can act on',
     creator: 'Autonomous',
     color: Color(0xfff2ca7d),
     asset: 'assets/engine-icons/lab-bench.png',
@@ -335,7 +429,7 @@ const _harnesses = <String, EngineIdentity>{
   'autonomous/autonomous-grid': EngineIdentity(
     id: 'autonomous/autonomous-grid',
     label: 'Grid',
-    category: 'Compute',
+    category: 'Local AI',
     tagline: 'Deploy open-weight models across your machines and watch the fleet live',
     creator: 'Autonomous',
     color: Color(0xfff5a623),
@@ -489,12 +583,39 @@ const _harnesses = <String, EngineIdentity>{
     color: Color(0xffe8894a),
     asset: 'assets/engine-icons/openmontage.png',
   ),
+  // Original Harness package marks; Godogen's upstream publishes no logo.
+  'autonomous/roundtable': EngineIdentity(
+    id: 'autonomous/roundtable',
+    label: 'Roundtable',
+    category: 'Decisions',
+    creator: 'Autonomous',
+    color: Color(0xff94b9a5),
+    asset: 'assets/engine-icons/roundtable.png',
+  ),
+  'autonomous/jev-browser': EngineIdentity(
+    id: 'autonomous/jev-browser',
+    label: 'Jev Browser',
+    category: 'Research',
+    tagline: 'Name a site, say what you want, and get a spreadsheet',
+    creator: 'Autonomous',
+    color: Color(0xff8bd3cc),
+    asset: 'assets/engine-icons/jev-browser.png',
+  ),
+  'autonomous/godogen': EngineIdentity(
+    id: 'autonomous/godogen',
+    label: 'Godogen',
+    category: 'Games',
+    tagline: 'Autonomous game development',
+    creator: 'Alex Ermolov',
+    color: Color(0xffb5d9ae),
+    asset: 'assets/engine-icons/godogen.png',
+  ),
   // Of the eight studios of 2026-09-18, three wear their project's own mark —
   // Comfy's `assets/logo.svg`, Dimensional's favicon, Bonsai's desktop icon
   // from IfcOpenShell. The other five (Ableton AI, autoresearch-mlx,
   // Foam-Agent, JUCE Agent Toolkit, SimSkill) publish no logo of their own,
   // and the marks they sit beside (Ableton, JUCE, OpenFOAM, SUMO) are other
-  // companies' trademarks — so, like Godogen, they are not here and draw their
+  // companies' trademarks — so they are not here and draw their
   // initial; their words come from the Store's catalog.
   'autonomous/comfy-mcp': EngineIdentity(
     id: 'autonomous/comfy-mcp',
@@ -539,7 +660,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/data-studio',
     label: "Data Studio",
     category: "Data",
-    tagline: "Explore CSV data with live charts, filters and exact values",
+    tagline: "Turn your files into answers you can trace, revise and reuse",
     creator: "OpenHarness contributors",
     color: Color(0xff4987ca),
     asset: 'assets/engine-icons/data-studio.png',
@@ -566,7 +687,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/openscad',
     label: "OpenSCAD",
     category: "CAD",
-    tagline: "The Programmers Solid 3D CAD Modeller",
+    tagline: "Your measurements. A family of usable parts.",
     creator: "OpenSCAD",
     color: Color(0xffe2c63d),
     asset: 'assets/engine-icons/openscad.png',
@@ -575,7 +696,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/freecad',
     label: "FreeCAD",
     category: "CAD",
-    tagline: "Parametric 3D modeling with verified STEP exports",
+    tagline: "From your measurements to checked, editable custom parts",
     creator: "OpenHarness contributors",
     color: Color(0xff418fde),
     asset: 'assets/engine-icons/freecad.png',
@@ -584,7 +705,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/orca-slicer',
     label: "Orca Slicer",
     category: "Fabrication",
-    tagline: "An open-source slicer for FFF 3D printers",
+    tagline: "Your mesh. Compared plans. Editable native projects.",
     creator: "OpenHarness contributors",
     color: Color(0xff009789),
     asset: 'assets/engine-icons/orca-slicer.png',
@@ -611,7 +732,8 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/home-assistant',
     label: "Home Assistant",
     category: "Automation",
-    tagline: "Open-source home automation that puts local control first",
+    tagline:
+        "Home automation ideas → tested YAML, native traces and a real handoff",
     creator: "OpenHarness contributors",
     color: Color(0xffb88159),
     asset: 'assets/engine-icons/home-assistant.png',
@@ -620,7 +742,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/score',
     label: "Score",
     category: "Music",
-    tagline: "Music notation for everyone",
+    tagline: "Your musical idea, ready to hear and share",
     creator: "OpenHarness contributors",
     color: Color(0xffbd965f),
     asset: 'assets/engine-icons/score.png',
@@ -636,10 +758,45 @@ const _harnesses = <String, EngineIdentity>{
   ),
 };
 
+// Marks for locally linked tools which have not joined the public catalog.
+// Recognize them when a daemon reports them, without offering phantom installs.
+const _linkedHarnesses = <String, EngineIdentity>{
+  'autonomous/harness-monitor': EngineIdentity(
+    id: "autonomous/harness-monitor",
+    label: "Harness Monitor",
+    category: "Compute",
+    tagline: "htop for your harnesses: pause the idle ones, keep the fleet in your head",
+    creator: "Autonomous",
+    color: Color(0xffadd1a3),
+    asset: 'assets/engine-icons/harness-monitor.png',
+  ),
+  'autonomous/harness-builder': EngineIdentity(
+    id: "autonomous/harness-builder",
+    label: "Harness Builder",
+    category: "Harnesses",
+    creator: "Autonomous",
+    color: Color(0xffb7a9de),
+    asset: 'assets/engine-icons/harness-builder.png',
+  ),
+};
+
 /// The base engine each first-party harness runs on, so the Create dialog can
 /// say "Runs on Claude Code" — and send the right `engine` — before the machine
 /// has answered `dsh_list`. The daemon's catalog is authoritative when present.
 const knownHarnessBase = <String, String>{
+  'autonomous/ableton-ai': 'codex',
+  'autonomous/autoresearch-mlx': 'codex',
+  'autonomous/foam-agent': 'codex',
+  'autonomous/juce-agent-toolkit': 'codex',
+  'autonomous/machine-monitor': 'claude',
+  'autonomous/simskill': 'codex',
+
+  'autonomous/roundtable': 'claude',
+  'autonomous/jev-browser': 'claude',
+  'autonomous/godogen': 'claude',
+  'autonomous/ollama': 'codex',
+  'autonomous/mlx-lm': 'codex',
+  'autonomous/vllm': 'codex',
   'autonomous/voxel-worlds': 'claude',
   'autonomous/generative-art': 'claude',
   'autonomous/music-studio': 'claude',
@@ -730,7 +887,8 @@ EngineIdentity engineIdentity(String? engine, {String? displayName}) {
   final id = engine?.trim().toLowerCase() ?? '';
   final known =
       _engines[id] ??
-      _harnesses[id] ??
+      _harnesses[canonicalHarnessId(id)] ??
+      _linkedHarnesses[id] ??
       (id == kTerminalEngine ? _terminal : null);
   if (known != null) return known;
   final raw = displayName?.trim().isNotEmpty == true
@@ -817,7 +975,31 @@ class EngineMark extends StatelessWidget {
             identity: identity,
             size: size,
           );
-    return Opacity(opacity: enabled ? 1 : 0.45, child: mark);
+    // These vendor assets use near-white ink. Give them a stable dark ground
+    // so their original shapes stay visible on both light and dark surfaces.
+    final needsDarkTile = const {
+      'cursor',
+      'opencode',
+      'autonomous/kicad',
+    }.contains(identity.id);
+    return Opacity(
+      opacity: enabled ? 1 : 0.45,
+      child: needsDarkTile
+          ? SizedBox.square(
+              dimension: size,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0xff29322f),
+                  borderRadius: BorderRadius.circular(size * .2),
+                ),
+                child: Padding(
+                  padding: EdgeInsets.all(size * .08),
+                  child: mark,
+                ),
+              ),
+            )
+          : mark,
+    );
   }
 }
 

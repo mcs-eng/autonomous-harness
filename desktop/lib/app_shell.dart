@@ -25,6 +25,7 @@ import 'core/startup.dart';
 import 'logging/app_log.dart';
 import 'logging/install.dart';
 import 'shortcuts/app_keymap.dart';
+import 'shortcuts/keyboard_practice.dart';
 import 'widgets/shortcuts_sheet.dart';
 import 'widgets/update_notice.dart';
 import 'widgets/window_chrome.dart';
@@ -113,7 +114,7 @@ class HarnessApp extends StatelessWidget {
       codeSize: grid.AppFont.codeSize,
     );
     return MaterialApp(
-      title: 'OpenHarness',
+      title: 'Harness',
       // Flutter's DEBUG ribbon stays on a debug build: it is how a locally built
       // app is told apart from the installed release at a glance (owner,
       // 2026-09-16). It never appears in a release build whatever this says.
@@ -238,11 +239,7 @@ class _RootShellState extends ConsumerState<RootShell>
     switch (call.method) {
       case 'checkForUpdates':
         final app = ref.read(appStateProvider);
-        await _menuDialog(() async {
-          final result = await app.checkForUpdates();
-          if (!mounted) return;
-          await showUpdateCheckDialog(context, app, result);
-        });
+        await _menuDialog(() => checkForUpdatesAndShowResult(context, app));
       case 'flashFirmware':
         await _menuDialog(() => showFlashFirmwareDialog(context));
       case 'exportLogs':
@@ -254,6 +251,8 @@ class _RootShellState extends ConsumerState<RootShell>
         );
       case 'showShortcuts':
         await _menuDialog(() => showShortcutsSheet(context));
+      case 'keyboardPractice':
+        await _menuDialog(() => showKeyboardPractice(context));
       case 'increaseTerminalFontSize':
         await terminalFontStore.increaseSize();
       case 'decreaseTerminalFontSize':

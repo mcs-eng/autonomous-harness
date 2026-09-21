@@ -299,7 +299,7 @@ void main() {
   ) async {
     final app = projectApp();
     app.adoptSessionForTest(terminal('a0', []));
-    await mount(tester, app);
+    await mount(tester, app, size: const Size(1600, 800));
     final filter = find.byKey(const ValueKey('project-filter'));
     await tester.enterText(filter, 'notebook');
     await tester.tap(find.byTooltip('Hide sidebar'));

@@ -14,7 +14,7 @@ import '../../terminal/terminal_theme_store.dart';
 import '../../core/wsl_preferences.dart';
 import '../../widgets/wsl_account_dialog.dart';
 
-/// Customize OpenHarness ▸ Terminal: the colours and the face the agent's output is drawn in.
+/// Customize Harness ▸ Terminal: the colours and the face the agent's output is drawn in.
 ///
 /// Laid out in the app's own [SettingRow]s rather than in bare Material, for
 /// the same reason Appearance is: a preference reads as a preference here or it

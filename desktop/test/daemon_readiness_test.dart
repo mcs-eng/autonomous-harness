@@ -113,8 +113,9 @@ class _Notifier extends AppNotifier {
   }
 
   @override
-  Future<void> refreshMachines() async {
+  Future<bool> refreshMachines() async {
     refreshes++;
+    return true;
   }
 }
 

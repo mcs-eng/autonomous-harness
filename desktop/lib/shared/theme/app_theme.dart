@@ -189,12 +189,19 @@ class _PaletteScope extends InheritedNotifier<ValueNotifier<HarnessPalette>> {
 abstract final class AppPalette {
   // Approved Swarms canvas and native tab-strip palette.
   static Color get swarmField => AppTheme.palette.value.workspace;
+  // The welcome illustration recedes behind the working command dock.
+  static Color get swarmWelcome => const Color(0xff171717);
   static Color get swarmTabBar => AppTheme.palette.value.tabBar;
   static Color get swarmAccent => AppTheme.palette.value.accent;
   // Shared with the native search field for a continuous input/results surface.
   static Color get swarmSearchSurface => AppTheme.palette.value.search;
   static const agentEntrySurface = Color(0xff101113);
   static const agentEntryField = Color(0xff1d1f22);
+  // The command field deliberately stays light, like a browser's new-tab omnibox.
+  static const commandField = Color(0xFFF7F8FA);
+  static const commandInk = Color(0xFF202124);
+  static const commandMuted = Color(0xFF646971);
+  static const commandChip = Color(0xFFE9EBEF);
 
   // the conversation / content area — pure white in light, like Codex.
   //

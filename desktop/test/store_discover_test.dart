@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -11,10 +12,18 @@ import 'package:harness/core/config.dart';
 import 'package:harness/core/engine_availability.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
+import 'package:harness/shared/layouts/widgets/sidebar_item.dart';
+import 'package:harness/shortcuts/app_keymap.dart';
+import 'package:harness/shortcuts/keymap_host.dart';
 import 'package:harness/widgets/agent_picker.dart';
+import 'package:harness/widgets/engine_identity.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/store/store_controller.dart';
+import 'package:harness/store/store_cover_art.dart';
+import 'package:harness/store/store_explore_widgets.dart';
 import 'package:harness/store/store_editorial.dart';
+import 'package:harness/store/store_exploration.dart';
+import 'package:harness/store/store_featured_art.dart';
 import 'package:harness/store/store_models.dart';
 import 'package:harness/store/store_screen.dart';
 
@@ -23,7 +32,7 @@ import 'support/real_fonts.dart';
 final _catalog = [
   for (final (id, name, category) in [
     ('blender', 'Blender', '3D'),
-    ('copper', 'Copper', 'PCB'),
+    ('autonomous-circuit', 'Autonomous Circuit', 'PCB'),
     ('text-to-cad', 'text-to-cad', 'CAD'),
     ('phaser', 'Phaser', 'Games'),
     ('strudel', 'Strudel', 'Music'),
@@ -37,13 +46,14 @@ final _catalog = [
     ('circuitjs', 'CircuitJS', 'Circuits'),
     ('rdkit', 'RDKit', 'Chemistry'),
     ('yosys', 'Yosys', 'Chips'),
+    ('ollama', 'Ollama', 'Local AI'),
   ])
     DshEntry(
       id: 'autonomous/$id',
       name: name,
       engine: 'claude',
       category: category,
-      installed: ['blender', 'copper', 'marp'].contains(id),
+      installed: ['blender', 'autonomous-circuit', 'marp'].contains(id),
       viewerUse: switch (id) {
         'blender' => 'autonomous/model-viewer',
         'text-to-cad' => 'autonomous/cad-viewer',
@@ -66,6 +76,18 @@ final _catalog = [
     ),
 ];
 
+List<DshEntry> _listedCatalog() => [
+  for (final directory in Directory(
+    '../store/agents',
+  ).listSync().whereType<Directory>())
+    if ((jsonDecode(File('${directory.path}/store.json').readAsStringSync())
+            as Map)['listed'] !=
+        false)
+      DshEntry.fromJson(
+        jsonDecode(File('${directory.path}/harness.json').readAsStringSync()),
+      )!,
+];
+
 class _App extends AppNotifier {
   _App()
     : super(
@@ -80,12 +102,13 @@ class _App extends AppNotifier {
 }
 
 class _Api implements StoreApi {
-  _Api({this.unavailable = false});
+  _Api({this.unavailable = false, this.items = const []});
   final bool unavailable;
+  final List<StoreRating> items;
   @override
   Future<List<StoreRating>> ratings() async {
     if (unavailable) throw StateError('service unavailable');
-    return [];
+    return items;
   }
 
   @override
@@ -114,6 +137,7 @@ Future<(_App, GlobalKey)> _open(
   List<DshEntry>? entries,
   String? initialHarness,
   bool unavailable = false,
+  List<StoreRating> ratings = const [],
   double width = 1440,
   double height = 1000,
   double scale = 1,
@@ -144,6 +168,8 @@ Future<(_App, GlobalKey)> _open(
   ]);
   app.machineStates['local'] = local;
   app.openStore();
+  final keymap = AppKeymap();
+  addTearDown(keymap.dispose);
   final key = GlobalKey();
   await tester.pumpWidget(
     RepaintBoundary(
@@ -157,10 +183,18 @@ Future<(_App, GlobalKey)> _open(
           child: child!,
         ),
         home: Scaffold(
-          body: StoreTab(
-            notifier: app,
-            api: _Api(unavailable: unavailable),
-            initialHarness: initialHarness,
+          body: KeymapProvider(
+            keymap: keymap,
+            child: KeymapHost(
+              keymap: keymap,
+              actions: const {},
+              enabled: () => true,
+              child: StoreTab(
+                notifier: app,
+                api: _Api(unavailable: unavailable, items: ratings),
+                initialHarness: initialHarness,
+              ),
+            ),
           ),
         ),
       ),
@@ -169,12 +203,22 @@ Future<(_App, GlobalKey)> _open(
   await tester.pumpAndSettle();
   await tester.runAsync(() async {
     final context = tester.element(find.byType(StoreTab));
-    for (final asset in [
-      'blender-studio.png',
-      'copper-board.png',
-      'phaser-bricks.png',
-    ]) {
-      await precacheImage(AssetImage('assets/store/$asset'), context);
+    for (final asset in {
+      for (final identity in [
+        ...allEngines,
+        for (final entry in entries ?? _catalog) engineIdentity(entry.id),
+      ])
+        ?identity.asset,
+    }) {
+      await precacheImage(AssetImage(asset), context);
+    }
+    for (final asset in {
+      ...storeProjectAssets.values,
+      ...storeCoverArt.values.map((cover) => cover.asset),
+      ...storeFeaturedArt.values,
+      'assets/store/blender-studio.png',
+    }) {
+      await precacheImage(AssetImage(asset), context);
     }
   });
   await tester.pumpAndSettle();
@@ -184,6 +228,19 @@ Future<(_App, GlobalKey)> _open(
 Future<void> _capture(WidgetTester tester, GlobalKey key, String name) async {
   final output = Platform.environment['HARNESS_STORE_CAPTURE_DIR'];
   if (output == null) return;
+  // Categories can decode new artwork after the initial Store frame. Wait for
+  // those image providers as well before capturing, outside the fake test clock.
+  final context = key.currentContext!;
+  final images = tester
+      .widgetList<Image>(find.byType(Image))
+      .map((image) => image.image)
+      .toSet();
+  await tester.runAsync(() async {
+    for (final provider in images) {
+      await precacheImage(provider, context, onError: (_, _) {});
+    }
+  });
+  await tester.pumpAndSettle();
   await tester.runAsync(() async {
     final image =
         await (key.currentContext!.findRenderObject()! as RenderRepaintBoundary)
@@ -196,6 +253,247 @@ Future<void> _capture(WidgetTester tester, GlobalKey key, String name) async {
 }
 
 void main() {
+  test('every listed harness has a bundled cover and source record', () {
+    final listed = _listedCatalog().map((entry) => entry.id).toSet();
+    expect(storeCoverArt.keys.toSet(), listed);
+    final sources = (jsonDecode(
+      File('assets/store/covers/sources.json').readAsStringSync(),
+    ) as List).cast<Map>();
+    expect(sources.map((source) => source['harness']).toSet(), listed);
+    expect(sources.length, listed.length);
+    for (final entry in storeCoverArt.entries) {
+      final source = sources.singleWhere(
+        (source) => source['harness'] == entry.key,
+      );
+      expect(entry.value.asset, 'assets/store/covers/${source['asset']}');
+      expect(File(entry.value.asset).existsSync(), isTrue, reason: entry.key);
+      expect(source['source'], isNotEmpty, reason: entry.key);
+      if (entry.value.credit != null) {
+        expect(source['license'], isNotEmpty, reason: entry.key);
+        expect(
+          File('assets/store/covers/${source['licenseFile']}').existsSync(),
+          isTrue,
+          reason: entry.key,
+        );
+      }
+    }
+  });
+
+  testWidgets('bundled covers decode and fit thumbnail frames', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1180, 980);
+    addTearDown(tester.view.reset);
+    final ids = storeCoverArt.keys.toList();
+    for (var start = 0; start < ids.length; start += 25) {
+      final pageIds = ids.skip(start).take(25).toList();
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: key,
+          child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: grid.buildAppTheme(brightness: Brightness.dark),
+            home: Scaffold(
+              body: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Wrap(
+                  spacing: 16,
+                  runSpacing: 18,
+                  children: [
+                    for (final id in pageIds)
+                      SizedBox(
+                        width: 212,
+                        child: Column(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: AspectRatio(
+                                aspectRatio: 1.65,
+                                child: StoreProjectArt(
+                                  entry: DshEntry(
+                                    id: id,
+                                    name: id.split('/').last,
+                                    engine: 'codex',
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(id.split('/').last),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.runAsync(() async {
+        for (final id in pageIds) {
+          final cover = storeCoverArt[id]!;
+          final bytes = await rootBundle.load(cover.asset);
+          final codec = await ui.instantiateImageCodec(
+            bytes.buffer.asUint8List(),
+          );
+          final frame = await codec.getNextFrame();
+          expect(
+            frame.image.width,
+            greaterThanOrEqualTo(400),
+            reason: cover.asset,
+          );
+          if (cover.viewport case final viewport?) {
+            expect(
+              cover.imageSize,
+              Size(frame.image.width.toDouble(), frame.image.height.toDouble()),
+              reason: cover.asset,
+            );
+            expect(viewport.left, greaterThanOrEqualTo(0), reason: cover.asset);
+            expect(viewport.top, greaterThanOrEqualTo(0), reason: cover.asset);
+            expect(
+              viewport.right,
+              lessThanOrEqualTo(frame.image.width),
+              reason: cover.asset,
+            );
+            expect(
+              viewport.bottom,
+              lessThanOrEqualTo(frame.image.height),
+              reason: cover.asset,
+            );
+            expect(viewport.shortestSide, greaterThan(0), reason: cover.asset);
+          }
+          frame.image.dispose();
+          codec.dispose();
+          await precacheImage(AssetImage(cover.asset), key.currentContext!);
+        }
+      });
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await _capture(tester, key, 'cover-selection-${start ~/ 25 + 1}');
+    }
+  });
+
+  testWidgets('covers stay separate from prompt examples', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Row(
+          children: [
+            for (final showExample in [false, true])
+              SizedBox(
+                width: 300,
+                height: 190,
+                child: StoreProjectArt(
+                  key: ValueKey(showExample ? 'proof' : 'cover'),
+                  entry: _catalog.first,
+                  showExample: showExample,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    await tester.runAsync(() async {
+      final context = tester.element(find.byKey(const ValueKey('cover')));
+      await precacheImage(
+        const AssetImage('assets/store/covers/blender.jpg'),
+        context,
+      );
+      await precacheImage(
+        const AssetImage('assets/store/projects/blender.jpg'),
+        context,
+      );
+    });
+    await tester.pumpAndSettle();
+    final coverImage = tester.widget<Image>(
+      find.descendant(
+        of: find.byKey(const ValueKey('cover')),
+        matching: find.byType(Image),
+      ),
+    );
+    final proofImage = tester.widget<Image>(
+      find.descendant(
+        of: find.byKey(const ValueKey('proof')),
+        matching: find.byType(Image),
+      ),
+    );
+    expect(
+      (coverImage.image as AssetImage).assetName,
+      'assets/store/covers/blender.jpg',
+    );
+    expect(
+      (proofImage.image as AssetImage).assetName,
+      'assets/store/projects/blender.jpg',
+    );
+    expect(
+      find.byTooltip(
+        'DOGWALK: a snowy world made in Blender\nBlender Foundation · DOGWALK · CC BY 4.0\nView source',
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  test(
+    'every listed harness has a browsing category and a discipline invitation',
+    () {
+      final entries = _listedCatalog();
+      expect(entries, isNotEmpty);
+      for (final entry in entries) {
+        expect(
+          storeCategoryFor(entry),
+          isNot('Other'),
+          reason: '${entry.id}: ${entry.category}',
+        );
+        expect(
+          storeDiscipline(storeCategoryFor(entry)).headline,
+          isNotEmpty,
+          reason: '${entry.id} must be discoverable beyond search',
+        );
+      }
+      expect(
+        storeCategoryFor(
+          const DshEntry(
+            id: 'community/new-craft',
+            name: 'New craft',
+            engine: 'claude',
+            category: 'Uncharted',
+          ),
+        ),
+        'Other',
+      );
+    },
+  );
+
+  test('Local AI groups Grid and current and future local runtimes', () {
+    for (final (id, domain) in [
+      ('autonomous/autonomous-grid', 'Compute'),
+      ('local/ollama', 'Compute'),
+      ('local/mlx-lm', 'Local AI'),
+      ('local/vllm', 'Local AI'),
+      ('community/next-runtime', 'local ai'),
+    ]) {
+      expect(
+        storeCategoryFor(
+          DshEntry(id: id, name: id, engine: 'codex', category: domain),
+        ),
+        'Local AI',
+      );
+    }
+    expect(
+      storeCategoryFor(
+        const DshEntry(
+          id: 'codex',
+          name: 'Codex',
+          engine: 'codex',
+          kind: 'engine',
+          category: 'Code',
+        ),
+      ),
+      'Coding',
+    );
+  });
+
   setUpAll(() async {
     await loadRealFonts();
     await (FontLoader(
@@ -208,6 +506,269 @@ void main() {
         ))
         .load();
   });
+
+  testWidgets(
+    'search is ready on arrival and stays at the top while browsing',
+    (tester) async {
+      final (_, key) = await _open(tester);
+      final search = find.byKey(const ValueKey('store-search'));
+      final field = tester.widget<TextField>(search);
+      expect(field.focusNode!.hasFocus, isTrue);
+      final initialRect = tester.getRect(search);
+      expect(initialRect.width, greaterThan(1000));
+      await tester.drag(
+        find.byKey(const PageStorageKey('store-discover-scroll')),
+        const Offset(0, -700),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getRect(search), initialRect);
+      await _capture(tester, key, 'discover-exploration');
+
+      await tester.tap(
+        find.byKey(const ValueKey('store-shelf-category:Engineering')),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getRect(search), initialRect);
+      await tester.drag(
+        find.byKey(const ValueKey('store-catalog:Engineering')),
+        const Offset(0, -550),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getRect(search), initialRect);
+      await tester.enterText(search, 'mounting holes');
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('store-card:autonomous/text-to-cad')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('store-card:autonomous/autonomous-circuit')),
+        findsNothing,
+      );
+      expect(tester.getRect(search), initialRect);
+      await tester.tap(find.byTooltip('Clear search'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('store-category-hero')), findsOneWidget);
+      expect(tester.widget<TextField>(search).focusNode!.hasFocus, isTrue);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  test('search finds ideas in published examples as well as names', () {
+    const entry = DshEntry(
+      id: 'community/plotter',
+      name: 'Plotter',
+      engine: 'codex',
+      tagline: 'Turn observations into pictures.',
+      examples: [
+        StoreExample(prompt: 'Visualize rainfall over the last decade.'),
+      ],
+    );
+    expect(storeMatches(entry, 'rainfall decade'), isTrue);
+    expect(storeMatches(entry, 'observations'), isTrue);
+    expect(storeMatches(entry, 'rainfall circuit'), isFalse);
+  });
+
+  test('search puts a requested tool before mentions in another tool', () {
+    const entries = [
+      DshEntry(
+        id: 'a',
+        name: 'Animator',
+        engine: 'codex',
+        description: 'Use Blender scenes.',
+      ),
+      DshEntry(id: 'b', name: 'Blender', engine: 'codex'),
+      DshEntry(id: 'c', name: 'Blender Helper', engine: 'codex'),
+      DshEntry(id: 'd', name: 'Unrelated', engine: 'codex'),
+    ];
+    expect(storeSearch(entries, ' BLENDER ').map((e) => e.id), ['b', 'c', 'a']);
+    expect(storeSearch(entries, 'nothing'), isEmpty);
+  });
+
+  testWidgets('an empty search offers a way into a discipline', (tester) async {
+    await _open(tester);
+    final search = find.byKey(const ValueKey('store-search'));
+    await tester.enterText(search, 'unfindabletool');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('store-search-explore:Design')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('store-catalog:Design')), findsOneWidget);
+    expect(tester.widget<TextField>(search).controller!.text, isEmpty);
+    expect(
+      tester
+          .widget<SidebarItem>(
+            find.byKey(const ValueKey('store-shelf-category:Design')),
+          )
+          .selected,
+      isTrue,
+    );
+    await tester.tap(find.byKey(const ValueKey('store-back')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(search).controller!.text, 'unfindabletool');
+  });
+
+  testWidgets(
+    'category navigation highlights the rail and restores scroll through back and forward',
+    (tester) async {
+      await _open(tester, height: 850);
+      final discover = find.byKey(
+        const PageStorageKey('store-discover-scroll'),
+      );
+      final categoryCard = find.byKey(
+        const ValueKey('store-category:Engineering'),
+      );
+      await tester.ensureVisible(categoryCard);
+      await tester.pumpAndSettle();
+      final homeY = tester.getTopLeft(categoryCard).dy;
+      await tester.tap(categoryCard);
+      await tester.pumpAndSettle();
+      final nav = find.byKey(
+        const ValueKey('store-shelf-category:Engineering'),
+      );
+      expect(tester.widget<SidebarItem>(nav).selected, isTrue);
+      final harness = find.byKey(
+        const ValueKey('store-card:autonomous/autonomous-circuit'),
+      );
+      await tester.ensureVisible(harness);
+      await tester.pumpAndSettle();
+      final categoryY = tester.getTopLeft(harness).dy;
+      await tester.tap(harness);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('store-page:autonomous/autonomous-circuit')),
+        findsOneWidget,
+      );
+      expect(tester.widget<SidebarItem>(nav).selected, isTrue);
+      await tester.tap(find.byKey(const ValueKey('store-back')));
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(harness).dy, closeTo(categoryY, 1));
+      await tester.tap(find.byKey(const ValueKey('store-back')));
+      await tester.pumpAndSettle();
+      expect(discover, findsOneWidget);
+      expect(tester.getTopLeft(categoryCard).dy, closeTo(homeY, 1));
+      await tester.tap(find.byKey(const ValueKey('store-nav-forward')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<SidebarItem>(nav).selected, isTrue);
+      expect(tester.getTopLeft(harness).dy, closeTo(categoryY, 1));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'search history is one stop and clearing returns to the originating category',
+    (tester) async {
+      await _open(tester);
+      await tester.tap(
+        find.byKey(const ValueKey('store-shelf-category:Engineering')),
+      );
+      await tester.pumpAndSettle();
+      final search = find.byKey(const ValueKey('store-search'));
+      for (final query in ['cop', 'copp', 'copper']) {
+        await tester.enterText(search, query);
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.byKey(const ValueKey('store-back')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('store-catalog:Engineering')),
+        findsOneWidget,
+      );
+      expect(tester.widget<TextField>(search).controller!.text, isEmpty);
+      await tester.tap(find.byKey(const ValueKey('store-nav-forward')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(search).controller!.text, 'copper');
+      await tester.tap(
+        find.byKey(const ValueKey('store-card:autonomous/autonomous-circuit')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('store-back')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(search).controller!.text, 'copper');
+      await tester.tap(find.byTooltip('Clear search'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('store-catalog:Engineering')),
+        findsOneWidget,
+      );
+      expect(tester.widget<TextField>(search).focusNode!.hasFocus, isTrue);
+    },
+  );
+
+  testWidgets('installed filter survives opening a harness and returning', (
+    tester,
+  ) async {
+    await _open(tester);
+    await tester.tap(find.byKey(const ValueKey('store-shelf-category:Design')));
+    await tester.pumpAndSettle();
+    final filter = find.byKey(const ValueKey('store-filter-installed'));
+    await tester.ensureVisible(filter);
+    await tester.tap(filter);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('store-card:autonomous/text-to-cad')),
+      findsNothing,
+    );
+    final blender = find.byKey(const ValueKey('store-card:autonomous/blender'));
+    await tester.ensureVisible(blender);
+    await tester.tap(blender);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('store-back')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<ChoiceChip>(filter).selected, isTrue);
+    expect(
+      find.byKey(const ValueKey('store-card:autonomous/text-to-cad')),
+      findsNothing,
+    );
+    await tester.ensureVisible(find.byKey(const ValueKey('store-filter-all')));
+    await tester.tap(find.byKey(const ValueKey('store-filter-all')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('store-card:autonomous/text-to-cad')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'the existing Find command focuses Store search instead of a terminal',
+    (tester) async {
+      await _open(tester);
+      await tester.tap(
+        find.byKey(const ValueKey('store-shelf-category:Design')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('store-category-feature')));
+      await tester.pumpAndSettle();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.bracketLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('store-catalog:Design')),
+        findsOneWidget,
+      );
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.bracketRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('store-page:autonomous/blender')),
+        findsOneWidget,
+      );
+      // Mouse navigation must keep keyboard commands inside the Store.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('store-search')))
+            .focusNode!
+            .hasFocus,
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   for (final (width, height, scale, brightness) in [
     (1440.0, 1080.0, 1.0, Brightness.dark),
@@ -235,16 +796,43 @@ void main() {
         findsNothing,
       );
       expect(find.byKey(const ValueKey('store-nav-categories')), findsNothing);
-      expect(find.byKey(const ValueKey('store-shelf-all')), findsNothing);
+      expect(find.byKey(const ValueKey('store-shelf-all')), findsOneWidget);
       expect(find.byKey(const ValueKey('store-shelf-installed')), findsNothing);
       expect(find.text('Harness Store'), findsNothing);
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('store-card:codex'))).dy,
+        lessThan(
+          tester
+              .getTopLeft(find.byKey(const ValueKey('store-category:Design')))
+              .dy,
+        ),
+        reason: 'Coding is the starting point before the other disciplines',
+      );
+      expect(
+        tester
+            .getTopLeft(
+              find.byKey(const ValueKey('store-shelf-category:Coding')),
+            )
+            .dy,
+        lessThan(
+          tester
+              .getTopLeft(
+                find.byKey(const ValueKey('store-shelf-category:Design')),
+              )
+              .dy,
+        ),
+      );
       for (final category in [
         'Design',
         'Engineering',
         'Media',
-        'Science',
+        'Music',
+        'Productivity',
+        'Science & Data',
+        'Simulation',
         'Games',
-        'Code',
+        'Local AI',
+        'Coding',
       ]) {
         expect(
           find.byKey(ValueKey('store-shelf-category:$category')),
@@ -256,6 +844,17 @@ void main() {
         tester,
         key,
         'discover-${width.toInt()}-${brightness.name}-${scale.toStringAsFixed(1)}',
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('store-shelf-category:Engineering')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('store-category-hero')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await _capture(
+        tester,
+        key,
+        'engineering-${width.toInt()}-${brightness.name}-${scale.toStringAsFixed(1)}',
       );
       await tester.tap(find.byKey(const ValueKey('store-viewers-button')));
       await tester.pumpAndSettle();
@@ -270,7 +869,41 @@ void main() {
   }
 
   testWidgets(
-    'categories group domains, collections open and search finds capabilities',
+    'the complete listed catalog browses every craft without an Other bucket',
+    (tester) async {
+      final entries = _listedCatalog();
+      final (_, key) = await _open(tester, entries: entries);
+      expect(
+        find.byKey(const ValueKey('store-shelf-category:Other')),
+        findsNothing,
+      );
+      await _capture(tester, key, 'discover-full-catalog');
+      for (final category in storeCategoryDomains.keys) {
+        final matches =
+            entries.where((e) => storeCategoryFor(e) == category).toList()
+              ..sort(
+                (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+              );
+        if (matches.isEmpty) continue;
+        final tab = find.byKey(ValueKey('store-shelf-category:$category'));
+        await tester.ensureVisible(tab);
+        await tester.tap(tab);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(ValueKey('store-card:${matches.first.id}')),
+          findsOneWidget,
+          reason: '$category must show its actual catalog entries',
+        );
+        expect(tester.takeException(), isNull);
+        if (['Research', 'Music', 'Engineering', 'Design'].contains(category)) {
+          await _capture(tester, key, 'category-${category.toLowerCase()}');
+        }
+      }
+    },
+  );
+
+  testWidgets(
+    'discovery cards open the same category as the sidebar and search finds ideas',
     (tester) async {
       await _open(tester);
       await tester.tap(
@@ -286,15 +919,20 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.byKey(const ValueKey('store-card:autonomous/copper')),
+        find.byKey(const ValueKey('store-card:autonomous/autonomous-circuit')),
         findsNothing,
       );
       await tester.tap(find.byKey(const ValueKey('store-shelf-discover')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('store-collection:hardware')));
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('store-category:Engineering')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('store-category:Engineering')),
+      );
       await tester.pumpAndSettle();
       expect(
-        find.byKey(const ValueKey('store-card:autonomous/copper')),
+        find.byKey(const ValueKey('store-card:autonomous/autonomous-circuit')),
         findsOneWidget,
       );
       expect(
@@ -307,7 +945,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(
-        find.byKey(const ValueKey('store-card:autonomous/copper')),
+        find.byKey(const ValueKey('store-card:autonomous/autonomous-circuit')),
         findsOneWidget,
       );
       expect(find.byKey(const ValueKey('store-card:codex')), findsNothing);
@@ -325,7 +963,7 @@ void main() {
       await tester.tap(find.byTooltip('Clear search'));
       await tester.pumpAndSettle();
       expect(
-        find.byKey(const ValueKey('store-feature:autonomous/blender')),
+        find.byKey(const ValueKey('store-catalog:Engineering')),
         findsOneWidget,
       );
     },
@@ -351,7 +989,9 @@ void main() {
       ),
     );
     final (_, key) = await _open(tester);
-    await tester.tap(find.text('Explore').first);
+    await tester.tap(
+      find.byKey(const ValueKey('store-feature:autonomous/blender')),
+    );
     await tester.pumpAndSettle();
     expect(
       find.byKey(const ValueKey('store-page:autonomous/blender')),
@@ -370,11 +1010,117 @@ void main() {
   });
 
   testWidgets(
+    'discovery has three illustrated features and categories have one',
+    (tester) async {
+      final (_, key) = await _open(tester);
+      expect(find.byType(StoreProjectArt), findsNothing);
+      expect(find.byType(StoreFeaturedArt), findsNWidgets(3));
+      expect(
+        find.byKey(const ValueKey('store-feature-art:codex')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('store-feature-art:autonomous/blender')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(
+          const ValueKey('store-feature-art:autonomous/autonomous-circuit'),
+        ),
+        findsOneWidget,
+      );
+      final category = find.byKey(const ValueKey('store-category:Design'));
+      expect(
+        find.descendant(of: category, matching: find.byType(EngineMark)),
+        findsOneWidget,
+      );
+      await tester.ensureVisible(category);
+      await _capture(tester, key, 'discover-disciplines');
+      await tester.tap(category);
+      await tester.pumpAndSettle();
+      expect(find.byType(StoreProjectArt), findsNothing);
+      expect(find.byType(StoreFeaturedArt), findsOneWidget);
+      for (final entry in _catalog.where(
+        (entry) =>
+            storeCategoryFor(entry) == 'Design' && !entry.isViewerPackage,
+      )) {
+        final row = find.byKey(ValueKey('store-card:${entry.id}'));
+        expect(row, findsOneWidget);
+        expect(
+          find.descendant(of: row, matching: find.byType(EngineMark)),
+          findsOneWidget,
+        );
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('top rated appears only with enough community reviews', (
+    tester,
+  ) async {
+    final (_, key) = await _open(
+      tester,
+      ratings: [
+        for (final (id, average, count) in [
+          ('autonomous/blender', 4.8, 5),
+          ('autonomous/strudel', 4.5, 8),
+          ('autonomous/marp', 5.0, 1),
+        ])
+          StoreRating(
+            harnessId: id,
+            average: average,
+            count: count,
+            histogram: const [],
+          ),
+      ],
+    );
+    expect(
+      find.byKey(const ValueKey('store-recent-collection')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('store-top-rated-collection')),
+      findsOneWidget,
+    );
+    final first = find.byKey(
+      const ValueKey('store-top-rated:autonomous/blender'),
+    );
+    expect(first, findsOneWidget);
+    expect(
+      find.descendant(of: first, matching: find.text('1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('store-top-rated:autonomous/strudel')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('store-top-rated:autonomous/marp')),
+      findsNothing,
+    );
+    await tester.ensureVisible(find.text('Top rated'));
+    await _capture(tester, key, 'discover-top-rated');
+    await tester.tap(first);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('store-page:autonomous/blender')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
     'unavailable reviews do not become a release notice in discovery or detail',
     (tester) async {
       await _open(tester, unavailable: true);
+      expect(
+        find.byKey(const ValueKey('store-top-rated-collection')),
+        findsNothing,
+      );
       expect(find.textContaining('not available'), findsNothing);
-      await tester.tap(find.text('Explore').first);
+      await tester.tap(
+        find.byKey(const ValueKey('store-feature:autonomous/blender')),
+      );
       await tester.pumpAndSettle();
       expect(find.text('Ratings and reviews'), findsNothing);
       expect(find.text('No ratings yet'), findsNothing);
@@ -392,15 +1138,15 @@ void main() {
       findsNothing,
     );
     expect(
-      find.byKey(const ValueKey('store-collection:hardware')),
+      find.byKey(const ValueKey('store-category:Engineering')),
       findsNothing,
     );
-    expect(find.text('Coding engines'), findsOneWidget);
+    expect(find.text('Your starting point: code.'), findsOneWidget);
     expect(find.byKey(const ValueKey('store-card:codex')), findsOneWidget);
   });
 
   testWidgets(
-    'Open launches the installed harness and cancel abandons only its draft',
+    'a browse row opens details; New Harness starts work from the page',
     (tester) async {
       final (app, _) = await _open(tester);
       await tester.tap(
@@ -408,9 +1154,20 @@ void main() {
       );
       await tester.pumpAndSettle();
       final count = app.swarms.length;
-      await tester.tap(
-        find.byKey(const ValueKey('store-action:autonomous/blender')),
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('store-card:autonomous/blender')),
       );
+      await tester.tap(
+        find.byKey(const ValueKey('store-card:autonomous/blender')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('store-page:autonomous/blender')),
+        findsOneWidget,
+      );
+      expect(app.swarms.length, count);
+      expect(find.text('Resume Harness'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('store-primary-action')));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('create-agent-submit')), findsOneWidget);
       expect(

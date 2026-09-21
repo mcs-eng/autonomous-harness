@@ -5,7 +5,19 @@ could not previously do. A polished simulation, a collection of presets, or a sp
 does not pass. Our previous release verified its controls, but chose the wrong acceptance criteria.
 The prior verification reports remain technical evidence, not evidence that these are good products.
 
-## Review of our seven
+**Rebuild progress:** [AUTHORING-REBUILD.md](AUTHORING-REBUILD.md) records the new Art/Music tools,
+six distinct authored fixtures, revisions and real export checks. Both are now listed at the
+user's explicit request to test them through the Harness Store. Music listening and installed-engine
+trials with real user briefs are still outstanding; listing does not claim those reviews passed.
+
+**Next user direction:** improve the other five sequentially. Creative Direction has now been
+rebuilt and relisted; see [FORME-REBUILD.md](FORME-REBUILD.md) and the
+[sequential plan](FIVE-REBUILDS.md). Voxel Worlds is also rebuilt and published (#146);
+Drone Pilot is published (#151), Game Master is published (#153), and Lab Bench is published (#155).
+All seven are listed in the verified public catalog for user testing. The original withdrawal table below
+is retained as history, not a description of the rebuilt Forme product.
+
+## Original review of our seven
 
 | Harness | What it actually enables today | Why it falls short | Decision |
 |---|---|---|---|
@@ -17,15 +29,17 @@ The prior verification reports remain technical evidence, not evidence that thes
 | Game Master | Watch fixed heuristic teams and compare policies | Cannot create and ship an original playable game | Withdraw; stop parallel development |
 | Lab Bench | Inspect one synthetic experiment | Cannot do useful analysis on the person's own observations | Withdraw; stop parallel development |
 
-All seven receive `listed:false`. The source, logos, tests and installed workspaces stay intact.
+All seven initially received `listed:false`. Art and Music have since been rebuilt and relisted
+for user testing, followed by Creative Direction, Voxel Worlds, Drone Pilot, Game Master and Lab Bench. Source, logos,
+tests and workspaces stay intact.
 The shared web viewer remains available: it is infrastructure used by other harnesses.
 Other sessions' harnesses are outside this withdrawal.
 
-## Focus
+## Initial focus (historical; the sequential rebuild is now published)
 
 Choose Generative Art and Music Studio. They share a clear path from a person's idea to an
-original, editable asset they can use. Keep both unlisted during development. Do not relist merely
-because a template gained more buttons, styles or a prettier screenshot.
+original, editable asset they can use. They are now available for the user's Store testing.
+More buttons, styles or a prettier screenshot do not by themselves meet the product bar.
 
 For visual work, the agent must be able to build a new visual system from a brief, use the person's
 text and assets, revise it without losing their choices, and deliver editable vectors, production
@@ -35,7 +49,7 @@ For music, the agent must compose and arrange a complete brief, work with the pe
 material, let them hear and revise sections, and deliver audio plus an editable handoff into a DAW.
 Changing a seed in the existing lo-fi loop does not pass.
 
-## Gates before either returns to the Store
+## Product validation still required
 
 1. Three materially different real briefs, completed through the actual agent workflow. No preset
    selection masquerading as generation, fake model messages, or a prompt box with no backend.
@@ -46,5 +60,6 @@ Changing a seed in the existing lo-fi loop does not pass.
 4. Cold workspace install, dependency setup/doctor, actual viewer interaction and honest verdicts.
 5. Store examples must show the brief and its actual result; document limits and any paid service.
 
-This is a withdrawal and a change of focus. It is not a claim that the replacement tools already
-achieve an “iPhone moment.” Reintroduction requires the evidence above.
+The original withdrawal changed our focus. The user has since requested Store access to test the
+replacements. This availability is not a claim that they achieve an “iPhone moment”; evaluate them
+against the evidence above and record remaining gaps honestly.

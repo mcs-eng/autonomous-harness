@@ -126,7 +126,7 @@ void main() {
       final (:app, :projects, :connections) = await prepare(tester);
       final original = app.activeSwarm;
       final originalPane = app.focusedPane;
-      await mount(tester, app, projects: projects);
+      await mount(tester, app, projects: projects, size: const Size(1600, 800));
       await tester.tap(
         find.byKey(const ValueKey('new-project-agent:second:$secondFolder')),
       );
@@ -174,7 +174,7 @@ void main() {
       }
       final original = app.activeSwarm;
       final originalPane = app.focusedPane;
-      await mount(tester, app, projects: projects);
+      await mount(tester, app, projects: projects, size: const Size(1600, 800));
       for (final id in ['offline', 'shared']) {
         final button = tester.widget<AppIconButton>(
           find.byKey(ValueKey('new-project-agent:$id:/work/$id')),

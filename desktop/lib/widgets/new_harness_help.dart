@@ -10,9 +10,10 @@ enum HarnessHelpTopic { agent, machine, project }
 /// Optional guidance beside the choices it explains. A separate route keeps
 /// the form, its scroll position and its keyboard shortcuts underneath it.
 class HarnessHelpLink extends StatefulWidget {
-  const HarnessHelpLink({super.key, required this.topic});
+  const HarnessHelpLink({super.key, required this.topic, this.textStyle});
 
   final HarnessHelpTopic topic;
+  final TextStyle? textStyle;
 
   @override
   State<HarnessHelpLink> createState() => _HarnessHelpLinkState();
@@ -52,13 +53,15 @@ class _HarnessHelpLinkState extends State<HarnessHelpLink> {
             foregroundColor: AppPalette.textSecondary,
             minimumSize: const Size(0, 32),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            textStyle: TextStyle(
-              fontFamily: AppFont.sans,
-              fontFamilyFallback: AppFont.sansFallback,
-              fontSize: 14,
-              fontWeight: FontWeight.w400,
-              height: 1.4,
-            ),
+            textStyle:
+                widget.textStyle ??
+                TextStyle(
+                  fontFamily: AppFont.sans,
+                  fontFamilyFallback: AppFont.sansFallback,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w400,
+                  height: 1.4,
+                ),
             side: BorderSide.none,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(6),
@@ -250,7 +253,7 @@ class _HarnessHelpDialogState extends State<_HarnessHelpDialog> {
       _HelpOption(
         leading: Icon(LucideIcons.folderPlus, size: 28),
         title: 'New project',
-        description: 'Start fresh. OpenHarness creates a new folder on your selected machine for your work.',
+        description: 'Start fresh. Harness creates a new folder on your selected machine for your work.',
       ),
       _HelpOption(
         leading: Icon(LucideIcons.folderOpen, size: 28),
@@ -263,7 +266,7 @@ class _HarnessHelpDialogState extends State<_HarnessHelpDialog> {
         leading: Icon(LucideIcons.gitBranch, size: 28),
         title: 'Git',
         description:
-            'Bring a project from GitHub. Paste a repository link and OpenHarness '
+            'Bring a project from GitHub. Paste a repository link and Harness '
             'clones it onto your selected machine before starting.',
       ),
       _HelpOption(

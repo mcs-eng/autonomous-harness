@@ -75,9 +75,7 @@ class GridModelPicker extends StatefulWidget {
 
   /// The agent's engine, for the subscription row's icon and label.
   final String? engineLabel;
-
-  /// A narrow terminal header retains the same picker behind a 28px icon.
-  final bool iconOnly;
+  final bool compact;
 
   const GridModelPicker({
     super.key,
@@ -90,7 +88,7 @@ class GridModelPicker extends StatefulWidget {
     this.currentTargetId,
     this.webSearch,
     this.engineLabel,
-    this.iconOnly = false,
+    this.compact = false,
   });
 
   @override
@@ -462,6 +460,28 @@ class _GridModelPickerState extends State<GridModelPicker> {
   @override
   Widget build(BuildContext context) {
     final sentence = _webSearchSentence;
+    if (widget.compact) {
+      return IconButton(
+        tooltip: sentence == null
+            ? 'Where this agent runs'
+            : 'Where this agent runs\n$sentence',
+        onPressed: _open,
+        icon: _loading
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              )
+            : const Icon(Icons.tune, size: 16),
+        style: IconButton.styleFrom(
+          foregroundColor: AppColors.mutedStrong,
+          fixedSize: const Size(28, 28),
+          minimumSize: const Size(28, 28),
+          padding: EdgeInsets.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+      );
+    }
     return Tooltip(
       // The same sentence the menu shows, one line under the control's own — so a person can learn
       // the agent has no web search without opening the menu at all.
@@ -485,61 +505,34 @@ class _GridModelPickerState extends State<GridModelPicker> {
             // ancestor asking for a hand is not, by itself, the thing that decides.
             mouseCursor: SystemMouseCursors.click,
             borderRadius: BorderRadius.circular(4),
-            child: widget.iconOnly
-                ? Semantics(
-                    label: 'Model',
-                    child: SizedBox.square(
-                      dimension: 28,
-                      child: Center(
-                        child: _loading
-                            ? const SizedBox.square(
-                                dimension: 11,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 1.5,
-                                ),
-                              )
-                            : Icon(
-                                Icons.tune,
-                                size: 16,
-                                color: AppColors.textSoft,
-                              ),
-                      ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // No leading glyph: the word carries the control, and a header this dense reads
+                  // better with one fewer mark in it. The spinner takes that space only while a read
+                  // is in flight, so the label does not shift when nothing is happening.
+                  if (_loading) ...[
+                    const SizedBox(
+                      width: 11,
+                      height: 11,
+                      child: CircularProgressIndicator(strokeWidth: 1.5),
                     ),
-                  )
-                : Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 3,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // No leading glyph: the word carries the control, and a header this dense reads
-                        // better with one fewer mark in it. The spinner takes that space only while a read
-                        // is in flight, so the label does not shift when nothing is happening.
-                        if (_loading) ...[
-                          const SizedBox(
-                            width: 11,
-                            height: 11,
-                            child: CircularProgressIndicator(strokeWidth: 1.5),
-                          ),
-                          const SizedBox(width: 5),
-                        ],
-                        Text(
-                          'Model',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: AppColors.textSoft,
-                          ),
-                        ),
-                        Icon(
-                          Icons.arrow_drop_down,
-                          size: 14,
-                          color: AppColors.mutedStrong,
-                        ),
-                      ],
-                    ),
+                    const SizedBox(width: 5),
+                  ],
+                  Text(
+                    'Model',
+                    style: TextStyle(fontSize: 11, color: AppColors.textSoft),
                   ),
+                  Icon(
+                    Icons.arrow_drop_down,
+                    size: 14,
+                    color: AppColors.mutedStrong,
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -571,7 +564,6 @@ class _ManagerInvitationState extends State<_ManagerInvitation> {
 
   @override
   Widget build(BuildContext context) {
-    final rule = Expanded(child: Container(height: 1, color: AppColors.border));
     return Padding(
       // Wider than a row's inset on purpose: this block is not one of them.
       padding: const EdgeInsets.fromLTRB(
@@ -584,20 +576,22 @@ class _ManagerInvitationState extends State<_ManagerInvitation> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              rule,
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
+              Container(width: 12, height: 1, color: AppColors.border),
+              const SizedBox(width: 8),
+              Flexible(
                 child: Text(
                   'Manage the models on your machines',
+                  textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 10.5,
-                    letterSpacing: .2,
                     color: AppColors.mutedStrong,
                   ),
                 ),
               ),
-              rule,
+              const SizedBox(width: 8),
+              Container(width: 12, height: 1, color: AppColors.border),
             ],
           ),
           const SizedBox(height: 9),
@@ -605,7 +599,7 @@ class _ManagerInvitationState extends State<_ManagerInvitation> {
             cursor: SystemMouseCursors.click,
             onEnter: (_) => setState(() => _hovered = true),
             onExit: (_) => setState(() => _hovered = false),
-            child: GestureDetector(
+            child: InkWell(
               onTap: widget.onPressed,
               child: Container(
                 // Full width, so it reads as the section's one action rather than as a wider row.

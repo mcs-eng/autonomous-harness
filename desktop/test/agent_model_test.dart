@@ -29,6 +29,7 @@ void main() {
       );
     },
   );
+  _cloneTests();
   test('uses explicit terminal availability from a new CLI', () {
     final dormantPane = Agent.fromJson({
       'id': 'agent-1',
@@ -238,4 +239,61 @@ void _dshTests() {
       expect(odd.updatedAt, isNull);
     },
   );
+}
+
+/// What Clone (⌘⇧N) reads off the frame to open another of the same agent.
+void _cloneTests() {
+  test('parses the launch choices off an agent frame', () {
+    final agent = Agent.fromJson({
+      'id': 'agent-1',
+      'name': 'a',
+      'engine': 'claude',
+      'permissionMode': 'readOnly',
+      'bypassPermission': false,
+      'namedAgent': 'reviewer',
+    });
+    expect(agent.permissionMode, 'readOnly');
+    expect(agent.bypassPermission, isFalse);
+    expect(agent.namedAgent, 'reviewer');
+    expect(agent.canClone, isTrue);
+  });
+
+  test('an older daemon leaves them null, which is not the same as false', () {
+    final agent = Agent.fromJson({
+      'id': 'agent-1',
+      'name': 'a',
+      'engine': 'claude',
+    });
+    expect(agent.permissionMode, isNull);
+    expect(agent.bypassPermission, isNull);
+    expect(agent.namedAgent, isNull);
+    expect(agent.canClone, isTrue);
+  });
+
+  test('refuses a mode or named agent outside the flag-value shape', () {
+    Agent parse(Map<String, dynamic> extra) => Agent.fromJson({
+      'id': 'agent-1',
+      'name': 'a',
+      'engine': 'claude',
+      ...extra,
+    });
+    expect(parse({'permissionMode': 'read only'}).permissionMode, isNull);
+    expect(parse({'permissionMode': '--dangerous'}).permissionMode, isNull);
+    expect(parse({'namedAgent': '../etc/passwd'}).namedAgent, isNull);
+    expect(parse({'namedAgent': 'a b'}).namedAgent, isNull);
+    expect(parse({'bypassPermission': 'true'}).bypassPermission, isNull);
+  });
+
+  test('a grid agent, or one with no engine, cannot be cloned', () {
+    expect(
+      Agent.fromJson({
+        'id': 'agent-1',
+        'name': 'a',
+        'engine': 'claude',
+        'grid': {'model': 'DeepSeek-V4'},
+      }).canClone,
+      isFalse,
+    );
+    expect(Agent.fromJson({'id': 'agent-1', 'name': 'a'}).canClone, isFalse);
+  });
 }

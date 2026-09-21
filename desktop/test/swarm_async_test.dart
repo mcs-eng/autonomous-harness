@@ -98,9 +98,14 @@ void main() {
       'Harness needs tmux to start harnesses on Test host. Install tmux there, then try again.',
     ),
     (
+      'CODEX_CLI_TOO_OLD',
+      'Your installed Codex CLI does not support --approve-for-me. Update Codex and try again.',
+      'Your installed Codex CLI does not support --approve-for-me. Update Codex and try again.',
+    ),
+    (
       'UNSUPPORTED',
       null,
-      'Update the harness CLI on this machine to create a harness',
+      'Update the harness CLI on this machine to start a harness',
     ),
     // Refused at the wire before any pane exists: a definite no, never
     // "check status".
@@ -112,7 +117,7 @@ void main() {
     (
       'INVALID_PROMPT',
       'prompt must be a string',
-      'Create harness failed: prompt must be a string',
+      'Could not start harness: prompt must be a string',
     ),
     (
       'PROMPT_UNSUPPORTED',
@@ -122,7 +127,7 @@ void main() {
     (
       'SPAWN_FAILED',
       'The machine could not allocate an agent process.',
-      'Test host has not confirmed the new agent yet. Check status before creating another.',
+      'Test host has not confirmed the new harness yet. Check status before starting another.',
     ),
   ]) {
     test(
@@ -198,7 +203,7 @@ void main() {
       connection.reply.completeError(const WsRequestTimeout('agent_create'));
       expect(
         await creation,
-        'Test host has not confirmed the new agent yet. Check status before creating another.',
+        'Test host has not confirmed the new harness yet. Check status before starting another.',
       );
       expect(connection.calls, ['agent_create']);
       expect(app.panes, isEmpty);

@@ -311,7 +311,7 @@ void main() {
         );
         expect(
           await answered(() => Future.error(StateError('socket closed'))),
-          'Install failed on Test host',
+          'Lost the connection to Test host while installing — it may still be finishing there. Try again in a moment.',
         );
         expect(catalog.installs['autonomous/typst']!.failed, isTrue);
         expect(
@@ -323,7 +323,7 @@ void main() {
     );
   });
 
-  testWidgets('Store Get, Open and Remove use only the local daemon', (
+  testWidgets('Store Get, New Harness and Remove use the local daemon', (
     tester,
   ) async {
     tester.view.devicePixelRatio = 1;
@@ -406,7 +406,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('store-primary-action')),
-        matching: find.text('Open'),
+        matching: find.text('New Harness'),
       ),
       findsOneWidget,
     );

@@ -1,7 +1,7 @@
 // How the wheel's rows are composed: the local row, and the fleet's rows around it.
 import { describe, expect, it, vi } from 'vitest'
 
-import { DaemonCableHost, type CableHostWiring } from './cableHost.js'
+import { DaemonCableHost, cableEventFor, type CableHostWiring } from './cableHost.js'
 import type { FleetMachine, MachineFleet } from './machineFleet.js'
 
 const AGENTS: Array<{ agentId: string; registeredAt: number; active: boolean; terminalAvailable: boolean; engine: string }> = []
@@ -48,7 +48,7 @@ const REMOTE: FleetMachine = { machineId: 'other', name: 'office-imac', state: '
 
 /** The window, open on one tab that holds these panes in this order. */
 function onTab(host: DaemonCableHost, agentIds: string[], id = 't1'): void {
-  host.setSwarms({ active: id, swarms: [{ id, name: 'Tab', agentIds }] })
+  host.setSwarms({ active: id, swarms: [{ id, name: 'Tab', agentIds, panes: agentIds.length }] })
   host.setDesk(agentIds)
 }
 
@@ -246,12 +246,22 @@ describe('DaemonCableHost.listAgentsFlat across machines, and the tab the dial g
     expect(agents.map((a) => a.machineId)).toEqual(['mine', 'other', 'third'])
   })
 
-  it('never lists a terminal — a shell with nobody in it is not something the dial can drive', async () => {
+  it('lists a terminal beside the agents, and says it is one', async () => {
+    // It used to be left out, on the reading that the dial drives agents and a shell has no turn to
+    // drive. But the window draws a shell as a tile like any other, so leaving it out gave the dial
+    // a desk with a hole in it — a pane the carousel could not walk to and could not explain. It is
+    // listed now, and `engine` is how the tile knows to wear a prompt instead of a product mark and
+    // to offer no Voice; the same row is reported as `claude` the moment one is typed into it.
     AGENTS.length = 0
     AGENTS.push({ agentId: 'term-1', registeredAt: 1, active: true, terminalAvailable: true, engine: 'terminal' })
     AGENTS.push({ agentId: 'local-1', registeredAt: 2, active: true, terminalAvailable: true, engine: 'claude' })
     const host = new DaemonCableHost(wiring(), crossFleet({}, []))
-    expect((await settled(host)).map((a) => a.id)).toEqual(['local-1'])
+    const agents = await settled(host)
+    expect(agents.map((a) => a.id)).toEqual(['term-1', 'local-1'])
+    expect(agents.map((a) => a.engine)).toEqual(['terminal', 'claude'])
+    // …and the overview's number is not the list's length. The carousel carries the shell because it
+    // is a tile; "N agents · all idle" counts work in flight, which a shell has none of.
+    expect(host.agentTotal()).toBe(1)
   })
 
   it('keeps a machine\'s agents when the backend cannot be asked', async () => {
@@ -360,7 +370,10 @@ describe('DaemonCableHost.listAgentsFlat across machines, and the tab the dial g
     host.noteAgent('other', 'r9')
     expect(host.describe('r9')).toEqual({ name: '', engine: '', machine: 'office-imac' })
     host.openAgent('r9')
-    expect(opened).toHaveBeenCalledWith('other', 'r9')
+    expect(opened).toHaveBeenCalledWith('other', 'r9', undefined)
+    // A question screen's own open says so, and the window hears it.
+    host.openAgent('r9', 'question')
+    expect(opened).toHaveBeenLastCalledWith('other', 'r9', 'question')
   })
 
   it('forks a local agent through the daemon and opens the fork in the window', async () => {
@@ -600,5 +613,48 @@ describe('DaemonCableHost.listAgentsFlat across machines, and the tab the dial g
     const host = new DaemonCableHost(wiring(), fleet)
     expect(await settled(host)).toEqual([])
     expect(fleet.listAgents).not.toHaveBeenCalled()
+  })
+})
+
+describe('DaemonCableHost.listSwarms', () => {
+  // The bug this pair exists for: a tab holding only a shell drives no agent, so it named none, and
+  // the dial's switcher — which had nothing else to go on — dropped it. You could see that tab while
+  // standing on it and never reach it again once you left (openharness#160).
+  it('reports a tab that holds only a terminal as having a tile, not as empty', () => {
+    const host = new DaemonCableHost(wiring(), fleetOf([]))
+    host.setSwarms({
+      active: 'work',
+      swarms: [
+        { id: 'work', name: 'harness-1', agentIds: ['a1'], panes: 1 },
+        { id: 'shell', name: 'harness-2', agentIds: [], panes: 1 },
+        { id: 'fresh', name: 'New Harness', agentIds: [], panes: 0 },
+      ],
+    })
+    expect(host.listSwarms()).toEqual({
+      selected: 'work',
+      swarms: [
+        { id: 'work', name: 'harness-1', agents: 1, panes: 1 },
+        // No agents and still a place to go: this is the row that used to disappear.
+        { id: 'shell', name: 'harness-2', agents: 0, panes: 1 },
+        // Nothing on it at all — still nothing the dial can offer, which was always the intent.
+        { id: 'fresh', name: 'New Harness', agents: 0, panes: 0 },
+      ],
+    })
+  })
+
+  it('says nothing at all while no window is connected', () => {
+    const host = new DaemonCableHost(wiring(), fleetOf([]))
+    host.setSwarms(null)
+    expect(host.listSwarms()).toEqual({ selected: '', swarms: [] })
+  })
+})
+
+describe('cableEventFor', () => {
+  it('carries whether the card is a sub-agent\'s turn end, and nothing else about it', () => {
+    const base = { type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'body', recap: 'recap' } }
+    expect(cableEventFor(base)).toEqual({ kind: 'summary', agentId: 'a1', text: 'body', recap: 'recap', subagent: false })
+    expect(cableEventFor({ ...base, payload: { ...base.payload, subagent: true } })?.subagent).toBe(true)
+    expect(cableEventFor({ ...base, payload: { ...base.payload, subagent: 'yes' } })?.subagent).toBe(false)
+    expect(cableEventFor({ ...base, payload: { kind: 'tool', text: 'Bash' } })).toBeNull()
   })
 })

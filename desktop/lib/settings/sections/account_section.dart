@@ -22,7 +22,7 @@ class AccountSection extends StatelessWidget {
             ? 'Connected to a local development session.'
             : localMode
             ? 'This computer runs without an account. Sign in to reach other machines.'
-            : 'Your OpenHarness sign-in on this computer.',
+            : 'Your Harness sign-in on this computer.',
         child: SingleChildScrollView(
           child: SettingRow(
             title:

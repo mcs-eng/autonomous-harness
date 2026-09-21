@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -31,6 +32,9 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
   WslPreferencesStore get _wslPreferences =>
       widget.wslPreferences ?? wslPreferencesStore;
   String? _copied;
+  String? _copyError;
+  var _copyRevision = 0;
+  Timer? _copyTimer;
   final _scroll = ScrollController();
   final _primaryFocus = FocusNode(debugLabel: 'Setup action');
   final _bodyFocus = FocusNode(
@@ -44,6 +48,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
 
   @override
   void dispose() {
+    _copyTimer?.cancel();
     _scroll.dispose();
     _primaryFocus.dispose();
     _bodyFocus.dispose();
@@ -52,12 +57,28 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
   }
 
   Future<void> _copy(String value) async {
-    await Clipboard.setData(ClipboardData(text: value));
-    if (!mounted) return;
-    setState(() => _copied = value);
-    Future<void>.delayed(const Duration(milliseconds: 1400), () {
-      if (mounted && _copied == value) setState(() => _copied = null);
-    });
+    final revision = ++_copyRevision;
+    _copyTimer?.cancel();
+    try {
+      await Clipboard.setData(ClipboardData(text: value));
+      if (!mounted || revision != _copyRevision) return;
+      setState(() {
+        _copied = value;
+        _copyError = null;
+      });
+      _copyTimer = Timer(const Duration(milliseconds: 1400), () {
+        if (mounted && revision == _copyRevision) {
+          setState(() => _copied = null);
+        }
+      });
+    } catch (_) {
+      if (!mounted || revision != _copyRevision) return;
+      setState(() {
+        _copied = null;
+        _copyError =
+            'Could not copy. Select the text to copy it, or try again.';
+      });
+    }
   }
 
   @override
@@ -222,7 +243,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
       _heading(
         'Getting started',
         'Checking this computer',
-        'Checking the tools OpenHarness needs to run your agents.',
+        'Checking the tools Harness needs to run your agents.',
       ),
       _checkList(state, checking: true),
     ],
@@ -243,8 +264,8 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
           count == 0
               ? 'Your tools are ready. Verify them to continue.'
               : count == 1
-              ? 'Install this tool, then sign in to start your first agent.'
-              : 'Install these $countLabel, then sign in to start your first agent.',
+              ? 'Install this tool, then sign in to start your first harness.'
+              : 'Install these $countLabel, then sign in to start your first harness.',
         ),
         Row(
           children: [
@@ -275,7 +296,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
             _notice(
               Icons.terminal,
               'Admin prompts stay in Terminal',
-              'Complete any installation prompts there, then return to OpenHarness.',
+              'Complete any installation prompts there, then return to Harness.',
             ),
             const SizedBox(height: 16),
           ],
@@ -301,8 +322,8 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
       if (state.phase == EnvironmentSetupPhase.waitingForTerminal)
         _notice(
           Icons.lock_outline,
-          'OpenHarness cannot see your password',
-          'Finish the prompts in Terminal, then return here. OpenHarness checks progress automatically.',
+          'Harness cannot see your password',
+          'Finish the prompts in Terminal, then return here. Harness checks progress automatically.',
         ),
       const SizedBox(height: 18),
       _checkList(state, checking: true),
@@ -340,7 +361,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
       _heading(
         'Setup complete',
         'This computer is ready',
-        'Every required command passed. Continue to OpenHarness sign-in.',
+        'Every required command passed. Continue to Harness sign-in.',
       ),
       _checkList(state),
     ],
@@ -370,7 +391,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
             checking:
                 checking && state.phase == EnvironmentSetupPhase.preflight,
           ),
-        const _CheckSectionLabel('OpenHarness components'),
+        const _CheckSectionLabel('Harness components'),
         _CheckRow(
           label: 'Managed Node 20+ & Harness CLI',
           detail: '~/.harness/runtime · harness version',
@@ -428,6 +449,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
               leading: CircleAvatar(
                 radius: 14,
                 backgroundColor: AppColors.hover,
+                foregroundColor: AppColors.text,
                 child: Text(
                   '${index + 1}',
                   style: const TextStyle(fontSize: 11),
@@ -619,7 +641,10 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
             : widget.notifier.startEnvironmentSetup;
       case EnvironmentSetupPhase.failed:
         label = state.windowsHost ? 'Recheck' : 'Retry';
-        action = manual || state.windowsHost
+        action =
+            manual ||
+                state.windowsHost ||
+                !widget.notifier.environmentInstallRequested
             ? widget.notifier.retryEnvironmentSetup
             : widget.notifier.startEnvironmentSetup;
       case EnvironmentSetupPhase.ready:
@@ -674,9 +699,15 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
           ),
       ],
     );
-    final next = Text(
-      'Next: sign in and start a harness.',
-      style: TextStyle(color: AppColors.textSoft, fontSize: 11),
+    final next = Semantics(
+      liveRegion: _copyError != null,
+      child: Text(
+        _copyError ?? 'Next: sign in and start a harness.',
+        style: TextStyle(
+          color: _copyError == null ? AppColors.textSoft : AppColors.danger,
+          fontSize: 11,
+        ),
+      ),
     );
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),

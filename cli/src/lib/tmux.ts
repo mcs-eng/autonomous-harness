@@ -14,7 +14,7 @@ import {
   executableFileIdentity,
   type AgentCommandOwnershipSnapshot,
 } from './engineBin.js'
-import { BYPASS_PERMISSION_FLAGS } from './engineLaunch.js'
+import { BYPASS_PERMISSION_FLAGS, PERMISSION_MODES, permissionModeApproves } from './engineLaunch.js'
 import { psEnv } from './childLocale.js'
 
 function cleanPaneTitle(title: string): string | null {
@@ -427,8 +427,24 @@ function readProcField(pid: number, field: 'cmdline' | 'comm'): string | null {
   try { return readFileSync(`/proc/${pid}/${field}`, 'utf8') } catch { return null }
 }
 
+/**
+ * A `ps` that is already running answers everyone who asks while it runs. The first reconcile pass
+ * after a boot attaches a few agents at once and every attach validates its pane against the table,
+ * as does each hook that arrives in the same burst — one table serves them all. There is no cache,
+ * only the read in flight: the oldest table anyone is handed began a `ps` ago (tens of ms), never
+ * one that finished before they asked. Callers get the SAME array; none of them mutates it (every
+ * consumer maps or filters into its own), and any new one must not either.
+ */
+let processRowsInFlight: Promise<ProcessRow[] | null> | null = null
+
 /** The process table, or null when `ps` itself failed — "we could not look" is not "nothing is there". */
-export async function processRows(): Promise<ProcessRow[] | null> {
+export function processRows(): Promise<ProcessRow[] | null> {
+  if (processRowsInFlight) return processRowsInFlight
+  processRowsInFlight = readProcessRows().finally(() => { processRowsInFlight = null })
+  return processRowsInFlight
+}
+
+async function readProcessRows(): Promise<ProcessRow[] | null> {
   const rows = await new Promise<ProcessRow[] | null>((resolve) => {
     execFile('ps', ['-axo', 'pid=,ppid=,comm=,lstart=,args='], { timeout: 3000, env: psEnv() }, (err, stdout) => {
       if (err) { resolve(null); return }
@@ -796,15 +812,23 @@ function selectEngineProcess(
  * SessionStart hook fires for a NEW session, so a pane that reattached to an old one is invisible to the
  * daemon until the user happens to type. Read from each CLI's own `--help` on 2026-08-03.
  *
- * Two deliberate holes:
- *   - `--continue` / `-c` carries NO id on any of these CLIs. Nothing can be recovered from argv there.
- *   - claude and codex are absent: `registry.register` demands a transcript path for those two, which
- *     argv does not carry — and both DO fire SessionStart on resume, so there is nothing to repair.
+ * One deliberate hole: `--continue` / `-c` carries NO id on any of these CLIs. Nothing can be
+ * recovered from argv there.
+ *
+ * claude and codex DO fire SessionStart on resume, so their argv is normally redundant — but a hook
+ * only helps a daemon that was listening for it. An agent whose SessionStart landed while the daemon
+ * could not see its pane (a session named by an older build, before the `harness-` whitelist) sits
+ * with no session until the user types again, and cannot be forked meanwhile. Their ids are read
+ * here for that case; `registry.register` still demands the transcript, which sessionRepair's
+ * `findResumedTranscript` derives from the id. `--fork-session` (claude) writes a NEW session, so
+ * that argv names the PARENT and must not bind — `codex fork <id>` never matched `resume` to begin with.
  *
  * The id pattern is a filter, not decoration: `-r` on Command Code takes "a name (use quotes for
  * multi-word names)", so a title would otherwise be registered as a session id.
  */
-const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]; id: RegExp }>> = {
+const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]; id: RegExp; unless?: string[] }>> = {
+  claude: { flags: ['--resume', '-r'], id: /^[0-9a-f-]{16,}$/i, unless: ['--fork-session'] },
+  codex: { flags: ['resume'], id: /^[0-9a-f-]{16,}$/i },
   cursor: { flags: ['--resume'], id: /^[0-9a-f-]{16,}$/i },
   opencode: { flags: ['--session', '-s'], id: /^ses_[A-Za-z0-9]+$/ },
   // Kilo inherits opencode's resume flags and its `ses_` id prefix — measured on this machine's kilo.db:
@@ -833,11 +857,12 @@ const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]
 
 /**
  * Whether a live process's argv already contains every flag this engine's confirmed bypass-permission
- * mode requires — read from the running process BEFORE restart signals it, so the relaunch can reapply
- * the exact autonomy mode the agent had (there is nowhere else to read it from once the process is
- * dead). Token-exact via `argvTokens`, not a substring `.includes()` check on the raw string, so a
- * prompt or argument that merely CONTAINS the flag text cannot false-positive. Engines with no
- * confirmed bypass flag (`BYPASS_PERMISSION_FLAGS[engine] === null`) always read false — never guess.
+ * mode requires. Discovery reads it off every running agent and keeps the registry row's
+ * `bypassPermission` in step with it, which is what a relaunch reads (a row written before the field
+ * existed learns it here). Token-exact via `argvTokens`, not a substring `.includes()` check on the raw
+ * string, so a prompt or argument that merely CONTAINS the flag text cannot false-positive. Engines
+ * with no confirmed bypass flag (`BYPASS_PERMISSION_FLAGS[engine] === null`) always read false — never
+ * guess.
  *
  * A bare `--` option terminator ends the option section in every engine's CLI grammar here:
  * everything after it is a POSITIONAL (prompt text, file names), however flag-shaped. Scanning
@@ -875,21 +900,50 @@ export function bypassPermissionActiveFromArgv(
   if (!flags) return false
   // Flattened `ps` args can never prove a bypass flag: refuse to persist state from them.
   if (!boundaryFaithful) return false
+  // A named mode says exactly how much the engine approves on its own (`full` — the old
+  // skip-everything flag — included); only an argv naming none falls back to the bare flag check.
   const tokens = argvTokens(args)
   const terminator = tokens.indexOf('--')
   const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
-  // The flags in order, as launch writes them (`--permission-mode auto` is two tokens, and "auto"
-  // alone elsewhere in argv is not the mode) — or `--flag=value` as one.
-  const inOrder = (want: readonly string[]): boolean => optionTokens.some((_, i) => want.every((flag, j) => optionTokens[i + j] === flag))
-    || (want.length === 2 && optionTokens.includes(`${want[0]}=${want[1]}`))
-  // An agent launched before the auto modes carried the old skip-everything flag; it still counts as
-  // approving on its own, and a relaunch brings it back in the auto mode.
-  return inOrder(flags) || (LEGACY_BYPASS_FLAGS[engine] ?? []).some((legacy) => inOrder(legacy))
+  const mode = permissionModeFromTokens(engine, optionTokens)
+  return mode ? permissionModeApproves(mode) : flagsInOrder(optionTokens, flags)
 }
 
-const LEGACY_BYPASS_FLAGS: Partial<Record<RegisteredSession['engine'], string[][]>> = {
-  claude: [['--dangerously-skip-permissions']],
-  codex: [['--dangerously-bypass-approvals-and-sandbox']],
+/**
+ * The permission mode a live process's argv names — the inverse of `permissionModeFlags`, so the row
+ * of an agent somebody typed into a terminal (or one written before modes were recorded) can carry
+ * the SAME mode a created one does, and a relaunch brings it back exactly: `--dangerously-skip-permissions`
+ * comes back as `--dangerously-skip-permissions`, not downgraded to the auto mode. Null when argv
+ * names no mode — which is not `ask` (a person picking Ask records it; an argv with no flag is just
+ * silent), so `bypassPermission` keeps deciding there as before. Token-exact like
+ * `bypassPermissionActive`; an engine with no mode table reads null.
+ */
+export function permissionModeFromArgv(engine: RegisteredSession['engine'], args: string): string | null {
+  // Like bypass detection, stop at a bare `--`: its tail is positional prompt text.
+  const tokens = argvTokens(args)
+  const terminator = tokens.indexOf('--')
+  return permissionModeFromTokens(engine, terminator === -1 ? tokens : tokens.slice(0, terminator))
+}
+
+function permissionModeFromTokens(engine: RegisteredSession['engine'], tokens: readonly string[]): string | null {
+  const modes = PERMISSION_MODES[engine]
+  if (!modes) return null
+  // `full` is checked ahead of the rest where the engine has it: its flag is a single token no other
+  // mode shares, and an argv carrying both it and `--permission-mode` is running without permissions
+  // whatever else it says. `ask` is empty and can never be "found".
+  const names = ['full', ...Object.keys(modes).filter((mode) => mode !== 'full')]
+  for (const mode of names) {
+    const flags = modes[mode]
+    if (flags?.length && flagsInOrder(tokens, flags)) return mode
+  }
+  return null
+}
+
+/** The flags in order, as launch writes them (`--permission-mode auto` is two tokens, and "auto"
+ *  alone elsewhere in argv is not the mode) — or `--flag=value` as one. */
+function flagsInOrder(tokens: readonly string[], want: readonly string[]): boolean {
+  return tokens.some((_, i) => want.every((flag, j) => tokens[i + j] === flag))
+    || (want.length === 2 && tokens.includes(`${want[0]}=${want[1]}`))
 }
 
 /**
@@ -955,6 +1009,7 @@ export function resumeSessionId(engine: RegisteredSession['engine'], args: strin
   const tokens = argvTokens(args)
   const terminator = tokens.indexOf('--')
   const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
+  if (spec.unless?.some((flag) => optionTokens.includes(flag))) return null
   for (let index = 0; index < optionTokens.length; index++) {
     const token = optionTokens[index]
     for (const flag of spec.flags) {
