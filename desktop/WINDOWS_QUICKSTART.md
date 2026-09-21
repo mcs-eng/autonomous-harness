@@ -147,8 +147,12 @@ of agent arguments. Two fork changes gave way to upstream's own versions: the
 compact pane-header menu and its header width rules. Continue working now sits
 inside upstream's start page instead of replacing it. The desktop updater stays
 off on Windows, local mode does not request the account desk, and the New Harness
-box treats agent folders as POSIX paths on a Windows host. This source change
-does not update an installed Preview 7 bundle.
+box treats agent folders as POSIX paths on a Windows host. When this computer's
+CLI runs in WSL, that box now completes folders and finds the home folder through
+the daemon, as it does for a remote machine; it no longer reads the Windows disk.
+With sessions to show, the start page gives Continue working the height that an
+empty page leaves above the search. This source change does not update an
+installed Preview 7 bundle.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.
