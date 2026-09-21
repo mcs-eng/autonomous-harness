@@ -148,16 +148,6 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                   ),
                 ),
                 Expanded(child: _projectList()),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    'Closing a view keeps its agent running.',
-                    style: TextStyle(
-                      color: grid.AppPalette.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                ),
               ],
             ],
           ),
@@ -222,22 +212,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
               padding: const EdgeInsets.only(left: 12, right: 8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (final location in projectLocations(group)) ...[
-                    _location(location),
-                    for (final agent in group.agents.where(
-                      (a) =>
-                          a.machineId == location.machineId &&
-                          a.project != null &&
-                          projectFolderPath(a.project!.cwd) == location.folder,
-                    ))
-                      _agent(agent),
-                  ],
-                  for (final agent in group.agents.where(
-                    (a) => a.project == null,
-                  ))
-                    _agent(agent),
-                ],
+                children: _groupSessions(group),
               ),
             ),
         ],
@@ -252,7 +227,36 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     );
   }
 
-  Widget _location(ProjectLocation location) {
+  List<Widget> _groupSessions(SwarmProjectGroup group) {
+    final locations = projectLocations(group);
+    final hosts = locations.map((item) => item.machineId).toSet();
+    return [
+      for (final location in locations) ...[
+        _location(
+          location,
+          showHost: hosts.length > 1,
+          showFolder:
+              locations.length > 1 ||
+              _folderBase(location.folder) != group.name,
+        ),
+        for (final agent in group.agents.where(
+          (a) =>
+              a.machineId == location.machineId &&
+              a.project != null &&
+              projectFolderPath(a.project!.cwd) == location.folder,
+        ))
+          _agent(agent),
+      ],
+      for (final agent in group.agents.where((a) => a.project == null))
+        _agent(agent),
+    ];
+  }
+
+  Widget _location(
+    ProjectLocation location, {
+    required bool showHost,
+    required bool showFolder,
+  }) {
     final machine = widget.app.stateOf(location.machineId);
     final available =
         machine != null &&
@@ -260,38 +264,44 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         machine.nodeOnline != false &&
         machine.connectionStatus == ConnectionStatus.connected;
     final host = widget.app.projectMachineLabel(location.machineId);
+    final where = '$host\n${location.folder}';
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 8, 0, 4),
       child: Row(
         children: [
-          Expanded(
-            child: Tooltip(
-              message: '$host\n${location.folder}',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    host,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: grid.AppPalette.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                  Text(
-                    location.folder,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: grid.AppPalette.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
+          if (showHost || showFolder)
+            Expanded(
+              child: Tooltip(
+                message: where,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (showHost)
+                      Text(
+                        host,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: grid.AppPalette.textSecondary,
+                          fontSize: 11,
+                        ),
+                      ),
+                    if (showFolder)
+                      Text(
+                        _folderBase(location.folder),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: grid.AppPalette.textSecondary,
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-          ),
+            )
+          else
+            const Spacer(),
           if (machine == null ||
               machine.needsLink ||
               machine.nodeOnline == false ||
@@ -323,6 +333,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     final branch = row.project?.branch;
     final detail =
         row.agent.launchDetail ?? row.agent.terminalUnavailableReason;
+    final shown = row.agent.displayName;
     final selected =
         widget.app.focusedPane?.machineId == row.machineId &&
         widget.app.focusedPane?.agentId == row.agent.id;
@@ -331,11 +342,17 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
       children: [
         SidebarItem(
           key: ValueKey('project-agent:${row.machineId}:${row.agent.id}'),
-          label: row.agent.name,
+          label: shown,
           selected: selected,
           leading: EngineMark.forAgent(row.agent, size: 16),
-          tooltip:
-              '${row.agent.name}\n$status${branch == null ? '' : ' · $branch'}\n${widget.app.projectMachineLabel(row.machineId)}\n${row.project?.cwd ?? 'Folder not reported'}${detail == null ? '' : '\n$detail'}',
+          tooltip: [
+            shown,
+            if (shown != row.agent.name) row.agent.name,
+            '$status${branch == null ? '' : ' · $branch'}',
+            widget.app.projectMachineLabel(row.machineId),
+            row.project?.cwd ?? 'Folder not reported',
+            ?detail,
+          ].join('\n'),
           onTap: () => _openOrExplain(row),
         ),
         Padding(
@@ -388,7 +405,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(
-          row?.agent.name ?? widget.app.projectMachineLabel(machineId),
+          row?.agent.displayName ?? widget.app.projectMachineLabel(machineId),
         ),
         content: SingleChildScrollView(
           child: Column(
@@ -428,4 +445,9 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     if (action == 'machines') setState(() => _machines = true);
     if (action == 'refresh') await widget.app.reloadMachineData(machineId);
   }
+}
+
+String _folderBase(String folder) {
+  final parts = folder.split(RegExp(r'[/\\]')).where((part) => part.isNotEmpty);
+  return parts.isEmpty ? folder : parts.last;
 }

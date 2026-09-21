@@ -86,7 +86,7 @@ describe('buildEngineLaunchArgv', () => {
       expect(result.out).toContain('args:a b --flag')
       expect(result.status).toBe(3)
       // No shell was handed over and no "this pane is a shell now" line was printed: no tty.
-      expect(result.out).not.toContain('This pane is a shell now')
+      expect(result.out).not.toContain('Type claude to start it again')
     })
     it('a command that does not exist still ends the pane with 127, so "not installed" stays a launch failure', () => {
       const argv = buildEngineLaunchArgv('claude', {}, '/bin/sh', undefined, undefined, NO_TMUX)
@@ -97,6 +97,9 @@ describe('buildEngineLaunchArgv', () => {
       expect(prelude).toContain(`[ -n "\${TMUX_PANE:-}" ] && '/opt/homebrew/bin/tmux' set-option -p -t "$TMUX_PANE" @harness_engine_exit "$harness_status"`)
       expect(prelude.indexOf('set-option')).toBeLessThan(prelude.indexOf("exec '/bin/bash'"))
       expect(prelude).toContain('if [ "$harness_status" -eq 127 ]; then exit 127; fi')
+      expect(prelude).toContain(
+        `Codex stopped ('"\$harness_status"'). Type codex to start it again, or close this pane.`,
+      )
       // zsh is a login shell; bash keeps its interactive rc (same rule as a terminal).
       expect(engineFallbackPrelude('codex', '/bin/zsh', null)).toContain("exec '/bin/zsh' -l\n")
       expect(engineFallbackPrelude('codex', '/bin/bash', null)).toContain("exec '/bin/bash'\n")

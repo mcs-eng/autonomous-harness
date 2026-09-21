@@ -28,7 +28,7 @@ String projectAgentStatus(AppNotifier app, SwarmAgentRef row) {
     return 'Needs input';
   }
   if (app.agentIsProcessing(row.machineId, row.agent.id)) return 'Working';
-  return 'Idle';
+  return 'Ready';
 }
 
 /// Opening is navigation, never agent creation. Reuse a view across all tabs,

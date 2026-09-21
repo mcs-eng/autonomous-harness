@@ -3,6 +3,7 @@ import { homedir, userInfo } from 'node:os'
 import { isAbsolute, basename, dirname, join } from 'node:path'
 import { isTerminalEngine, type AgentEngine } from '../engines/types.js'
 import { binaryOnPath, resolveBinaryOnPath } from './binaryOnPath.js'
+import { engineLabel } from './agentNames.js'
 import { engineBin } from './engineBin.js'
 import type { EngineInstallRecipe } from './engineInstall.js'
 import { GRID_NO_UPDATE_CHECK_VAR, gridBinaryPath } from './gridExec.js'
@@ -484,7 +485,7 @@ export function engineFallbackPrelude(engine: AgentEngine, shellPath: string, tm
     // Only a pane — something with a terminal on stdin — gets a shell to type into. Run without one
     // (a spec exercising the script, a wrapper piped somewhere) the engine's own status is the answer.
     + '  if ! [ -t 0 ]; then exit "$harness_status"; fi\n'
-    + `  printf '\\n%s\\n' ${shellSingleQuote(`harness: ${command} exited ($harness_status). This pane is a shell now — run ${command} again, or stop the pane.`).replace('($harness_status)', `('"$harness_status"')`)}\n`
+    + `  printf '\\n%s\\n' ${shellSingleQuote(`${engineLabel(engine)} stopped ($harness_status). Type ${command} to start it again, or close this pane.`).replace('($harness_status)', `('"$harness_status"')`)}\n`
     + `  exec ${shellSingleQuote(shellPath)}${loginArgs}\n`
     + '}\n'
 }

@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
 import '../clipboard/native_clipboard.dart';
+import '../core/project_folder.dart';
 import '../state/app_state.dart';
 
 import 'agent_drag.dart';
@@ -1801,6 +1802,9 @@ class _TerminalHeader extends StatelessWidget {
             .where((part) => part.isNotEmpty)
             .lastOrNull ??
         project?.name;
+    final visibleFolder = folder != null && !isGeneratedWorkFolder(folder)
+        ? folder
+        : null;
     // A fork says so first: "forked from X" is the one fact about this pane
     // that the folder and the branch — shared with its source — cannot tell.
     final forkedFrom = agent?.forkedFrom;
@@ -2040,7 +2044,7 @@ class _TerminalHeader extends StatelessWidget {
                           size: narrow ? 11 : 12,
                           contextData: PromptContext(
                             machine: machineName,
-                            project: narrow ? null : folder,
+                            project: narrow ? null : visibleFolder,
                             branch: narrow ? null : project?.branch,
                             leading: !narrow && forkedFrom != null
                                 ? 'forked from ${forkedFrom.name}'

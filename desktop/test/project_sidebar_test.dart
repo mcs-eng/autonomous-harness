@@ -271,6 +271,39 @@ void main() {
     },
   );
 
+  testWidgets(
+    'generated folders and clock names stay out of the session list',
+    (tester) async {
+      final app = projectApp();
+      addTearDown(app.dispose);
+      final host = app.machineStates['m']!
+        ..nodeOnline = true
+        ..connectionStatus = ConnectionStatus.connected;
+      host.agents = const [
+        Agent(
+          id: 'grid',
+          name: 'Grid harness 9-21 16:20',
+          engine: 'codex',
+          dshName: 'Grid',
+          terminalAvailable: true,
+        ),
+      ];
+      host.localProjects = const {
+        'grid': AgentProject(name: 'agent-3', cwd: '/root/harnesses/agent-3'),
+      };
+      await mountSidebar(tester, app);
+      expect(find.text('Grid'), findsOneWidget);
+      expect(find.text('Ready'), findsOneWidget);
+      expect(find.text('Grid harness 9-21 16:20'), findsNothing);
+      expect(find.text('/root/harnesses/agent-3'), findsNothing);
+      expect(
+        find.text('Closing a view keeps its agent running.'),
+        findsNothing,
+      );
+      expect(projectAgentStatus(app, swarmAgents(app).single), 'Ready');
+    },
+  );
+
   test('failed and starting launches never report idle', () {
     final app = projectApp();
     addTearDown(app.dispose);

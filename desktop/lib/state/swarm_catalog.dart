@@ -31,6 +31,7 @@ class SwarmAgentRef {
   AgentProject? get project => machine.projectOf(agent);
   String get searchText => [
     agent.displayName,
+    agent.name,
     agent.engine,
     machine.machine.displayName,
     project?.name,

@@ -31,7 +31,18 @@ void main() {
     () {
       const agent = Agent(id: 'a0', name: automaticName, engine: 'codex');
       expect(agent.name, automaticName);
-      expect(agent.displayName, 'Untitled Pane');
+      expect(agent.displayName, 'Codex');
+      expect(
+        const Agent(
+          id: 'a0',
+          name: automaticName,
+          title: automaticName,
+          engine: 'codex',
+          dsh: 'autonomous/grid',
+          dshName: 'Grid',
+        ).displayName,
+        'Grid',
+      );
       expect(
         const Agent(
           id: 'a0',
@@ -63,7 +74,7 @@ void main() {
       ),
     ];
     await app.addAgentToSwarm('m', 'a0');
-    expect(app.activeSwarm.name, 'Untitled Tab');
+    expect(app.activeSwarm.name, 'Codex');
     expect(app.activeSwarm.nameIsCustom, isFalse);
     await sessionTitle(app, 'Review API changes');
     expect(app.activeSwarm.name, 'Review API changes');

@@ -56,6 +56,12 @@ void main() {
       'text-to-cad-2026-12-25-00-00-09',
     );
     expect(projectFolderName('***', at), 'harness-2026-12-25-00-00');
+    expect(isGeneratedWorkFolder('/root/harnesses/agent-3'), isTrue);
+    expect(
+      isGeneratedWorkFolder('/root/harnesses/hermes-2026-09-21-16-20'),
+      isTrue,
+    );
+    expect(isGeneratedWorkFolder('/work/notebook'), isFalse);
   });
   test('long suggested names preserve the timestamp through remote name limits and collisions', () {
     final request = ProjectFolderRequest.generated(

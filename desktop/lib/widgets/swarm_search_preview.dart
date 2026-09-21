@@ -295,7 +295,7 @@ class _AgentPreview extends StatelessWidget {
         ? 'Needs you'
         : working
         ? 'Working'
-        : 'Idle';
+        : 'Ready';
     final color = offline
         ? Colors.white54
         : waiting != null
