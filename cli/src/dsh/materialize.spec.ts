@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import type { InstalledDsh } from './installed.js'
 import { parseDshManifest, readDshManifest } from './manifest.js'
 import { dshMarkerLine, materializeWorkspace, resolveDshCommand, skillDirsIn } from './materialize.js'
+import { KILL_GRACE_MS } from './shell.js'
 
 const STARTER = realpathSync(fileURLToPath(new URL('../../../store/starter', import.meta.url)))
 
@@ -204,7 +205,11 @@ describe('materializeWorkspace, on harnesses other than the starter', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const slow = install({ engine: 'codex', workspace: { marker: 'done', init: 'sleep 30' } })
     const pending = materializeWorkspace(slow, workspace)
-    vi.advanceTimersByTime(5 * 60_000)
+    // Through the SIGTERM and the SIGKILL that follows it. The init runs in the user's interactive
+    // shell, which ignores SIGTERM until the script's own trap is in place (DSH_STOP_TRAP): a shell
+    // still reading its rc files when the TERM lands — which is where it is, microseconds after
+    // spawn — is only ever stopped by the KILL.
+    vi.advanceTimersByTime(5 * 60_000 + KILL_GRACE_MS)
     const result = await pending
     expect(result.warnings).toEqual(['init exited by timeout'])
   })

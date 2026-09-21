@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
@@ -19,7 +19,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const { managedNodePath } = await import('../lib/nodeRuntime.js')
-const { dshNodeFallback, dshShellArgv, isShellNoise, killProcessGroup, runDshCommand, spawnDshCommand } = await import('./shell.js')
+const { DSH_STOP_TRAP, dshNodeFallback, dshShellArgv, isShellNoise, killProcessGroup, runDshCommand, spawnDshCommand } = await import('./shell.js')
 
 describe('dshShellArgv', () => {
   const original = process.env.SHELL
@@ -27,15 +27,15 @@ describe('dshShellArgv', () => {
 
   it('runs a bash user\'s setup and doctor as a LOGIN shell, where .bash_profile (and nvm) live', () => {
     process.env.SHELL = '/bin/bash'
-    expect(dshShellArgv('./doctor.sh')).toEqual({ path: '/bin/bash', args: ['-lic', `${dshNodeFallback()}\n./doctor.sh`] })
+    expect(dshShellArgv('./doctor.sh')).toEqual({ path: '/bin/bash', args: ['-lic', `${DSH_STOP_TRAP}\n${dshNodeFallback()}\n./doctor.sh`] })
   })
 
   it('keeps zsh as it already was', () => {
     process.env.SHELL = '/bin/zsh'
-    expect(dshShellArgv('./doctor.sh')).toEqual({ path: '/bin/zsh', args: ['-lic', `${dshNodeFallback()}\n./doctor.sh`] })
+    expect(dshShellArgv('./doctor.sh')).toEqual({ path: '/bin/zsh', args: ['-lic', `${DSH_STOP_TRAP}\n${dshNodeFallback()}\n./doctor.sh`] })
   })
 
-  it('falls back to /bin/sh -c when no user shell is known', () => {
+  it('falls back to /bin/sh -c, with no trap, when no user shell is known', () => {
     seams.sh = true
     try {
       expect(dshShellArgv('./doctor.sh')).toEqual({ path: '/bin/sh', args: ['-c', `${dshNodeFallback()}\n./doctor.sh`] })
@@ -77,6 +77,63 @@ describe('isShellNoise', () => {
     expect(isShellNoise("(eval):3: can't change option: zle")).toBe(true)
     expect(isShellNoise('ok   zle is a word a doctor might print')).toBe(false)
   })
+
+  it('drops what an interactive bash says without a terminal, and nothing a doctor would', () => {
+    expect(isShellNoise('bash: cannot set terminal process group (-1): Inappropriate ioctl for device')).toBe(true)
+    expect(isShellNoise('bash: cannot set terminal process group (5954): Inappropriate ioctl for device')).toBe(true)
+    expect(isShellNoise('bash: no job control in this shell')).toBe(true)
+    expect(isShellNoise('bash: [7146: 2 (255)] tcsetattr: Inappropriate ioctl for device')).toBe(true)
+    expect(isShellNoise('logout')).toBe(true)
+    expect(isShellNoise('exit')).toBe(true)
+    expect(isShellNoise('logout', 'stderr')).toBe(true)
+    expect(isShellNoise('exit', 'stderr')).toBe(true)
+    // bash writes the echo to stderr; a doctor's own stdout line that happens to read `exit` stays
+    expect(isShellNoise('logout', 'stdout')).toBe(false)
+    expect(isShellNoise('exit', 'stdout')).toBe(false)
+    expect(isShellNoise('bash: no job control in this shell', 'stdout')).toBe(true)
+    expect(isShellNoise('miss bash: no job control is not what this doctor checks')).toBe(false)
+    expect(isShellNoise('exit code was 3')).toBe(false)
+    expect(isShellNoise('bash: line 3: kicad-cli: command not found')).toBe(false)
+  })
+})
+
+/**
+ * The daemon's own situation whenever it was not started from a terminal, and the hosted CI runner's:
+ * SHELL is /bin/bash and there is no tty. Real bash, real rc files — the same exposure command.spec.ts
+ * and materialize.spec.ts already have, pinned here at the seam that owns it.
+ */
+describe('runDshCommand in an interactive login bash with no terminal', () => {
+  const original = process.env.SHELL
+  let dir: string
+  beforeEach(() => {
+    process.env.SHELL = '/bin/bash'
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-bash-')))
+  })
+  afterEach(() => {
+    if (original === undefined) delete process.env.SHELL; else process.env.SHELL = original
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it.runIf(existsSync('/bin/bash'))('reports the script\'s lines and exit, and nothing the shell says about itself', async () => {
+    const result = await runDshCommand('echo one; echo two >&2; exit 3', { cwd: dir })
+    expect(result).toMatchObject({ code: 3, signal: null, timedOut: false })
+    expect(result.lines.toSorted()).toEqual(['one', 'two'])
+  })
+
+  it.runIf(existsSync('/bin/bash'))('keeps a doctor\'s own stdout `exit` while dropping the shell\'s stderr echo of it', async () => {
+    const result = await runDshCommand('echo exit; echo logout; exit 1', { cwd: dir })
+    expect(result).toMatchObject({ code: 1, signal: null, timedOut: false })
+    expect(result.lines).toEqual(['exit', 'logout'])
+  })
+
+  it.runIf(existsSync('/bin/bash'))('a timeout ends the script, not only the command that was running', async () => {
+    // Before the trap, SIGTERM ended the sleep and the shell went on to print `after`. When the TERM
+    // lands while bash is still in its rc files it is ignored and the SIGKILL after the grace period
+    // ends the shell instead — later, but with the same result.
+    const result = await runDshCommand('echo started; sleep 30; echo after', { cwd: dir, timeoutMs: 500 })
+    expect(result.timedOut).toBe(true)
+    expect(result.lines).not.toContain('after')
+  }, 15_000)
 })
 
 describe('runDshCommand', () => {

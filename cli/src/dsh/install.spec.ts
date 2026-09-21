@@ -9,6 +9,7 @@ import { env } from '../config/env.js'
 import { DOCTOR_TIMEOUT_MS, installDsh, removeDsh, resolveInstallSource, runDshDoctor, type DshInstallProgress } from './install.js'
 import { dshInstallDir, installedDsh, invalidateInstalledDsh, listInstalledDsh, readInstalledIndex, type InstalledDsh } from './installed.js'
 import { HARNESS_MONOREPO, type DshRegistryEntry } from './registry.js'
+import { KILL_GRACE_MS } from './shell.js'
 
 function gitRepo(dir: string, files: Record<string, string>): string {
   mkdirSync(dir, { recursive: true })
@@ -463,9 +464,12 @@ describe('installDsh, every way it can go', () => {
       const slow: InstalledDsh = { ...base, manifest: { ...none.manifest, toolchain: { doctor: 'echo "ok   started"; sleep 30' } } }
       const said = 'miss doctor still running after 5 min — stopped; run `harness dsh doctor acme/thing` again'
       const seen: string[] = []
+      // Through the SIGTERM and the SIGKILL after it: the doctor's interactive shell ignores SIGTERM
+      // until its own trap is in place (DSH_STOP_TRAP in shell.ts), and a shell still reading its rc
+      // files when the TERM lands is only ever stopped by the KILL.
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       const pending = runDshDoctor(slow, (line) => seen.push(line))
-      vi.advanceTimersByTime(DOCTOR_TIMEOUT_MS)
+      vi.advanceTimersByTime(DOCTOR_TIMEOUT_MS + KILL_GRACE_MS)
       vi.useRealTimers()
       const result = await pending
       expect(result.ok).toBe(false)
@@ -474,7 +478,7 @@ describe('installDsh, every way it can go', () => {
       // and with no one listening for lines
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       const quiet = runDshDoctor(slow)
-      vi.advanceTimersByTime(DOCTOR_TIMEOUT_MS)
+      vi.advanceTimersByTime(DOCTOR_TIMEOUT_MS + KILL_GRACE_MS)
       vi.useRealTimers()
       expect((await quiet).lines.at(-1)).toBe(said)
     })

@@ -58,6 +58,10 @@ Store's listed/unlisted distinction. Withdrawn experimental presets stay hidden;
 existing installed workspaces are retained. Jev Sheets and the Isolated Web Viewer
 are the new listed packages in the bundled catalog. Their own setup and account
 requirements still apply; inclusion in the catalog is not live qualification.
+The next preview's CLI also stops showing bash's own `no job control` and `logout`
+lines in package doctor and setup output when the daemon runs without a terminal,
+as it does under WSL, and a timed-out doctor, setup, or workspace init now ends the
+whole script rather than only the command that was running.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.

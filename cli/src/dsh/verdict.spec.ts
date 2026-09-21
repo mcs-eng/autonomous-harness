@@ -174,8 +174,11 @@ describe('DshVerdictWatcher, event by event', () => {
         listener = (name, at) => { if (name === event && at === path) resolve(true) }
         inner.on('all', listener)
       })
-      // a change within the same millisecond as the last one can read as no change at all
-      await settle(20)
+      // chokidar reports at most one change per path per 50 ms (`_emit` in chokidar/index.js drops
+      // the rest rather than deferring them), so the next write has to clear that window to be
+      // reported at all; 20 ms was inside it, and the second write of a burst went unseen. Still well
+      // inside the watcher's 150 ms debounce, which is what the burst below is about.
+      await settle(60)
       act()
       const seenIt = await Promise.race([landed, settle(3_000).then(() => false)])
       inner.off('all', listener)
