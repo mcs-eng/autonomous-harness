@@ -211,19 +211,6 @@ final _automaticHarnessName = RegExp(
 bool isAutomaticHarnessName(String name) =>
     _automaticHarnessName.hasMatch(name);
 
-/// The readable half of a name Harness invented: "Codex" from
-/// "Codex harness 9-20 9:15", "Harness" from "harness-12".
-String friendlyAutomaticLabel(String name) {
-  final timed = RegExp(
-    r'^(.+?) harness \d{1,2}-\d{1,2} \d{1,2}:\d{2}(?::\d{2})?$',
-  ).firstMatch(name);
-  final label = timed?.group(1)?.trim();
-  if (label != null && label.isNotEmpty) return label;
-  if (RegExp(r'^agent-[1-9]\d*$').hasMatch(name)) return 'Agent';
-  if (RegExp(r'^harness-[1-9]\d*$').hasMatch(name)) return 'Harness';
-  return name;
-}
-
 class Agent {
   final String id;
   final String? sessionId;
@@ -343,24 +330,10 @@ class Agent {
 
   bool get isStopped => status == 'stopped';
 
-  /// Explicit names win. A clock-stamp Harness invented gives way to the
-  /// session title, then to the harness or engine ("Grid", "Codex").
-  String get displayName {
-    if (!isAutomaticHarnessName(name)) return name;
-    final titled = title?.trim();
-    if (titled != null &&
-        titled.isNotEmpty &&
-        !isAutomaticHarnessName(titled)) {
-      return titled;
-    }
-    final identity = identityDisplayName?.trim();
-    if (identity != null &&
-        identity.isNotEmpty &&
-        !isAutomaticHarnessName(identity)) {
-      return identity;
-    }
-    return friendlyAutomaticLabel(name);
-  }
+  /// Explicit names win. An automatic CLI label gives way to its session title.
+  String get displayName => _automaticHarnessName.hasMatch(name)
+      ? (title?.trim().isNotEmpty == true ? title!.trim() : kUntitledPane)
+      : name;
 
   /// The engines whose sessions can be forked — natively (Claude Code's
   /// `--fork-session`, `codex fork`) or by a handoff message (OpenCode takes a

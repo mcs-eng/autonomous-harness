@@ -62,6 +62,22 @@ void main() {
       isTrue,
     );
     expect(isGeneratedWorkFolder('/work/notebook'), isFalse);
+    // Windows and WSL share paths name the same folders.
+    expect(
+      isGeneratedWorkFolder(r'C:\Users\dev\harnesses\codex-2026-09-21-16-20'),
+      isTrue,
+    );
+    expect(isGeneratedWorkFolder(r'C:\work\agent-3\'), isTrue);
+    expect(
+      isGeneratedWorkFolder(r'\\wsl$\Ubuntu\home\dev\harnesses\agent-3'),
+      isTrue,
+    );
+    expect(isGeneratedWorkFolder(r'\\wsl$\Ubuntu\home\dev\notebook'), isFalse);
+    // Names a person chose stay on screen.
+    for (final name in ['agent-smith', 'project-2', '2026-report']) {
+      expect(isGeneratedWorkFolder('/work/$name'), isFalse, reason: name);
+      expect(isGeneratedWorkFolder(r'C:\work\' + name), isFalse, reason: name);
+    }
   });
   test('long suggested names preserve the timestamp through remote name limits and collisions', () {
     final request = ProjectFolderRequest.generated(

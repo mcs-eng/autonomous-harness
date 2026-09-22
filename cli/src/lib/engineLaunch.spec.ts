@@ -85,7 +85,7 @@ describe('buildEngineLaunchArgv', () => {
       const result = run(script)
       expect(result.out).toContain('args:a b --flag')
       expect(result.status).toBe(3)
-      // No shell was handed over and no "this pane is a shell now" line was printed: no tty.
+      // No shell was handed over and no "Claude stopped … start it again" line was printed: no tty.
       expect(result.out).not.toContain('Type claude to start it again')
     })
     it('a command that does not exist still ends the pane with 127, so "not installed" stays a launch failure', () => {

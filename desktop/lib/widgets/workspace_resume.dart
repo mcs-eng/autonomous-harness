@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/project_folder.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
 import '../state/project_navigation.dart';
@@ -76,6 +77,7 @@ class WorkspaceResume extends StatelessWidget {
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
     final waiting = workspaceWaitingCount(app);
+    final labels = sessionLabels(rows);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -107,7 +109,7 @@ class WorkspaceResume extends StatelessWidget {
           style: TextStyle(color: grid.AppPalette.textSecondary),
         ),
         const SizedBox(height: 16),
-        for (final row in rows)
+        for (final (i, row) in rows.indexed)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Material(
@@ -122,7 +124,7 @@ class WorkspaceResume extends StatelessWidget {
                 ),
                 leading: EngineMark.forAgent(row.agent, size: 24),
                 title: Text(
-                  row.agent.name,
+                  labels[i],
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -140,10 +142,7 @@ class WorkspaceResume extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                         Text(
-                          [
-                                row.project?.cwd ?? 'Folder not reported',
-                                row.project?.branch,
-                              ]
+                          [_folder(row.project?.cwd), row.project?.branch]
                               .whereType<String>()
                               .where((v) => v.isNotEmpty)
                               .join(' · '),
@@ -163,3 +162,11 @@ class WorkspaceResume extends StatelessWidget {
     );
   }
 }
+
+/// The last part of [cwd], which the tooltip shows whole. A folder Harness
+/// named itself says nothing the label does not.
+String? _folder(String? cwd) => cwd == null
+    ? 'Folder not reported'
+    : isGeneratedWorkFolder(cwd)
+    ? null
+    : folderBase(cwd);
