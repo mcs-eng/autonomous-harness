@@ -7,10 +7,12 @@ import 'package:dio/dio.dart';
 import 'dart:ui' show Color;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart' show BuildContext, StringCharacters;
+import 'package:flutter/widgets.dart'
+    show AppLifecycleState, BuildContext, StringCharacters, WidgetsBinding;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/analytics.dart';
+import '../models/model_manager_controller.dart';
 import '../api/api_client.dart';
 import '../viewer/sign_in_browser.dart';
 import '../viewer/viewer_services.dart';
@@ -33,6 +35,7 @@ import '../core/local_git_projects.dart';
 import '../core/test_run.dart';
 import '../core/models.dart';
 import '../core/project_folder.dart';
+import '../core/git_worktree.dart';
 import '../core/project_history.dart';
 import '../core/project_preview.dart';
 import '../core/repository_clone.dart';
@@ -68,6 +71,8 @@ import 'session_preview.dart';
 import '../usage/remote_usage.dart';
 import '../usage/usage_accounts.dart';
 import '../orchestrator/orchestrator_controller.dart';
+import '../notify/agent_alerts.dart';
+import '../notify/alert_sounds.dart';
 
 enum AppStatus {
   bootstrapping,
@@ -175,6 +180,7 @@ class AgentForkAttempt {
 /// One deliberate creation, retained by the form if its reply is lost. Reusing
 /// it checks the original request; opening New agent starts a fresh intent.
 class AgentCreationAttempt {
+  AgentCreationAttempt({this.background = false});
   String _id = _newCreationId();
   String? _machineId, _targetId;
   Map<String, dynamic>? _choices;
@@ -182,6 +188,11 @@ class AgentCreationAttempt {
   HarnessPlacement? _placement;
   Future<String?>? _inFlight;
   bool _awaitingConfirmation = false, _finished = false;
+
+  /// Prepare a session without adding a pane or changing the selected tab.
+  final bool background;
+  String? _agentId;
+  String? get agentId => _agentId;
   String? _outcome;
   String? _preparedFolder;
   ProjectFolderRequest? _projectFolder;
@@ -425,6 +436,18 @@ class _AgentStop {
 
 class AppNotifier extends ChangeNotifier {
   final AuthSession session;
+
+  /// The noise this window makes when an agent finishes or gets stuck.
+  final AlertSounds alerts;
+
+  /// And what it puts on screen for the same two moments. Its own notifier, so
+  /// a banner appearing does not rebuild the workspace.
+  final AgentAlerts agentAlerts;
+
+  /// Which agents have news nobody has looked at. Marked on the same two
+  /// moments and NOT behind the banner or sound switches — see [AgentUnread].
+  final AgentUnread agentUnread;
+
   AppConfig config;
   late ApiClient api;
 
@@ -442,6 +465,7 @@ class AppNotifier extends ChangeNotifier {
   final _machineEdits = <String, _MachineEdit>{};
   final _agentRenames = <(String, String), _AgentRename>{};
   final _agentStops = <(String, String), _AgentStop>{};
+  final _agentPauses = <(String, String), Future<String?>>{};
   final _agentForks = <(String, String), AgentForkAttempt>{};
   final _agentRestarts = <(String, String), AgentRestartAttempt>{};
   int _machineEditRevision = 0;
@@ -475,6 +499,9 @@ class AppNotifier extends ChangeNotifier {
 
   /// Words from the dial, for whoever can put a palette on screen.
   Stream<SpokenTaskRequest> get spokenTasks => _spokenTasks.stream;
+  final StreamController<void> _modelsRequests =
+      StreamController<void>.broadcast();
+  Stream<void> get modelsRequests => _modelsRequests.stream;
   final LocalManualFixture? localManualFixture;
   final Duration turnActivityTimeout;
   final LocalCliDiscovery? localCliDiscovery;
@@ -596,6 +623,12 @@ class AppNotifier extends ChangeNotifier {
   UpdateInfo? availableUpdate;
   bool isCheckingForUpdate = false;
   bool isInstallingUpdate = false;
+
+  /// How much of the new build has arrived, 0..1, while it is downloading;
+  /// null before the first byte and again once the bytes are in — verifying and
+  /// unpacking have no counter, so the bar goes back to indeterminate rather
+  /// than sitting at a 100% that has not finished anything.
+  double? updateDownloadFraction;
   String? updateError;
   final Set<String> _offlinePollsInFlight = {};
   final Map<String, Object> _offlineRecoveryInFlight = {};
@@ -627,6 +660,7 @@ class AppNotifier extends ChangeNotifier {
     _machineEdits.clear();
     _agentRenames.clear();
     _agentStops.clear();
+    _agentPauses.clear();
     _agentForks.clear();
     _agentRestarts.clear();
     _confirmedMachineEdits.clear();
@@ -705,12 +739,31 @@ class AppNotifier extends ChangeNotifier {
   Future<void> deskFetchForTest() => _deskFetch();
   @visibleForTesting
   Future<void> deskFlushForTest() => _deskFlush();
+  @visibleForTesting
+  void persistLayoutForTest() => _persistLayout();
   String _activeSwarmId = 'swarm-1';
   int _nextSwarmId = 2;
   // No tab cap, as in Chrome: only the visible tab's panes are built, so a background tab costs its
   // terminal streams and nothing else — its web panes are unloaded until it is shown again.
   static const maxClosedSwarms = 24;
   final List<ClosedWork> _closedHistory = [];
+  // The monitor follows user-visible panes, never the daemon's entire process
+  // inventory. Keep identities after a pane is minimized, paused or closed.
+  final _monitorHarnesses = <(String, String)>{};
+  bool hasOpenedHarness(String machineId, String agentId) =>
+      _monitorHarnesses.contains((machineId, agentId));
+
+  /// Record pane intent, never daemon discovery. Saved with the existing layout.
+  void rememberOpenedHarness(String machineId, String agentId) {
+    if (machineId.isEmpty || agentId.isEmpty) return;
+    final identity = (machineId, agentId);
+    _monitorHarnesses.remove(identity);
+    _monitorHarnesses.add(identity);
+    if (_monitorHarnesses.length > 4096) {
+      _monitorHarnesses.remove(_monitorHarnesses.first);
+    }
+  }
+
   int _nextClosedHistoryId = 1;
   List<ClosedWork> get closedHistory =>
       List.unmodifiable(_closedHistory.reversed);
@@ -756,6 +809,15 @@ class AppNotifier extends ChangeNotifier {
   }
 
   void _rememberClosed(ClosedWork entry) {
+    if (entry is ClosedAgent) {
+      rememberOpenedHarness(entry.machineId, entry.agentId);
+    } else if (entry is ClosedSwarm) {
+      for (final pane in entry.panes) {
+        if (pane.agentId case final id?) {
+          rememberOpenedHarness(pane.machineId, id);
+        }
+      }
+    }
     // An unused starter has no work to recover. This also covers empty pages
     // restored from builds that did not mark them as drafts.
     if (entry is ClosedSwarm &&
@@ -844,7 +906,7 @@ class AppNotifier extends ChangeNotifier {
     await addAgentToSwarm(machineId, agentId, swarmId: activeSwarmId);
   }
 
-  // A New Tab remains temporary until it has content or a custom name.
+  // Tabs created for a pending action stay temporary until they have content.
   // The return destination is session-local; abandoned drafts are never saved.
   final _draftSwarmReturns = <String, String>{};
 
@@ -866,8 +928,8 @@ class AppNotifier extends ChangeNotifier {
     bool newTabPage = false,
   }) {
     name = Swarm.normalizeName(name);
-    // Reuse onboarding for ordinary destinations. Explicit Cmd-T opens a
-    // temporary minimal page, removed when the user cancels or leaves it.
+    // Ordinary destinations can reuse an empty tab. Explicit New Tab always
+    // creates its own tab with the same welcome content.
     if (name == Swarm.defaultName && !newTabPage) {
       final starter = activeSwarm.isEmptyStarter
           ? activeSwarm
@@ -957,6 +1019,7 @@ class AppNotifier extends ChangeNotifier {
     }
     _activeSwarmId = id;
     railFocused = false;
+    _noteNavigation();
     final pane = focusedPane;
     selectedMachineId = pane?.machineId;
     _persistLayout();
@@ -1028,6 +1091,7 @@ class AppNotifier extends ChangeNotifier {
     if (owner.focusedPaneId != pane.id) {
       owner.previousPaneId = owner.focusedPaneId;
       owner.focusedPaneId = pane.id;
+      _seeFocusedAgent();
     }
     if (owner.zoomedPaneId != null) owner.zoomedPaneId = pane.id;
     // Leaving an untouched New Tab for an existing view abandons it, as
@@ -1040,6 +1104,7 @@ class AppNotifier extends ChangeNotifier {
     _activeSwarmId = owner.id;
     railFocused = false;
     selectedMachineId = machineId;
+    _noteNavigation();
     _paneFocusRequest++;
     _persistLayout();
     _announceAppFocus();
@@ -1329,10 +1394,68 @@ class AppNotifier extends ChangeNotifier {
   int? get focusedPaneId => activeSwarm.focusedPaneId;
   set focusedPaneId(int? value) => activeSwarm.focusedPaneId = value;
 
+  /// Whether this computer holds an account.
+  ///
+  /// Guest is the ABSENCE of one, not a mode of its own: everything on this
+  /// computer works without it — agents, terminals, tabs, DSH, the cabled dial
+  /// — and what an account adds is the OTHER machines, the shared desk, voice
+  /// on the dial and the profile. The window opens either way; see [isGuest]
+  /// for what a guest is asked to sign in for, and `showSignInSheet` for how
+  /// it is asked.
+  ///
+  /// Presumed true until the CLI says otherwise (`bootstrap` asks, and every
+  /// change after that goes through [_rebindAuth]): nothing gated on it is on
+  /// screen before that answer lands, and a fixture that sets [status] straight
+  /// to `authenticated` is a signed-in window unless it says it is not.
+  bool signedIn = true;
+
+  /// A desktop window running without an account. A viewer is never a guest: it
+  /// has no local daemon, so there is nothing it could show signed out.
+  ///
+  /// Fork: local mode is not a guest. It is a remembered choice with its own
+  /// labels and exit ("Leave local mode"), so the guest prompts stay out of it.
+  bool get isGuest => viewer == null && !signedIn && !localOnly;
+
   int _paneFocusRequest = 0;
 
   /// Explicit navigation must reveal and refocus even an already-selected pane.
   int get paneFocusRequest => _paneFocusRequest;
+
+  bool _paneFocusByUser = true;
+
+  /// Whether the latest navigation — [paneFocusRequest], a tab switch, a
+  /// focus move — was a person's gesture on this app.
+  ///
+  /// False while it was a device's doing: the dial turning, a notification or
+  /// question shown there, the WiFi device asking for an agent. Those move the
+  /// view and the keyboard exactly as a click does, and must NOT take a
+  /// terminal back from whichever client holds it — `_autoTakeControl` in
+  /// `terminal_panel.dart` reads this before retaking. A question re-shown on
+  /// the dial used to count as a click: the app took back every pane, the
+  /// re-attach redrew the dialog, the daemon announced it as a new question,
+  /// the dial beeped and asked again, 1.5s round, until the cable came out
+  /// (owner, 2026-09-22).
+  bool get paneFocusByUser => _paneFocusByUser;
+
+  bool _navigatingFromDevice = false;
+
+  /// Run [navigate] as the device's move, not a person's — see
+  /// [paneFocusByUser]. Covers only the synchronous part: an `async`
+  /// navigation's body runs up to its first `await` inside this, which is
+  /// where every focus and tab change happens, and the attach it waits on
+  /// afterwards is not the device's to be blamed for.
+  T _fromDevice<T>(T Function() navigate) {
+    _navigatingFromDevice = true;
+    try {
+      return navigate();
+    } finally {
+      _navigatingFromDevice = false;
+    }
+  }
+
+  void _noteNavigation() {
+    _paneFocusByUser = !_navigatingFromDevice;
+  }
 
   /// An explicit relayout reveals live output even in tiles whose rectangle
   /// does not change. This is view intent, so it is never persisted.
@@ -1508,7 +1631,13 @@ class AppNotifier extends ChangeNotifier {
     PaneLayoutStore? paneLayoutStore,
     LocalModeStore? localMode,
     this.turnActivityTimeout = const Duration(seconds: 12),
-  }) : _paneLayout = paneLayoutStore,
+    AlertSounds? alerts,
+    AgentAlerts? agentAlerts,
+    AgentUnread? agentUnread,
+  }) : alerts = alerts ?? AlertSounds(store: alertSoundStore),
+       agentAlerts = agentAlerts ?? AgentAlerts(),
+       agentUnread = agentUnread ?? AgentUnread(),
+       _paneLayout = paneLayoutStore,
        _localMode = localMode ?? localModeStore,
        // Remembers "a dial has been seen here" on the same terms the pane
        // layout is remembered: with a layout store there is a state file, and
@@ -1575,6 +1704,13 @@ class AppNotifier extends ChangeNotifier {
 
   String get autonomousEnv => _autonomousEnv;
   bool get hasAvailableUpdate => availableUpdate != null;
+
+  /// [updateDownloadFraction] as whole percent, for the one word the banner,
+  /// the dialog and Settings all show.
+  int? get updateDownloadPercent {
+    final fraction = updateDownloadFraction;
+    return fraction == null ? null : (fraction * 100).clamp(0, 100).floor();
+  }
 
   static const offlineRetryInterval = Duration(seconds: 5);
   static const localDaemonReconnectDelay = Duration(seconds: 1);
@@ -1869,6 +2005,12 @@ class AppNotifier extends ChangeNotifier {
     if (moved) _previousPaneId = focusedPaneId;
     focusedPaneId = paneId;
     selectedMachineId = focusedPane?.machineId;
+    // Switching TO a harness is how its news gets read. Not only the routes
+    // that go through a banner or the Harnesses list: clicking the tile, the
+    // rail, ⌘-number, the dial — all of them arrive here, and all of them mean
+    // the same thing to somebody who was told this one wanted them.
+    _seeFocusedAgent();
+    _noteNavigation();
     if (reveal) _paneFocusRequest++;
     if (zoomedPaneId != null) zoomedPaneId = paneId;
     // Announced even when this tile was ALREADY focused.
@@ -2475,6 +2617,7 @@ class AppNotifier extends ChangeNotifier {
       final authStatus = await cliLogin.checkStatus();
       if (!_authWorkCurrent(revision)) return;
       _bootStatusMessage = null;
+      signedIn = authStatus.loggedIn;
       if (!authStatus.loggedIn) {
         currentUser = null;
         if (localOnly && authStatus.localOnly) {
@@ -2493,6 +2636,10 @@ class AppNotifier extends ChangeNotifier {
           _lastError = localModeUnsupportedMessage;
           _lastErrorRetryable = false;
         }
+        // Fork: a signed-out desktop window still opens on the login screen, which offers
+        // Sign in and "Use this computer without an account" (local mode). Upstream now opens
+        // a signed-out desktop straight onto the desk as a guest; this fork keeps its login
+        // screen until that choice is made deliberately.
         status = AppStatus.unauthenticated;
         notifyListeners();
         return;
@@ -2787,14 +2934,17 @@ class AppNotifier extends ChangeNotifier {
     if (status == AppStatus.unauthenticated) return;
     status = AppStatus.authenticated;
     notifyListeners();
-    // The CLI has confirmed sign-in and daemon readiness. Display-name/avatar
-    // metadata is independent of machine discovery and must not delay work.
-    // No account, no profile and no desk: the local daemon answers `/api/auth/me`
-    // with 401 by design, and a request it can only refuse is not worth making.
-    if (!localOnly) {
+    // The CLI has confirmed daemon readiness. Display-name/avatar metadata is
+    // independent of machine discovery and must not delay work — and a guest
+    // has no profile to load. Local mode has neither: its daemon answers
+    // `/api/auth/me` with 401 by design, and a request it can only refuse is
+    // not worth making.
+    if (signedIn && !localOnly) {
       unawaited(_loadProfile());
       // The desk too: tabs from the other computers appear as intent, like the
-      // restored ones, and attach as their machines answer.
+      // restored ones, and attach as their machines answer. It is the ACCOUNT's
+      // desk (`Desk{userId}`), so a guest has none — asking for one would earn a
+      // 401 on every poll for a document that cannot exist.
       _deskEnsure(revision);
     }
     try {
@@ -2803,7 +2953,170 @@ class AppNotifier extends ChangeNotifier {
       if (!_authWorkCurrent(revision)) return;
       _reportMachineLoadError(error);
     }
+    if (!_authWorkCurrent(revision)) return;
+    // The account may have changed while this window was closed — see
+    // [_followLocalMachineId]. Done AFTER the list, which is what says which id
+    // this computer is served under now.
+    await _followLocalMachineId(revision);
     if (_authWorkCurrent(revision)) notifyListeners();
+  }
+
+  /// This computer's machine id, against the one the saved desk was keyed by.
+  ///
+  /// The account can change while the app is CLOSED — `harness logout` in a
+  /// terminal, a session that expired overnight — and then the tiles restored a
+  /// moment ago name a machine the daemon no longer serves under that id. Re-seat
+  /// them under the one it does, and remember it for next time.
+  Future<void> _followLocalMachineId(int revision) async {
+    final store = _paneLayout;
+    final current = localMachineState?.machine.machineId;
+    if (store == null || current == null) return;
+    final remembered = await store.loadLocalMachineId();
+    if (!_authWorkCurrent(revision)) return;
+    var from = remembered != null && remembered != current ? remembered : null;
+    // A guest's list is this computer and nothing else, so a tile waiting for a
+    // machine the list does not have can only be this computer under the account
+    // it left — IF every such tile names the same one. That reading beats the
+    // remembered id: a desk saved before the id was remembered, or remembered by
+    // a launch that could not re-seat, still comes home. Signed in, an unknown id
+    // is a machine that was deleted, and nothing is inferred.
+    if (isGuest) {
+      final unknown = {
+        for (final pane in allPanes)
+          if (!machineStates.containsKey(pane.machineId)) pane.machineId,
+      };
+      if (unknown.length == 1 && unknown.single != current) {
+        from = unknown.single;
+      }
+    }
+    if (from != null) {
+      await _reseatDesk(from: from, to: current, dropOthers: isGuest);
+      if (!_authWorkCurrent(revision)) return;
+    }
+    await store.saveLocalMachineId(current);
+  }
+
+  /// The account left this window — signed out from Settings, or a session that
+  /// ended underneath us — and the desk has to be sat back down on the machine
+  /// id the daemon serves NOW.
+  ///
+  /// The daemon takes its identity once, at boot: this computer's own id signed
+  /// out, the account's machineId signed in. `harness login` and `harness logout`
+  /// restart it on the other one, so this side waits for that daemon to come
+  /// back, reads the machine list it now serves, and re-seats every tile that was
+  /// open on the OLD local id under the new one. Remote tiles ride along on a
+  /// sign-in and leave on a sign-out — a guest has no machine to attach them to,
+  /// and a tile waiting forever reads as broken rather than as signed out.
+  ///
+  /// The whole desk goes through the saved layout and back (see [_reseatDesk])
+  /// rather than being re-keyed live: a tile's machine id is set at birth, and
+  /// every other path that changes which agent a tile shows already goes through
+  /// the store. Reusing the cold-start restore is what keeps this from becoming a
+  /// second, subtly different way to build a grid.
+  ///
+  /// [revision] is the sign-out's own, when it has one: the explicit sign-out
+  /// already invalidated the previous work, and a second invalidation here would
+  /// orphan its own wait. A session that ended underneath us passes none and
+  /// invalidates for itself — the in-flight work belongs to the account that
+  /// just left.
+  Future<void> _becomeGuest({String? banner, int? revision}) async {
+    revision ??= _invalidateAuthWork();
+    final before = localMachineState?.machine.machineId;
+    signedIn = false;
+    currentUser = null;
+    analyticsAccount.clear();
+    // The desk is the ACCOUNT's document (`Desk{userId}`): a guest has none, and
+    // the tabs closing here are this window leaving the account, not the person
+    // closing them — so nothing is sent.
+    _deskRetry?.cancel();
+    _deskRetry = null;
+    _desk.reset();
+    _stopAllOfflineRetries();
+    _stopAllLinkRetries();
+    _stopAllAgentSyncTimers();
+    _clearAllTurnActivity();
+    // Every connection goes: the daemon this window was talking to is being
+    // replaced by one with a different identity, and a remote lane was borrowed
+    // from the account that is changing hands.
+    await _pool?.closeAll();
+    if (!_authWorkCurrent(revision)) return;
+    machines = [];
+    machinesAreStale = false;
+    machineStates.clear();
+    sessionPreviews.clear();
+    expandedMachines.clear();
+    selectedMachineId = null;
+    _ensurePool();
+    notifyListeners();
+    try {
+      await ensureCliDaemonReady();
+    } catch (error) {
+      if (!_authWorkCurrent(revision)) return;
+      _lastError = '$error';
+      _lastErrorRetryable = true;
+      notifyListeners();
+      return;
+    }
+    if (!_authWorkCurrent(revision)) return;
+    try {
+      await refreshMachines();
+    } catch (error) {
+      if (!_authWorkCurrent(revision)) return;
+      _reportMachineLoadError(error);
+    }
+    if (!_authWorkCurrent(revision)) return;
+    final after = localMachineState?.machine.machineId;
+    if (after != null) {
+      // Remote tiles leave with the account — a guest has no machine to attach
+      // them to, and a tile waiting forever reads as broken rather than as
+      // signed out. This computer's follow it to the id the daemon serves now.
+      await _reseatDesk(from: before ?? after, to: after, dropOthers: true);
+      if (!_authWorkCurrent(revision)) return;
+      await _paneLayout?.saveLocalMachineId(after);
+      if (!_authWorkCurrent(revision)) return;
+    }
+    // A guest ends on the desk, whichever screen it started from.
+    status = AppStatus.authenticated;
+    if (banner != null) {
+      _lastError = banner;
+      _lastErrorRetryable = true;
+    }
+    notifyListeners();
+  }
+
+  /// Rebuild the grid from the saved layout with this computer's tiles re-keyed
+  /// from [from] to [to], and — with [dropOthers] — every other machine's tiles
+  /// left out.
+  ///
+  /// The live tiles are closed WITHOUT persisting (their ids are the old ones),
+  /// the file is rewritten, and the cold-start restore reads it back; tiles whose
+  /// machines are already connected are attached straight away rather than
+  /// waiting for a connect event that already happened.
+  Future<void> _reseatDesk({
+    required String from,
+    required String to,
+    required bool dropOthers,
+  }) async {
+    final store = _paneLayout;
+    if (store == null) return;
+    _persistLayout();
+    await store.flushSwarms();
+    await store.rekeyMachine(from: from, to: to, dropOthers: dropOthers);
+    if (_disposed) return;
+    await _closeAllPanes(persist: false);
+    if (_disposed) return;
+    _closedHistory.clear();
+    final starter = Swarm(id: 'swarm-${_nextSwarmId++}');
+    swarms
+      ..clear()
+      ..add(starter);
+    _activeSwarmId = starter.id;
+    await _restorePaneLayout();
+    if (_disposed) return;
+    for (final machine in machineStates.values) {
+      _attachPendingPanes(machine);
+    }
+    _announceAppFocus();
   }
 
   /// The local daemon (`harness start`) must be up before any local REST/WS call can work — unlike
@@ -2874,10 +3187,10 @@ class AppNotifier extends ChangeNotifier {
         );
       case LocalCliProbeState.down:
         _daemonGateFailed = true;
-        // Before blaming the environment, check whether the daemon is missing because it signed itself
-        // out. "Try running `harness start` yourself" is advice that cannot work in that case — the
-        // session file is gone, so every start exits again — and it is the advice this branch used to
-        // give unconditionally.
+        // A daemon missing because its session ended is not an environment problem — and no longer a
+        // reason to stop, either: it starts WITHOUT a session and serves this computer. So the window
+        // is told it has become a guest (a banner, and the sheet on the next reach for another
+        // machine) and the supervisor goes on bringing the daemon back.
         final CliAuthStatus authStatus;
         try {
           authStatus = await cliLogin.checkStatus();
@@ -2891,9 +3204,8 @@ class AppNotifier extends ChangeNotifier {
         if (!_authWorkCurrent(revision)) return;
         // Local mode has no session to lose, so a daemon that is down there is
         // down for an ordinary reason and gets the ordinary advice.
-        if (!authStatus.loggedIn && !localOnly) {
+        if (!authStatus.loggedIn && signedIn && !localOnly) {
           _signedOutAtRuntime(_signedOutMessage);
-          return;
         }
         _startDaemonSupervision(discovery);
         throw StateError(
@@ -2946,11 +3258,15 @@ class AppNotifier extends ChangeNotifier {
       spawnAllowedAt: inSpawnSlot,
       stillSignedIn: () async {
         if (!_authWorkCurrent(revision)) return false;
-        final signedIn = localOnly || (await cliLogin.checkStatus()).loggedIn;
-        return _authWorkCurrent(revision) && signedIn;
+        final stillIn = localOnly || (await cliLogin.checkStatus()).loggedIn;
+        return _authWorkCurrent(revision) && stillIn;
       },
+      // Only the first time: the supervisor asks once per spawn attempt, and a guest window is
+      // already a guest — repeating it would put the banner back on every retry.
       onSignedOut: () {
-        if (_authWorkCurrent(revision)) _signedOutAtRuntime(_signedOutMessage);
+        if (_authWorkCurrent(revision) && signedIn) {
+          _signedOutAtRuntime(_signedOutMessage);
+        }
       },
       onSnapshot: (endpoint) {
         if (_authWorkCurrent(revision)) _updateLocalProjectSnapshot(endpoint);
@@ -3018,7 +3334,8 @@ class AppNotifier extends ChangeNotifier {
   /// machine was deleted from another machine or the SSO token simply expired, and guessing between
   /// them in the copy would sometimes be wrong. Signing in again is the answer to both.
   static const _signedOutMessage =
-      'You were signed out on this computer. Sign in again to reconnect.';
+      'You were signed out on this computer. This computer\'s agents keep '
+      'running; sign in again to reach your other machines.';
 
   /// The session went away while the app was already running — send the user to [LoginScreen] with a
   /// reason, and stop the background work that can only fail from here.
@@ -3027,7 +3344,7 @@ class AppNotifier extends ChangeNotifier {
   /// fills is the app that was ALREADY authenticated when the session disappeared underneath it,
   /// where nothing re-checked and the daemon supervisor simply respawned `harness start` forever.
   void _signedOutAtRuntime(String message) {
-    if (status == AppStatus.unauthenticated) {
+    if (status == AppStatus.unauthenticated || isGuest) {
       return; // idempotent: several sources can race here
     }
     _invalidateAuthWork();
@@ -3038,11 +3355,22 @@ class AppNotifier extends ChangeNotifier {
     pendingAuthorizeUrl = null;
     _awaitingFirstMessage = null;
     analyticsAccount.clear();
-    _clearAccountWorkspace();
-    _lastError = message;
-    _lastErrorRetryable = true;
-    status = AppStatus.unauthenticated;
-    notifyListeners();
+    // A VIEWER has nowhere to be but its login screen — no daemon, nothing of
+    // its own to show.
+    if (viewer != null) {
+      _clearAccountWorkspace();
+      _lastError = message;
+      _lastErrorRetryable = true;
+      status = AppStatus.unauthenticated;
+      notifyListeners();
+      return;
+    }
+    // A desktop window becomes a GUEST instead: the daemon comes back signed out
+    // and goes on serving this computer, so the agents that were running are
+    // still running. This computer's tiles stay (under the id it serves now),
+    // the other machines' leave, and the banner says why the list got shorter.
+    _closedHistory.clear();
+    unawaited(_becomeGuest(banner: message));
   }
 
   /// Remove the old account's live objects without overwriting its saved desk.
@@ -3079,6 +3407,7 @@ class AppNotifier extends ChangeNotifier {
     expandedMachines.clear();
     selectedMachineId = null;
     _closedHistory.clear();
+    _monitorHarnesses.clear();
     _draftSwarmReturns.clear();
     _localMismatchReported.clear();
     _dismissedLinkPrompts.clear();
@@ -3232,14 +3561,32 @@ class AppNotifier extends ChangeNotifier {
     // responses cannot change the installation or the offer a failure retains.
     availableUpdate = info;
     isInstallingUpdate = true;
+    updateDownloadFraction = null;
     updateError = null;
     notifyListeners();
     try {
       final updater = _updater;
-      final staged = await updater.downloadAndStage(info);
+      // One notify per whole percent. Dio reports every chunk, and each notify
+      // rebuilds the whole app shell (the banner lives in its ListenableBuilder),
+      // so a 45 MB build would repaint thousands of times for a bar 200px wide.
+      var shown = -1;
+      final staged = await updater.downloadAndStage(
+        info,
+        onProgress: (received, total) {
+          if (_disposed || total <= 0) return;
+          final fraction = (received / total).clamp(0.0, 1.0);
+          // The bytes are all in: verifying and unpacking follow, and neither
+          // can be measured, so stop claiming a number for them.
+          final next = fraction >= 1 ? null : fraction;
+          final percent = next == null ? 100 : (next * 100).floor();
+          if (percent == shown) return;
+          shown = percent;
+          updateDownloadFraction = next;
+          notifyListeners();
+        },
+      );
       if (staged == null) {
-        updateError =
-            'Could not download and verify Harness ${info.version}.';
+        updateError = 'Could not download and verify Harness ${info.version}.';
         return false;
       }
       final applied = await updater.applyStaged(staged, selfPid: pid);
@@ -3254,6 +3601,7 @@ class AppNotifier extends ChangeNotifier {
       return false;
     } finally {
       isInstallingUpdate = false;
+      updateDownloadFraction = null;
       if (!_disposed) notifyListeners();
     }
   }
@@ -3262,6 +3610,7 @@ class AppNotifier extends ChangeNotifier {
     if (_disposed || signingIn || signingOut || signOutError != null) return;
     final revision = _invalidateAuthWork();
     _closedHistory.clear();
+    _monitorHarnesses.clear();
     _lastError = null;
     // A sign-in ends local mode: the CLI lets a saved session win over the
     // flag, and the app stops passing it so the two never disagree. Not
@@ -3295,6 +3644,12 @@ class AppNotifier extends ChangeNotifier {
       pendingAuthorizeUrl = null;
       _resetLoginBrowser();
       notifyListeners();
+      // The CLI has just restarted its daemon onto the account's machineId, so a
+      // guest window's tiles are open on an id nothing serves any more. The
+      // ordinary bootstrap ends by following that id (`_followLocalMachineId`),
+      // which re-seats them — one path for a cold boot and for a sign-in, rather
+      // than a second way to build a grid.
+      signedIn = true;
       await _finishBootstrapSignedIn();
       if (!_authWorkCurrent(revision) || status != AppStatus.authenticated) {
         return;
@@ -3469,12 +3824,18 @@ class AppNotifier extends ChangeNotifier {
     _lastError = null;
     pendingAuthorizeUrl = null;
     _closedHistory.clear();
-    // Leaving local mode is the same exit: the tiles go, the daemon is stopped
-    // through `harness logout` below (nothing to clear, but the next start must
-    // run on the account rather than on this computer's bare id), and the login
-    // screen is next.
+    _monitorHarnesses.clear();
+    // Leaving local mode is the fork's exit to the login screen: the tiles go,
+    // the daemon is restarted through `harness logout` below (nothing to clear,
+    // but the next start must run on the account rather than on this computer's
+    // bare id), and the login screen is next.
+    final leavingLocalMode = localOnly;
     unawaited(_localMode.set(false));
-    status = AppStatus.unauthenticated;
+    // A VIEWER goes back to its login screen; a desktop window stays on the desk
+    // and becomes a guest — the daemon comes back signed out and keeps serving
+    // this computer, so signing out of the account is not a reason to take the
+    // agents off the screen. The rebind at the end sits the desk back down.
+    if (viewer != null || leavingLocalMode) status = AppStatus.unauthenticated;
     currentUser = null;
     analyticsAccount.clear();
     notifyListeners();
@@ -3501,6 +3862,12 @@ class AppNotifier extends ChangeNotifier {
         ? null
         : 'Your saved sign-in could not be cleared. Try signing out again.';
     notifyListeners();
+    // The CLI restarts its daemon signed out (`harness logout` does it itself),
+    // so this window waits for that one and sits its desk back down on the id it
+    // serves. In the background: the person asked to sign out, and that is done.
+    if (viewer == null && didClear && !leavingLocalMode) {
+      unawaited(_becomeGuest(revision: revision));
+    }
   }
 
   void _onLocalFailure(String machineId, int code, String reason) {
@@ -4256,6 +4623,10 @@ class AppNotifier extends ChangeNotifier {
           prev.codexHome != agent.codexHome ||
           prev.parentAgentId != agent.parentAgentId ||
           prev.project != agent.project ||
+          prev.lastActivityAt != agent.lastActivityAt ||
+          prev.tokensUsed != agent.tokensUsed ||
+          prev.outputStats != agent.outputStats ||
+          prev.tokensUpdatedAt != agent.tokensUpdatedAt ||
           prev.launchState != agent.launchState ||
           prev.launchError != agent.launchError ||
           prev.launchDetail != agent.launchDetail ||
@@ -4899,68 +5270,43 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
-  /// The Store harness every "Open Grid" door opens: Grid, the agent that
-  /// manages the models on a machine or a fleet, with its live viewer.
+  /// Model Manager keeps the original package ID for installed workspaces.
   static const gridHarness = 'autonomous/autonomous-grid';
+  ModelManagerController? _modelManager;
+  ModelManagerController get modelManager =>
+      _modelManager ??= ModelManagerController(this);
 
-  /// The one action behind every "Open Grid" entry — the pane picker's button
-  /// and the Models menu — and it is exactly what the Store's Open button
-  /// does: a draft tab of its own, then New Agent with Grid already chosen on
-  /// [machineId]. Not a dialog of this feature's own: a second way to open a
-  /// harness would be a second definition of what opening one means.
-  ///
-  /// Grid not installed on that machine → the Store, open on Grid's page,
-  /// whose Install is the way in. Nothing here reports progress: the tab
-  /// appearing is the confirmation.
-  ///
-  /// Takes the caller's [context] because New Agent needs one and this
-  /// notifier holds none — the same shape as every other dialog a door opens.
-  ///
-  /// [machineId] is the computer Grid opens on — the pane's own machine from a
-  /// pane's picker, the one chosen from the Models menu's list. Absent (a menu
-  /// with one machine, or none named), it is this computer's own when the app
-  /// has one, else whatever the person is looking at. Never guessed past a
-  /// named machine: a picker on a remote pane that opened on this computer was
-  /// the bug this argument exists to end.
+  Future<Map<String, dynamic>> localModels(
+    String machineId, {
+    bool refresh = false,
+  }) => _conn(machineId).request(
+    'grid_fleet_models_list',
+    payload: {'refresh': refresh},
+    timeout: const Duration(seconds: 90),
+  );
+
+  Future<Map<String, dynamic>> controlLocalModel(
+    String machineId,
+    String modelId, {
+    required bool start,
+  }) => _conn(machineId).request(
+    start ? 'grid_fleet_model_start' : 'grid_fleet_model_stop',
+    payload: {'modelId': modelId},
+    timeout: const Duration(seconds: 12),
+  );
+
+  /// The session picker opens the same local Models overview as the toolbar.
   Future<void> runLocalModel(
     BuildContext context, {
     String? machineId,
     Future<void> Function(String harnessId, String machineId)? onOpenHarness,
   }) async {
-    final machine = machineId != null
-        ? machineStates[machineId]
-        : _localModelMachine();
-    if (machine == null) {
-      _lastError = machineId != null
-          ? 'That machine is no longer linked.'
-          : 'Connect a machine before opening Grid.';
-      _lastErrorRetryable = false;
-      notifyListeners();
-      return;
-    }
-    machineId = machine.machine.machineId;
-    // Whether Grid is installed THERE, from the machine's own list — a stored
-    // answer is fine here, since an install this app started is pushed into
-    // it as it lands.
-    await probeDsh(machineId);
-    if (machine.dsh[gridHarness]?.installed != true) {
-      openStore(harness: gridHarness);
-      return;
-    }
-    if (!context.mounted) return;
-    if (onOpenHarness != null) {
-      await onOpenHarness(gridHarness, machineId);
-      return;
-    }
-    await openStoreAgent(context, this, gridHarness, machineId);
+    _modelsRequests.add(null);
   }
 
-  /// The Store harness the Machines menu opens: Machine Monitor, the fleet
-  /// itself, managed by talking to it, with the live map of every machine
-  /// beside the terminal.
   static const machinesHarness = 'autonomous/machine-monitor';
 
-  /// Open Machine Monitor, the same way [runLocalModel] opens Grid.
+  /// Open Machine Monitor on this computer.
   ///
   /// It belongs on THIS computer and nowhere else: everything it reads — the
   /// machine list, each machine's roster — it reads through the local daemon,
@@ -5994,6 +6340,127 @@ class AppNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Put one agent's news on screen, named the way the window names it.
+  /// The agent the person is looking at RIGHT NOW, or null.
+  ///
+  /// Both halves matter. The pane has to be the focused one, and the window has
+  /// to be the front one — a pane keeps its focus while the app sits behind a
+  /// browser, and treating that as "being watched" would swallow exactly the
+  /// news this feature exists for.
+  ///
+  /// A seam, because the alternative is not testable: reaching it through real
+  /// panes means `focusPane`, which announces the focus to the machine, which
+  /// dials it — and a test without a live connection hangs rather than fails.
+  late ({String machineId, String agentId})? Function() watchedAgent =
+      _watchedFromFocus;
+
+  /// The real answer, reachable from a test without going through `focusPane`.
+  @visibleForTesting
+  ({String machineId, String agentId})? watchedAgentFromFocusForTest() =>
+      _watchedFromFocus();
+
+  ({String machineId, String agentId})? _watchedFromFocus() {
+    if (lifecycle() != AppLifecycleState.resumed) return null;
+    final pane = focusedPane;
+    final agentId = pane?.agentId;
+    if (pane == null || agentId == null) return null;
+    return (machineId: pane.machineId, agentId: agentId);
+  }
+
+  bool _isBeingWatched(String machineId, String agentId) {
+    final watched = watchedAgent();
+    return watched != null &&
+        watched.machineId == machineId &&
+        watched.agentId == agentId;
+  }
+
+  /// Clear whatever the person is currently looking at. Every route into a
+  /// harness ends here, so none of them has to remember to.
+  @visibleForTesting
+  void seeWatchedAgent() {
+    final watched = watchedAgent();
+    if (watched != null) agentUnread.clear(watched.machineId, watched.agentId);
+  }
+
+  /// Where the app is. Injected so a test can say so without a real lifecycle.
+  ///
+  /// ⚠️ Tolerant of there being NO binding. This is read from `focusPane`, which
+  /// plain `test()` files exercise in their dozens — and `WidgetsBinding
+  /// .instance` THROWS when the binding has not been initialised rather than
+  /// answering null. Reading it unguarded took out some fifty tests across the
+  /// suite that have nothing to do with notifications.
+  ///
+  /// Unknown is treated as "not in front", which errs toward announcing news
+  /// rather than swallowing it — the direction this feature cannot afford to
+  /// get wrong.
+  AppLifecycleState? Function() lifecycle = () {
+    try {
+      return WidgetsBinding.instance.lifecycleState;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  void _raiseAlert(MachineState machine, String agentId, AlertKind kind) {
+    // Nothing at all for the agent on screen in front of you. A sound, a banner
+    // and a count are three ways of saying "look over here", and all three are
+    // noise about the pane you are already in.
+    if (_isBeingWatched(machine.machine.machineId, agentId)) return;
+    final agent = machine.agents.where((a) => a.id == agentId).firstOrNull;
+    // Before the banner and outside its switch: the mark is what the window can
+    // still say when somebody has turned the interrupting halves off.
+    agentUnread.mark(machine.machine.machineId, agentId, kind);
+    alerts.play(kind);
+    agentAlerts.post(
+      AgentAlert(
+        machineId: machine.machine.machineId,
+        agentId: agentId,
+        // The agent's own name, and its id only when it has none — a banner
+        // naming a uuid tells nobody which pane to look at.
+        title: (agent?.name.trim().isNotEmpty ?? false)
+            ? agent!.name.trim()
+            : agentId,
+        kind: kind,
+        at: DateTime.now(),
+      ),
+    );
+  }
+
+  /// What clicking a banner does: show that agent, wherever it is.
+  ///
+  /// Reveal first — an agent already on screen just needs focus, and opening a
+  /// second view of it would take the terminal away from the one that has it.
+  /// Only an agent with no view at all is placed, on the current Swarm, in the
+  /// same order [placeFork] uses for the same reason.
+  Future<void> revealAgentFromAlert(String machineId, String agentId) async {
+    markAgentSeen(machineId, agentId);
+    agentAlerts.dismiss(
+      AgentAlert(
+        machineId: machineId,
+        agentId: agentId,
+        title: '',
+        kind: AlertKind.done,
+        at: DateTime.now(),
+      ),
+    );
+    if (revealAgentView(machineId, agentId)) return;
+    if (activeSwarm.panes.length >= maxPanes) newSwarm();
+    await addAgentToSwarm(machineId, agentId, swarmId: activeSwarmId);
+    revealAgentView(machineId, agentId);
+  }
+
+  /// The person has gone to this agent — by clicking its row, its banner, or
+  /// anything else that puts it in front of them. Whatever it was carrying has
+  /// been seen.
+  void markAgentSeen(String machineId, String agentId) =>
+      agentUnread.clear(machineId, agentId);
+
+  /// Whatever tile is now in front of the person has been seen.
+  ///
+  /// Reads the focused pane rather than taking an id, so every route into a
+  /// harness clears it without each one having to remember to.
+  void _seeFocusedAgent() => seeWatchedAgent();
+
   String? _eventAgentId(
     MachineState machine,
     Map<String, dynamic> event,
@@ -6277,6 +6744,53 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
+  @visibleForTesting
+  Future<Map<String, dynamic>> Function(String machineId, String path)?
+  gitProjectReaderForTest;
+
+  /// Git choices are read on the machine that owns this project.
+  Future<Map<String, dynamic>> readGitProject(
+    String machineId,
+    String path,
+  ) async {
+    final machine = machineStates[machineId];
+    if (machine == null) return {'error': 'UNAVAILABLE'};
+    final reader = gitProjectReaderForTest;
+    if (reader != null) return reader(machineId, path);
+    if (machine.isLocalMachine) return readLocalGitProject(path);
+    if (connectionForTest == null &&
+        (machine.nodeOnline == false ||
+            machine.needsLink ||
+            machine.connectionStatus != ConnectionStatus.connected)) {
+      return {'error': 'UNAVAILABLE'};
+    }
+    try {
+      return await _conn(machineId).request(
+        'git_project_info',
+        payload: {'path': path},
+        timeout: const Duration(seconds: 6),
+      );
+    } catch (_) {
+      return {'error': 'UNAVAILABLE'};
+    }
+  }
+
+  /// PR lookup runs on the agent's machine using that machine's GitHub access.
+  Future<Map<String, dynamic>> readAgentPullRequest(
+    String machineId,
+    String agentId,
+  ) async {
+    try {
+      return await _conn(machineId).request(
+        'git_pull_request',
+        payload: {'agentId': agentId},
+        timeout: const Duration(seconds: 30),
+      );
+    } catch (_) {
+      return {'status': 'unavailable'};
+    }
+  }
+
   /// Reads source material only on the machine that owns the selected path.
   Future<Map<String, dynamic>> readProjectPreview(
     String machineId,
@@ -6425,7 +6939,8 @@ class AppNotifier extends ChangeNotifier {
       // start page the user is already on IS that tab. A split was asked for
       // by name and wins; so does a tab other than the current one. The
       // current tab is what the dialog passes when nothing was chosen.
-      if (dsh != null &&
+      if (!creation.background &&
+          dsh != null &&
           placement == null &&
           split == null &&
           (swarmId == null || swarmId == activeSwarmId)) {
@@ -6486,6 +7001,10 @@ class AppNotifier extends ChangeNotifier {
     'PROJECT_EXISTS' ||
     'CLONE_FAILED' ||
     'CLONE_TIMEOUT' ||
+    'GIT_PROJECT_UNAVAILABLE' ||
+    'INVALID_BRANCH' ||
+    'BRANCH_SWITCH_FAILED' ||
+    'WORKTREE_FAILED' ||
     'GIT_UNAVAILABLE' =>
       detail ?? 'Could not prepare the project folder on $machine.',
     'CWD_NOT_FOUND' || 'INVALID_CWD' =>
@@ -6546,11 +7065,9 @@ class AppNotifier extends ChangeNotifier {
     // A status check must remain possible even if the destination closed or a
     // capability probe changed while the first create was already in flight.
     if (!creation.awaitingConfirmation) {
-      final placementError = _creationPlacementError(
-        targetId,
-        split,
-        placement: placement,
-      );
+      final placementError = creation.background
+          ? null
+          : _creationPlacementError(targetId, split, placement: placement);
       if (placementError != null) return placementError;
       if (choices['codexHome'] != null) {
         if (choices['engine'] != 'codex') {
@@ -6606,11 +7123,9 @@ class AppNotifier extends ChangeNotifier {
       }
       // Preparation may be slow. Revalidate before starting a process, using
       // the original machine and split rather than the current selection.
-      final placementError = _creationPlacementError(
-        targetId,
-        split,
-        placement: placement,
-      );
+      final placementError = creation.background
+          ? null
+          : _creationPlacementError(targetId, split, placement: placement);
       if (placementError != null) return creation._complete(placementError);
       if (_disposed ||
           machineStates[machineId] != machine ||
@@ -6623,6 +7138,8 @@ class AppNotifier extends ChangeNotifier {
         ..remove('projectSource')
         ..remove('repositoryUrl')
         ..remove('projectName')
+        ..remove('gitSource')
+        ..remove('branchRef')
         ..['cwd'] = creation._preparedFolder;
     }
     if (!machine.isLocalMachine && creation._remoteProjectName != null) {
@@ -6676,7 +7193,7 @@ class AppNotifier extends ChangeNotifier {
             failure.code == 'UNSUPPORTED_ON_REMOTE' ||
             failure.code == 'E2EE_REQUIRED') {
           return '$machineName cannot check this creation. '
-              'Use New Pane (⌘P) to look for it before starting another.';
+              'Use Open Harness (⌘O) to look for it before starting another.';
         }
         return unconfirmed;
       }
@@ -6731,7 +7248,7 @@ class AppNotifier extends ChangeNotifier {
         // receipt-aware version. Missing is not proof that nothing started.
         // Check status stays read-only, even across upgrades and reconnects.
         return '$machineName has no record of this request. '
-            'Use New Pane (⌘P) to look for it before starting another.';
+            'Use Open Harness (⌘O) to look for it before starting another.';
       case 'pending':
         return '$machineName is still starting your harness. Check again in a moment.';
       case 'unconfirmed':
@@ -6779,15 +7296,21 @@ class AppNotifier extends ChangeNotifier {
     }
     creation._complete(null);
     if (_disposed || machineStates[machineId] != machine) return null;
+    creation._agentId = agent.id;
     _upsertAgent(machine, agent);
     // Apply each creation receipt once, even if its transport result is replayed.
+    // A Git start remembers its repository, never the worktree it made.
     final projectPath =
-        agent.project?.cwd ?? creation.preparedFolder ?? choices['cwd'];
+        choices['gitSource'] ??
+        agent.project?.cwd ??
+        creation.preparedFolder ??
+        choices['cwd'];
     if (projectPath is String && projectPath.isNotEmpty) {
       unawaited(projectHistory.select(machineId, projectPath));
     }
     harnessStats.onAgentSpawned();
     notifyListeners();
+    if (creation.background) return null;
     if (_creationPlacementError(targetId, split, placement: placement) !=
         null) {
       _lastError =
@@ -7066,6 +7589,57 @@ class AppNotifier extends ChangeNotifier {
         : null;
   }
 
+  Future<String?>? pendingAgentPause(String machineId, String agentId) =>
+      _agentPauses[(machineId, agentId)];
+
+  /// Keep confirmed paused work visible even if its subsequent inventory refresh
+  /// fails or the manager is dismissed. The daemon remains the durable authority.
+  Future<String?> pauseAgent(String machineId, String agentId) {
+    final key = (machineId, agentId);
+    if (_agentPauses[key] case final pending?) return pending;
+    final machine = stateOf(machineId);
+    final agent = machine?.agents.where((a) => a.id == agentId).firstOrNull;
+    if (machine == null || agent == null || !agent.canPauseAndResume) {
+      return Future.value(
+        'This harness has no supported saved conversation to resume.',
+      );
+    }
+    if (agent.isStopped) return Future.value(null);
+    final revision = _authRevision;
+    late final Future<String?> pause;
+    pause =
+        (() async {
+          final error = await deleteAgent(machineId, agentId);
+          if (!_machineWorkCurrent(machine, revision)) return error;
+          final current = machine.agents
+              .where((a) => a.id == agentId)
+              .firstOrNull;
+          if (error == null && current == null) {
+            _upsertAgent(
+              machine,
+              agent.copyWith(status: 'stopped', terminalAvailable: false),
+            );
+            notifyListeners();
+          }
+          await reloadMachineData(machineId);
+          if (!_machineWorkCurrent(machine, revision)) return error;
+          final observed = machine.agents
+              .where((a) => a.id == agentId)
+              .firstOrNull;
+          // A lost reply is resolved by authoritative inventory, never by resending Stop.
+          if (observed?.isStopped == true &&
+              observed?.sessionId == agent.sessionId) {
+            return null;
+          }
+          return error;
+        })().whenComplete(() {
+          if (identical(_agentPauses[key], pause)) _agentPauses.remove(key);
+          if (_authWorkCurrent(revision)) notifyListeners();
+        });
+    _agentPauses[key] = pause;
+    return pause;
+  }
+
   /// Stops the process through the CLI, retaining project files and history.
   /// The request outlives its confirmation and is shared by every view.
   ///
@@ -7147,12 +7721,20 @@ class AppNotifier extends ChangeNotifier {
             'Stop failed: ${detail is String && detail.isNotEmpty ? detail : code}';
         return;
       }
+      if (result['deleted'] != true) {
+        error = 'Could not confirm the pause. Refresh to check its status.';
+        return;
+      }
       await _removeAgent(request.machine, agentId);
     } catch (failure) {
       if (!request.confirmed) {
-        error = failure is WsRequestTimeout
-            ? 'Could not confirm the stop. Refresh agents to check its status.'
-            : 'Could not stop the agent. Try again.';
+        error = switch (failure) {
+          WsRequestFailure(:final code, :final detail) =>
+            'Stop failed: ${detail != null && detail.isNotEmpty ? detail : code}',
+          WsRequestTimeout() =>
+            'Could not confirm the stop. Refresh agents to check its status.',
+          _ => 'Could not stop the agent. Try again.',
+        };
       }
     } finally {
       if (identical(_agentStops[(machineId, agentId)], request)) {
@@ -7212,6 +7794,13 @@ class AppNotifier extends ChangeNotifier {
 
   /// Attach to a running harness or resume its saved conversation immediately.
   Future<RestartAgentResult> resumeAgent(String machineId, String agentId) {
+    if (pendingAgentPause(machineId, agentId) != null) {
+      return Future.value(
+        const RestartAgentResult(
+          error: 'The harness is still pausing. Try again in a moment.',
+        ),
+      );
+    }
     final agent = stateOf(machineId)?.agents
         .where((agent) => agent.id == agentId)
         .firstOrNull;
@@ -7379,9 +7968,18 @@ class AppNotifier extends ChangeNotifier {
       if (raw is! Map || raw['id'] != agentId) return unknown;
       try {
         var updated = Agent.fromJson(Map<String, dynamic>.from(raw));
+        // A resume that says it opened a NEW conversation is only a surprise
+        // where an old one was promised. An engine with no resume argv, or a
+        // harness paused before anything recorded a conversation, comes back as
+        // a new one BECAUSE that is what it was asked for — and the button said
+        // so beforehand — so the receipt is honoured rather than read as a
+        // failure that leaves the row stuck.
+        final fresh =
+            attempt.agent!.resumesFreshConversation ||
+            updated.resumesFreshConversation;
         if (resuming &&
-            (result['resumed'] == false ||
-                updated.sessionId != attempt.agent!.sessionId ||
+            ((result['resumed'] == false && !fresh) ||
+                (updated.sessionId != attempt.agent!.sessionId && !fresh) ||
                 updated.launchState == 'starting' ||
                 updated.launchState == 'failed')) {
           return unknown;
@@ -7433,6 +8031,9 @@ class AppNotifier extends ChangeNotifier {
                 ? 'Update the harness CLI on this machine to open saved harnesses.'
                 : 'Update the harness CLI on this machine to restart an agent.',
           'AGENT_BUSY' => 'Another operation is changing this agent. Wait for it to finish, then retry.',
+          'RESUME_UNAVAILABLE' => 'The saved conversation is unavailable. The harness can still be started fresh.',
+          'RESUME_SESSION_MISMATCH' => 'The harness came back on a different conversation. The saved one is still kept.',
+          'RESUME_FAILED' => 'The harness did not come back. Its output and conversation are kept.',
           _ =>
             resuming
                 ? 'Could not open this harness: $code'
@@ -8063,12 +8664,16 @@ class AppNotifier extends ChangeNotifier {
   /// unanswered question is re-shown on each reconnect, and a blink in the
   /// link used to open a row of tabs — on every Mac, once tabs were shared
   /// (owner, 2026-09-21).
+  ///
+  /// The device's move, never a person's — see [paneFocusByUser]: bringing
+  /// the agent forward takes nothing back from another client, and the tile
+  /// a tap opens claims only its own terminal.
   Future<void> openAgentFromDial(
     String machineId,
     String agentId, {
     bool fromQuestion = false,
   }) async {
-    if (revealAgentView(machineId, agentId)) {
+    if (_fromDevice(() => revealAgentView(machineId, agentId))) {
       selectedMachineId = machineId;
       notifyListeners();
       return;
@@ -8083,8 +8688,72 @@ class AppNotifier extends ChangeNotifier {
     // Its own tab. newSwarm reuses an unused start page when there is one, and
     // at the tab limit leaves the current tab selected — the agent then lands
     // there, with the usual capacity message if that tab is full.
-    newSwarm();
-    await addAgentToSwarm(machineId, agentId, swarmId: activeSwarmId);
+    await _fromDevice(() {
+      newSwarm();
+      return addAgentToSwarm(machineId, agentId, swarmId: activeSwarmId);
+    });
+  }
+
+  final _preparationOpens = <String, Future<bool>>{};
+  final _revealedPreparations = <String>{};
+
+  /// Reveal a prepared agent before its engine is ready, so login/trust stays
+  /// interactive. This only opens UI; task delivery belongs to the device.
+  Future<bool> revealPreparedAgent(
+    String machineId,
+    String agentId,
+    String operationId,
+  ) async {
+    final key = '$_authRevision/$machineId/$operationId';
+    if (_revealedPreparations.contains(key)) return true;
+    final agentKey = '$_authRevision/$machineId/$agentId';
+    final pending = _preparationOpens[agentKey];
+    if (pending != null) {
+      final opened = await pending;
+      if (opened) _revealedPreparations.add(key);
+      return opened;
+    }
+    final opening = _openPreparedAgent(machineId, agentId);
+    _preparationOpens[agentKey] = opening;
+    try {
+      final opened = await opening;
+      if (opened) _revealedPreparations.add(key);
+      return opened;
+    } finally {
+      _preparationOpens.remove(agentKey);
+    }
+  }
+
+  Future<bool> _openPreparedAgent(String machineId, String agentId) async {
+    final revision = _authRevision;
+    final machine = machineStates[machineId];
+    if (_disposed || machine == null || !await _awaitAgent(machine, agentId)) {
+      return false;
+    }
+    if (_disposed ||
+        revision != _authRevision ||
+        !identical(machineStates[machineId], machine)) {
+      return false;
+    }
+    await openAgentFromDial(machineId, agentId);
+    if (_disposed ||
+        revision != _authRevision ||
+        !identical(machineStates[machineId], machine) ||
+        !allPanes.any(
+          (p) => p.machineId == machineId && p.agentId == agentId,
+        )) {
+      return false;
+    }
+    // Reuse the generic package viewer path, including a late viewerUrl/error.
+    final agent = machine.agents.where((a) => a.id == agentId).firstOrNull;
+    if (agent != null) {
+      _dismissedViewers.remove(_viewerKey(machineId, agentId));
+      _syncViewerPane(machine, agent);
+      activeSwarm.zoomedPaneId = null;
+      _persistLayout();
+      notifyListeners();
+    }
+    return true;
   }
 
   /// Enable-time fallback: preserve the user's current choice and acknowledge it.
@@ -8112,21 +8781,46 @@ class AppNotifier extends ChangeNotifier {
     late Future<void> selection;
     _deviceFocusRevision = focusRevision;
     try {
-      selection = selectAgent(machineId, agentId);
+      selection = focusAgentFromDevice(machineId, agentId);
     } finally {
       _deviceFocusRevision = null;
     }
     await selection;
   }
 
-  /// The dial turned to an agent. Ordinary selection, the same path a click on the rail takes.
+  /// The dial turned to an agent. Focus, the same move a click on the rail makes — minus the retake.
   ///
   /// It used to take a `DeskEdge` and, for an agent with no tile, replace the pane at that end — the
   /// dial's carousel could walk past the end of the desk onto an unopened agent, and the edge said
   /// which tile it had walked off. The carousel walks only open panes now, so there is no off-desk
   /// landing left to place and nothing to replace.
-  Future<void> selectAgentFromDial(String machineId, String agentId) async {
-    await selectAgent(machineId, agentId);
+  Future<void> selectAgentFromDial(String machineId, String agentId) =>
+      focusAgentFromDevice(machineId, agentId);
+
+  /// Bring [agentId]'s tile forward because a device asked — the dial's
+  /// carousel, the WiFi device's focus. The tab switches, the tile gets the
+  /// keyboard and `app_focus` goes back to the daemon, exactly as
+  /// [selectAgent] does; what it does NOT do is reopen a stream another
+  /// client holds. [selectAgent] reopens every dead pane it lands on, and a
+  /// `takenOver` pane is dead by that measure — so a turn of the dial was a
+  /// takeover, and a question re-shown there took the whole desk back from
+  /// the other Mac (see [paneFocusByUser]). Here the band stays up with its
+  /// button, and only a hand on this app presses it.
+  ///
+  /// A tile that never attached (its machine was offline when it was
+  /// restored) is attached now, as the ordinary reconnect would: nobody else
+  /// can be holding a stream this app never opened. No tile at all opens one,
+  /// the way a rail click does — that is an open, not a focus, and it claims
+  /// only its own terminal.
+  Future<void> focusAgentFromDevice(String machineId, String agentId) async {
+    final existing = paneOfAgent(machineId, agentId);
+    if (existing == null) {
+      await _fromDevice(() => addAgentToSwarm(machineId, agentId));
+      return;
+    }
+    _fromDevice(() => revealAgentView(machineId, agentId));
+    machineStates[machineId]?.activeAgentId = agentId;
+    if (existing.session == null) await _attachSession(existing);
   }
 
   Future<void> selectAgent(String machineId, String agentId) async {
@@ -8161,7 +8855,7 @@ class AppNotifier extends ChangeNotifier {
   /// take over the whole content area would blank three working terminals
   /// belonging to two other machines. The one exception is a machine that
   /// already needs linking: that state now surfaces as a blocking popup
-  /// (HomeScreen._maybeShowLinkDialog / showLinkMachineScreenDialog) rather
+  /// (showLinkMachineScreenDialog, from SwarmScreen) rather
   /// than a tile, so opening one here too would just be a redundant "not
   /// linked" pane sitting behind it. Selecting is still worth doing — it's
   /// what makes the popup's gate notice this machine — the tile is not.
@@ -8781,6 +9475,114 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
+  /// Move a pane to another tab, terminal and all.
+  ///
+  /// The tile is the SAME [TerminalPane] on the other side — never a fresh one
+  /// — which is what keeps the terminal attached: the session hangs off the
+  /// pane ([TerminalPane.session]), the cell is a `GlobalKey`, and
+  /// `TerminalPanel` is built to survive a change of tab without remounting.
+  /// Closing here and opening there would tear the session down and ask the
+  /// daemon to open it again, losing the viewport and the scrollback.
+  ///
+  /// Refuses rather than half-moves: an unknown pane or tab, the tab it is
+  /// already on, and a destination at [maxPanes] all leave everything as it
+  /// was, the last one with the same message [assignAgentToPane] gives.
+  ///
+  /// A destination already showing this agent takes the move as a plain close
+  /// here — one membership per tab, the rule [assignAgentToPane] keeps.
+  bool movePaneToSwarm(int paneId, String swarmId, {bool follow = true}) {
+    final source = activeSwarm;
+    final pane = source.panes.where((p) => p.id == paneId).firstOrNull;
+    final target = swarms.where((swarm) => swarm.id == swarmId).firstOrNull;
+    if (pane == null || target == null || target.id == source.id) return false;
+    final twin = pane.agentId == null
+        ? null
+        : target.panes
+              .where(
+                (p) =>
+                    p.machineId == pane.machineId && p.agentId == pane.agentId,
+              )
+              .firstOrNull;
+    if (twin == null && target.panes.length >= maxPanes) {
+      _lastError =
+          'That tab holds $maxPanes agents. Close one there to move this in.';
+      _lastErrorRetryable = false;
+      notifyListeners();
+      return false;
+    }
+    source.remove(pane);
+    // The tab left behind re-tiles. `Swarm.remove` keeps the shape by carrying
+    // the manual layout down a tile — right when a pane CLOSES, because the
+    // split was drawn around the tiles that remain. A tile that left for
+    // another tab is not that: what is left here is a different set, and
+    // holding the old proportions leaves it visibly lopsided. A layout chosen
+    // outright in the Layout palette still stands; only the dragged sizes go.
+    source.paneSizes.removeWhere(
+      (key, _) => key.startsWith('${source.panes.length}:'),
+    );
+    source.arranged = null;
+    source.arrangedKey = null;
+    // A harness's viewer lives beside its terminal, so it travels with it —
+    // the same rule `closePane` keeps when the terminal goes.
+    final viewers = <TerminalPane>[];
+    if (!pane.isWeb && pane.agentId != null) {
+      for (final viewer in source.panes.toList()) {
+        if (viewer.isWeb &&
+            viewer.machineId == pane.machineId &&
+            viewer.ownerAgentId == pane.agentId) {
+          source.remove(viewer);
+          viewers.add(viewer);
+        }
+      }
+    }
+    if (twin == null) {
+      final firstAgent = target.panes.every((pane) => pane.agentId == null);
+      target.panes.add(pane);
+      // A tab that had no harness in it takes this one's name, the way it
+      // would for a harness opened into it.
+      if (firstAgent && !target.nameIsCustom && pane.agentId != null) {
+        final agent = machineStates[pane.machineId]?.agents
+            .where((agent) => agent.id == pane.agentId)
+            .firstOrNull;
+        target.titleMachineId = pane.machineId;
+        target.titleAgentId = pane.agentId;
+        target.name = agent == null || agent.displayName == kUntitledPane
+            ? Swarm.defaultName
+            : agent.displayName;
+      }
+      for (final viewer in viewers) {
+        if (target.panes.length >= maxPanes) break;
+        target.panes.add(viewer);
+      }
+      // The destination reflows for a tile it has never held, exactly as it
+      // would for a new one: remembered shapes for the old count cannot decide
+      // where this lands.
+      target.presets.remove(target.panes.length);
+      target.paneSizes.removeWhere(
+        (key, _) => key.startsWith('${target.panes.length}:'),
+      );
+      target.arranged = null;
+      target.arrangedKey = null;
+      if (target.focusedPaneId != pane.id) {
+        target.previousPaneId = target.focusedPaneId;
+        target.focusedPaneId = pane.id;
+      }
+      if (target.zoomedPaneId != null) target.zoomedPaneId = pane.id;
+    }
+    _settlePins();
+    if (follow) {
+      _activeSwarmId = target.id;
+      railFocused = false;
+      _noteNavigation();
+      _paneFocusRequest++;
+    }
+    selectedMachineId = focusedPane?.machineId;
+    _persistLayout();
+    _announceAppFocus();
+    notifyListeners();
+    return true;
+  }
+
   Future<void> closePane(int paneId, {bool persist = true}) async {
     final pane = panes.where((p) => p.id == paneId).firstOrNull;
     if (pane == null) return;
@@ -8881,8 +9683,51 @@ class AppNotifier extends ChangeNotifier {
               if (pane.agentId != null)
                 DeskPaneRef(machineId: pane.machineId, agentId: pane.agentId!),
           ],
+          layout: _deskLayoutOf(swarm),
         ),
   ];
+
+  /// The tab's layout as the desk holds it: the chosen presets and the
+  /// arrangements the window keeps (`paneSizes`), tiles as fractions. The
+  /// desk carries at most 16 arrangements; the newest are the ones a hand
+  /// just made, so those are what travel.
+  static DeskLayout _deskLayoutOf(Swarm swarm) {
+    final sizes = swarm.paneSizes.entries.toList();
+    return DeskLayout(
+      presets: {for (final e in swarm.presets.entries) '${e.key}': e.value.id},
+      sizes: {
+        for (final e in sizes.skip((sizes.length - 16).clamp(0, sizes.length)))
+          e.key: e.value.toJson(),
+      },
+    );
+  }
+
+  /// The desk's layout for a tab, made this window's: presets the shape
+  /// supports, arrangements whose tile count matches their key. Replaces
+  /// what was there — a layout is one thing, not a merge of two.
+  static void _applyDeskLayout(Swarm swarm, DeskLayout? layout) {
+    swarm.presets.clear();
+    swarm.paneSizes.clear();
+    if (layout == null) return;
+    for (final e in layout.presets.entries) {
+      final count = int.tryParse(e.key);
+      final preset = PanePreset.byId(e.value);
+      if (count != null &&
+          count >= 2 &&
+          count <= maxPanes &&
+          preset != null &&
+          preset.supportsCount(count)) {
+        swarm.presets[count] = preset;
+      }
+    }
+    swarm.paneSizes.addAll(
+      PaneArrangement.readSaved({
+        for (final e in layout.sizes.entries) e.key: e.value,
+      }),
+    );
+    swarm.arranged = null;
+    swarm.arrangedKey = null;
+  }
 
   /// First contact with the desk after sign-in. A daemon that predates the
   /// desk, or a signed-out one, answers null and this window keeps its tabs to
@@ -8957,9 +9802,12 @@ class AppNotifier extends ChangeNotifier {
       'desk',
       'joined at rev ${doc.revision} · ${doc.tabs.length} on the desk · ${unknown.length} of ours to seed',
     );
-    _deskApply(doc);
+    _deskApply(doc, joining: true);
     await _deskFlush();
   }
+
+  static String _layoutFingerprintOf(DeskLayout? layout) =>
+      layout == null || layout.isEmpty ? '' : layout.fingerprint;
 
   static bool _sameKeys(List<String> a, List<String> b) {
     if (a.length != b.length) return false;
@@ -9054,13 +9902,13 @@ class AppNotifier extends ChangeNotifier {
 
   /// Reconcile `swarms` to [doc], with this window's unacknowledged ops laid
   /// over it. Ignores a document older than one already applied.
-  void _deskApply(DeskDoc doc) {
+  void _deskApply(DeskDoc doc, {bool joining = false}) {
     if (doc.revision < _desk.revision) return;
     _desk.revision = doc.revision;
     final target = applyDeskOps(doc.tabs, _desk.pending);
     final believed = _desk.synced;
     _desk.synced = target;
-    _deskReconcile(target, believed: believed);
+    _deskReconcile(target, believed: believed, joining: joining);
   }
 
   /// Make `swarms` say what [target] says, and no more: tabs the desk closed go
@@ -9078,6 +9926,7 @@ class AppNotifier extends ChangeNotifier {
   void _deskReconcile(
     List<DeskTab> target, {
     List<DeskTab> believed = const [],
+    bool joining = false,
   }) {
     final targetById = {for (final t in target) t.id: t};
     final believedById = {for (final t in believed) t.id: t};
@@ -9196,6 +10045,26 @@ class AppNotifier extends ChangeNotifier {
           }
         }
       }
+      // The layout: the desk's, but — like the order — only where the desk's
+      // own layout moved since this window last agreed with it, so a drag in
+      // progress here is not undone by a document that merely arrived. A tab
+      // this window has never known takes the desk's layout as it is.
+      final knownLayout = believedById.containsKey(tab.id)
+          ? believedById[tab.id]!.layout
+          : null;
+      final layoutMoved =
+          !believedById.containsKey(tab.id) ||
+          _layoutFingerprintOf(knownLayout) != _layoutFingerprintOf(tab.layout);
+      // At the join a desk that holds no layout for a tab this window has one
+      // for learns this window's (the diff sends it up); it does not wipe it.
+      final deskHasOne = tab.layout != null && !tab.layout!.isEmpty;
+      if (layoutMoved &&
+          (deskHasOne || !joining) &&
+          _layoutFingerprintOf(tab.layout) !=
+              _layoutFingerprintOf(_deskLayoutOf(swarm))) {
+        _applyDeskLayout(swarm, tab.layout);
+        _paneLayoutRequest++;
+      }
       if (!swarm.nameIsCustom &&
           swarm.titleAgentId == null &&
           swarm.panes.isNotEmpty) {
@@ -9222,6 +10091,9 @@ class AppNotifier extends ChangeNotifier {
     if (!swarms.any((s) => s.id == _activeSwarmId)) {
       _activeSwarmId = swarms.first.id;
       selectedMachineId = focusedPane?.machineId;
+      // Another Mac closed the tab this one was on. The tab that comes forward
+      // instead is nobody's arrival here — see [paneFocusByUser].
+      _paneFocusByUser = false;
     }
 
     // Streams nobody shows any more.
@@ -9247,6 +10119,11 @@ class AppNotifier extends ChangeNotifier {
   }
 
   void _persistLayout() {
+    for (final pane in allPanes) {
+      if (pane.agentId case final id?) {
+        rememberOpenedHarness(pane.machineId, id);
+      }
+    }
     _draftSwarmReturns.removeWhere((id, _) {
       final swarm = swarms.where((swarm) => swarm.id == id).firstOrNull;
       return swarm == null ||
@@ -9268,6 +10145,7 @@ class AppNotifier extends ChangeNotifier {
         saved.any((swarm) => swarm.id == savedActive)
             ? savedActive!
             : saved.last.id,
+        monitorHarnesses: _monitorHarnesses,
       ),
     );
   }
@@ -9286,7 +10164,15 @@ class AppNotifier extends ChangeNotifier {
     final revision = _layoutRevision;
     final authRevision = _authRevision;
     final saved = await store.loadSwarms();
-    if (!_authWorkCurrent(authRevision) || revision != _layoutRevision) return;
+    final known = await store.loadMonitorHarnesses(saved);
+    if (!_authWorkCurrent(authRevision)) return;
+    for (final (machine, agent) in known) {
+      rememberOpenedHarness(machine, agent);
+    }
+    if (revision != _layoutRevision) {
+      _persistLayout();
+      return;
+    }
     if (saved != null &&
         allPanes.isEmpty &&
         swarms.length == 1 &&
@@ -9517,6 +10403,30 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
+  /// A person acted on this app — clicked a tile, brought the window forward
+  /// — so every stream another client took from it comes back, not only the
+  /// tile they touched: being at this app is a fact about the app, not about
+  /// one pane. Every tab, since a tile parked behind another tab is this
+  /// app's too. Only ever from a user gesture — see
+  /// `_TerminalPanelState._autoTakeControl` for why a session or focus
+  /// callback must never call this.
+  ///
+  /// Reopens in place, as `selectAgent` does for a dead pane; `reopen` itself
+  /// skips a pane already `opening`. A pane the daemon would refuse
+  /// (`_canAttachPane`: machine offline, agent gone) keeps its band. Focus is
+  /// not moved — the tile the person is on stays the one they are on.
+  Future<void> retakeTakenOverPanes() async {
+    final reopening = <Future<void>>[];
+    for (final pane in allPanes) {
+      final session = pane.session;
+      if (session == null || session.readOnly) continue;
+      if (session.status != TerminalSessionStatus.takenOver) continue;
+      if (!_canAttachPane(pane)) continue;
+      reopening.add(session.reopen());
+    }
+    await Future.wait(reopening);
+  }
+
   bool _canAttachPane(TerminalPane pane) {
     if (_disposed || !allPanes.contains(pane)) return false;
     final machine = machineStates[pane.machineId];
@@ -9678,7 +10588,9 @@ class AppNotifier extends ChangeNotifier {
         // the tab: the desk changes, `_persistLayout` re-describes it, and the dial's ring and swarm
         // line follow from that — nothing is answered to the dial directly.
         final swarmId = payload['swarmId'];
-        if (swarmId is String && swarmId.isNotEmpty) selectSwarm(swarmId);
+        if (swarmId is String && swarmId.isNotEmpty) {
+          _fromDevice(() => selectSwarm(swarmId));
+        }
         break;
       case 'dial_forked':
         // The dial forked an agent; the daemon already opened the pane on its
@@ -9690,10 +10602,12 @@ class AppNotifier extends ChangeNotifier {
           final targetMachineId = _dialFocusMachine(payload, forkId);
           if (targetMachineId != null) {
             unawaited(
-              placeFork(
-                targetMachineId,
-                forkId,
-                sourceAgentId: forkSource is String ? forkSource : '',
+              _fromDevice(
+                () => placeFork(
+                  targetMachineId,
+                  forkId,
+                  sourceAgentId: forkSource is String ? forkSource : '',
+                ),
               ),
             );
           }
@@ -9711,6 +10625,33 @@ class AppNotifier extends ChangeNotifier {
         final deskRevision = payload['revision'];
         if (deskRevision is! int || deskRevision > _desk.revision) {
           unawaited(_deskFetch());
+        }
+        break;
+      case 'device_prepare_open':
+        final operationId = payload['operationId'];
+        final prepareAgentId = payload['agentId'];
+        final prepareMachineId = payload['machineId'];
+        if (operationId is String &&
+            RegExp(r'^[a-f0-9]{64}$').hasMatch(operationId) &&
+            prepareAgentId is String &&
+            prepareAgentId.isNotEmpty &&
+            prepareMachineId == machineId) {
+          unawaited(() async {
+            try {
+              if (await revealPreparedAgent(
+                machineId,
+                prepareAgentId,
+                operationId,
+              )) {
+                await _pool?[machineId]?.sendTerminalFrame(
+                  'device_prepare_opened',
+                  {'operationId': operationId, 'agentId': prepareAgentId},
+                );
+              }
+            } catch (error) {
+              appLog.warn('device', 'Could not reveal prepared agent: $error');
+            }
+          }());
         }
         break;
       case 'dial_open':
@@ -9823,6 +10764,8 @@ class AppNotifier extends ChangeNotifier {
         }
         break;
       case 'agent_deleted':
+        final goneId = _eventAgentId(machine, event, payload);
+        if (goneId != null) agentUnread.forget(machineId, goneId);
         final agentId = _eventAgentId(machine, event, payload);
         if (agentId != null) {
           await _removeAgent(machine, agentId);
@@ -9860,10 +10803,14 @@ class AppNotifier extends ChangeNotifier {
             // original clock in that case: this is the same wait continuing,
             // and restarting it would make a long block look new.
             final known = machine.blockedAgents[agentId];
-            machine.blockedAgents[agentId] =
-                known != null && known.sameAs(asked)
+            final repeat = known != null && known.sameAs(asked);
+            machine.blockedAgents[agentId] = repeat
                 ? asked.withSince(known.since)
                 : asked;
+            // Only a NEW question earns a sound. The daemon re-announces every open one after a
+            // reconnect and when attaching to a turn that was already mid-dialog, and a window
+            // that beeped at those would sound an alarm every time the network hiccuped.
+            if (!repeat) _raiseAlert(machine, agentId, AlertKind.needsYou);
           }
         }
         break;
@@ -9916,6 +10863,7 @@ class AppNotifier extends ChangeNotifier {
       case 'turn_ended':
         final agentId = _eventAgentId(machine, event, payload);
         if (agentId != null) {
+          _raiseAlert(machine, agentId, AlertKind.done);
           _cancelTurnActivity(machine.machine.machineId, agentId);
         } else {
           final sessionId = _eventSessionId(event, payload);
@@ -9979,6 +10927,7 @@ class AppNotifier extends ChangeNotifier {
 
   @override
   void dispose() {
+    _modelManager?.dispose();
     for (final project in _orchestratorProjects.values) {
       project.dispose();
     }
@@ -9986,11 +10935,15 @@ class AppNotifier extends ChangeNotifier {
     terminalThemeStore.removeListener(_announceTerminalThemeEverywhere);
     _localGitProjects.dispose();
     sessionPreviews.dispose();
+    // Its sweep timer would otherwise outlive the window it was drawing into.
+    agentAlerts.dispose();
+    agentUnread.dispose();
     _disposed = true;
     _sharingDiscoveryTimer?.cancel();
     _stopMachineRecovery();
     if (signingIn) cliLogin.cancel();
     _closedHistory.clear();
+    _monitorHarnesses.clear();
     _daemonSupervisionTimer?.cancel();
     _updateCheckTimer?.cancel();
     _environmentRecheckTimer?.cancel();
@@ -10006,6 +10959,7 @@ class AppNotifier extends ChangeNotifier {
       swarm.panes.clear();
     }
     unawaited(_spokenTasks.close());
+    unawaited(_modelsRequests.close());
     super.dispose();
   }
 }

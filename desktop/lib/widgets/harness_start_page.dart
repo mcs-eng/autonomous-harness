@@ -186,7 +186,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                 onRefocus: _focus.requestFocus,
                               ),
                             ),
-                            // The same bottom line ⌘P has: this is the first box a
+                            // The same bottom line ⌘O has: this is the first box a
                             // new person sees, and the one that most needs to say
                             // what the keys are. On a window too short for both,
                             // the results keep the room.
@@ -259,10 +259,8 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                           padding: const EdgeInsets.only(left: 18, right: 8),
                           child: Text(
                             'Browse the\nHarness Store',
-                            style: TextStyle(
-                              fontSize: 16,
+                            style: grid.AppType.heading(
                               height: 1.3,
-                              fontWeight: FontWeight.w500,
                               color: Colors.white.withValues(alpha: .94),
                             ),
                           ),
@@ -314,10 +312,8 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                           padding: const EdgeInsets.only(left: 18, right: 8),
                           child: Text(
                             'Meet the\nHarness device',
-                            style: TextStyle(
-                              fontSize: 16,
+                            style: grid.AppType.heading(
                               height: 1.3,
-                              fontWeight: FontWeight.w500,
                               color: Colors.white.withValues(alpha: .94),
                             ),
                           ),
@@ -499,7 +495,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                         onPressed: widget.onQuickStart,
                                         child: Text(
                                           'Quick start · 4 steps',
-                                          style: boxMonoStyle(size: 12),
+                                          style: boxMonoStyle(),
                                         ),
                                       ),
                                     if (widget.onPractice != null)
@@ -510,7 +506,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                         onPressed: widget.onPractice,
                                         child: Text(
                                           'Keyboard practice',
-                                          style: boxMonoStyle(size: 12),
+                                          style: boxMonoStyle(),
                                         ),
                                       ),
                                   ],

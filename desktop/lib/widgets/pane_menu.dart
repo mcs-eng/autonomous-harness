@@ -8,6 +8,7 @@ import '../shortcuts/app_keymap.dart';
 import '../shortcuts/keymap.dart';
 import 'box_chrome.dart';
 
+import '../shared/theme/app_type.dart';
 import '../theme/app_theme.dart';
 import 'engine_identity.dart';
 import 'transient_menus.dart';
@@ -31,12 +32,17 @@ import 'transient_menus.dart';
 Future<T?> showPaneMenu<T>({
   required BuildContext context,
   required RelativeRect position,
-  required List<Widget> Function(void Function(T?) close) children,
+  List<Widget> Function(void Function(T?) close)? children,
+  Widget Function(void Function(T?) close)? body,
   void Function(OverlayEntry entry, void Function() close)? onOpen,
   VoidCallback? onClose,
   double minWidth = 340,
   double maxWidth = 540,
 }) {
+  assert(
+    (children == null) != (body == null),
+    'a pane menu is either a list of rows or one body widget, never both',
+  );
   final overlayState = Overlay.of(context);
   final completer = Completer<T?>();
   final previousFocus = FocusManager.instance.primaryFocus;
@@ -74,20 +80,25 @@ Future<T?> showPaneMenu<T>({
           delegate: _PaneMenuPosition(position, minWidth, maxWidth),
           child: _PaneMenuFocus(
             close: () => close(null),
-            child: IntrinsicWidth(
-              child: TerminalBox(
-                child: SingleChildScrollView(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: children(close),
+            // A row list sizes itself to its widest row ([IntrinsicWidth]) and scrolls as one
+            // column. A BODY does neither: it is handed the menu's box and lays itself out, which
+            // is what a panel with something pinned above and below a scrolling middle needs.
+            child: body != null
+                ? TerminalBox(child: body(close))
+                : IntrinsicWidth(
+                    child: TerminalBox(
+                      child: SingleChildScrollView(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: children!(close),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
-            ),
           ),
         ),
       ],
@@ -181,15 +192,17 @@ class _PaneMenuFocusState extends State<_PaneMenuFocus> {
   }
 
   @override
-  Widget build(BuildContext context) => KeymapRegion(
-    contextKind: KeymapContext.picker,
-    child: FocusScope(
-      node: _scope,
-      autofocus: true,
-      onKeyEvent: _key,
-      child: FocusTraversalGroup(child: widget.child),
-    ),
-  );
+  Widget build(BuildContext context) {
+    return KeymapRegion(
+      contextKind: KeymapContext.picker,
+      child: FocusScope(
+        node: _scope,
+        autofocus: true,
+        onKeyEvent: _key,
+        child: FocusTraversalGroup(child: widget.child),
+      ),
+    );
+  }
 }
 
 /// One selectable row of a pane menu.
@@ -199,6 +212,12 @@ class _PaneMenuFocusState extends State<_PaneMenuFocus> {
 /// InkWell around the whole item painted edge to edge and square, over a selected fill that was
 /// neither, and the two reading as different shapes made the current row look like the odd one
 /// out.
+///
+/// Same SHAPE, one fill. The fill belongs to the CHOSEN row and to nothing else: focus paints
+/// none at all (it is a keyboard position, not a decision) and hover paints the weaker
+/// [AppColors.rowHover], which moves with the pointer and so can never be mistaken for where the
+/// agent is. A tick was tried and taken out again — the fill is the whole signal, and a second one
+/// beside it was a column every row paid for.
 /// ⚠️ The cursor is STATED, in both places that can answer for it. A pane menu is drawn in an
 /// overlay above a terminal, and what a person sees while hovering a row was whatever the surface
 /// underneath asked for — an arrow over rows that are the whole point of the menu. `InkWell` carries
@@ -215,6 +234,21 @@ Widget paneMenuItem({required VoidCallback onTap, required Widget child}) =>
           onTap: onTap,
           mouseCursor: SystemMouseCursors.click,
           borderRadius: BorderRadius.circular(kPaneMenuRowRadius),
+          // ⚠️ STATED, all three. Left to the Material default the hover landed close enough to
+          // the selected fill to be indistinguishable, so the row under the pointer and the row
+          // the agent is actually on looked equally chosen — two highlights, one menu. The
+          // palette has always had a weaker tone for exactly this ([AppColors.rowHover]); the
+          // menu simply never asked for it. Splash and highlight go transparent because an ink
+          // ripple is a THIRD fill on the same rectangle, and it lingers after the tap.
+          hoverColor: AppColors.rowHover,
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          // ⚠️ The one that actually put two highlights on screen. The menu moves focus to its
+          // FIRST row as it opens (`_PaneMenuFocus`, so Enter activates something), and an InkWell
+          // paints focus with a fill of its own — so the top row was lit before the pointer moved
+          // and the agent's real row was lit too. Focus is a keyboard position, not a choice; only
+          // the chosen row is filled.
+          focusColor: Colors.transparent,
           child: child,
         ),
       ),
@@ -228,7 +262,7 @@ Widget paneMenuEmpty(String text) => Padding(
     kPaneMenuInset + kPaneMenuRowPadding,
     6,
   ),
-  child: Text(text, style: TextStyle(fontSize: 11, color: AppColors.textSoft)),
+  child: Text(text, style: AppType.body(color: AppColors.textSoft)),
 );
 
 /// A section label. Non-interactive and short, so the groups read as groups rather than as
@@ -253,8 +287,7 @@ Widget paneMenuHeader(String label, {String? caption}) => Padding(
     children: [
       Text(
         label,
-        style: TextStyle(
-          fontSize: 10.5,
+        style: AppType.caption(
           fontWeight: FontWeight.w600,
           letterSpacing: .3,
           color: AppColors.mutedStrong,
@@ -265,7 +298,7 @@ Widget paneMenuHeader(String label, {String? caption}) => Padding(
           padding: const EdgeInsets.only(top: 2),
           child: Text(
             caption,
-            style: TextStyle(fontSize: 10.5, color: AppColors.textSoft),
+            style: AppType.caption(color: AppColors.textSoft),
           ),
         ),
     ],
@@ -299,46 +332,45 @@ class PaneMenuRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Trailing metadata, as its own bounded column. Bounded rather than flexible: a `Flexible`
+    // here has a flex of ONE, so the row's spare width was split evenly between the title and
+    // every metadata field beside it — which put the account column a third of the way across a
+    // subscription row and a machine column halfway across a model row, three columns at three
+    // different offsets down one menu. What each field actually wants is its own width, at the
+    // right-hand edge, with the title absorbing the slack.
+    Widget meta(String text) => ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: kPaneMenuMetaMaxWidth),
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AppType.mono(color: AppColors.mutedStrong),
+      ),
+    );
     final row = Row(
       children: [
+        // The mark is the row's own, and rows without one do NOT reserve its width. A gutter on
+        // every row would line up the handful of rows that carry a logo by indenting every row
+        // that does not — the same trade the tick column was removed for, and the same answer.
         if (engine != null) ...[
-          EngineMark(engine: engine, size: 14),
+          EngineMark(engine: engine, size: kPaneMenuMarkSize),
           const SizedBox(width: 7),
         ] else if (leading != null) ...[
           leading!,
           const SizedBox(width: 7),
         ],
-        // ⚠️ Expanded on the TITLE, not on the status. The status is a handful of characters and
-        // wants only what it needs; giving it the flexible half truncated
-        // `Qwen3.6-35B-A3B-UD-Q5_K_XL` to `Qwen3.6-35B-A3B-UD-Q5_K…` while empty space sat beside
-        // it. The long string here is the model id, so the model id is what gets the room.
+        // The title takes the slack, so every metadata column lands at the right-hand edge.
         Expanded(
           child: Text(
             title,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 12.5,
-              // Stated rather than inherited: a PopupMenuItem's default text style is heavier than
-              // this menu wants, which read as every row being emphasised.
-              fontWeight: FontWeight.w400,
-              color: AppColors.text,
-            ),
+            // Regular, stated by the style rather than inherited: a PopupMenuItem's default text
+            // style is heavier than this menu wants, which read as every row being emphasised.
+            style: AppType.mono(color: AppColors.text),
           ),
         ),
-        if (detail.isNotEmpty) ...[
-          const SizedBox(width: 6),
-          Text(
-            detail,
-            style: TextStyle(fontSize: 11, color: AppColors.mutedStrong),
-          ),
-        ],
-        if (status != null) ...[
-          const SizedBox(width: 14),
-          Text(
-            status!,
-            style: TextStyle(fontSize: 11, color: AppColors.mutedStrong),
-          ),
-        ],
+        if (detail.isNotEmpty) ...[const SizedBox(width: 12), meta(detail)],
+        if (status != null) ...[const SizedBox(width: 12), meta(status!)],
       ],
     );
     return Container(
@@ -368,7 +400,7 @@ class PaneMenuRow extends StatelessWidget {
                   child: Text(
                     subtitle!,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 10.5, color: AppColors.textSoft),
+                    style: AppType.body(color: AppColors.textSoft),
                   ),
                 ),
               ],
@@ -381,6 +413,16 @@ class PaneMenuRow extends StatelessWidget {
 /// carries their SUM as a left inset, so header text sits exactly above the row text it heads.
 const double kPaneMenuInset = 6;
 const double kPaneMenuRowPadding = 8;
+
+/// A row's leading mark, when it has one. Not reserved on rows that do not.
+const double kPaneMenuMarkSize = 14;
+
+/// How wide one trailing metadata column may grow before it ellipsizes.
+///
+/// A cap rather than a flex share: the menu itself is capped, and a field allowed to take half of
+/// it would crowd out the thing the row is actually named after. Past this the account, the
+/// machine or the quota loses its tail — never the model's id.
+const double kPaneMenuMetaMaxWidth = 168;
 
 /// One radius for the hover and the selected fill: they are the same shape.
 const double kPaneMenuRowRadius = 5;

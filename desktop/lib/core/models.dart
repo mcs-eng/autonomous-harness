@@ -211,6 +211,47 @@ final _automaticHarnessName = RegExp(
 bool isAutomaticHarnessName(String name) =>
     _automaticHarnessName.hasMatch(name);
 
+/// Only measurements confirmed by this harness's own tool receipts.
+class AgentOutputStats {
+  const AgentOutputStats({
+    this.linesAdded,
+    this.linesRemoved,
+    this.pullRequestsCreated,
+    this.updatedAt,
+  });
+  final int? linesAdded, linesRemoved, pullRequestsCreated;
+  final DateTime? updatedAt;
+  bool get hasEdits => linesAdded != null && linesRemoved != null;
+  bool get isEmpty => !hasEdits && pullRequestsCreated == null;
+  static AgentOutputStats? fromJson(Object? value) {
+    if (value is! Map) return null;
+    int? count(Object? n) =>
+        n is int && n >= 0 && n <= 9007199254740991 ? n : null;
+    final added = count(value['linesAdded']),
+        removed = count(value['linesRemoved']);
+    final stats = AgentOutputStats(
+      linesAdded: removed == null ? null : added,
+      linesRemoved: added == null ? null : removed,
+      pullRequestsCreated: count(value['pullRequestsCreated']),
+      updatedAt: value['updatedAt'] is String
+          ? DateTime.tryParse(value['updatedAt'] as String)
+          : null,
+    );
+    return stats.isEmpty ? null : stats;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is AgentOutputStats &&
+      linesAdded == other.linesAdded &&
+      linesRemoved == other.linesRemoved &&
+      pullRequestsCreated == other.pullRequestsCreated &&
+      updatedAt == other.updatedAt;
+  @override
+  int get hashCode =>
+      Object.hash(linesAdded, linesRemoved, pullRequestsCreated, updatedAt);
+}
+
 class Agent {
   final String id;
   final String? sessionId;
@@ -239,6 +280,16 @@ class Agent {
   final GridWebSearch? gridWebSearch;
   final String? parentAgentId;
   final AgentProject? project;
+
+  /// The CLI's transcript/hook activity time, not its registry refresh time.
+  final DateTime? lastActivityAt;
+
+  /// Cached conversation usage reported by this agent's owning machine.
+  final int? tokensUsed;
+  final DateTime? tokensUpdatedAt;
+  final AgentOutputStats? outputStats;
+  bool get hasMonitorStats =>
+      tokensUsed != null || (outputStats != null && !outputStats!.isEmpty);
   final String status;
   final String launchState;
   final String? launchError;
@@ -281,6 +332,12 @@ class Agent {
   /// decides (see [canFork]).
   final bool? forkable;
 
+  /// How much a Pause of this harness can promise to bring back, as the daemon
+  /// reports it (`lib/resumeCapability.ts`): `shell`, `conversation` or
+  /// `fresh`. Null from a daemon that predates the field — see
+  /// [canPauseAndResume] for what this build assumes then.
+  final String? resumeMode;
+
   /// The permission mode this agent was launched in (`plan`, `readOnly`, …),
   /// as the daemon recorded it; null from a daemon that predates the field, a
   /// row from before the choice existed, or an agent Harness did not launch.
@@ -309,6 +366,10 @@ class Agent {
     this.gridWebSearch,
     this.parentAgentId,
     this.project,
+    this.lastActivityAt,
+    this.tokensUsed,
+    this.tokensUpdatedAt,
+    this.outputStats,
     this.status = 'active',
     this.launchState = 'ready',
     this.launchError,
@@ -323,12 +384,43 @@ class Agent {
     this.verdict,
     this.forkedFrom,
     this.forkable,
+    this.resumeMode,
     this.permissionMode,
     this.bypassPermission,
     this.namedAgent,
   });
 
   bool get isStopped => status == 'stopped';
+
+  /// Exact saved-conversation resume is currently implemented for these engines.
+  bool get canResumeConversation =>
+      (engine == 'claude' || engine == 'codex') &&
+      sessionId?.isNotEmpty == true;
+
+  /// Whether Harness Monitor may pause this harness and bring it back.
+  ///
+  /// Every engine can, and the daemon says so per engine through [resumeMode]
+  /// — a client that kept its own allow-list is how the two drifted, with
+  /// engines the daemon would happily resume greyed out here for a year.
+  /// What DIFFERS per engine is how much comes back, which
+  /// [resumesFreshConversation] answers and the button's wording says.
+  ///
+  /// The fallback is for a daemon that predates the field: the old rule, so an
+  /// older machine is never offered a Pause its CLI will refuse. `'terminal'`
+  /// is `kTerminalEngine` (`widgets/engine_identity.dart`), spelled out for the
+  /// same reason `'claude'`/`'codex'` are above: this is the model layer and
+  /// does not reach into the widgets.
+  bool get canPauseAndResume =>
+      resumeMode != null || engine == 'terminal' || canResumeConversation;
+
+  /// Whether resuming this harness opens a NEW conversation rather than the one
+  /// it was paused in — either because the engine has no resume argv (`fresh`),
+  /// or because nothing recorded a conversation to reopen. The button says so
+  /// before it is pressed, and a resume that reports it is a success, not a
+  /// failure.
+  bool get resumesFreshConversation =>
+      resumeMode == 'fresh' ||
+      (resumeMode == 'conversation' && (sessionId?.isEmpty ?? true));
 
   /// Explicit names win. An automatic CLI label gives way to its session title.
   String get displayName => _automaticHarnessName.hasMatch(name)
@@ -382,6 +474,9 @@ class Agent {
       _ => 'ready',
     };
     final grid = j['grid'] as Map<String, dynamic>?;
+    final usage = j['tokenUsage'];
+    final total = usage is Map ? usage['totalTokens'] : null;
+    final validTokens = total is int && total >= 0 && total <= 9007199254740991;
     return Agent(
       id: j['id'] as String,
       sessionId: _safeLabel(j['sessionId']),
@@ -396,6 +491,15 @@ class Agent {
       gridWebSearch: GridWebSearch.fromWire(grid?['webSearch']),
       parentAgentId: _safeLabel(j['parentAgentId'] ?? j['parentId']),
       project: AgentProject.fromJson(j['project']),
+      lastActivityAt: j['updatedAt'] is String
+          ? DateTime.tryParse(j['updatedAt'] as String)
+          : null,
+      tokensUsed: validTokens ? total : null,
+      tokensUpdatedAt:
+          validTokens && usage is Map && usage['updatedAt'] is String
+          ? DateTime.tryParse(usage['updatedAt'] as String)
+          : null,
+      outputStats: AgentOutputStats.fromJson(j['outputStats']),
       status: (j['status'] as String?) ?? 'active',
       launchState: launchState,
       launchError: launchState == 'failed' ? _safeLabel(launch['error']) : null,
@@ -415,6 +519,7 @@ class Agent {
       verdict: AgentVerdict.fromJson(j['verdict']),
       forkedFrom: ForkedFrom.fromJson(j['forkedFrom']),
       forkable: j['forkable'] is bool ? j['forkable'] as bool : null,
+      resumeMode: _safeResumeMode(j['resumeMode']),
       permissionMode: _safePermissionMode(j['permissionMode']),
       bypassPermission: j['bypassPermission'] is bool
           ? j['bypassPermission'] as bool
@@ -423,43 +528,57 @@ class Agent {
     );
   }
 
-  Agent copyWith({String? name}) => Agent(
-    id: id,
-    sessionId: sessionId,
-    name: name ?? this.name,
-    title: title,
-    engine: engine,
-    engineDisplayName: engineDisplayName,
-    engineIconHint: engineIconHint,
-    codexHome: codexHome,
-    gridModel: gridModel,
-    gridTargetId: gridTargetId,
-    gridWebSearch: gridWebSearch,
-    parentAgentId: parentAgentId,
-    project: project,
-    status: status,
-    launchState: launchState,
-    launchError: launchError,
-    launchDetail: launchDetail,
-    terminalAvailable: terminalAvailable,
-    terminalUnavailableReason: terminalUnavailableReason,
-    dsh: dsh,
-    dshName: dshName,
-    viewerUrl: viewerUrl,
-    viewerError: viewerError,
-    viewerName: viewerName,
-    verdict: verdict,
-    forkedFrom: forkedFrom,
-    forkable: forkable,
-    permissionMode: permissionMode,
-    bypassPermission: bypassPermission,
-    namedAgent: namedAgent,
-  );
+  Agent copyWith({String? name, String? status, bool? terminalAvailable}) =>
+      Agent(
+        id: id,
+        sessionId: sessionId,
+        name: name ?? this.name,
+        title: title,
+        engine: engine,
+        engineDisplayName: engineDisplayName,
+        engineIconHint: engineIconHint,
+        codexHome: codexHome,
+        gridModel: gridModel,
+        gridTargetId: gridTargetId,
+        gridWebSearch: gridWebSearch,
+        parentAgentId: parentAgentId,
+        project: project,
+        lastActivityAt: lastActivityAt,
+        tokensUsed: tokensUsed,
+        tokensUpdatedAt: tokensUpdatedAt,
+        outputStats: outputStats,
+        status: status ?? this.status,
+        launchState: launchState,
+        launchError: launchError,
+        launchDetail: launchDetail,
+        terminalAvailable: terminalAvailable ?? this.terminalAvailable,
+        terminalUnavailableReason: terminalUnavailableReason,
+        dsh: dsh,
+        dshName: dshName,
+        viewerUrl: viewerUrl,
+        viewerError: viewerError,
+        viewerName: viewerName,
+        verdict: verdict,
+        forkedFrom: forkedFrom,
+        forkable: forkable,
+        resumeMode: resumeMode,
+        permissionMode: permissionMode,
+        bypassPermission: bypassPermission,
+        namedAgent: namedAgent,
+      );
 
   /// A mode id as `PERMISSION_MODES` spells them (`acceptEdits`, `readOnly`):
   /// one word. Not checked against this build's own list — the daemon that
   /// launched the agent is the authority, and it is the one that will read the
   /// id back on a clone.
+  /// One of the daemon's three resume modes, or null for anything else — an
+  /// older daemon that does not send it, or a newer one that grew a fourth
+  /// this build has no wording for.
+  static String? _safeResumeMode(Object? raw) =>
+      raw is String && const {'shell', 'conversation', 'fresh'}.contains(raw)
+      ? raw
+      : null;
+
   static String? _safePermissionMode(Object? raw) =>
       raw is String && RegExp(r'^[A-Za-z]{1,32}$').hasMatch(raw) ? raw : null;
 
@@ -789,6 +908,10 @@ class RouteCandidate {
 
 String _str(Object? value) => value is String ? value : '';
 
+/// How a checkout on no branch reports itself, `Detached 65281563`: the
+/// daemon (cli/src/lib/agentProject.ts) and [LocalGitProjects] both say so.
+const kDetachedBranchPrefix = 'Detached ';
+
 /// Context reported by the owning daemon. Missing on older daemons.
 class AgentProject {
   const AgentProject({
@@ -797,12 +920,51 @@ class AgentProject {
     this.root,
     this.remote,
     this.branch,
+    this.worktree = false,
+    this.branchPending = false,
   });
   final String name;
   final String cwd;
   final String? root;
   final String? remote;
   final String? branch;
+
+  /// In a linked worktree rather than the repository's own checkout.
+  final bool worktree;
+
+  /// [branch] still has the name Harness made up at Start; it is shown once
+  /// the session's name replaces it.
+  final bool branchPending;
+
+  /// The folder as the person chose it: inside a Git checkout, a subfolder
+  /// shows as itself and the checkout's root as its repository ([name]), even
+  /// when the checkout is a temporary worktree. Outside Git it is [name], the
+  /// folder itself. The branch beside it is the repository's.
+  String get label {
+    final checkout = root;
+    if (checkout == null) return name;
+    String trimmed(String path) => path.replaceFirst(RegExp(r'[/\\]+$'), '');
+    if (trimmed(checkout) == trimmed(cwd)) return name;
+    return cwd
+            .split(RegExp(r'[/\\]'))
+            .where((part) => part.isNotEmpty)
+            .lastOrNull ??
+        name;
+  }
+
+  /// On a commit rather than a branch: an agent reading or testing one.
+  bool get detached => branch?.startsWith(kDetachedBranchPrefix) == true;
+
+  /// The branch worth showing beside the folder: none while Harness's made-up
+  /// name waits for the session's, and none on no branch at all.
+  String? get shownBranch => branchPending || detached ? null : branch;
+
+  /// The branch as a tooltip says it.
+  String? get branchDetail => branch == null
+      ? null
+      : detached
+      ? 'No branch: on commit ${branch!.substring(kDetachedBranchPrefix.length)}'
+      : 'Branch: $branch';
 
   String identity(String machineId) =>
       remote != null ? 'repo:$remote' : 'folder:$machineId:${root ?? cwd}';
@@ -814,9 +976,12 @@ class AgentProject {
       cwd == other.cwd &&
       root == other.root &&
       remote == other.remote &&
-      branch == other.branch;
+      branch == other.branch &&
+      worktree == other.worktree &&
+      branchPending == other.branchPending;
   @override
-  int get hashCode => Object.hash(name, cwd, root, remote, branch);
+  int get hashCode =>
+      Object.hash(name, cwd, root, remote, branch, worktree, branchPending);
 
   static AgentProject? fromJson(Object? raw) {
     if (raw is! Map) return null;
@@ -839,6 +1004,8 @@ class AgentProject {
       root: field('root'),
       remote: field('remote'),
       branch: field('branch', 256),
+      worktree: raw['worktree'] == true,
+      branchPending: raw['branchPending'] == true,
     );
   }
 }

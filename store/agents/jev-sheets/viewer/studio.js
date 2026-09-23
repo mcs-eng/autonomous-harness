@@ -2,6 +2,7 @@
 // fed by the viewer server over SSE: `state` (the whole sheet), `cells` (answers as they land),
 // `view` (sort, filter, review line, numbers) and `ghost` (the demo typist).
 import { parseHeader, describeColumn } from '/grammar.mjs'
+import { initQuestionLab } from '/question-lab-ui.mjs'
 
 const $ = (id) => document.getElementById(id)
 const h = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n }
@@ -34,6 +35,9 @@ async function post(cmd, body = {}) {
     return await r.json()
   } catch { return { ok: false, error: 'the viewer is restarting' } }
 }
+
+const questionLab = initQuestionLab({ post, getState: () => S, getSelected: () => selected })
+$('questionLabBtn').addEventListener('click', () => { userTouch(); questionLab.show() })
 
 // ---- colours ----------------------------------------------------------------------------------
 // One stable colour per option: its place in the column's option list picks it.
@@ -255,6 +259,7 @@ function applyState(s) {
   const first = !S
   const hadCols = new Set(S ? S.columns.map((c) => c.id) : [])
   S = s
+  $('questionLabBtn').disabled = false
   rowIndex = new Map(s.rows.map((r) => [r.id, r]))
   colIndex = new Map(s.columns.map((c) => [c.id, c]))
   const now = performance.now()
@@ -285,8 +290,15 @@ function applyShared(v) {
   if (!draggingReview) { $('reviewRange').value = S.reviewBelow; $('reviewVal').textContent = S.reviewBelow.toFixed(2) }
   if (v.ghost) applyGhost(v.ghost)
   if (v.client) S.client = v.client
-  // Own data with no key: say plainly that the stand-in is not the real model.
-  $('standin').classList.toggle('hidden', !(S.own && S.client === 'mock'))
+  if (typeof v.offline === 'boolean') S.offline = v.offline
+  // The shared HUD describes machine-wide credentials. A practice project deliberately ignores them.
+  document.querySelector('[data-jev-hud]').hidden = !!S.offline
+  $('costLabel').textContent = S.client === 'mock' ? 'est. live cost' : 'cost so far'
+  // Label practice for sample rows too, including when a live key is present on this machine.
+  $('standin').classList.toggle('hidden', S.client !== 'mock')
+  $('standin').textContent = S.offline
+    ? 'Offline practice. A word-matching stand-in fills these cells and Question Lab. No new live model calls are made. These answers do not establish model quality.'
+    : 'These are not real model answers. An offline stand-in is matching words. Connect a key in the Jev · live mind panel to ask the real model.'
   renderFilterChip()
   dirty.top = dirty.hist = dirty.find = true
 }

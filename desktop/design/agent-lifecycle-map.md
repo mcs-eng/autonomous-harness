@@ -121,7 +121,7 @@ Evidence: [`notify.mjs`](../../cli/hook/notify.mjs),
 | `agent_deleted` | Remove the row/view from the receiving client's live inventory. The `retained` flag tells desktop to reload the stopped catalog. | None. It is not itself a kill command or proof that the engine exited; terminal unavailability can also produce it. |
 | `agent_renamed` | Update the Harness display name. | None; name/title mutation happened separately. |
 
-Natural engine exit sends `agent_synced` with `status: stopped` and no terminal route for the original identity. The separate shell is announced as a Terminal. Devices receive a deletion for the engine because they list live agents. Explicit Stop still sends `agent_deleted` with `retained: true`, so desktop closes its live views and refreshes the saved catalog.
+Natural engine exit ends the identity that ran the engine exactly as an explicit Stop does: `agent_deleted` with `retained: true`, so the desktop closes its live views and refreshes the saved catalog, followed by `agent_synced` with `status: stopped` and no terminal route for that identity. The separate shell is announced as a Terminal of its own, and the person opens it from the harness list if they want a view of it — a tile left pointing at the ended identity used to sit on "terminal unavailable" forever (#262). Devices receive the same deletion, because they list live agents.
 
 ## Cmd-P/T contract
 
@@ -145,7 +145,7 @@ Natural engine exit sends `agent_synced` with `status: stopped` and no terminal 
 - `creationId` uses the existing durable receipt protocol and `agent_create_status`. A retry of the same intent returns its recorded result or uncertainty, never a new process.
 - A private, fsynced per-agent `.resume` reservation is written **before** history preparation and tmux allocation. It protects the gap between starting tmux and persisting a new registry row, including requests with a different receipt ID after daemon restart.
 - Confirmed native binding, verified completion or a confirmed stop clears the reservation. Unknown allocation/readiness keeps it; startup failure keeps history and preserves the shell/output when available.
-- On daemon restart, a strict-resume row whose pane disappeared is archived for explicit Open. It never enters restore's fresh fallback. A surviving engine is re-observed, and a surviving shell is separated from the saved conversation.
+- On daemon restart, a strict-resume row whose pane disappeared is restored by exact resume when its previous resume was confirmed (`launch: ready`); one still unconfirmed (`starting`) is archived for explicit Open. Neither ever enters restore's fresh fallback. A surviving engine is re-observed, and a surviving shell is separated from the saved conversation.
 
 ## Scope and review limits
 

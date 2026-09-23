@@ -80,7 +80,9 @@ export function validateConfig(raw) {
     return { id: source.id, type: source.type, engineEndpoint, host: source.host,
       ...(source.port ? { port: source.port } : {}), ...(source.sshBinary ? { sshBinary: source.sshBinary } : {}), ...(source.identityFile ? { identityFile: source.identityFile } : {}), ...(source.gpuIndex !== undefined ? { gpuIndex: source.gpuIndex } : {}) };
   });
-  return { spec: 1, mode: raw.mode, grid: raw.grid, controller, machines, sensors, preferences: { goal: text(raw.preferences?.goal, 500) || DEFAULT_CONFIG.preferences.goal, keepFreeMemoryGb: number(raw.preferences?.keepFreeMemoryGb) ?? 4, allowAutomaticChanges: raw.preferences?.allowAutomaticChanges === true } };
+  // The account's own grid, as Harness named it — what "my grid" means. Recorded, never chosen here.
+  const personalGrid = typeof raw.personalGrid === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/.test(raw.personalGrid) ? raw.personalGrid : null;
+  return { spec: 1, mode: raw.mode, grid: raw.grid, personalGrid, controller, machines, sensors, preferences: { goal: text(raw.preferences?.goal, 500) || DEFAULT_CONFIG.preferences.goal, keepFreeMemoryGb: number(raw.preferences?.keepFreeMemoryGb) ?? 4, allowAutomaticChanges: raw.preferences?.allowAutomaticChanges === true } };
 }
 export async function readConfig(workspace) { return validateConfig(await readJson(join(workspace, 'grid-fleet.json'), DEFAULT_CONFIG)); }
 
@@ -101,7 +103,7 @@ export function invocation(machine, args, env = process.env, thinking) {
   return { file: 'ssh', args: [...argv, machine.host, remote], env: childEnv };
 }
 
-export function execute(machine, args, { timeoutMs = 15_000, inherit = false, env = process.env, signal, thinking } = {}) {
+export function execute(machine, args, { timeoutMs = 15_000, inherit = false, env = process.env, signal, thinking, onOutput } = {}) {
   if (thinking !== undefined && typeof thinking !== 'boolean') throw new Error('Thinking must be a boolean.');
   if (machine.transport === 'harness') {
     if (!Array.isArray(args) || args.some(a => typeof a !== 'string' || a.includes('\0'))) throw new Error('Grid arguments must be strings without NUL bytes.');
@@ -122,13 +124,17 @@ export function execute(machine, args, { timeoutMs = 15_000, inherit = false, en
       killTimer = setTimeout(() => { child.kill('SIGKILL'); finish({ ok: false, code: 124, error: message }); }, 1500);
     };
     const abort = () => stop('Grid command was interrupted; verify the engine state before retrying.');
-    try { child = spawn(call.file, call.args, { env: call.env, stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'] }); }
+    try { child = spawn(call.file, call.args, { env: call.env, stdio: inherit && !onOutput ? 'inherit' : ['ignore', 'pipe', 'pipe'] }); }
     catch (error) { finish({ ok: false, code: 127, error: error.message }); return; }
     let stopping = false;
     const capture = which => chunk => {
       if (stopping) return;
       if (stdout.length + stderr.length + chunk.length > 4 * 1024 * 1024) { stopping = true; stop('Grid output exceeded 4 MiB.'); return; }
       if (which === 'out') stdout += chunk; else stderr += chunk;
+      if (onOutput) {
+        onOutput(chunk);
+        if (inherit) (which === 'out' ? process.stdout : process.stderr).write(chunk);
+      }
     };
     child.stdout?.setEncoding('utf8').on('data', capture('out'));
     child.stderr?.setEncoding('utf8').on('data', capture('err'));
@@ -140,15 +146,56 @@ export function execute(machine, args, { timeoutMs = 15_000, inherit = false, en
   });
 }
 
+/**
+ * The CLI's own reason for a failed read: a JSON error envelope (`{"error":
+ * {"message": ...}}`, printed to either stream) or the last human-readable
+ * stderr line. Surfaced so the viewer names the cause — "could not reach grid
+ * X: ..." — instead of a bare exit code. Credentials never reach the browser:
+ * tokens and userinfo are redacted before the message is stored.
+ */
+export function cliDetail(stdout, stderr) {
+  for (const chunk of [stdout, stderr]) {
+    for (const line of String(chunk || '').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        const message = typeof parsed?.error === 'string' ? parsed.error : parsed?.error?.message;
+        if (typeof message === 'string' && message.trim()) return cleanDetail(message);
+      } catch { /* not a JSON envelope */ }
+    }
+  }
+  // Otherwise the human line: stderr first (the CLI reports failures there), then stdout.
+  for (const chunk of [stderr, stdout]) {
+    const lines = String(chunk || '').split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('{'));
+    if (lines.length) return cleanDetail(lines[lines.length - 1]);
+  }
+  return null;
+}
+
+export function cleanDetail(message) {
+  return text(String(message)
+    .replace(/([?&]token=)[^&\s]+/gi, '$1…')
+    .replace(/(^[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/i, '$1…@'), 280);
+}
+
 export async function gridJson(machine, mode, args, options) {
   const result = await execute(machine, [`--${mode}`, ...args, '--json'], options);
   if (!result.ok) {
     const blocked = /(?:could not reach|network|socket)[\s\S]{0,600}(?:operation not permitted|EPERM|denied|blocked)/i.test(`${result.stdout}\n${result.stderr}`);
-    return { ok: false, error: blocked ? 'Network access was blocked by the agent sandbox. Use fleet status for viewer observations, or request scoped network approval before retrying this Grid command.' : result.code === 127 ? result.error : `grid ${args[0]} failed (${result.code}). Run it in the agent terminal for details.` };
+    if (blocked) return { ok: false, error: 'Network access was blocked by the agent sandbox. Use fleet status for viewer observations, or request scoped network approval before retrying this Grid command.' };
+    if (result.code === 127) return { ok: false, error: result.error };
+    // Exit 1 carries the reason on stderr (e.g. a dead relay URL): repeat it so the
+    // viewer and the agent see "could not reach grid …", not just an exit code.
+    const detail = cliDetail(result.stdout, result.stderr);
+    return { ok: false, error: detail ? `grid ${args[0]} failed (${result.code}): ${detail}` : `grid ${args[0]} failed (${result.code}). Run it in the agent terminal for details.` };
   }
   try {
     const value = JSON.parse(result.stdout);
-    if (value?.error) return { ok: false, error: `grid ${args[0]} reported an error.` };
+    if (value?.error) {
+      const detail = typeof value.error === 'string' ? cleanDetail(value.error) : cleanDetail(value.error.message || 'Grid reported an error.');
+      return { ok: false, error: `grid ${args[0]} reported: ${detail}` };
+    }
     return { ok: true, value };
   } catch { return { ok: false, error: `grid ${args[0]} did not return valid JSON.` }; }
 }
@@ -164,7 +211,11 @@ export async function gridJson(machine, mode, args, options) {
  */
 export async function gridSelect(machine, mode, grid, options, { run = execute, readJson = gridJson } = {}) {
   const written = await run(machine, [`--${mode}`, 'use', grid], options);
-  if (!written.ok) return { ok: false, error: written.code === 127 ? written.error : `grid use failed (${written.code}). Run it in the agent terminal for details.` };
+  if (!written.ok) {
+    if (written.code === 127) return { ok: false, error: written.error };
+    const detail = cliDetail(written.stdout, written.stderr);
+    return { ok: false, error: detail ? `grid use failed (${written.code}): ${detail}` : `grid use failed (${written.code}). Run it in the agent terminal for details.` };
+  }
   const read = await readJson(machine, mode, ['use'], options);
   const active = typeof read.value?.active === 'string' ? read.value.active : null;
   if (read.ok && active !== null && active !== grid) return { ok: false, error: `grid use answered, but the active grid is ${active}, not ${grid}.` };
@@ -186,18 +237,54 @@ export async function operations(workspace) {
   });
 }
 
+// Only the public status receipt goes through the app's existing project-file
+// reader. Internal state and endpoint credentials stay hidden under .harness.
+export async function publishSetup(workspace, record) {
+  const file = join(stateDir(workspace), 'setup.json');
+  const current = await readJson(file, null).catch(() => null);
+  if (current?.id !== record.id && current?.startedAt > record.startedAt) return;
+  if (record.stage === 'checking' && current?.stage !== 'checking' &&
+      ['running', 'done'].includes(current?.phase)) return;
+  const updatedAt = now();
+  await atomicJson(file, { spec: 1, ...record, updatedAt });
+  const { id, stage, phase, model, grid, progressPercent } = record;
+  await atomicJson(join(workspace, 'model-setup.json'), {
+    spec: 1, id, stage, phase, model, grid, progressPercent, updatedAt,
+  });
+}
+
 export async function runTracked(workspace, machine, mode, args, options = {}) {
   const command = args.find(a => !a.startsWith('-')) || 'overview';
   const op = { id: randomUUID(), machine: machine.id, command: `grid ${text(command, 40)}`, phase: 'running', startedAt: now(), endedAt: null, exitCode: null, pid: process.pid };
   const file = join(stateDir(workspace), 'operations', `${op.id}.json`);
-  await atomicJson(file, op);
+  const stage = command === 'pull' ? 'downloading' : command === 'join' || (command === 'engine' && args.includes('install')) ? 'starting' : ['device-info', 'catalog', 'ctx'].includes(command) ? 'checking' : null;
+  let pending = Promise.resolve(), lastProgress = 0, outputTail = '';
+  const publish = () => {
+    const snapshot = { ...op };
+    pending = pending.then(async () => {
+      await atomicJson(file, snapshot);
+      if (stage) await publishSetup(workspace, { ...snapshot, stage });
+    });
+    return pending;
+  };
+  await publish();
+  const heartbeat = setInterval(() => { void publish().catch(() => {}); }, 5000);
+  heartbeat.unref();
   try {
-    const result = await execute(machine, [`--${mode}`, ...args], { inherit: true, timeoutMs: 30 * 60_000, ...options });
+    const result = await execute(machine, [`--${mode}`, ...args], { inherit: true, timeoutMs: 30 * 60_000, ...options,
+      ...(stage === 'downloading' && machine.transport !== 'harness' ? { onOutput(chunk) {
+        outputTail = (outputTail + chunk).slice(-1024);
+        const match = [...outputTail.matchAll(/(?:^|[\s(])([0-9]+(?:\.[0-9]+)?)%/g)].at(-1);
+        if (match) op.progressPercent = Math.min(100, Number(match[1]));
+        if (match && Date.now() - lastProgress > 500) { lastProgress = Date.now(); void publish().catch(() => {}); }
+      } } : {}),
+    });
     Object.assign(op, { phase: result.ok ? 'done' : result.code === 124 ? 'interrupted' : 'failed', endedAt: now(), exitCode: result.code });
-    await atomicJson(file, op);
+    await publish();
     return result;
   } catch (error) {
-    await atomicJson(file, { ...op, phase: 'failed', endedAt: now(), exitCode: 1 });
+    Object.assign(op, { phase: 'failed', endedAt: now(), exitCode: 1 });
+    await publish();
     throw error;
-  }
+  } finally { clearInterval(heartbeat); }
 }

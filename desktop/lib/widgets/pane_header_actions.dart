@@ -25,6 +25,7 @@ class PaneHeaderActions extends StatelessWidget {
     this.viewerVisible = false,
     this.viewerColor,
     this.details,
+    this.trailing,
     this.modelPicker,
     this.terminal = false,
     this.compact = false,
@@ -57,12 +58,10 @@ class PaneHeaderActions extends StatelessWidget {
   /// layers keep their size so hovering never changes the title's width.
   final Widget? details;
 
-  /// Where this agent runs, shown with the controls rather than beside the name.
-  ///
-  /// It belongs here for the same reason the icons do: a header this narrow has room for the agent's
-  /// NAME or for what you can do to it, not both, and what you can do to it is worth reading only
-  /// when you are reaching for it. Parked on the left of the cluster, so the four icons a person
-  /// aims at by muscle memory keep the right edge they have always had.
+  /// Supplemental branch context, hidden with details when controls appear.
+  final Widget? trailing;
+
+  /// The current model stays visible beside the pane's contextual controls.
   final Widget? modelPicker;
 
   @override
@@ -107,17 +106,13 @@ class PaneHeaderActions extends StatelessWidget {
         alwaysIncludeSemantics: true,
         duration: MediaQuery.disableAnimationsOf(context)
             ? Duration.zero
-            : const Duration(milliseconds: 100),
+            : grid.AppMotion.hover,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (!compact && onShare != null) ...[
               action('Share harness', Icons.person_add_alt_1_outlined, onShare),
               const SizedBox(width: 2),
-            ],
-            if (modelPicker != null) ...[
-              modelPicker!,
-              const SizedBox(width: 4),
             ],
             if (compact)
               _CompactPaneActions(
@@ -197,22 +192,43 @@ class PaneHeaderActions extends StatelessWidget {
         ),
       ),
     );
-    if (details == null) return controls;
-    return Stack(
-      alignment: Alignment.centerRight,
+    final actionArea = details == null
+        ? controls
+        : Stack(
+            alignment: Alignment.centerRight,
+            children: [
+              IgnorePointer(
+                ignoring: visible,
+                child: AnimatedOpacity(
+                  key: const ValueKey('pane-header-details'),
+                  opacity: visible ? 0 : 1,
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : grid.AppMotion.hover,
+                  child: ExcludeSemantics(
+                    excluding: visible,
+                    child: trailing == null
+                        ? details!
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Flexible(child: details!),
+                              trailing!,
+                            ],
+                          ),
+                  ),
+                ),
+              ),
+              controls,
+            ],
+          );
+    if (modelPicker == null) return actionArea;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        IgnorePointer(
-          ignoring: visible,
-          child: AnimatedOpacity(
-            key: const ValueKey('pane-header-details'),
-            opacity: visible ? 0 : 1,
-            duration: MediaQuery.disableAnimationsOf(context)
-                ? Duration.zero
-                : const Duration(milliseconds: 100),
-            child: ExcludeSemantics(excluding: visible, child: details!),
-          ),
-        ),
-        controls,
+        modelPicker!,
+        const SizedBox(width: 4),
+        Flexible(child: actionArea),
       ],
     );
   }
@@ -277,7 +293,7 @@ class _CompactPaneActionsState extends State<_CompactPaneActions> {
               focusNode: i == 0 ? _firstFocus : null,
               onPressed: enabled[i].callback,
               style: ButtonStyle(
-                textStyle: WidgetStatePropertyAll(boxMonoStyle(size: 12)),
+                textStyle: WidgetStatePropertyAll(grid.AppType.body()),
                 foregroundColor: WidgetStatePropertyAll(AppColors.text),
                 minimumSize: const WidgetStatePropertyAll(Size(180, 30)),
                 shape: const WidgetStatePropertyAll(RoundedRectangleBorder()),
@@ -323,19 +339,21 @@ class PaneHeaderHover extends StatefulWidget {
 class _PaneHeaderHoverState extends State<PaneHeaderHover> {
   bool _hovered = false, _focused = false;
   @override
-  Widget build(BuildContext context) => MouseRegion(
-    onEnter: (_) => setState(() => _hovered = true),
-    onExit: (_) => setState(() => _hovered = false),
-    child: Focus(
-      canRequestFocus: false,
-      includeSemantics: false,
-      onFocusChange: (value) => setState(() => _focused = value),
-      child: _PaneHeaderVisibility(
-        visible: _hovered || _focused,
-        child: widget.child,
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: Focus(
+        canRequestFocus: false,
+        includeSemantics: false,
+        onFocusChange: (value) => setState(() => _focused = value),
+        child: _PaneHeaderVisibility(
+          visible: _hovered || _focused,
+          child: widget.child,
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _PaneHeaderVisibility extends InheritedWidget {
@@ -373,7 +391,7 @@ class _ViewerToggle extends StatelessWidget {
       tooltip: on ? 'Hide viewer' : 'Show viewer',
       onPressed: onPressed,
       icon: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
+        duration: grid.AppMotion.swap,
         curve: Curves.easeOut,
         decoration: BoxDecoration(
           shape: BoxShape.circle,

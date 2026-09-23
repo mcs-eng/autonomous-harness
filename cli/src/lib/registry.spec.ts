@@ -743,14 +743,56 @@ describe('agent identity: the process owns the agent, the session is bound to it
     expect(registry.resolve('agent-1')?.boundAt).toBe(Date.now())
   })
 
-  it('a re-register of the same session is not a rotation', async () => {
+  it('a re-register of the same session is not a rotation, and keeps the folder the row already has', async () => {
     const { registry } = await loadRegistryModule()
     registry.load()
     registerProcess(registry, { launcherId: 'agent-1', sessionId: 's1', transcriptPath: transcript('s1'), tmuxPane: '%1', cwd: '/tmp/demo' })
-    const again = registerProcess(registry, { launcherId: 'agent-1', sessionId: 's1', transcriptPath: transcript('s1'), tmuxPane: '%1', cwd: '/tmp/demo' })
+    // Claude's UserPromptSubmit carries the session's tracked SHELL directory, which follows every
+    // Bash `cd`; the row's folder — what a resume or restore `cd`s into — must not follow it.
+    const again = registerProcess(registry, { launcherId: 'agent-1', sessionId: 's1', transcriptPath: transcript('s1'), tmuxPane: '%1', cwd: '/tmp/demo/cli' })
     expect(again?.isNew).toBe(false)
     expect(again?.rebound).toBeNull()
     expect(registry.list()).toHaveLength(1)
+    expect(registry.byAgent('agent-1')?.cwd).toBe('/tmp/demo')
+    // A rotation is a new session and takes the folder it reports.
+    const rot = registerProcess(registry, { launcherId: 'agent-1', sessionId: 's2', transcriptPath: transcript('s2'), tmuxPane: '%1', cwd: '/tmp/demo/cli' })
+    expect(rot?.isNew).toBe(true)
+    expect(registry.byAgent('agent-1')?.cwd).toBe('/tmp/demo/cli')
+  })
+
+  it('a first bind whose cwd is not the transcript\'s project folder takes the folder from the transcript', async () => {
+    // A fork inherits its source's drifted cwd; `claude --resume` typed from a subfolder announces
+    // that subfolder. Claude never moves the transcript out of the project dir it was started in,
+    // so the file's own directory says which folder is the session's.
+    const { registry } = await loadRegistryModule()
+    registry.load()
+    const project = join(dataDir, 'repo')
+    const projectDir = join(dataDir, project.replace(/[^A-Za-z0-9]/g, '-'))
+    mkdirSync(projectDir, { recursive: true })
+    const path = join(projectDir, 's1.jsonl')
+    writeFileSync(path, [
+      JSON.stringify({ type: 'mode' }),
+      JSON.stringify({ type: 'user', cwd: join(project, 'cli') }),
+      JSON.stringify({ type: 'user', cwd: project }),
+    ].join('\n') + '\n')
+    const bound = registerProcess(registry, { launcherId: 'agent-1', sessionId: 's1', transcriptPath: path, tmuxPane: '%1', cwd: join(project, 'cli') })
+    expect(bound?.isNew).toBe(true)
+    expect(registry.byAgent('agent-1')?.cwd).toBe(project)
+    // The folder itself, spelled as given, is accepted as is.
+    const rot = registerProcess(registry, { launcherId: 'agent-1', sessionId: 's2', transcriptPath: (() => { const p2 = join(projectDir, 's2.jsonl'); writeFileSync(p2, JSON.stringify({ cwd: project }) + '\n'); return p2 })(), tmuxPane: '%1', cwd: project })
+    expect(rot?.isNew).toBe(true)
+    expect(registry.byAgent('agent-1')?.cwd).toBe(project)
+  })
+
+  it('re-observing a pane follows the shell until a session is bound, then leaves the folder alone', async () => {
+    const { registry } = await loadRegistryModule()
+    registry.load()
+    registry.openProcessAgent({ agentId: 'agent-1', engine: 'terminal', tmuxPane: '%1', cwd: '/tmp/demo', processIdentity: processIdentity(101) })
+    registry.openProcessAgent({ engine: 'terminal', tmuxPane: '%1', cwd: '/tmp/demo/cli', processIdentity: processIdentity(101) })
+    expect(registry.byAgent('agent-1')?.cwd).toBe('/tmp/demo/cli')
+    registerProcess(registry, { launcherId: 'agent-2', sessionId: 's1', transcriptPath: transcript('s1'), tmuxPane: '%2', cwd: '/tmp/demo' })
+    registry.openProcessAgent({ engine: 'claude', tmuxPane: '%2', cwd: '/tmp/demo/cli', processIdentity: processIdentity(102) })
+    expect(registry.byAgent('agent-2')?.cwd).toBe('/tmp/demo')
   })
 
   it('one engine session cannot belong to two agents', async () => {
@@ -1003,6 +1045,37 @@ describe('agent identity: the process owns the agent, the session is bound to it
     reloaded.load()
     expect(reloaded.byAgent('agent-1')?.sessionId).toBe('')
     expect(reloaded.unbound()).toHaveLength(1)
+  })
+
+  // A row that does not leave `starting` reads as "Starting" on the desk while its engine is working,
+  // and the state is written from six places that cannot see each other. Each one says so, and a
+  // settled row says nothing — so a log from a machine where it sticks names the pair doing it.
+  it('names every launch change by the door it came through, and is silent when nothing changed', async () => {
+    const { registry } = await loadRegistryModule()
+    registry.load()
+    const lines: string[] = []
+    const log = vi.spyOn(console, 'log').mockImplementation((message: unknown) => {
+      if (typeof message === 'string' && message.startsWith('[launch]')) lines.push(message)
+    })
+    try {
+      const pending = registry.openPendingAgent({ engine: 'claude', runtimes: [{ backend: 'tmux', paneId: '%7' }], cwd: '/tmp/demo' })!
+      registry.openProcessAgent({ engine: 'claude', tmuxPane: '%7', cwd: '/tmp/demo', processIdentity: processIdentity(707) })
+      registry.setLaunch(pending.agentId, { state: 'ready' })            // already ready — silent
+      registry.setLaunch(pending.agentId, { state: 'failed', error: 'START_TIMEOUT' })
+      const id = pending.agentId.slice(0, 8)
+      expect(lines).toEqual([
+        `[launch] ${id} starting → ready · openProcessAgent re-observed`,
+        `[launch] ${id} ready → failed · setLaunch (START_TIMEOUT)`,
+      ])
+
+      // A bind ends the launch without naming it: the rebuilt row carries none.
+      lines.length = 0
+      registry.setLaunch(pending.agentId, { state: 'starting' })
+      registerProcess(registry, { launcherId: pending.agentId, sessionId: 's1', transcriptPath: transcript('s1'), tmuxPane: '%7', cwd: '/tmp/demo' })
+      expect(lines.filter(line => line.includes('→ none'))).toHaveLength(1)
+    } finally {
+      log.mockRestore()
+    }
   })
 
   it('opens a route-only pending agent and adopts the engine process without changing agentId', async () => {

@@ -1,4 +1,4 @@
-// Clone Agent (⌘⇧N): another agent of the focused pane's kind with a fresh
+// Clone Harness (⌘⇧N): another agent of the focused pane's kind with a fresh
 // conversation — fork minus the context. Everything a dialog would ask is read
 // off the source agent's frame, so the chord goes straight to `agent_create`
 // on the source's machine; a relayed machine takes the same road as this one.
@@ -116,19 +116,34 @@ void main() {
   Map<String, dynamic> withoutId(Map<String, dynamic> payload) =>
       {...payload}..remove('creationId');
 
-  test('⌘⇧N is Clone Agent in the live table and reaches the native menu', () {
-    final shiftN = kSwarmShortcuts.where(
-      (s) =>
-          s.activator.trigger == LogicalKeyboardKey.keyN &&
-          s.activator.meta &&
-          s.activator.shift,
-    );
-    expect(shiftN.single.action, ShortcutAction.cloneAgent);
-    expect(harnessCommandById['agent.clone']!.keys, ['cmd+shift+n']);
-    expect(harnessCommandById['agent.clone']!.nativeAction, 'cloneAgent');
-    // Fork keeps no default chord; the two are siblings, not a pair.
-    expect(harnessCommandById['agent.fork']!.keys, isEmpty);
-  });
+  test(
+    '⌘⇧N is Clone Harness in the live table and reaches the native menu',
+    () {
+      final shiftN = kSwarmShortcuts.where(
+        (s) =>
+            s.activator.trigger == LogicalKeyboardKey.keyN &&
+            s.activator.meta &&
+            s.activator.shift,
+      );
+      expect(shiftN.single.action, ShortcutAction.cloneAgent);
+      expect(harnessCommandById['agent.clone']!.keys, ['cmd+shift+n']);
+      expect(harnessCommandById['agent.clone']!.nativeAction, 'cloneAgent');
+      // Its neighbour on the shifted row: Restart, on ⌘⇧E — not ⌘⇧R, which
+      // renames the tab, and not ⌘R, which splits right.
+      final shiftE = kSwarmShortcuts.where(
+        (s) =>
+            s.activator.trigger == LogicalKeyboardKey.keyE &&
+            s.activator.meta &&
+            s.activator.shift,
+      );
+      expect(shiftE.single.action, ShortcutAction.restartAgent);
+      expect(harnessCommandById['agent.restart']!.keys, ['cmd+shift+e']);
+      expect(harnessCommandById['agent.restart']!.nativeAction, 'restartAgent');
+      expect(harnessCommandById['swarm.rename']!.keys, ['cmd+shift+r']);
+      // Fork keeps no default chord; the two are siblings, not a pair.
+      expect(harnessCommandById['agent.fork']!.keys, isEmpty);
+    },
+  );
 
   test('a clone is named after its source the way a fork is', () {
     expect(cloneNameFor('Reviewer'), 'Reviewer - clone');

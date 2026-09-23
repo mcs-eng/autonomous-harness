@@ -63,7 +63,7 @@ final harnessCommands = <HarnessCommand>[
     'navigation.commands',
     'Search commands',
     ShortcutGroup.actions,
-    extraKeys: ['cmd+shift+p'],
+    extraKeys: ['cmd+p'],
     nativeAction: 'commands',
   ),
   const HarnessCommand(
@@ -138,7 +138,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'navigation.needs_input',
-    'Show agents needing input',
+    'Show harnesses needing input',
     ShortcutGroup.navigate,
     action: ShortcutAction.showAttention,
     nativeAction: 'notifications',
@@ -207,6 +207,14 @@ final harnessCommands = <HarnessCommand>[
     ShortcutGroup.panes,
     action: ShortcutAction.movePaneDown,
     repeatable: true,
+  ),
+  const HarnessCommand(
+    'pane.move_to_tab',
+    'Move the pane to another tab',
+    ShortcutGroup.panes,
+    action: ShortcutAction.movePaneToTab,
+    nativeAction: 'movePaneToTab',
+    keywords: ['send', 'tab', 'another'],
   ),
   const HarnessCommand(
     'pane.zoom',
@@ -286,11 +294,17 @@ final harnessCommands = <HarnessCommand>[
     repeatable: true,
   ),
   const HarnessCommand(
-    'agent.add',
-    'New Pane',
+    'agent.open',
+    'Open Harness',
     ShortcutGroup.actions,
     action: ShortcutAction.addAgent,
     nativeAction: 'addAgent',
+    keywords: ['resume', 'existing', 'pane'],
+  ),
+  const HarnessCommand(
+    'agent.add',
+    'New Pane',
+    ShortcutGroup.actions,
   ),
   const HarnessCommand(
     'agent.new',
@@ -314,6 +328,9 @@ final harnessCommands = <HarnessCommand>[
     'agent.restart',
     'Restart Harness',
     ShortcutGroup.actions,
+    action: ShortcutAction.restartAgent,
+    nativeAction: 'restartAgent',
+    keywords: ['again', 'relaunch', 'resume'],
   ),
   const HarnessCommand(
     'terminal.new',

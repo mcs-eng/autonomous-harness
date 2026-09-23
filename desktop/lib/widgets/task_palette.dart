@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' show FontFeature, ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -73,22 +72,16 @@ Future<void> showTaskPalette(
   AppNotifier notifier, {
   SpokenTask? spoken,
 }) {
-  // showGeneralDialog, not showDialog, and the barrier is BUILT rather than coloured: the design's veil
-  // is `rgba(0,0,0,.74)` over `backdrop-filter: blur(3px)`, and `barrierColor` can only do the first
-  // half. The blur is what makes the terminals behind read as *behind* instead of as text competing with
-  // the field — at 74% flat they are dimmed but still legible, which is worse than either extreme.
+  // A keyboard palette opens fully drawn on its first frame.
   return showGeneralDialog<void>(
     context: context,
     barrierDismissible: true,
     barrierLabel: 'Dismiss',
     barrierColor: Colors.transparent,
-    transitionDuration: const Duration(milliseconds: 160),
+    transitionDuration: Duration.zero,
     pageBuilder: (context, _, _) =>
         _TaskPalette(notifier: notifier, spoken: spoken),
-    transitionBuilder: (context, anim, _, child) => FadeTransition(
-      opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
-      child: child,
-    ),
+    transitionBuilder: (context, anim, _, child) => child,
     // Every exit lands here — Esc, a tap on the veil, and the self-close after a send. A commit has
     // already answered by then and this does nothing; anything else is a person walking away, which the
     // dial has to hear about or it keeps showing work that is not happening.
@@ -102,12 +95,11 @@ Future<void> showTaskPalette(
 /// confidence column. Naming them together is what keeps a later "small tidy" from drifting off it one
 /// value at a time; if the page changes, this block is the diff.
 abstract final class _D {
-  /// The frosted sheet.
+  /// The opaque sheet.
   static const width = 680.0;
   static const radius = 16.0;
-  static const fill = Color(0xE11E1E21); // rgba(30,30,33,.88)
+  static const fill = Color(0xFF1E1E21);
   static const rim = Color(0x1FFFFFFF); // rgba(255,255,255,.12)
-  static const blur = 24.0;
 
   /// The lit top edge — `inset 0 1px 0 rgba(255,255,255,.06)`. A one-pixel highlight is most of what
   /// makes glass read as glass rather than as a grey box.
@@ -115,7 +107,6 @@ abstract final class _D {
 
   /// The veil.
   static const veil = kDialogVeilTint;
-  static const veilBlur = 3.0;
 
   /// ABOVE the middle, deliberately: the list grows downwards, and a box pinned to the centre would
   /// jump every time the answer arrived. Anchored high, it stays put and the results unroll beneath it.
@@ -125,7 +116,6 @@ abstract final class _D {
   static const fieldInk = Color(0xFFF4F4F6);
   static const hint = Color(0xFF6E6E76);
   static const caret = Color(0xFFE6E6EA);
-  static const fieldSize = 22.0;
 
   /// The rows.
   static const sep = Color(0x14FFFFFF); // rgba(255,255,255,.08)
@@ -352,7 +342,7 @@ class _TaskPaletteState extends State<_TaskPalette> {
         Scrollable.ensureVisible(
           target,
           alignment: 0.5,
-          duration: const Duration(milliseconds: 120),
+          duration: Duration.zero,
           curve: Curves.easeOut,
         ),
       );
@@ -477,13 +467,8 @@ class _TaskPaletteState extends State<_TaskPalette> {
         Positioned.fill(
           child: GestureDetector(
             onTap: () => Navigator.of(context).maybePop(),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(
-                sigmaX: _D.veilBlur,
-                sigmaY: _D.veilBlur,
-              ),
-              child: const ColoredBox(color: _D.veil),
-            ),
+            behavior: HitTestBehavior.opaque,
+            child: const ColoredBox(color: _D.veil),
           ),
         ),
         Center(
@@ -502,53 +487,47 @@ class _TaskPaletteState extends State<_TaskPalette> {
     );
   }
 
-  /// The frosted sheet: a clip, the blur behind it, the fill and rim on top, and a one-pixel lit edge.
-  ///
-  /// The order matters. The blur has to be INSIDE the same clip as the fill or it squares off the
-  /// corners, and the lit edge has to sit above the fill or the fill covers it.
+  /// An opaque sheet avoids compositing and blurring the live terminals.
   Widget _sheet() {
     return ClipRRect(
       borderRadius: BorderRadius.circular(_D.radius),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: _D.blur, sigmaY: _D.blur),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: _D.fill,
-            borderRadius: BorderRadius.circular(_D.radius),
-            border: Border.all(color: _D.rim),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x99000000),
-                blurRadius: 100,
-                offset: Offset(0, 40),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: _D.fill,
+          borderRadius: BorderRadius.circular(_D.radius),
+          border: Border.all(color: _D.rim),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x99000000),
+              blurRadius: 12,
+              offset: Offset(0, 4),
+            ),
+          ],
+        ),
+        // TRANSPARENT Material, and it is required rather than decorative: dropping Dialog for a
+        // hand-built veil dropped the Material ancestor with it, and TextField and InkWell both
+        // assert without one. `transparency` provides it while painting nothing, so the glass above
+        // stays the only surface — a MaterialType.canvas here would put an opaque sheet over it.
+        child: Material(
+          type: MaterialType.transparency,
+          child: Stack(
+            children: [
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [_field(), _results()],
+              ),
+              // `inset 0 1px 0 rgba(255,255,255,.06)`.
+              const Positioned(
+                left: 0,
+                right: 0,
+                top: 0,
+                child: ColoredBox(
+                  color: _D.innerLight,
+                  child: SizedBox(height: 1),
+                ),
               ),
             ],
-          ),
-          // TRANSPARENT Material, and it is required rather than decorative: dropping Dialog for a
-          // hand-built veil dropped the Material ancestor with it, and TextField and InkWell both
-          // assert without one. `transparency` provides it while painting nothing, so the glass above
-          // stays the only surface — a MaterialType.canvas here would put an opaque sheet over it.
-          child: Material(
-            type: MaterialType.transparency,
-            child: Stack(
-              children: [
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [_field(), _results()],
-                ),
-                // `inset 0 1px 0 rgba(255,255,255,.06)`.
-                const Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 0,
-                  child: ColoredBox(
-                    color: _D.innerLight,
-                    child: SizedBox(height: 1),
-                  ),
-                ),
-              ],
-            ),
           ),
         ),
       ),
@@ -583,17 +562,11 @@ class _TaskPaletteState extends State<_TaskPalette> {
             // Read-only rather than disabled while the router thinks: a disabled field drops the focus,
             // and the focus is what Esc is listening on.
             readOnly: working || _stage == _Stage.sent,
-            style: const TextStyle(
-              color: _D.fieldInk,
-              fontSize: _D.fieldSize,
-              height: 1.35,
-              letterSpacing: -0.22, // -.01em at 22px
-            ),
+            style: grid.AppType.mono(color: _D.fieldInk, height: 1.35),
             cursorColor: _D.caret,
             cursorWidth: 2,
-            cursorHeight: _D.fieldSize * 1.05,
             cursorRadius: Radius.zero,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               filled: false,
               isDense: true,
               isCollapsed: true,
@@ -604,11 +577,7 @@ class _TaskPaletteState extends State<_TaskPalette> {
               focusedBorder: InputBorder.none,
               disabledBorder: InputBorder.none,
               hintText: 'Describe the work…',
-              hintStyle: TextStyle(
-                color: _D.hint,
-                fontSize: _D.fieldSize,
-                height: 1.35,
-              ),
+              hintStyle: grid.AppType.mono(color: _D.hint, height: 1.35),
             ),
           ),
         ),
@@ -640,11 +609,7 @@ class _TaskPaletteState extends State<_TaskPalette> {
               child: Center(
                 child: Text(
                   '${_elapsed}s',
-                  style: const TextStyle(
-                    color: _D.hint,
-                    fontSize: 11.5,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
+                  style: grid.AppType.monoMeta(color: _D.hint),
                 ),
               ),
             ),
@@ -666,9 +631,9 @@ class _TaskPaletteState extends State<_TaskPalette> {
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
             child: Text(
               _note,
-              style: const TextStyle(
+              style: grid.AppType.monoLabel(
+                fontWeight: FontWeight.w400,
                 color: _D.questionInk,
-                fontSize: 12,
                 height: 1.45,
               ),
             ),
@@ -680,20 +645,13 @@ class _TaskPaletteState extends State<_TaskPalette> {
         // it replaces: the eye is already on the row, and a lit row answers "who" as well as "done".
         final taker = _named(_committed);
         return _panel([
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(16, 8, 16, 6),
             child: Row(
               children: [
                 Icon(Icons.check, size: 14, color: _D.green),
                 SizedBox(width: 8),
-                Text(
-                  'on it',
-                  style: TextStyle(
-                    color: _D.green,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                Text('on it', style: grid.AppType.monoLabel(color: _D.green)),
               ],
             ),
           ),
@@ -758,12 +716,12 @@ class _TaskPaletteState extends State<_TaskPalette> {
     final reason = (answer?.reason ?? '').trim();
     final weighed = answer?.weighed ?? 0;
     final machines = answer?.machines ?? 0;
-    const base = TextStyle(color: _D.questionInk, fontSize: 12, height: 1.45);
-    const mark = TextStyle(
-      color: _D.questionMark,
-      fontSize: 12,
-      fontWeight: FontWeight.w500,
+    final base = grid.AppType.monoLabel(
+      fontWeight: FontWeight.w400,
+      color: _D.questionInk,
+      height: 1.45,
     );
+    final mark = grid.AppType.monoLabel(color: _D.questionMark);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
       child: Column(
@@ -807,9 +765,8 @@ class _TaskPaletteState extends State<_TaskPalette> {
                 '“$reason”',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: grid.AppType.monoMeta(
                   color: _D.machineDim,
-                  fontSize: 11.5,
                   fontStyle: FontStyle.italic,
                 ),
               ),
@@ -874,10 +831,8 @@ class _TaskPaletteState extends State<_TaskPalette> {
                 candidate.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(
+                style: grid.AppType.monoLabel(
                   color: taken ? const Color(0xFFDFFBE9) : _D.engineInk,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
                 ),
               ),
             ),
@@ -888,9 +843,8 @@ class _TaskPaletteState extends State<_TaskPalette> {
                 candidate.machine,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(
+                style: grid.AppType.monoMeta(
                   color: taken ? const Color(0xFF9FD9B6) : _D.machineInk,
-                  fontSize: 12.5,
                 ),
               ),
             ),
@@ -900,10 +854,8 @@ class _TaskPaletteState extends State<_TaskPalette> {
                 candidate.recent,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(
+                style: grid.AppType.monoMeta(
                   color: taken ? const Color(0xFFDFFBE9) : _D.nameInk,
-                  fontFamily: grid.AppFont.mono,
-                  fontSize: 13,
                 ),
               ),
             ),
@@ -915,11 +867,8 @@ class _TaskPaletteState extends State<_TaskPalette> {
               child: Text(
                 fit > 0 ? fit.toStringAsFixed(2) : '',
                 textAlign: TextAlign.right,
-                style: TextStyle(
+                style: grid.AppType.monoMeta(
                   color: leader || taken ? _D.green : _D.lowFit,
-                  fontFamily: grid.AppFont.mono,
-                  fontSize: 12,
-                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
             ),

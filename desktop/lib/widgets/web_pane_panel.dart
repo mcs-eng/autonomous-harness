@@ -316,10 +316,8 @@ class _WebPanePanelState extends State<WebPanePanel> {
                           widget.title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
+                          style: grid.AppType.monoLabel(
                             color: AppColors.text,
-                            fontFamily: AppFonts.sans,
-                            fontSize: 13,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -327,10 +325,8 @@ class _WebPanePanelState extends State<WebPanePanel> {
                       if (widget.verdict case final verdict?) ...[
                         Text(
                           '  ·  ',
-                          style: TextStyle(
+                          style: grid.AppType.monoLabel(
                             color: AppColors.mutedStrong,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
                           ),
                         ),
                         Flexible(
@@ -533,40 +529,35 @@ class _Notice extends StatelessWidget {
   final Widget? action;
 
   @override
-  Widget build(BuildContext context) => Center(
-    child: SingleChildScrollView(
-      primary: false,
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 26, color: AppColors.mutedStrong),
-          const SizedBox(height: 10),
-          Text(
-            title,
-            style: TextStyle(
-              color: AppColors.text,
-              fontFamily: AppFonts.sans,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        primary: false,
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 26, color: AppColors.mutedStrong),
+            const SizedBox(height: 10),
+            Text(
+              title,
+              style: grid.AppType.label(
+                color: AppColors.text,
+                fontWeight: FontWeight.w600,
+              ),
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            detail,
-            textAlign: TextAlign.center,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: AppColors.mutedStrong,
-              fontFamily: AppFonts.mono,
-              fontFamilyFallback: AppFonts.monoFallback,
-              fontSize: 11,
+            const SizedBox(height: 4),
+            Text(
+              detail,
+              textAlign: TextAlign.center,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: grid.AppType.body(color: AppColors.mutedStrong),
             ),
-          ),
-          if (action != null) ...[const SizedBox(height: 8), action!],
-        ],
+            if (action != null) ...[const SizedBox(height: 8), action!],
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }

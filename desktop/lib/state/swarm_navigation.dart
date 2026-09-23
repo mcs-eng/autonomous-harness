@@ -365,8 +365,16 @@ Future<void> _resumeStoppedDestination(
     // This opens a view of the allocated terminal, not a claim that history
     // has loaded. The native CLI may need login or hook review before it can
     // confirm the conversation; the receipt keeps verifying in the background.
+    //
+    // The conversation has to be the one asked for — unless none was: a resume
+    // that was always going to open a new one (an engine with no resume argv, a
+    // harness paused with nothing recorded) reports a different id because it
+    // did as it was told, and the tile it opened is still this harness's.
+    final fresh =
+        agent?.resumesFreshConversation == true ||
+        current?.resumesFreshConversation == true;
     if (current?.terminalAvailable == true &&
-        current?.sessionId == agent!.sessionId &&
+        (fresh || current?.sessionId == agent!.sessionId) &&
         current?.launchState != 'failed' &&
         current?.isStopped == false) {
       terminalReady.complete();
@@ -396,7 +404,7 @@ Future<void> _resumeStoppedDestination(
 }) {
   final prefix = [
     type,
-    project?.name,
+    project?.label,
   ].whereType<String>().where((part) => part.isNotEmpty).join(' · ');
   final branch = project?.branch;
   return (
@@ -404,7 +412,7 @@ Future<void> _resumeStoppedDestination(
       agentLabel,
       machine,
       if (offline) 'Offline',
-      project?.name,
+      project?.label,
       branch,
     ].whereType<String>().where((part) => part.isNotEmpty).join(' · '),
     text: [
@@ -654,8 +662,8 @@ class SwarmLocationCatalog {
       promptContext: PromptContext(
         harness: label,
         machine: machineLabel,
-        project: project?.name,
-        branch: project?.branch,
+        project: project?.label,
+        branch: project?.shownBranch,
         leading: machine?.nodeOnline == false ? 'Offline' : null,
       ),
       swarmId: swarm.id,
@@ -1103,6 +1111,7 @@ List<SwarmDestination> swarmDestinations(
       context.addAll([
         row?.$1.machine.displayName,
         row?.$2.name ?? pane.session?.agentName,
+        project?.label,
         project?.name,
         project?.branch,
         project?.cwd,
@@ -1193,8 +1202,8 @@ List<SwarmDestination> swarmDestinations(
         promptContext: PromptContext(
           harness: label,
           machine: machineName,
-          project: project?.name,
-          branch: project?.branch,
+          project: project?.label,
+          branch: project?.shownBranch,
           leading: machine?.nodeOnline == false ? 'Offline' : null,
         ),
         swarmId: owner?.id,
@@ -1212,6 +1221,7 @@ List<SwarmDestination> swarmDestinations(
           row?.$2.title,
           type,
           machineName,
+          project?.label,
           project?.name,
           project?.branch,
           project?.cwd,

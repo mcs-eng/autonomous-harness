@@ -14,82 +14,14 @@ import '../shared/theme/app_theme.dart' as grid;
 /// and the old workspace preview (three agents side by side on one screen)
 /// never hinted that the agents could be on other computers at all.
 ///
-/// **Every motion is a packet.** One leaves a pin plain (a grey square — bytes
-/// on hardware you own), rings the pin as it goes, is sealed on the way in
-/// (the square turns accent and grows a halo) and lands in the pane it was
-/// for, which flashes once. Nothing else moves on its own: no drifting dots,
-/// no rotating rims. The four arcs fire a quarter of a cycle apart, so four
-/// moving parts read as one instrument rather than four effects arguing.
-///
-/// Two clocks. [_entrance] runs ONCE, on first build: the window lands, the
-/// pins pop in one after another, and each arc draws itself as its pin
-/// arrives — "linking", said without a word. [_loop] is the heartbeat every
-/// packet is a phase of, and it is the same 3.2 s the relay diagram before it
-/// used, for the same reason: the aurora behind the card breathes at an exact
-/// multiple, so the two never drift into a beat.
-///
-/// Reduce Motion (and a disabled `TickerMode`, which is how the widget tests
-/// keep `pumpAndSettle` from hanging on an endless loop) parks both clocks:
-/// the entrance at its end, so the field is fully drawn, and the loop at a
-/// phase where one packet is sealed and another still plain — the picture
-/// keeps making its point instead of becoming a diagram of nothing happening.
-class LoginFleetMap extends StatefulWidget {
+/// A fully drawn still shows a sealed packet and a plain packet together,
+/// without an entrance delay or a continuous idle repaint loop.
+class LoginFleetMap extends StatelessWidget {
   const LoginFleetMap({super.key});
 
-  /// The drawing's own aspect, so the caller can size it without guessing.
   static const double aspectRatio = 512 / 190;
-
-  @override
-  State<LoginFleetMap> createState() => _LoginFleetMapState();
-}
-
-/// The shared heartbeat. Every packet, ring and pane flash is a phase of it.
-const Duration _period = Duration(milliseconds: 3200);
-
-/// How long the field takes to assemble on first sight.
-const Duration _entranceLength = Duration(milliseconds: 1700);
-
-class _LoginFleetMapState extends State<LoginFleetMap>
-    with TickerProviderStateMixin {
-  late final AnimationController _entrance = AnimationController(
-    vsync: this,
-    duration: _entranceLength,
-  );
-  late final AnimationController _loop = AnimationController(
-    vsync: this,
-    duration: _period,
-  );
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final stilled =
-        MediaQuery.disableAnimationsOf(context) ||
-        !TickerMode.valuesOf(context).enabled;
-    if (stilled) {
-      _entrance
-        ..stop()
-        ..value = 1;
-      _loop
-        ..stop()
-        ..value = _reducedPhase;
-    } else {
-      if (!_entrance.isAnimating && _entrance.value < 1) _entrance.forward();
-      if (!_loop.isAnimating) _loop.repeat();
-    }
-  }
-
-  /// Where the loop stops for someone who asked for less motion: a quarter
-  /// past the seal on one arc, so that packet glows while the next one along
-  /// is still a plain grey square mid-flight.
+  // Show both sealed and plain packets without running a ticker while idle.
   static const double _reducedPhase = 0.66;
-
-  @override
-  void dispose() {
-    _entrance.dispose();
-    _loop.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -122,16 +54,9 @@ class _LoginFleetMapState extends State<LoginFleetMap>
     return RepaintBoundary(
       child: AspectRatio(
         aspectRatio: LoginFleetMap.aspectRatio,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([_entrance, _loop]),
-          builder: (context, _) => CustomPaint(
-            painter: _MapPainter(
-              entrance: Curves.easeOut.transform(_entrance.value),
-              t: _loop.value,
-              palette: palette,
-            ),
-            size: Size.infinite,
-          ),
+        child: CustomPaint(
+          painter: _MapPainter(entrance: 1, t: _reducedPhase, palette: palette),
+          size: Size.infinite,
         ),
       ),
     );
@@ -234,6 +159,11 @@ class _MapPainter extends CustomPainter {
   /// The loop's phase, 0 → 1, wrapping.
   final double t;
   final _MapPalette palette;
+  // Machine names in the UI face; the line under each, a place and its agents,
+  // in the terminal's.
+  final _sansStyle = grid.AppType.caption(height: 1.2);
+  final _monoStyle = grid.AppType.monoMeta(height: 1.2);
+  double _paintScale = 1;
 
   static const Size _design = Size(512, 190);
 
@@ -291,6 +221,8 @@ class _MapPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final scale = size.width / _design.width;
+    if (scale <= 0) return;
+    _paintScale = scale;
     canvas.save();
     canvas.scale(scale);
     canvas.clipRRect(
@@ -394,7 +326,7 @@ class _MapPainter extends CustomPainter {
       canvas,
       '● this Mac · 4 linked',
       Offset(_window.left + 7, _window.top + 6),
-      size: 9,
+
       color: _fade(palette.ink2, landed),
     );
     const names = ['Claude', 'Codex', 'Gemini', '+'];
@@ -419,7 +351,7 @@ class _MapPainter extends CustomPainter {
         canvas,
         names[i],
         Offset(pane.left + 5, pane.top + 4),
-        size: 8,
+
         weight: FontWeight.w600,
         color: _fade(tints[i], landed),
       );
@@ -492,8 +424,8 @@ class _MapPainter extends CustomPainter {
 
       // Labels are laid out in unscaled space and only faded, so the text
       // never renders at a fractional scale mid-pop.
-      final nameWidth = _measure(pin.name, size: 10.5, weight: FontWeight.w500);
-      final subWidth = _measure(pin.sub, size: 8.5, mono: true);
+      final nameWidth = _measure(pin.name, weight: FontWeight.w500);
+      final subWidth = _measure(pin.sub, mono: true);
       final width = math.max(nameWidth, subWidth);
       // Centred on the pin, but never off the field.
       final left = (pin.at.dx - width / 2).clamp(
@@ -505,15 +437,17 @@ class _MapPainter extends CustomPainter {
         canvas,
         pin.name,
         Offset(left + (width - nameWidth) / 2, top),
-        size: 10.5,
+
         weight: FontWeight.w500,
         color: _fade(palette.ink2, alpha),
       );
       _text(
         canvas,
         pin.sub,
-        Offset(left + (width - subWidth) / 2, top + 13),
-        size: 8.5,
+        Offset(
+          left + (width - subWidth) / 2,
+          top + grid.AppType.captionSize * 1.2 / _paintScale,
+        ),
         mono: true,
         color: _fade(palette.faint, alpha),
       );
@@ -572,7 +506,6 @@ class _MapPainter extends CustomPainter {
 
   TextPainter _layout(
     String text, {
-    required double size,
     FontWeight weight = FontWeight.w400,
     bool mono = false,
     Color color = const Color(0xFFFFFFFF),
@@ -580,18 +513,14 @@ class _MapPainter extends CustomPainter {
     final painter = TextPainter(
       text: TextSpan(
         text: text,
-        style: TextStyle(
-          fontFamily: mono ? palette.mono : palette.sans,
-          fontFamilyFallback: mono
-              ? palette.monoFallback
-              : palette.sansFallback,
-          fontSize: size,
+        style: (mono ? _monoStyle : _sansStyle).copyWith(
           fontWeight: weight,
           color: color,
-          height: 1.2,
         ),
       ),
       textDirection: TextDirection.ltr,
+      // Scale the drawing, but keep its labels at their own point size.
+      textScaler: TextScaler.linear(1 / _paintScale),
       maxLines: 1,
       ellipsis: '…',
     )..layout(maxWidth: 160);
@@ -600,30 +529,26 @@ class _MapPainter extends CustomPainter {
 
   double _measure(
     String text, {
-    required double size,
     FontWeight weight = FontWeight.w400,
     bool mono = false,
-  }) => _layout(text, size: size, weight: weight, mono: mono).width;
+  }) => _layout(text, weight: weight, mono: mono).width;
 
   void _text(
     Canvas canvas,
     String text,
     Offset at, {
-    required double size,
     required Color color,
     FontWeight weight = FontWeight.w400,
     bool mono = false,
   }) {
-    _layout(
-      text,
-      size: size,
-      weight: weight,
-      mono: mono,
-      color: color,
-    ).paint(canvas, at);
+    _layout(text, weight: weight, mono: mono, color: color).paint(canvas, at);
   }
 
   @override
   bool shouldRepaint(_MapPainter old) =>
-      old.t != t || old.entrance != entrance || old.palette != palette;
+      old.t != t ||
+      old.entrance != entrance ||
+      old.palette != palette ||
+      old._sansStyle != _sansStyle ||
+      old._monoStyle != _monoStyle;
 }

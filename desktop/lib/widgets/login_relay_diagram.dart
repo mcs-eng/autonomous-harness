@@ -232,6 +232,8 @@ class _RelayPainter extends CustomPainter {
   final double t;
   final _DiagramPalette palette;
   final _DiagramLabels labels;
+  final _textStyle = grid.AppType.caption(height: 1.0);
+  double _paintScale = 1;
 
   static const Size _design = Size(440, 140);
 
@@ -252,6 +254,8 @@ class _RelayPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final scale = size.width / _design.width;
+    if (scale <= 0) return;
+    _paintScale = scale;
     canvas.save();
     canvas.scale(scale);
 
@@ -353,7 +357,6 @@ class _RelayPainter extends CustomPainter {
     // box rather than a sentence printed across the wires outside it.
     final caption = _layOutText(
       labels.hub,
-      fontSize: 9.5,
       color: palette.faint,
       maxWidth: _hub.width - eyeWidth - gap - padding * 2,
     );
@@ -416,7 +419,6 @@ class _RelayPainter extends CustomPainter {
         canvas,
         labels.nodes[i],
         Offset(r.left + 26, r.center.dy),
-        fontSize: 10.5,
         color: palette.ink,
       );
     }
@@ -542,27 +544,17 @@ class _RelayPainter extends CustomPainter {
   /// font, or the user's chosen family changes.
   TextPainter _layOutText(
     String text, {
-    required double fontSize,
     required Color color,
     double? maxWidth,
   }) {
     return TextPainter(
       text: TextSpan(
         text: text,
-        style: TextStyle(
-          fontFamily: grid.AppFont.sans,
-          fontFamilyFallback: grid.AppFont.sansFallback,
-          fontSize: fontSize,
-          color: color,
-          letterSpacing: grid.AppFont.trackingFor(fontSize),
-          height: 1.0,
-        ),
+        style: _textStyle.copyWith(color: color),
       ),
       textDirection: TextDirection.ltr,
-      // The drawing is scaled as a unit, so text inside it must not also take
-      // the platform's scaler — that would grow the labels past the boxes they
-      // sit in while the boxes stayed put.
-      textScaler: TextScaler.noScaling,
+      // Counteract only the drawing scale; labels keep their own point size.
+      textScaler: TextScaler.linear(1 / _paintScale),
       maxLines: 1,
       ellipsis: '…',
     )..layout(maxWidth: maxWidth ?? double.infinity);
@@ -572,10 +564,9 @@ class _RelayPainter extends CustomPainter {
     Canvas canvas,
     String text,
     Offset at, {
-    required double fontSize,
     required Color color,
   }) {
-    final painter = _layOutText(text, fontSize: fontSize, color: color);
+    final painter = _layOutText(text, color: color);
     painter.paint(canvas, Offset(at.dx, at.dy - painter.height / 2));
   }
 
@@ -583,7 +574,8 @@ class _RelayPainter extends CustomPainter {
   bool shouldRepaint(covariant _RelayPainter old) =>
       old.t != t ||
       old.palette.accent != palette.accent ||
-      old.palette.isDark != palette.isDark;
+      old.palette.isDark != palette.isDark ||
+      old._textStyle != _textStyle;
 }
 
 /// A left-to-right gradient between two points on the canvas, used to give the
@@ -597,51 +589,10 @@ Shader _gradientAlong(Offset from, Offset to, Color color, double alpha) {
   ).createShader(Rect.fromPoints(from, to));
 }
 
-/// The atmosphere behind the sign-in card: two very low-alpha blobs drifting
-/// on a multiple of the diagram's own clock.
-///
-/// It is what makes the window read as *lit* rather than printed, and it is
-/// the piece that carries the design into the corners of a 1280×800 window
-/// that the card itself leaves empty. Alphas are tuned per theme for the same
-/// reason the packet halo is: on a near-white panel this can only ever be a
-/// tint before it turns to haze, while charcoal has room for it to glow.
-///
-/// The period is an exact multiple of [_period] so the two never drift into a
-/// beat against each other — the whole screen stays one instrument.
-class LoginAurora extends StatefulWidget {
+/// A static background tint. Waiting to sign in does not repaint the whole
+/// window continuously; network progress is shown by the sign-in controls.
+class LoginAurora extends StatelessWidget {
   const LoginAurora({super.key});
-
-  @override
-  State<LoginAurora> createState() => _LoginAuroraState();
-}
-
-class _LoginAuroraState extends State<LoginAurora>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _drift = AnimationController(
-    vsync: this,
-    duration: _period * 4,
-  );
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final stilled =
-        MediaQuery.disableAnimationsOf(context) ||
-        !TickerMode.valuesOf(context).enabled;
-    if (stilled) {
-      _drift
-        ..stop()
-        ..value = 0.5;
-    } else if (!_drift.isAnimating) {
-      _drift.repeat();
-    }
-  }
-
-  @override
-  void dispose() {
-    _drift.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -654,12 +605,9 @@ class _LoginAuroraState extends State<LoginAurora>
 
     return IgnorePointer(
       child: RepaintBoundary(
-        child: AnimatedBuilder(
-          animation: _drift,
-          builder: (context, _) => CustomPaint(
-            painter: _AuroraPainter(t: _drift.value, a: a, b: b),
-            size: Size.infinite,
-          ),
+        child: CustomPaint(
+          painter: _AuroraPainter(t: 0.5, a: a, b: b),
+          size: Size.infinite,
         ),
       ),
     );

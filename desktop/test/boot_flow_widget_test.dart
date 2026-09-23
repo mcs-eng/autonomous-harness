@@ -20,6 +20,7 @@ import 'package:harness/update/desktop_updater.dart';
 import 'package:harness/update/manual_update_check.dart';
 import 'package:harness/widgets/update_notice.dart';
 import 'package:harness/widgets/bootstrapping_screen.dart';
+import 'package:harness/widgets/terminal_progress.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,7 +30,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 /// status is set directly, so bootstrap/login (which call platform
 /// channels and the network) never run.
 AppNotifier makeNotifier(AppStatus status) {
-  final app = AppNotifier(
+  final app = _GuestApp(
     config: AppConfig.dev,
     authSession: AuthSession(),
     configStore: null,
@@ -42,6 +43,28 @@ AppNotifier makeNotifier(AppStatus status) {
     email: 'sam@example.com',
   );
   return app;
+}
+
+/// A window that never reaches for a real daemon.
+///
+/// A signed-out boot used to stop at the login wall before the daemon mattered;
+/// it now lands on the desk as a GUEST, which is past the daemon gate — and a
+/// unit test must not shell out for one. Everything else is the real notifier.
+class _GuestApp extends AppNotifier {
+  _GuestApp({
+    required super.config,
+    required super.authSession,
+    super.configStore,
+    super.cliLogin,
+    super.environmentProvisioner,
+    super.localManualFixture,
+  });
+
+  @override
+  Future<void> ensureCliDaemonReady() async {}
+
+  @override
+  Future<bool> refreshMachines() async => true;
 }
 
 /// bootstrap() now asks the CLI (not AuthSession) whether this computer is signed in — this fake
@@ -168,7 +191,7 @@ void main() {
   );
 
   test('local manual fixture boots without SSO or persisted state', () async {
-    final app = AppNotifier(
+    final app = _GuestApp(
       config: const AppConfig(apiBaseUrl: 'http://127.0.0.1:12345'),
       authSession: AuthSession(),
       localManualFixture: const LocalManualFixture(
@@ -195,7 +218,7 @@ void main() {
     'config-store failure falls back without resetting auth preferences',
     () async {
       final store = _BrokenConfigStore();
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: store,
@@ -205,7 +228,11 @@ void main() {
 
       await app.bootstrap();
 
-      expect(app.status, AppStatus.unauthenticated);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
       expect(app.config.apiBaseUrl, ConfigStore.defaultBaseUrl);
       expect(app.autonomousEnv, 'prod');
       expect(store.resetCalls, 0);
@@ -218,7 +245,7 @@ void main() {
       final storage = _FakeKeyValueStore()
         ..values['environment_setup_version'] = '3';
       final provisioner = _ReadyEnvironmentProvisioner();
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: storage),
@@ -231,7 +258,11 @@ void main() {
       expect(provisioner.called, isTrue);
       expect(app.environmentReadiness.isReady, isTrue);
       // Reached the login check rather than getting stuck on preparingEnvironment.
-      expect(app.status, AppStatus.unauthenticated);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
     },
   );
 
@@ -240,7 +271,7 @@ void main() {
     () async {
       final storage = _FakeKeyValueStore();
       final provisioner = _ReadyEnvironmentProvisioner();
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: storage),
@@ -274,7 +305,7 @@ void main() {
         mode: EnvironmentSetupMode.automatic,
       );
       final provisioner = _ScriptedEnvironmentProvisioner([missing, ready]);
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: _FakeKeyValueStore()),
@@ -293,7 +324,11 @@ void main() {
       );
       await app.startEnvironmentSetup();
       expect(provisioner.installCalls, [isFalse, isTrue]);
-      expect(app.status, AppStatus.unauthenticated);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
       expect(app.environmentReadiness.phase, EnvironmentSetupPhase.ready);
       expect(
         painted,
@@ -328,7 +363,7 @@ void main() {
       );
       final storage = _FakeKeyValueStore();
       final provisioner = _ScriptedEnvironmentProvisioner([stuck, ready]);
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: storage),
@@ -349,7 +384,11 @@ void main() {
       // what lets the provisioner skip the already-`ready` harness step during the recheck.
       expect(provisioner.resumeFromCalls.last, same(stuck));
       expect(app.environmentReadiness.isReady, isTrue);
-      expect(app.status, AppStatus.unauthenticated);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
       expect(storage.values['environment_setup_version'], isNull);
       expect(app.environmentRecheckPending, isFalse);
       app.dispose();
@@ -369,7 +408,7 @@ void main() {
       );
       final storage = _FakeKeyValueStore();
       final provisioner = _ScriptedEnvironmentProvisioner([stuck, stuck]);
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: storage),
@@ -418,7 +457,7 @@ void main() {
           [probing, reviewed],
         ],
       );
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: _FakeKeyValueStore()),
@@ -469,7 +508,7 @@ void main() {
         ],
       );
       final provisioner = _ScriptedEnvironmentProvisioner([waiting, waiting]);
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: _FakeKeyValueStore()),
@@ -530,8 +569,8 @@ void main() {
     // LoginScreen. Keep this on the real RootShell so notifier wiring remains
     // covered as well as the standalone screen's presentation tests.
     expect(find.byType(BootstrappingScreen), findsOneWidget);
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(find.text('Getting Harness ready'), findsOneWidget);
+    expect(find.byType(TerminalProgressLine), findsOneWidget);
+    expect(find.text(r'$ harness start'), findsOneWidget);
     expect(find.text('Opening Harness…'), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
   });
@@ -547,7 +586,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Checking this computer'), findsOneWidget);
+    expect(find.text(r'$ harness doctor'), findsOneWidget);
     expect(find.textContaining('read-only'), findsOneWidget);
     expect(find.text('ENVIRONMENT SETUP'), findsNothing);
     expect(find.text('Pre-flight check'), findsNothing);
@@ -751,7 +790,7 @@ void main() {
           phase: EnvironmentSetupPhase.ready,
         ),
       ]);
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: null,
@@ -778,8 +817,13 @@ void main() {
       await tester.tap(find.text('Install 1 tool'));
       await tester.pump();
       expect(provisioner.installCalls, [true]);
-      expect(app.status, AppStatus.unauthenticated);
-      expect(find.text('Sign in'), findsOneWidget);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      // …on the desk, not in front of it.
+      expect(find.text('Sign in'), findsNothing);
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
@@ -904,14 +948,14 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byType(TerminalProgressLine), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
 
     app.status = AppStatus.unauthenticated;
     app.notifyListeners();
     await tester.pump();
 
-    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byType(TerminalProgressLine), findsNothing);
     expect(find.text('Sign in'), findsOneWidget);
   });
 
@@ -975,10 +1019,12 @@ void main() {
     expect(find.text('Sam'), findsOneWidget);
     expect(find.text('sam@example.com'), findsOneWidget);
     await tester.tap(find.byKey(const Key('settings-sign-out-button')));
-    // The login relay diagram keeps animating after sign-out.
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(app.status, AppStatus.unauthenticated);
+    // Signing out leaves the account, not this computer: the window stays on the
+    // desk as a guest and the daemon goes on serving the agents that are running.
+    // Settings closes with the tap, as it did.
+    expect(app.signedIn, isFalse);
     expect(find.text('Account'), findsNothing);
     await tester.pumpWidget(const SizedBox());
     app.dispose();
@@ -1079,6 +1125,11 @@ void main() {
       app.selectedMachineId = machine.machineId;
       await app.selectAgent(machine.machineId, 'offline-agent');
 
+      // Tall enough for the full guide: a pane beside others needs 546px of
+      // body, which the default 600px window no longer leaves once the
+      // workspace gutter is taken out.
+      await tester.binding.setSurfaceSize(const Size(800, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         ProviderScope(
           overrides: [appStateProvider.overrideWithValue(app)],
@@ -1090,7 +1141,6 @@ void main() {
       expect(find.text('Harness is offline'), findsOneWidget);
       expect(app.panes.single.agentId, 'offline-agent');
       await tester.binding.setSurfaceSize(const Size(800, 560));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pump();
       expect(
         find.text('Harness is not running on this computer.'),
@@ -1198,7 +1248,7 @@ void main() {
     await tester.pump();
     expect(find.text('Link this machine'), findsNothing);
 
-    await chord(tester, LogicalKeyboardKey.keyP, shift: true);
+    await chord(tester, LogicalKeyboardKey.keyP);
     await tester.enterText(
       find.byKey(const ValueKey('harness-start-search')),
       '> link machine',
@@ -1281,7 +1331,7 @@ void main() {
     await tester.pump();
     expect(find.text('Link this machine'), findsNothing);
 
-    await chord(tester, LogicalKeyboardKey.keyP, shift: true);
+    await chord(tester, LogicalKeyboardKey.keyP);
     await tester.enterText(
       find.byKey(const ValueKey('harness-start-search')),
       '> link machine',
