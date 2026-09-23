@@ -203,6 +203,20 @@ String _suggestedFolderName(
   return '$prefix$ending';
 }
 
+final _generatedWorkFolder = RegExp(
+  r'^(?:(?:harness|agent)-[1-9]\d*|[a-z0-9]+(?:-[a-z0-9]+)*-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}(?:-\d{2})?(?:-\d+)?)$',
+);
+
+/// A folder Harness named itself (`codex-2026-09-21-16-20`, `agent-3`).
+/// A name somebody chose does not match, so it can stay on screen.
+bool isGeneratedWorkFolder(String path) {
+  final base = path
+      .split(RegExp(r'[/\\]'))
+      .where((part) => part.isNotEmpty)
+      .lastOrNull;
+  return base != null && _generatedWorkFolder.hasMatch(base);
+}
+
 /// `codex-2026-09-03-09-05`: [label] in lowercase words, then the local date and time.
 String projectFolderName(
   String label,

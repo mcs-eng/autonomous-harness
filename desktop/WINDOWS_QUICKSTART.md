@@ -31,7 +31,8 @@ Get-Content .\harness-desktop-windows-x64-1.0.0-windows.7.zip.sha256
 The sidebar switches between **Projects** and the existing **Machines** view.
 Choose a session to return to its existing tab, or reopen its view if closed.
 Project headings expand the list without starting agents. Non-Git folders work
-too; repositories with multiple checkouts list each host and working folder.
+too; a repository with several checkouts lists each working folder, and each host
+when there is more than one.
 
 ![The Projects sidebar listing fictional projects and their sessions](../docs/images/project-sidebar.png)
 
@@ -49,6 +50,27 @@ least 1400 pixels wide; in a narrower window the sidebar button opens it as a
 drawer, so two panes keep their full header controls. A narrow pane header uses
 upstream's **Pane actions** menu. Tab and Enter operate the navigation controls
 without taking terminal input.
+
+Sessions are listed by what they are. A row shows the session's own name or
+title, otherwise its harness or engine (**Grid**, **Codex**); the clock-stamped
+name Harness invented stays in the tooltip. Two rows with the same label in one
+project add the clock (**Codex · 16:20**) or a number. A project whose folder
+Harness named itself (`agent-3`, `codex-2026-09-21-16-20`) is headed by its
+sessions instead. A folder line appears only when it adds information: not when it
+repeats the project heading or is a folder Harness named, and as the whole path
+when two locations end in the same folder name. The tooltip always has the full
+path. **Continue working** uses the same labels and shows the last folder part.
+An idle session reads **Ready**, here and in search; a harness session whose
+engine exited reads **Stopped**, and its pane says how to start the engine again.
+Tabs, pane titles, and the rename, delete, and fork dialogs keep upstream's names,
+so a rename starts from the session's real name.
+
+These fork changes touch upstream files: the engine-exit message in
+`cli/src/lib/engineLaunch.ts`, **Ready** in
+`desktop/lib/widgets/swarm_search_preview.dart`, the pane header's omission of a
+generated folder in `desktop/lib/widgets/terminal_panel.dart`, and
+`isGeneratedWorkFolder` in `desktop/lib/core/project_folder.dart`, with their tests.
+The labels themselves live in the fork's `desktop/lib/state/project_navigation.dart`.
 
 This source change does not update an installed Preview 7 bundle or desktop shortcut.
 

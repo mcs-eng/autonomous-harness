@@ -271,6 +271,208 @@ void main() {
     },
   );
 
+  testWidgets(
+    'generated folders and clock names stay out of the session list',
+    (tester) async {
+      final app = projectApp();
+      addTearDown(app.dispose);
+      final host = app.machineStates['m']!
+        ..nodeOnline = true
+        ..connectionStatus = ConnectionStatus.connected;
+      // The automatic name says Codex; the label must come from the harness.
+      const harness = Agent(
+        id: 'notes',
+        name: 'Codex harness 9-21 16:20',
+        engine: 'codex',
+        dsh: 'example/field-notes',
+        dshName: 'Field Notes',
+        terminalAvailable: true,
+      );
+      host.agents = const [harness];
+      host.localProjects = const {
+        'notes': AgentProject(name: 'agent-3', cwd: '/work/harnesses/agent-3'),
+      };
+      await mountSidebar(tester, app);
+      // The project heading and its one session.
+      expect(find.text('Field Notes'), findsNWidgets(2));
+      expect(find.text('Ready'), findsOneWidget);
+      expect(find.text('agent-3'), findsNothing);
+      expect(find.text('Codex harness 9-21 16:20'), findsNothing);
+      expect(find.text('/work/harnesses/agent-3'), findsNothing);
+      expect(
+        find.text('Closing a view keeps its agent running.'),
+        findsOneWidget,
+      );
+      expect(projectAgentStatus(app, swarmAgents(app).single), 'Ready');
+      // Dialogs and tabs keep the name a rename starts from.
+      expect(harness.displayName, 'Untitled Pane');
+      expect(sessionLabel(harness), 'Field Notes');
+
+      // The engine exited; the daemon keeps the pane as a shell.
+      host.agents = const [
+        Agent(
+          id: 'notes',
+          name: 'Codex harness 9-21 16:20',
+          engine: 'terminal',
+          dsh: 'example/field-notes',
+          dshName: 'Field Notes',
+          terminalAvailable: true,
+        ),
+      ];
+      await mountSidebar(tester, app);
+      expect(find.text('Stopped'), findsOneWidget);
+      expect(find.text('Field Notes'), findsNWidgets(2));
+      // A plain terminal is not a stopped harness.
+      final shell = SwarmAgentRef(
+        host,
+        const Agent(
+          id: 'shell',
+          name: 'Terminal harness 9-21 16:30',
+          engine: 'terminal',
+          terminalAvailable: true,
+        ),
+      );
+      expect(projectAgentStatus(app, shell), 'Ready');
+      expect(sessionLabel(shell.agent), 'Terminal');
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('folder lines appear only when they tell locations apart', (
+    tester,
+  ) async {
+    final app = projectApp();
+    addTearDown(app.dispose);
+    final host = app.machineStates['m']!
+      ..nodeOnline = true
+      ..connectionStatus = ConnectionStatus.connected;
+    host.agents = const [
+      Agent(id: 'a0', name: 'Main', terminalAvailable: true),
+      Agent(id: 'a1', name: 'Worktree', terminalAvailable: true),
+      Agent(id: 'b0', name: 'One', terminalAvailable: true),
+      Agent(id: 'b1', name: 'Two', terminalAvailable: true),
+    ];
+    host.localProjects = const {
+      // A user-named checkout and a dated worktree Harness made for it.
+      'a0': AgentProject(
+        name: 'notebook',
+        cwd: '/work/notebook',
+        remote: 'example/notebook',
+      ),
+      'a1': AgentProject(
+        name: 'notebook',
+        cwd: '/work/harnesses/codex-2026-09-21-16-20',
+        remote: 'example/notebook',
+      ),
+      // Two checkouts whose folders end the same way.
+      'b0': AgentProject(
+        name: 'Service',
+        cwd: '/work/one/app',
+        remote: 'example/service',
+      ),
+      'b1': AgentProject(
+        name: 'Service',
+        cwd: '/work/two/app',
+        remote: 'example/service',
+      ),
+    };
+    await mountSidebar(tester, app);
+    expect(find.text('notebook'), findsNWidgets(2));
+    expect(find.text('codex-2026-09-21-16-20'), findsNothing);
+    expect(find.text('/work/harnesses/codex-2026-09-21-16-20'), findsNothing);
+    expect(find.text('app'), findsNothing);
+    expect(find.text('/work/one/app'), findsOneWidget);
+    expect(find.text('/work/two/app'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('identical labels are told apart within a project', (
+    tester,
+  ) async {
+    final app = projectApp();
+    addTearDown(app.dispose);
+    final host = app.machineStates['m']!
+      ..nodeOnline = true
+      ..connectionStatus = ConnectionStatus.connected;
+    host.agents = const [
+      Agent(
+        id: 'c0',
+        name: 'Codex harness 9-21 16:20',
+        engine: 'codex',
+        terminalAvailable: true,
+      ),
+      Agent(
+        id: 'c1',
+        name: 'Codex harness 9-21 17:05',
+        engine: 'codex',
+        terminalAvailable: true,
+      ),
+      Agent(
+        id: 'c2',
+        name: 'Codex harness 9-20 17:05',
+        engine: 'codex',
+        terminalAvailable: true,
+      ),
+      Agent(id: 'r0', name: 'Review', terminalAvailable: true),
+      Agent(id: 'r1', name: 'Review', terminalAvailable: true),
+      // Each in a folder Harness made: its own project, headed by its session.
+      Agent(
+        id: 'g0',
+        name: 'Codex harness 9-22 08:00',
+        engine: 'codex',
+        terminalAvailable: true,
+      ),
+      Agent(
+        id: 'g1',
+        name: 'Codex harness 9-22 09:30',
+        engine: 'codex',
+        terminalAvailable: true,
+      ),
+    ];
+    const shared = AgentProject(
+      name: 'Notebook',
+      cwd: '/work/notebook',
+      remote: 'example/notebook',
+    );
+    host.localProjects = const {
+      'c0': shared,
+      'c1': shared,
+      'c2': shared,
+      'r0': shared,
+      'r1': shared,
+      'g0': AgentProject(
+        name: 'codex-2026-09-22-08-00',
+        cwd: '/work/harnesses/codex-2026-09-22-08-00',
+      ),
+      'g1': AgentProject(
+        name: 'codex-2026-09-22-09-30',
+        cwd: '/work/harnesses/codex-2026-09-22-09-30',
+      ),
+    };
+    await mountSidebar(tester, app);
+    // Only the lone sessions of the two generated-folder projects below.
+    expect(find.text('Codex'), findsNWidgets(2));
+    expect(find.text('Codex · 16:20'), findsOneWidget);
+    expect(find.text('Codex · 9-21 17:05'), findsOneWidget);
+    expect(find.text('Codex · 9-20 17:05'), findsOneWidget);
+    expect(find.text('Review · 1'), findsOneWidget);
+    expect(find.text('Review · 2'), findsOneWidget);
+    // Two generated-folder projects: their headings carry the clock.
+    expect(find.text('Codex · 08:00'), findsOneWidget);
+    expect(find.text('Codex · 09:30'), findsOneWidget);
+    expect(find.text('codex-2026-09-22-08-00'), findsNothing);
+    // The filter still finds a session by the label it shows.
+    await tester.enterText(
+      find.byKey(const ValueKey('project-filter')),
+      'codex 08:00',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Codex · 08:00'), findsOneWidget);
+    expect(find.text('Codex · 09:30'), findsNothing);
+    expect(find.text('Review · 1'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   test('failed and starting launches never report idle', () {
     final app = projectApp();
     addTearDown(app.dispose);

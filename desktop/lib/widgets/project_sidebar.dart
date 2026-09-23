@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/models.dart';
+import '../core/project_folder.dart';
 import '../shared/layouts/widgets/sidebar_item.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/widgets/app_icon_button.dart';
@@ -168,26 +169,29 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
 
   Widget _projectList() {
     final groups = swarmProjects(widget.app, widget.projects.projects);
+    final headings = _headings(groups);
     final grouped = {
       for (final g in groups)
         for (final a in g.agents) (a.machineId, a.agent.id),
     };
-    final other = swarmAgents(
-      widget.app,
-      _query,
-    ).where((a) => !grouped.contains((a.machineId, a.agent.id))).toList();
+    final other = swarmAgents(widget.app)
+        .where(
+          (a) => !grouped.contains((a.machineId, a.agent.id)) && _matches(a),
+        )
+        .toList();
     final visible = groups
         .where(
           (g) =>
               _query.isEmpty ||
               g.name.toLowerCase().contains(_query) ||
+              headings[g.id]!.toLowerCase().contains(_query) ||
               projectLocations(g).any(
                 (p) =>
                     '${p.folder} ${widget.app.projectMachineLabel(p.machineId)}'
                         .toLowerCase()
                         .contains(_query),
               ) ||
-              g.agents.any((a) => a.searchText.contains(_query)),
+              g.agents.any(_matches),
         )
         .toList();
     if (visible.isEmpty && other.isEmpty) {
@@ -208,11 +212,13 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         for (final group in visible) ...[
           SidebarItem(
             key: ValueKey('project:${group.id}'),
-            label: group.name,
+            label: headings[group.id]!,
             icon: _collapsed.contains(group.id)
                 ? Icons.chevron_right
                 : Icons.expand_more,
-            tooltip: '${group.name} · ${group.agents.length} sessions',
+            tooltip: headings[group.id] == group.name
+                ? '${group.name} · ${group.agents.length} sessions'
+                : '${headings[group.id]}\n${group.name} · ${group.agents.length} sessions',
             onTap: () => setState(() {
               if (!_collapsed.remove(group.id)) _collapsed.add(group.id);
             }),
@@ -222,22 +228,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
               padding: const EdgeInsets.only(left: 12, right: 8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (final location in projectLocations(group)) ...[
-                    _location(location),
-                    for (final agent in group.agents.where(
-                      (a) =>
-                          a.machineId == location.machineId &&
-                          a.project != null &&
-                          projectFolderPath(a.project!.cwd) == location.folder,
-                    ))
-                      _agent(agent),
-                  ],
-                  for (final agent in group.agents.where(
-                    (a) => a.project == null,
-                  ))
-                    _agent(agent),
-                ],
+                children: _groupSessions(group),
               ),
             ),
         ],
@@ -246,13 +237,95 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
             padding: EdgeInsets.all(12),
             child: Text('Other sessions'),
           ),
-          for (final agent in other) _agent(agent),
+          for (final (i, label) in sessionLabels(other).indexed)
+            _agent(other[i], label),
         ],
       ],
     );
   }
 
-  Widget _location(ProjectLocation location) {
+  /// What each project heading says. A folder Harness named itself, with no
+  /// saved project behind it, is headed by its sessions instead ("Codex").
+  Map<String, String> _headings(List<SwarmProjectGroup> groups) {
+    final generated = [
+      for (final g in groups)
+        if (g.saved == null &&
+            g.agents.isNotEmpty &&
+            isGeneratedWorkFolder(g.name))
+          g,
+    ];
+    final labels = distinctLabels(
+      [
+        for (final g in generated)
+          {for (final a in g.agents) sessionLabel(a.agent)}.join(', '),
+      ],
+      [for (final g in generated) g.agents.first.agent.name],
+    );
+    return {
+      for (final g in groups) g.id: g.name,
+      for (final (i, g) in generated.indexed) g.id: labels[i],
+    };
+  }
+
+  /// A session matches on everything [SwarmAgentRef.searchText] covers, and
+  /// on the label and raw name the sidebar shows.
+  bool _matches(SwarmAgentRef row) {
+    final text =
+        '${row.searchText} ${sessionLabel(row.agent)} ${row.agent.name}'
+            .toLowerCase();
+    return _query.split(RegExp(r'\s+')).every(text.contains);
+  }
+
+  List<Widget> _groupSessions(SwarmProjectGroup group) {
+    final locations = projectLocations(group);
+    final hosts = locations.map((item) => item.machineId).toSet();
+    final bases = [for (final l in locations) folderBase(l.folder)];
+    final placed = [
+      for (final location in locations)
+        group.agents
+            .where(
+              (a) =>
+                  a.machineId == location.machineId &&
+                  a.project != null &&
+                  projectFolderPath(a.project!.cwd) == location.folder,
+            )
+            .toList(),
+    ];
+    final unplaced = group.agents.where((a) => a.project == null).toList();
+    final ordered = [...placed.expand((rows) => rows), ...unplaced];
+    final labels = sessionLabels(ordered);
+    final labelOf = {
+      for (final (i, row) in ordered.indexed)
+        (row.machineId, row.agent.id): labels[i],
+    };
+    return [
+      for (final (i, location) in locations.indexed) ...[
+        _location(
+          location,
+          showHost: hosts.length > 1,
+          // A folder line only when it tells the locations apart or differs
+          // from the heading; the whole path when two end the same way.
+          folder: isGeneratedWorkFolder(location.folder)
+              ? null
+              : bases.where((base) => base == bases[i]).length > 1
+              ? location.folder
+              : locations.length > 1 || bases[i] != group.name
+              ? bases[i]
+              : null,
+        ),
+        for (final row in placed[i])
+          _agent(row, labelOf[(row.machineId, row.agent.id)]!),
+      ],
+      for (final row in unplaced)
+        _agent(row, labelOf[(row.machineId, row.agent.id)]!),
+    ];
+  }
+
+  Widget _location(
+    ProjectLocation location, {
+    required bool showHost,
+    required String? folder,
+  }) {
     final machine = widget.app.stateOf(location.machineId);
     final available =
         machine != null &&
@@ -260,38 +333,44 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         machine.nodeOnline != false &&
         machine.connectionStatus == ConnectionStatus.connected;
     final host = widget.app.projectMachineLabel(location.machineId);
+    final where = '$host\n${location.folder}';
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 8, 0, 4),
       child: Row(
         children: [
-          Expanded(
-            child: Tooltip(
-              message: '$host\n${location.folder}',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    host,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: grid.AppPalette.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                  Text(
-                    location.folder,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: grid.AppPalette.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
+          if (showHost || folder != null)
+            Expanded(
+              child: Tooltip(
+                message: where,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (showHost)
+                      Text(
+                        host,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: grid.AppPalette.textSecondary,
+                          fontSize: 11,
+                        ),
+                      ),
+                    if (folder != null)
+                      Text(
+                        folder,
+                        maxLines: folder == location.folder ? 2 : 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: grid.AppPalette.textSecondary,
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-          ),
+            )
+          else
+            const Spacer(),
           if (machine == null ||
               machine.needsLink ||
               machine.nodeOnline == false ||
@@ -318,7 +397,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     );
   }
 
-  Widget _agent(SwarmAgentRef row) {
+  Widget _agent(SwarmAgentRef row, String shown) {
     final status = projectAgentStatus(widget.app, row);
     final branch = row.project?.branch;
     final detail =
@@ -331,11 +410,17 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
       children: [
         SidebarItem(
           key: ValueKey('project-agent:${row.machineId}:${row.agent.id}'),
-          label: row.agent.name,
+          label: shown,
           selected: selected,
           leading: EngineMark.forAgent(row.agent, size: 16),
-          tooltip:
-              '${row.agent.name}\n$status${branch == null ? '' : ' · $branch'}\n${widget.app.projectMachineLabel(row.machineId)}\n${row.project?.cwd ?? 'Folder not reported'}${detail == null ? '' : '\n$detail'}',
+          tooltip: [
+            shown,
+            if (shown != row.agent.name) row.agent.name,
+            '$status${branch == null ? '' : ' · $branch'}',
+            widget.app.projectMachineLabel(row.machineId),
+            row.project?.cwd ?? 'Folder not reported',
+            ?detail,
+          ].join('\n'),
           onTap: () => _openOrExplain(row),
         ),
         Padding(
@@ -388,7 +473,9 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(
-          row?.agent.name ?? widget.app.projectMachineLabel(machineId),
+          row == null
+              ? widget.app.projectMachineLabel(machineId)
+              : sessionLabel(row.agent),
         ),
         content: SingleChildScrollView(
           child: Column(

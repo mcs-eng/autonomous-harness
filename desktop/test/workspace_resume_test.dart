@@ -34,6 +34,66 @@ void main() {
     },
   );
 
+  testWidgets(
+    'a resume card names the session and shows only the last folder part',
+    (tester) async {
+      final app = projectApp();
+      addTearDown(app.dispose);
+      final machine = app.machineStates['m']!
+        ..nodeOnline = true
+        ..connectionStatus = ConnectionStatus.connected;
+      machine.agents = const [
+        Agent(
+          id: 'a0',
+          name: 'Codex harness 9-21 16:20',
+          engine: 'codex',
+          terminalAvailable: true,
+        ),
+        Agent(
+          id: 'a1',
+          name: 'Codex harness 9-21 17:05',
+          engine: 'codex',
+          terminalAvailable: true,
+        ),
+      ];
+      machine.localProjects = const {
+        'a0': AgentProject(
+          name: 'Notebook',
+          cwd: '/work/clients/notebook',
+          branch: 'main',
+        ),
+        'a1': AgentProject(
+          name: 'codex-2026-09-21-17-05',
+          cwd: '/work/harnesses/codex-2026-09-21-17-05',
+        ),
+      };
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: grid.buildAppTheme(brightness: Brightness.dark),
+          home: Scaffold(
+            body: WorkspaceResume(
+              app: app,
+              rows: workspaceResumeAgents(app, const []),
+              onOpen: (_) {},
+              onAttention: () {},
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Codex · 16:20'), findsOneWidget);
+      expect(find.text('Codex · 17:05'), findsOneWidget);
+      expect(find.text('Codex harness 9-21 16:20'), findsNothing);
+      expect(find.text('notebook · main'), findsOneWidget);
+      expect(find.text('/work/clients/notebook · main'), findsNothing);
+      expect(find.textContaining('codex-2026-09-21-17-05'), findsNothing);
+      expect(
+        find.byTooltip('Test host\n/work/clients/notebook'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   for (final size in [const Size(1100, 800), const Size(600, 560)]) {
     testWidgets('resume and search work at $size with large text', (
       tester,
