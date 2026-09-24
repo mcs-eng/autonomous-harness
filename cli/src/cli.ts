@@ -561,9 +561,7 @@ async function authStatusCommand(json: boolean): Promise<void> {
     // the desktop app keeps its home screen instead of sending the person to a sign-in they declined.
     if (env.HARNESS_LOCAL_ONLY) {
       if (json) console.log(JSON.stringify({ loggedIn: false, localOnly: true, computerId: computerId() }))
-      else console.log('
-  ○ Local mode — this computer runs without an account. To reach other machines: harness login
-')
+      else console.log('\n  ○ Local mode — this computer runs without an account. To reach other machines: harness login\n')
       return
     }
     // The computer id travels even signed out: it is the id this computer's daemon serves itself

@@ -34,9 +34,6 @@ class _Api extends ApiClient {
   final lists = <Completer<List<Machine>>>[];
 
   @override
-  Future<Map<String, dynamic>?> desk() async => null;
-
-  @override
   Future<Map<String, dynamic>?> me() async => null;
 
   // A retry also joins the desk; a real request would outlive the test clock.

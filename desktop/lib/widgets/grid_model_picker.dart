@@ -374,7 +374,7 @@ class _GridModelPickerState extends State<GridModelPicker> {
       return 'No models are available from ${section.label ?? section.name}.';
     }
     if (section.own || section.source == 'private') {
-      return 'No local models on this account yet.';
+      return 'Set up your first local model on this computer.';
     }
     return null;
   }

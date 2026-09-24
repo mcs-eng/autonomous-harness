@@ -228,11 +228,9 @@ void main() {
 
       await app.bootstrap();
 
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
+      // Fork: a signed-out desktop window opens on the login screen, which offers
+      // Sign in and local mode; upstream opens a guest desk here instead.
+      expect(app.status, AppStatus.unauthenticated);
       expect(app.config.apiBaseUrl, ConfigStore.defaultBaseUrl);
       expect(app.autonomousEnv, 'prod');
       expect(store.resetCalls, 0);
@@ -258,11 +256,9 @@ void main() {
       expect(provisioner.called, isTrue);
       expect(app.environmentReadiness.isReady, isTrue);
       // Reached the login check rather than getting stuck on preparingEnvironment.
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
+      // Fork: a signed-out desktop window opens on the login screen, which offers
+      // Sign in and local mode; upstream opens a guest desk here instead.
+      expect(app.status, AppStatus.unauthenticated);
     },
   );
 
@@ -324,11 +320,9 @@ void main() {
       );
       await app.startEnvironmentSetup();
       expect(provisioner.installCalls, [isFalse, isTrue]);
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
+      // Fork: a signed-out desktop window opens on the login screen, which offers
+      // Sign in and local mode; upstream opens a guest desk here instead.
+      expect(app.status, AppStatus.unauthenticated);
       expect(app.environmentReadiness.phase, EnvironmentSetupPhase.ready);
       expect(
         painted,
@@ -384,11 +378,9 @@ void main() {
       // what lets the provisioner skip the already-`ready` harness step during the recheck.
       expect(provisioner.resumeFromCalls.last, same(stuck));
       expect(app.environmentReadiness.isReady, isTrue);
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
+      // Fork: a signed-out desktop window opens on the login screen, which offers
+      // Sign in and local mode; upstream opens a guest desk here instead.
+      expect(app.status, AppStatus.unauthenticated);
       expect(storage.values['environment_setup_version'], isNull);
       expect(app.environmentRecheckPending, isFalse);
       app.dispose();
@@ -662,7 +654,10 @@ void main() {
       final duplicate = app.retrySessionCheck();
       await tester.pump();
       expect(login.calls, 2);
-      expect(find.text('Checking sign-in…'), findsOneWidget);
+      // The startup box keeps earlier lines on screen, so the first check's line is
+      // still there above the current one.
+      expect(find.text('Checking sign-in…'), findsWidgets);
+      expect(find.text('Try again'), findsNothing);
       login.status.complete(const CliAuthStatus(loggedIn: false));
       await duplicate;
       await tester.pump();
@@ -817,13 +812,10 @@ void main() {
       await tester.tap(find.text('Install 1 tool'));
       await tester.pump();
       expect(provisioner.installCalls, [true]);
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
-      // …on the desk, not in front of it.
-      expect(find.text('Sign in'), findsNothing);
+      // Fork: a signed-out desktop window still opens on the login screen, which
+      // offers Sign in and local mode (upstream opens a guest desk here).
+      expect(app.status, AppStatus.unauthenticated);
+      expect(find.text('Sign in'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },

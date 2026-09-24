@@ -465,9 +465,10 @@ void main() {
         onSelected: (model) => picked = model,
       );
 
-      expect(find.text('Bran fleet · bran-a'), findsOneWidget);
-      expect(find.text('qwen3.5:12b'), findsNWidgets(2));
-      await tester.tap(find.text('qwen3.5:12b').first);
+      expect(find.text('LOCAL · BRAN FLEET · BRAN-A'), findsOneWidget);
+      final rows = find.widgetWithText(ModelPickerRow, 'qwen3.5:12b');
+      expect(rows, findsNWidgets(2));
+      await tester.tap(rows.first);
       await tester.pumpAndSettle();
       expect(picked?.targetId, 'local:bran-a:1111111111111111');
     },
@@ -543,12 +544,13 @@ void main() {
         currentModel: 'same-model',
         onSelected: (model) => picked = model,
       );
-      await tester.tap(find.text('same-model').last);
+      final rows = find.widgetWithText(ModelPickerRow, 'same-model');
+      await tester.tap(rows.last);
       await tester.pumpAndSettle();
       expect(picked, isNull);
-      await tester.tap(find.text('Model'));
+      await tester.tap(find.byType(GridModelPicker));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('same-model').first);
+      await tester.tap(rows.first);
       await tester.pumpAndSettle();
       expect(picked?.targetId, 'local:fleet:1111111111111111');
     },

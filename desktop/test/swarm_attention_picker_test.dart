@@ -162,7 +162,10 @@ void main() {
         await tester.pump();
         expect(selectedHarness, findsOneWidget);
         final row = tester.getRect(selectedHarness);
-        final list = tester.getRect(find.descendant(of: find.byType(Dialog), matching: find.byType(ListView)));
+        // The fork's projects sidebar has a list of its own; measure the picker's.
+        final list = tester.getRect(
+          find.ancestor(of: selectedHarness, matching: find.byType(ListView)).first,
+        );
         expect(row.top, greaterThanOrEqualTo(list.top));
         expect(row.bottom, lessThanOrEqualTo(list.bottom));
       }
@@ -172,7 +175,9 @@ void main() {
         selection,
         ValueKey('session-open:${agentDestinationId('m', 'a12')}'),
       );
-      final list = tester.getRect(find.descendant(of: find.byType(Dialog), matching: find.byType(ListView)));
+      final list = tester.getRect(
+        find.ancestor(of: selectedHarness, matching: find.byType(ListView)).first,
+      );
       final row = tester.getRect(selectedHarness);
       expect(row.top, greaterThanOrEqualTo(list.top));
       expect(row.bottom, lessThanOrEqualTo(list.bottom));

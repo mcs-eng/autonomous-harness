@@ -239,7 +239,8 @@ Future<void> showSwarmLinkDialog(
     final signedIn = await showSignInSheet(
       context,
       notifier,
-      reason: 'Your machines live on your account. Sign in to link another one '
+      reason:
+          'Your machines live on your account. Sign in to link another one '
           'to this computer.',
     );
     if (!signedIn || !context.mounted) return;
