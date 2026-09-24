@@ -512,6 +512,7 @@ function solveLeg(leg, ref, samples, findings) {
   if (mode === 'hohmann') {
     const h = hohmann(MU_SUN, departState.elements.aKm, bodyState(to, depart).elements.aKm)
     tof = h.tofSeconds
+    if (tof > 15 * 365.25 * DAY_S) throw new Error(`${ref}: time of flight is over 15 years; this solver is one revolution`)
     arrive = new Date(depart.getTime() + tof * 1000)
     // Idealized coplanar ellipse in the departure body's plane, starting prograde.
     const radial = unit(departState.r)
@@ -674,6 +675,7 @@ function round(n) {
 /**
  * Porkchop of departure date × time of flight.
  * Cell value is injection Δv plus circular-capture Δv (km/s), or null if Lambert fails.
+ * `captureKm: null` is a flyby: the cell is injection Δv only.
  */
 export function porkchop({
   from,
@@ -717,12 +719,12 @@ export function porkchop({
         const vInfDep = norm(sub(solved.v1, r1.v))
         const vInfArr = norm(sub(solved.v2, r2.v))
         const inj = orbitBurn(origin, parkingKm, vInfDep)
-        const cap = orbitBurn(dest, captureKm, vInfArr)
-        const total = inj.dv + cap.dv
+        const cap = captureKm == null ? null : orbitBurn(dest, captureKm, vInfArr)
+        const total = inj.dv + (cap ? cap.dv : 0)
         cell = {
           dv: total,
           injection: inj.dv,
-          capture: cap.dv,
+          capture: cap ? cap.dv : null,
           vInfDepart: vInfDep,
           vInfArrive: vInfArr,
           c3: inj.c3,

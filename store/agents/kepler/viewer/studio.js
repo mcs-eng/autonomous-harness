@@ -454,6 +454,7 @@ document.querySelector('#window').addEventListener('click', async () => {
   if (!leg) return
   say('Searching the window…')
   await new Promise((r) => setTimeout(r, 20))
+  const captureRaw = document.querySelector('#capture').value
   grid = porkchop({
     from: fromSel.value,
     to: toSel.value,
@@ -464,7 +465,7 @@ document.querySelector('#window').addEventListener('click', async () => {
     nDep: 24,
     nTof: 18,
     parkingKm: Number(document.querySelector('#parking').value) || 200,
-    captureKm: Number(document.querySelector('#capture').value) || 250,
+    captureKm: captureRaw === '' ? null : Number(captureRaw),
     prograde: document.querySelector('#prograde').value === 'true',
   })
   porkOpen = true

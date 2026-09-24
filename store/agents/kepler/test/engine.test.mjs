@@ -159,6 +159,50 @@ test('porkchop returns a finite Earth–Mars window cheaper than a winter corner
   assert.ok(worst + 1e-6 >= grid.best.dv)
 })
 
+test('a blank capture prices the window on injection only and can move the best date', () => {
+  const args = {
+    from: 'earth',
+    to: 'mars',
+    depart0: '2033-04-19',
+    departSpanDays: 180,
+    tof0Days: 140,
+    tofSpanDays: 220,
+    nDep: 24,
+    nTof: 18,
+    parkingKm: 200,
+  }
+  const captured = porkchop({ ...args, captureKm: 250 })
+  const flyby = porkchop({ ...args, captureKm: null })
+  assert.equal(flyby.captureKm, null)
+  assert.equal(flyby.best.capture, null)
+  assert.equal(flyby.best.dv, flyby.best.injection)
+  assert.notEqual(flyby.best.depart.slice(0, 10), captured.best.depart.slice(0, 10))
+  const cells = flyby.cells.flat().filter(Boolean)
+  assert.ok(cells.every((cell) => cell.capture == null && cell.dv === cell.injection))
+})
+
+test('an Earth–Neptune Hohmann over 15 years stays not ready', () => {
+  const mission = {
+    spec: 1,
+    name: 'Neptune flyby',
+    ships: [{
+      id: 'probe',
+      legs: [{ from: 'earth', to: 'neptune', mode: 'hohmann', depart: '2033-01-01' }],
+    }],
+  }
+  const solved = solveMission(mission, { samples: 24 })
+  assert.equal(solved.ok, false)
+  assert.equal(solved.ships[0].legs.length, 0)
+  assert.ok(solved.findings.some((f) => f.severity === 'error' && /15 years/.test(f.message)))
+  assert.equal(verdictFromSolve(solved).ready, false)
+
+  const mars = structuredClone(mission)
+  mars.ships[0].legs[0].to = 'mars'
+  const short = solveMission(mars, { samples: 24 })
+  assert.equal(short.ok, true)
+  assert.ok(short.ships[0].legs[0].tofDays < 15 * 365.25)
+})
+
 function normOf(v) {
   const x = v.x ?? v[0]
   const y = v.y ?? v[1]

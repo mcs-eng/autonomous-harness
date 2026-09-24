@@ -28,6 +28,13 @@ test('the starter mission checks ready and writes a report', () => {
   assert.match(fs.readFileSync(path.join(dir, 'delivery/trajectory.csv'), 'utf8'), /ares,ares\.0,/)
 })
 
+test('Best window treats a blank Capture field as a flyby', () => {
+  const src = fs.readFileSync(path.join(root, 'viewer/studio.js'), 'utf8')
+  const call = src.slice(src.indexOf('grid = porkchop'), src.indexOf('porkOpen = true'))
+  assert.match(call, /captureRaw === '' \? null : Number\(captureRaw\)/)
+  assert.doesNotMatch(call, /\|\|\s*250/)
+})
+
 test('a broken mission stays not ready', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler-'))
   fs.writeFileSync(path.join(dir, 'mission.json'), '{')
