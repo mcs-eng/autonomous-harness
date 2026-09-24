@@ -181,6 +181,27 @@ test('a blank capture prices the window on injection only and can move the best 
   assert.ok(cells.every((cell) => cell.capture == null && cell.dv === cell.injection))
 })
 
+test('an Earth–Mars Lambert just under 15 years is a miss, not a ready path', () => {
+  const depart = Date.parse('2033-01-01')
+  const arrive = Date.parse('2048-01-01')
+  const days = (arrive - depart) / (DAY_S * 1000)
+  assert.ok(days < 15 * 365.25, days)
+  const mission = {
+    spec: 1,
+    name: 'Long Mars',
+    ships: [{
+      id: 'probe',
+      legs: [{ from: 'earth', to: 'mars', depart: '2033-01-01', arrive: '2048-01-01' }],
+    }],
+  }
+  const solved = solveMission(mission)
+  assert.equal(solved.ok, false)
+  assert.equal(solved.ships[0].legs.length, 0)
+  assert.ok(solved.findings.some((f) => f.severity === 'error' && /Lambert miss/.test(f.message)))
+  assert.equal(solved.findings.some((f) => /did not converge/.test(f.message)), false)
+  assert.equal(verdictFromSolve(solved).ready, false)
+})
+
 test('an Earth–Neptune Hohmann over 15 years stays not ready', () => {
   const mission = {
     spec: 1,

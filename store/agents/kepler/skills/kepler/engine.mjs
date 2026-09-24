@@ -579,7 +579,20 @@ function solveLeg(leg, ref, samples, findings) {
   dth = solved.dth
   const vInfDep = norm(sub(v1, departState.v))
   const vInfArr = norm(sub(v2, arriveState.v))
-  const path = sampleLambert(r1, v1, tof, samples)
+  let path
+  try {
+    path = sampleLambert(r1, v1, tof, samples)
+  } catch (err) {
+    if (err.message === 'propagate: did not converge') {
+      throw new Error(`${ref}: Lambert miss; the one-revolution transfer does not reach ${bodyInfo(to).label}`)
+    }
+    throw err
+  }
+  const arrival = path[path.length - 1]
+  const missKm = norm(sub(arrival, r2))
+  if (!(missKm < 1e5)) {
+    throw new Error(`${ref}: Lambert miss; the one-revolution transfer does not reach ${bodyInfo(to).label}`)
+  }
   return finishLeg({
     leg, ref, from, to, mode, depart, arrive, tof, r1, r2, v1, v2, dth,
     path, parkingKm, captureKm, vInfDep, vInfArr, heliocentric, findings, samples,
