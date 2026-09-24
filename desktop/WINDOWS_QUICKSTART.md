@@ -301,11 +301,11 @@ projects sidebar and **Settings → Account** say **Local mode** and offer
 cancelled or fails, the sign-in screen offers **Use this computer without an
 account** to return to the desk.
 
-**Sign out** runs `harness logout`, which clears this computer's saved sign-in
-and restarts a running daemon signed out, for this computer only. The window
-stays on the desk in local mode: this computer's tiles stay, and the other
-machines' leave. A session that ends while the app is open does the same and
-says so. From a WSL terminal, `harness start` without a saved sign-in runs the
+**Sign out** in **Settings → Account** runs `harness logout`, which clears this
+computer's saved sign-in and restarts a running daemon signed out, for this
+computer only. The window stays on the desk in local mode: this computer's tiles
+stay, and the other machines' tiles leave. A session that ends while the app is
+open does the same and says so. From a WSL terminal, `harness start` without a saved sign-in runs the
 same daemon, and `harness status` reads `this computer only (not signed in)`.
 
 ## Preview limitations and recovery
