@@ -34,6 +34,20 @@ test('sensor configuration accepts Windows SSH custody and rejects ambiguous or 
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,grid:'http://bran:11434/v1//'}),/grid/);
 });
 
+test('null and omitted machine and sensor ids are rejected',()=>{
+  const machine={transport:'local'};
+  const sensorWithoutId={...source};
+  delete sensorWithoutId.id;
+  for(const bad of [
+    {...DEFAULT_CONFIG,machines:[{...machine,id:null}]},
+    {...DEFAULT_CONFIG,machines:[machine]},
+    {...DEFAULT_CONFIG,sensors:[{...source,id:null}]},
+    {...DEFAULT_CONFIG,sensors:[sensorWithoutId]},
+  ]){
+    assert.throws(()=>validateConfig(bad),/unique, simple id/);
+  }
+});
+
 test('sensor invocation is a fixed nvidia-smi query with strict noninteractive SSH',()=>{
   const call=nvidiaSmiInvocation(validateConfig({...DEFAULT_CONFIG,sensors:[source]}).sensors[0]);
   assert.equal(call.file,source.sshBinary);
