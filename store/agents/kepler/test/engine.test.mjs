@@ -223,6 +223,29 @@ test('a porkchop does not price a sub-15-year Lambert miss', () => {
   assert.equal(grid.best, null)
 })
 
+test('a porkchop does not price a transfer over 15 years', () => {
+  const shortDays = 14 * 365.25
+  const longDays = 16 * 365.25
+  assert.ok(shortDays < 15 * 365.25)
+  assert.ok(longDays > 15 * 365.25)
+  const grid = porkchop({
+    from: 'earth',
+    to: 'mars',
+    depart0: '2033-01-01',
+    departSpanDays: 0,
+    tof0Days: shortDays,
+    tofSpanDays: longDays - shortDays,
+    nDep: 1,
+    nTof: 2,
+    parkingKm: 200,
+    captureKm: 250,
+  })
+  assert.ok(grid.cells[0][0], 'a 14-year Earth–Mars arc still has a one-revolution price')
+  assert.equal(grid.cells[0][1], null)
+  assert.equal(grid.best.tofDays, shortDays)
+  assert.notEqual(grid.best.dv, undefined)
+})
+
 test('an Earth–Neptune Hohmann over 15 years stays not ready', () => {
   const mission = {
     spec: 1,

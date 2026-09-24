@@ -687,8 +687,8 @@ function round(n) {
 
 /**
  * Porkchop of departure date × time of flight.
- * Cell value is injection Δv plus circular-capture Δv (km/s), or null if Lambert fails
- * or the arc does not propagate to the target.
+ * Cell value is injection Δv plus circular-capture Δv (km/s), or null if Lambert fails,
+ * the arc does not propagate to the target, or the flight is over 15 years.
  * `captureKm: null` is a flyby: the cell is injection Δv only.
  */
 export function porkchop({
@@ -730,6 +730,7 @@ export function porkchop({
         const r1 = bodyState(origin, depart)
         const r2 = bodyState(dest, arrive)
         const flight = tof[j] * DAY_S
+        if (flight > 15 * 365.25 * DAY_S) throw new Error('time of flight is over 15 years')
         const solved = lambert(MU_SUN, r1.r, r2.r, flight, { prograde })
         const path = sampleLambert(r1.r, solved.v1, flight, 180)
         const arrival = path[path.length - 1]
