@@ -3019,6 +3019,9 @@ class AppNotifier extends ChangeNotifier {
   /// orphan its own wait. A session that ended underneath us passes none and
   /// invalidates for itself — the in-flight work belongs to the account that
   /// just left.
+  // Fork: unreachable while this fork keeps its login-screen account model; kept
+  // unchanged so later upstream syncs still merge cleanly.
+  // ignore: unused_element
   Future<void> _becomeGuest({String? banner, int? revision}) async {
     revision ??= _invalidateAuthWork();
     final before = localMachineState?.machine.machineId;
@@ -3206,6 +3209,7 @@ class AppNotifier extends ChangeNotifier {
         // down for an ordinary reason and gets the ordinary advice.
         if (!authStatus.loggedIn && signedIn && !localOnly) {
           _signedOutAtRuntime(_signedOutMessage);
+          return;
         }
         _startDaemonSupervision(discovery);
         throw StateError(
@@ -3334,8 +3338,7 @@ class AppNotifier extends ChangeNotifier {
   /// machine was deleted from another machine or the SSO token simply expired, and guessing between
   /// them in the copy would sometimes be wrong. Signing in again is the answer to both.
   static const _signedOutMessage =
-      'You were signed out on this computer. This computer\'s agents keep '
-      'running; sign in again to reach your other machines.';
+      'You were signed out on this computer. Sign in again to reconnect.';
 
   /// The session went away while the app was already running — send the user to [LoginScreen] with a
   /// reason, and stop the background work that can only fail from here.
@@ -3355,22 +3358,15 @@ class AppNotifier extends ChangeNotifier {
     pendingAuthorizeUrl = null;
     _awaitingFirstMessage = null;
     analyticsAccount.clear();
-    // A VIEWER has nowhere to be but its login screen — no daemon, nothing of
-    // its own to show.
-    if (viewer != null) {
-      _clearAccountWorkspace();
-      _lastError = message;
-      _lastErrorRetryable = true;
-      status = AppStatus.unauthenticated;
-      notifyListeners();
-      return;
-    }
-    // A desktop window becomes a GUEST instead: the daemon comes back signed out
-    // and goes on serving this computer, so the agents that were running are
-    // still running. This computer's tiles stay (under the id it serves now),
-    // the other machines' leave, and the banner says why the list got shorter.
-    _closedHistory.clear();
-    unawaited(_becomeGuest(banner: message));
+    // Fork: every window goes back to its login screen, which offers Sign in and
+    // local mode. Upstream turns a desktop window into a guest here
+    // ([_becomeGuest]); this fork keeps its login-screen account model.
+    signedIn = false;
+    _clearAccountWorkspace();
+    _lastError = message;
+    _lastErrorRetryable = true;
+    status = AppStatus.unauthenticated;
+    notifyListeners();
   }
 
   /// Remove the old account's live objects without overwriting its saved desk.
@@ -3829,13 +3825,11 @@ class AppNotifier extends ChangeNotifier {
     // the daemon is restarted through `harness logout` below (nothing to clear,
     // but the next start must run on the account rather than on this computer's
     // bare id), and the login screen is next.
-    final leavingLocalMode = localOnly;
     unawaited(_localMode.set(false));
-    // A VIEWER goes back to its login screen; a desktop window stays on the desk
-    // and becomes a guest — the daemon comes back signed out and keeps serving
-    // this computer, so signing out of the account is not a reason to take the
-    // agents off the screen. The rebind at the end sits the desk back down.
-    if (viewer != null || leavingLocalMode) status = AppStatus.unauthenticated;
+    // Fork: signing out returns every window to its login screen. Upstream keeps
+    // a desktop window on the desk as a guest ([_becomeGuest]).
+    signedIn = false;
+    status = AppStatus.unauthenticated;
     currentUser = null;
     analyticsAccount.clear();
     notifyListeners();
@@ -3865,9 +3859,7 @@ class AppNotifier extends ChangeNotifier {
     // The CLI restarts its daemon signed out (`harness logout` does it itself),
     // so this window waits for that one and sits its desk back down on the id it
     // serves. In the background: the person asked to sign out, and that is done.
-    if (viewer == null && didClear && !leavingLocalMode) {
-      unawaited(_becomeGuest(revision: revision));
-    }
+    // Fork: no guest desk to sit back down (see above); the login screen is next.
   }
 
   void _onLocalFailure(String machineId, int code, String reason) {
@@ -6757,7 +6749,9 @@ class AppNotifier extends ChangeNotifier {
     if (machine == null) return {'error': 'UNAVAILABLE'};
     final reader = gitProjectReaderForTest;
     if (reader != null) return reader(machineId, path);
-    if (machine.isLocalMachine) return readLocalGitProject(path);
+    // Fork: a local CLI inside WSL owns a filesystem this Windows GUI cannot
+    // run git in, so it is asked over the daemon like a remote machine.
+    if (machineSharesGuiFilesystem(machineId)) return readLocalGitProject(path);
     if (connectionForTest == null &&
         (machine.nodeOnline == false ||
             machine.needsLink ||

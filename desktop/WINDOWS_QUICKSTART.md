@@ -176,6 +176,18 @@ With sessions to show, the start page gives Continue working the height that an
 empty page leaves above the search. This source change does not update an
 installed Preview 7 bundle.
 
+Source builds after this also incorporate upstream `461ff2bf` (September 23),
+190 commits. Upstream now lets the CLI daemon start without an account and opens
+a signed-out desktop on a guest desk. This fork's CLI takes that change, but its
+desktop keeps the login screen with **Use this computer without an account**: at
+startup, after signing out, and when a session ends while the app is open. Local
+mode works as before. The projects sidebar keeps its **Machines** view, so the
+fork retains the machine rail and account footer that upstream removed as
+unused. The model picker takes upstream's searchable panel; registered local
+fleets appear in it as **Local** sections, and the account's own grid is headed
+**Your private cloud**. The startup screen takes upstream's terminal-style
+design and keeps **Try again** when the saved sign-in cannot be checked.
+
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.
 This stops the connection service; do not kill your tmux sessions or delete
@@ -285,7 +297,8 @@ launches in `state.json` beside the theme.
 What needs the account stays off until you sign in: other machines, linking,
 shared harnesses, the Harness Store, and the signed-in profile. The account
 menu and Settings say **Local mode** and offer **Leave local mode**, which
-stops the local daemon and returns to the login screen; signing in there ends
+restarts the local daemon for this computer only and returns to the login
+screen; signing in there ends
 local mode, because the CLI lets a saved sign-in win over the flag and the app
 agrees with it.
 

@@ -391,13 +391,13 @@ void main() {
         'office file-menu',
       );
       await tester.pumpAndSettle();
-      expect(find.text(_running.name), findsOneWidget);
-      expect(find.text(_paused.name), findsNothing);
+      expect(_inMonitor(find.text(_running.name)), findsOneWidget);
+      expect(_inMonitor(find.text(_paused.name)), findsNothing);
       await tester.tap(find.byTooltip('Clear search'));
       await tester.tap(find.byKey(const ValueKey('session-filter:paused')));
       await tester.pumpAndSettle();
-      expect(find.text(_paused.name), findsOneWidget);
-      expect(find.text(_running.name), findsNothing);
+      expect(_inMonitor(find.text(_paused.name)), findsOneWidget);
+      expect(_inMonitor(find.text(_running.name)), findsNothing);
       await tester.tap(find.byTooltip('Sort harnesses'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Project').last);
@@ -842,7 +842,7 @@ void main() {
       final original = app.focusedPane!;
       app.newSwarm(name: 'Another tab');
       await open(tester);
-      await tester.tap(find.text(_running.name));
+      await tester.tap(_inMonitor(find.text(_running.name)));
       await tester.pumpAndSettle();
       expect(app.allPanes, [original]);
       expect(app.focusedPane, original);
@@ -1168,3 +1168,8 @@ void main() {
     },
   );
 }
+
+/// The fork's projects sidebar lists the same sessions by name; look inside the
+/// monitor popover only.
+Finder _inMonitor(Finder finder) =>
+    find.descendant(of: find.byType(HarnessSessionManager), matching: finder);

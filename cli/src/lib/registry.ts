@@ -642,6 +642,8 @@ const TRANSCRIPT_ROOT: Readonly<Record<AgentEngine, ((codexHome?: string) => str
   kilo: null,
   hermes: null,
   devin: null,
+  // Fork: Cline runs in its pane without Harness history, so there is no transcript to point at.
+  cline: null,
   terminal: null,
 }
 

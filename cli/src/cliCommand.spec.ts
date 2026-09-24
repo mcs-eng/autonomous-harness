@@ -346,10 +346,18 @@ describe('local mode (HARNESS_LOCAL_ONLY)', () => {
     expect(payload).not.toHaveProperty('localOnly')
   })
 
-  it('without the flag, a missing session still refuses to start', () => {
-    const result = run('start')
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('Not signed in. Run: harness login')
+  // Upstream now starts a daemon without an account, so `start` no longer refuses; what the flag
+  // still decides is whether that run is labelled local mode.
+  it('without the flag, a missing session is signed out rather than local mode', () => {
+    const root = freshRoot()
+    const result = spawnSync(process.execPath, [TSX, CLI_SOURCE, 'auth', 'status', '--json'], {
+      cwd: CLI_ROOT, encoding: 'utf8', env: envFor(root, {}),
+    })
+    expect(result.status).toBe(0)
+    const payload = JSON.parse(lastLine(result.stdout)) as Record<string, unknown>
+    expect(payload.loggedIn).toBe(false)
+    expect(payload).not.toHaveProperty('localOnly')
+    expect(payload.computerId).toMatch(/^[0-9a-f-]{16,64}$/i)
   })
 
   it('start boots the daemon on the computer id, never dials, and serves this computer alone', async () => {

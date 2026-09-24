@@ -59,6 +59,7 @@ describe('what a paused harness can promise, per engine', () => {
     // A new engine gets the weaker proof by default, never a ten-minute wait.
     const strict = ENGINES.filter(engine => confirmsResumeByHook(engine))
     expect(strict).toEqual(['claude', 'codex'])
-    expect(ENGINES.length).toBe(15)
+    // 16 in this fork: upstream's 15 plus Cline.
+    expect(ENGINES.length).toBe(16)
   })
 })

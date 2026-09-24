@@ -61,7 +61,12 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
         await tester.pump();
         final row = tester.getRect(selectedRow);
-        final list = tester.getRect(find.descendant(of: find.byType(Dialog), matching: find.byType(ListView)));
+        final list = tester.getRect(
+          find.descendant(
+            of: find.byType(Dialog),
+            matching: find.byType(ListView),
+          ),
+        );
         expect(row.top, greaterThanOrEqualTo(list.top));
         expect(row.bottom, lessThanOrEqualTo(list.bottom));
         expect(tester.takeException(), isNull);
@@ -164,7 +169,9 @@ void main() {
         final row = tester.getRect(selectedHarness);
         // The fork's projects sidebar has a list of its own; measure the picker's.
         final list = tester.getRect(
-          find.ancestor(of: selectedHarness, matching: find.byType(ListView)).first,
+          find
+              .ancestor(of: selectedHarness, matching: find.byType(ListView))
+              .first,
         );
         expect(row.top, greaterThanOrEqualTo(list.top));
         expect(row.bottom, lessThanOrEqualTo(list.bottom));
@@ -176,7 +183,9 @@ void main() {
         ValueKey('session-open:${agentDestinationId('m', 'a12')}'),
       );
       final list = tester.getRect(
-        find.ancestor(of: selectedHarness, matching: find.byType(ListView)).first,
+        find
+            .ancestor(of: selectedHarness, matching: find.byType(ListView))
+            .first,
       );
       final row = tester.getRect(selectedHarness);
       expect(row.top, greaterThanOrEqualTo(list.top));
