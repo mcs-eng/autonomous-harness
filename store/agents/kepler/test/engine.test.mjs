@@ -270,6 +270,44 @@ test('a porkchop does not let a past departure win Best window', () => {
   assert.equal(grid.best.dv, grid.cells[1][0].dv)
 })
 
+test('an unknown, wrong-case, or blank body is not a ready leg or a priced burn', () => {
+  const mission = (from, to) => ({
+    spec: 1,
+    name: 'Probe',
+    ships: [{
+      id: 'probe',
+      legs: [{ from, to, depart: '2033-01-01', arrive: '2033-09-01', parkingKm: 200, captureKm: 300 }],
+    }],
+  })
+  for (const [from, to] of [['pluto', 'mars'], ['Earth', 'Mars'], ['', 'mars'], ['earth', '']]) {
+    const solved = solveMission(mission(from, to), { samples: 8 })
+    assert.equal(solved.ok, false, `${from} → ${to}`)
+    assert.equal(solved.ships[0].legs.length, 0)
+    assert.equal(verdictFromSolve(solved).ready, false)
+  }
+  const window = {
+    depart0: '2033-01-01',
+    departSpanDays: 0,
+    tof0Days: 200,
+    tofSpanDays: 0,
+    nDep: 1,
+    nTof: 1,
+    parkingKm: 200,
+    captureKm: 250,
+  }
+  for (const args of [
+    { from: 'pluto', to: 'mars' },
+    { from: 'Earth', to: 'Mars' },
+    { from: '', to: 'mars' },
+    { from: 'earth', to: '' },
+  ]) {
+    assert.throws(() => porkchop({ ...window, ...args }), /porkchop: bodies/)
+  }
+  for (const id of ['pluto', 'Earth', 'Sun', '']) {
+    assert.throws(() => orbitBurn(id, 200, 3), /orbitBurn/)
+  }
+})
+
 test('an Earth–Neptune Hohmann over 15 years stays not ready', () => {
   const mission = {
     spec: 1,

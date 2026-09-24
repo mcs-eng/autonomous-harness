@@ -40,12 +40,9 @@ const PHYSICAL = {
 export const BODY_IDS = Object.keys(ELEMENTS)
 
 export function bodyInfo(id) {
-  const key = String(id || '').toLowerCase()
-  if (!PHYSICAL[key] || key === 'sun' && !ELEMENTS[key]) {
-    if (key === 'sun') return { id: 'sun', ...PHYSICAL.sun }
-    return null
-  }
-  if (!ELEMENTS[key]) return null
+  const key = String(id ?? '')
+  if (key === 'sun') return { id: 'sun', ...PHYSICAL.sun }
+  if (!PHYSICAL[key] || !ELEMENTS[key]) return null
   return { id: key, ...PHYSICAL[key] }
 }
 
@@ -167,7 +164,7 @@ function rotatePerifocal(x, y, Omega, inc, omega) {
 
 /** Heliocentric ecliptic state of a planet at a date. km and km/s. */
 export function bodyState(id, when) {
-  const key = String(id || '').toLowerCase()
+  const key = String(id ?? '')
   const el = ELEMENTS[key]
   if (!el) throw new Error(`unknown body: ${id}`)
   const [aAu, e, iDeg, Ldeg, wpiDeg, nodeDeg] = el
@@ -197,7 +194,7 @@ export function bodyState(id, when) {
 
 /** Sample a body's orbit at the epoch's elements (fixed ellipse, not the drifting year). */
 export function bodyOrbit(id, steps = 180) {
-  const key = String(id).toLowerCase()
+  const key = String(id)
   const el = ELEMENTS[key]
   if (!el) throw new Error(`unknown body: ${id}`)
   const [aAu, e, iDeg, , wpiDeg, nodeDeg] = el
@@ -382,7 +379,7 @@ export function hohmann(mu, r1, r2) {
  */
 export function orbitBurn(bodyId, altitudeKm, vInf) {
   const info = bodyInfo(bodyId)
-  if (!info || bodyId === 'sun') throw new Error(`orbitBurn: ${bodyId}`)
+  if (!info || info.id === 'sun') throw new Error(`orbitBurn: ${bodyId}`)
   if (!(altitudeKm >= 0)) throw new Error('orbitBurn: altitude')
   if (!(vInf >= 0) || !Number.isFinite(vInf)) throw new Error('orbitBurn: vInf')
   const r = info.radiusKm + altitudeKm
@@ -487,8 +484,8 @@ export function solveMission(mission, { samples = 180 } = {}) {
 }
 
 function solveLeg(leg, ref, samples, findings) {
-  const from = String(leg.from || '').toLowerCase()
-  const to = String(leg.to || '').toLowerCase()
+  const from = String(leg.from ?? '')
+  const to = String(leg.to ?? '')
   if (!ELEMENTS[from] || !ELEMENTS[to]) throw new Error(`${ref}: from/to must be planets, not "${from}" → "${to}"`)
   if (from === to) throw new Error(`${ref}: from and to are the same body`)
   const mode = legMode(leg)
@@ -704,8 +701,8 @@ export function porkchop({
   captureKm = 250,
   prograde = true,
 } = {}) {
-  const origin = String(from || 'earth').toLowerCase()
-  const dest = String(to || 'mars').toLowerCase()
+  const origin = String(from ?? '')
+  const dest = String(to ?? '')
   if (!ELEMENTS[origin] || !ELEMENTS[dest] || origin === dest) throw new Error('porkchop: bodies')
   const t0 = parseDate(depart0, 'depart0').getTime()
   const dep = []
