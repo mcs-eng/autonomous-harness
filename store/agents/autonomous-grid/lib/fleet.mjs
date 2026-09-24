@@ -68,7 +68,7 @@ export function validateConfig(raw) {
     if (!['local', 'ssh', 'harness'].includes(m.transport)) throw new Error(`Unknown transport for ${m.id}.`);
     if (m.transport === 'harness' && (typeof m.machineId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(m.machineId))) throw new Error(`A Harness machineId is required for ${m.id}.`);
     if (m.transport === 'harness' && (m.gridHome || m.gridBinary)) throw new Error(`Harness targets use their daemon's Grid installation and home: ${m.id}.`);
-    if (m.transport === 'ssh' && (typeof m.host !== 'string' || !/^(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(m.host))) throw new Error(`Invalid SSH host for ${m.id}; use an SSH config alias or user@host.`);
+    if (m.transport === 'ssh' && (typeof m.host !== 'string' || !/^(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9](?:[A-Za-z0-9_.:-]*[A-Za-z0-9_:-])?$/.test(m.host))) throw new Error(`Invalid SSH host for ${m.id}; use an SSH config alias or user@host.`);
     if (m.port !== undefined && (!Number.isInteger(m.port) || m.port < 1 || m.port > 65535)) throw new Error(`Invalid SSH port for ${m.id}.`);
     for (const key of ['gridBinary', 'gridHome']) if (m[key] !== undefined && (typeof m[key] !== 'string' || !m[key].startsWith('/') || m[key].includes('\0') || m[key].length > 1024)) throw new Error(`${key} for ${m.id} must be an absolute path.`);
     return { id: m.id, name: text(m.name) || m.id, transport: m.transport, ...(m.transport === 'harness' ? { machineId: m.machineId } : {}), ...(m.transport === 'ssh' ? { host: m.host, ...(m.port ? { port: m.port } : {}) } : {}), ...(m.gridBinary ? { gridBinary: m.gridBinary } : {}), ...(m.gridHome ? { gridHome: m.gridHome } : {}) };
@@ -87,7 +87,7 @@ export function validateConfig(raw) {
     const allowed = new Set(['id', 'type', 'engineEndpoint', 'host', 'port', 'sshBinary', 'identityFile', 'gpuIndex']);
     const unknown = Object.keys(source).find(key => !allowed.has(key));
     if (unknown) throw new Error(`Unknown setting ${unknown} for sensor ${source.id}.`);
-    if (typeof source.host !== 'string' || !/^(?:[A-Za-z0-9][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(source.host)) throw new Error(`Invalid SSH host for sensor ${source.id}.`);
+    if (typeof source.host !== 'string' || !/^(?:[A-Za-z0-9][A-Za-z0-9_.-]*@)?[A-Za-z0-9](?:[A-Za-z0-9_.:-]*[A-Za-z0-9_:-])?$/.test(source.host)) throw new Error(`Invalid SSH host for sensor ${source.id}.`);
     if (source.port !== undefined && (!Number.isInteger(source.port) || source.port < 1 || source.port > 65535)) throw new Error(`Invalid SSH port for sensor ${source.id}.`);
     if (source.sshBinary !== undefined && !absolutePath(source.sshBinary)) throw new Error(`sshBinary for sensor ${source.id} must be an absolute path.`);
     if (source.identityFile !== undefined && !absolutePath(source.identityFile)) throw new Error(`identityFile for sensor ${source.id} must be an absolute path.`);

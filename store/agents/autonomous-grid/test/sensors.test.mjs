@@ -17,8 +17,9 @@ test('sensor configuration accepts Windows SSH custody and rejects ambiguous or 
     {...source,engineEndpoint:'http://user:secret@bran:11434/v1'}, {...source,engineEndpoint:'http://bran:11434/v1?token=secret'},
     {...source,engineEndpoint:'http://bran:11434/v1/../admin'}, {...source,engineEndpoint:'http://@bran:11434/v1'},
     {...source,engineEndpoint:'http://bran:11434/v1//'},
-    {...source,host:'-proxy@bran'}, {...source,command:'nvidia-smi'},
+    {...source,host:'-proxy@bran'}, {...source,host:'hermes@bran.'}, {...source,command:'nvidia-smi'},
   ]) assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[bad]}));
+  assert.throws(()=>validateConfig({...DEFAULT_CONFIG,machines:[{id:'a',transport:'ssh',host:'bran.'}]}),/Invalid SSH host/);
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[source,{...source}]}),/unique/);
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[source,{...source,id:'other'}]}),/Only one sensor/);
   assert.equal(validateConfig(DEFAULT_CONFIG).personalGrid,null);
