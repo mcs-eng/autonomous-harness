@@ -17,8 +17,12 @@ const absolutePath = value => typeof value === 'string' && value.length <= 1024 
 function sensorEndpoint(value, id) {
   try {
     const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
-    return url.href.replace(/\/$/, '');
+    // Exact means the written string, aside from one trailing slash. A parser
+    // rewrite (`..`, `\`, or an empty userinfo `@`) is a different endpoint.
+    const normalized = url.href.replace(/\/$/, '');
+    const written = typeof value === 'string' ? value.replace(/\/$/, '') : '';
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || written !== normalized) throw new Error();
+    return normalized;
   } catch { throw new Error(`Sensor ${id} needs an exact HTTP engineEndpoint without credentials, query, or fragment.`); }
 }
 

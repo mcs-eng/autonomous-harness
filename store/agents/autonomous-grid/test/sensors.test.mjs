@@ -15,6 +15,7 @@ test('sensor configuration accepts Windows SSH custody and rejects ambiguous or 
   for(const bad of [
     {...source,type:'shell'}, {...source,sshBinary:'ssh.exe'}, {...source,identityFile:'id_ed25519'},
     {...source,engineEndpoint:'http://user:secret@bran:11434/v1'}, {...source,engineEndpoint:'http://bran:11434/v1?token=secret'},
+    {...source,engineEndpoint:'http://bran:11434/v1/../admin'}, {...source,engineEndpoint:'http://@bran:11434/v1'},
     {...source,host:'-proxy@bran'}, {...source,command:'nvidia-smi'},
   ]) assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[bad]}));
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[source,{...source}]}),/unique/);
