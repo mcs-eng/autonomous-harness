@@ -86,7 +86,9 @@ export function validateConfig(raw) {
       ...(source.port ? { port: source.port } : {}), ...(source.sshBinary ? { sshBinary: source.sshBinary } : {}), ...(source.identityFile ? { identityFile: source.identityFile } : {}), ...(source.gpuIndex !== undefined ? { gpuIndex: source.gpuIndex } : {}) };
   });
   // The account's own grid, as Harness named it — what "my grid" means. Recorded, never chosen here.
-  const personalGrid = typeof raw.personalGrid === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/.test(raw.personalGrid) ? raw.personalGrid : null;
+  // Absent is signed out. A present value that is empty or not a Harness name must not collapse to that.
+  if (raw.personalGrid != null && (typeof raw.personalGrid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/.test(raw.personalGrid))) throw new Error('personalGrid must be the signed-in Harness grid name, or null when signed out.');
+  const personalGrid = raw.personalGrid ?? null;
   return { spec: 1, mode: raw.mode, grid: raw.grid, personalGrid, controller, machines, sensors, preferences: { goal: text(raw.preferences?.goal, 500) || DEFAULT_CONFIG.preferences.goal, keepFreeMemoryGb: number(raw.preferences?.keepFreeMemoryGb) ?? 4, allowAutomaticChanges: raw.preferences?.allowAutomaticChanges === true } };
 }
 export async function readConfig(workspace) { return validateConfig(await readJson(join(workspace, 'grid-fleet.json'), DEFAULT_CONFIG)); }

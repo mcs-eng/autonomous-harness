@@ -21,6 +21,10 @@ test('sensor configuration accepts Windows SSH custody and rejects ambiguous or 
   ]) assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[bad]}));
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[source,{...source}]}),/unique/);
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[source,{...source,id:'other'}]}),/Only one sensor/);
+  assert.equal(validateConfig(DEFAULT_CONFIG).personalGrid,null);
+  assert.equal(validateConfig({...DEFAULT_CONFIG,personalGrid:'home-lab'}).personalGrid,'home-lab');
+  assert.throws(()=>validateConfig({...DEFAULT_CONFIG,personalGrid:''}),/personalGrid/);
+  assert.throws(()=>validateConfig({...DEFAULT_CONFIG,personalGrid:'http://bran:11434/v1/../admin'}),/personalGrid/);
 });
 
 test('sensor invocation is a fixed nvidia-smi query with strict noninteractive SSH',()=>{
