@@ -1075,6 +1075,46 @@ void main() {
   );
 
   test(
+    'startSupervising stops when a live daemon is already signed out',
+    () async {
+      const computerId = '0123456789abcdef0123456789abcdef';
+      final identityFile = File('${scratch.path}/computer-id-live')
+        ..writeAsStringSync(computerId);
+      server = await serveStatus(0, () => readyStatus(computerId));
+      var spawnCount = 0;
+      var signedOutCalls = 0;
+      final discovery = discoveryFor(
+        server!.port,
+        identityFile,
+        spawnCommand: () async {
+          spawnCount++;
+        },
+      );
+
+      final timer = discovery.startSupervising(
+        checkInterval: const Duration(milliseconds: 20),
+        graceStep: const Duration(milliseconds: 10),
+        graceWindow: const Duration(milliseconds: 50),
+        initialBackoff: const Duration(milliseconds: 20),
+        maxBackoff: const Duration(milliseconds: 20),
+        stillSignedIn: () async => false,
+        onSignedOut: () => signedOutCalls++,
+      );
+      addTearDown(timer.cancel);
+
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      expect(spawnCount, 0, reason: 'a live signed-out daemon is not restarted');
+      expect(signedOutCalls, 1, reason: 'the caller is told exactly once');
+      expect(
+        timer.isActive,
+        isFalse,
+        reason: 'supervision stops while the daemon is still up',
+      );
+    },
+  );
+
+  test(
     'startSupervising keeps respawning while the CLI is still signed in',
     () async {
       const computerId = '0123456789abcdef0123456789abcdef';

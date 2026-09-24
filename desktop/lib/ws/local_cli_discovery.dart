@@ -419,9 +419,9 @@ class LocalCliDiscovery {
   ///
   /// Never surfaces ORDINARY failures to the caller (no exceptions, no
   /// [AppNotifier]-visible error); [onSignedOut] is the single exception, and it is a NOTICE rather
-  /// than a failure — the account is gone, the daemon comes back signed out and goes on serving this
-  /// computer, and the window should say so —
-  /// this runs unattended in the background for the app's whole lifetime; callers that need a
+  /// than a failure — the account is gone, so supervision stops and the window returns to its login
+  /// screen. This loop does not kill the daemon and does not keep watching a signed-out one.
+  /// It runs unattended in the background for the app's whole lifetime; callers that need a
   /// one-shot "start now and tell me if it worked" should use [ensureRunning] instead. Cancel the
   /// timer to stop supervising — this never touches the daemon process itself (it self-daemonizes and
   /// must keep running after the app quits, see `harness_daemon_keep_alive` plan).
@@ -445,6 +445,7 @@ class LocalCliDiscovery {
   }) {
     var backoff = initialBackoff;
     var nextSpawnAllowedAt = DateTime.now();
+    var nextAuthCheckAt = DateTime.fromMillisecondsSinceEpoch(0);
     var quietTicks = 0;
     var wasReady = false;
     // The daemon's backend link as last observed. Reported on every CHANGE, including the first
@@ -493,25 +494,33 @@ class LocalCliDiscovery {
           }
           final seen = await probe();
           observe(seen);
-          // Running — ready or on its way. Nothing to spawn, nothing to back off from.
-          if (seen.alive) return;
+          // A signed-out daemon stays up and serves this computer. Ask while it
+          // is up, on [maxBackoff] rather than every tick (`harness auth status`
+          // is a process). Signed out, this window goes back to its login
+          // screen, so supervision stops instead of leaving that daemon running
+          // behind it.
+          if (seen.alive) {
+            if (stillSignedIn != null &&
+                !DateTime.now().isBefore(nextAuthCheckAt)) {
+              if (!await stillSignedIn()) {
+                timer.cancel();
+                onSignedOut?.call();
+                return;
+              }
+              nextAuthCheckAt = DateTime.now().add(maxBackoff);
+              // A closed window during the auth check must not keep supervising.
+              if (!timer.isActive) return;
+            }
+            return;
+          }
           quietTicks += 1;
           if (quietTicks < spawnAfter) return;
           if (DateTime.now().isBefore(nextSpawnAllowedAt)) return;
           if (!(spawnAllowedAt?.call(DateTime.now()) ?? true)) return;
-          // A daemon that signed itself OUT — its machine was deleted from another machine, or its
-          // session expired — deletes its session file. It used to exit and refuse to start again
-          // without one, which made respawning it the one failure this loop could not fix; a daemon
-          // now STARTS signed out and serves this computer, so the respawn goes ahead below. The
-          // caller is still told: the window it is holding has become a guest, and should say so.
-          //
-          // Asked here and not on every tick because it costs a `harness auth status` process, and
-          // the respawn point is already rate-limited by the backoff above — so this runs once per
-          // spawn attempt rather than once every [checkInterval].
+          // Asked here and not on every quiet tick because it costs a `harness auth status`
+          // process, and the respawn point is already rate-limited by the backoff above.
           if (stillSignedIn != null && !await stillSignedIn()) {
-            // Fork: the window this supervises goes back to its login screen
-            // when signed out, so supervision stops here rather than keeping a
-            // signed-out daemon up behind it (upstream respawns it for a guest).
+            // The daemon is already down. Do not start a signed-out one.
             timer.cancel();
             onSignedOut?.call();
             return;
