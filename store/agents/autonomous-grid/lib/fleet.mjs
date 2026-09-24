@@ -10,6 +10,8 @@ export const DEFAULT_CONFIG = { spec: 1, mode: 'local', grid: null, machines: [{
 export const now = () => new Date().toISOString();
 export const stateDir = workspace => join(workspace, '.harness', 'grid');
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
+// test() stringifies its argument, so null and undefined become "null" and "undefined" and match. Require a string first.
+const simpleId = value => typeof value === 'string' && idPattern.test(value);
 export const text = (value, max = 240) => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max) : '';
 export const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const absolutePath = value => typeof value === 'string' && value.length <= 1024 && !/[\x00-\x1f\x7f]/.test(value) && (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value));
@@ -47,7 +49,7 @@ export function validateConfig(raw) {
   if (!Array.isArray(raw.machines) || !raw.machines.length || raw.machines.length > 32) throw new Error('machines must contain 1–32 local, Harness, or SSH targets.');
   const ids = new Set();
   const machines = raw.machines.map(m => {
-    if (!m || !idPattern.test(m.id) || ids.has(m.id)) throw new Error('Every machine needs a unique, simple id.');
+    if (!m || !simpleId(m.id) || ids.has(m.id)) throw new Error('Every machine needs a unique, simple id.');
     ids.add(m.id);
     if (!['local', 'ssh', 'harness'].includes(m.transport)) throw new Error(`Unknown transport for ${m.id}.`);
     if (m.transport === 'harness' && (typeof m.machineId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(m.machineId))) throw new Error(`A Harness machineId is required for ${m.id}.`);
@@ -63,7 +65,7 @@ export function validateConfig(raw) {
   const sourceIds = new Set(), sensorEndpoints = new Set();
   if (raw.sensors !== undefined && (!Array.isArray(raw.sensors) || raw.sensors.length > 16)) throw new Error('sensors must contain at most 16 sources.');
   const sensors = (raw.sensors || []).map(source => {
-    if (!source || !idPattern.test(source.id) || sourceIds.has(source.id)) throw new Error('Every sensor needs a unique, simple id.');
+    if (!source || !simpleId(source.id) || sourceIds.has(source.id)) throw new Error('Every sensor needs a unique, simple id.');
     sourceIds.add(source.id);
     if (source.type !== 'nvidia-smi-ssh') throw new Error(`Unknown sensor type for ${source.id}.`);
     const allowed = new Set(['id', 'type', 'engineEndpoint', 'host', 'port', 'sshBinary', 'identityFile', 'gpuIndex']);
