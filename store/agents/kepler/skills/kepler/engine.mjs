@@ -687,7 +687,8 @@ function round(n) {
 
 /**
  * Porkchop of departure date × time of flight.
- * Cell value is injection Δv plus circular-capture Δv (km/s), or null if Lambert fails.
+ * Cell value is injection Δv plus circular-capture Δv (km/s), or null if Lambert fails
+ * or the arc does not propagate to the target.
  * `captureKm: null` is a flyby: the cell is injection Δv only.
  */
 export function porkchop({
@@ -728,7 +729,11 @@ export function porkchop({
       try {
         const r1 = bodyState(origin, depart)
         const r2 = bodyState(dest, arrive)
-        const solved = lambert(MU_SUN, r1.r, r2.r, tof[j] * DAY_S, { prograde })
+        const flight = tof[j] * DAY_S
+        const solved = lambert(MU_SUN, r1.r, r2.r, flight, { prograde })
+        const path = sampleLambert(r1.r, solved.v1, flight, 180)
+        const arrival = path[path.length - 1]
+        if (!(norm(sub(arrival, r2.r)) < 1e5)) throw new Error('lambert miss')
         const vInfDep = norm(sub(solved.v1, r1.v))
         const vInfArr = norm(sub(solved.v2, r2.v))
         const inj = orbitBurn(origin, parkingKm, vInfDep)

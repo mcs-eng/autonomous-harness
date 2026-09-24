@@ -202,6 +202,27 @@ test('an Earth–Mars Lambert just under 15 years is a miss, not a ready path', 
   assert.equal(verdictFromSolve(solved).ready, false)
 })
 
+test('a porkchop does not price a sub-15-year Lambert miss', () => {
+  const depart = Date.parse('2033-01-01')
+  const arrive = Date.parse('2048-01-01')
+  const days = (arrive - depart) / (DAY_S * 1000)
+  assert.ok(days < 15 * 365.25, days)
+  const grid = porkchop({
+    from: 'earth',
+    to: 'mars',
+    depart0: '2033-01-01',
+    departSpanDays: 0,
+    tof0Days: days,
+    tofSpanDays: 0,
+    nDep: 1,
+    nTof: 1,
+    parkingKm: 200,
+    captureKm: 250,
+  })
+  assert.equal(grid.cells[0][0], null)
+  assert.equal(grid.best, null)
+})
+
 test('an Earth–Neptune Hohmann over 15 years stays not ready', () => {
   const mission = {
     spec: 1,
