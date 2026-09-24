@@ -14,6 +14,17 @@ export const text = (value, max = 240) => typeof value === 'string' ? value.repl
 export const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const absolutePath = value => typeof value === 'string' && value.length <= 1024 && !/[\x00-\x1f\x7f]/.test(value) && (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value));
 
+function rewrittenGridUrl(value) {
+  // A name or ID is not a URL. An HTTP(S) grid must be the written string. A parser rewrite, credentials, query, fragment, or second trailing slash is a different grid.
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) return false;
+    const normalized = url.href.replace(/\/$/, '');
+    const written = value.replace(/\/$/, '');
+    return Boolean(url.username || url.password || url.search || url.hash || url.pathname.endsWith('//') || written !== normalized);
+  } catch { return false; }
+}
+
 function sensorEndpoint(value, id) {
   try {
     const url = new URL(value);
@@ -48,7 +59,7 @@ export async function atomicJson(file, value) {
 
 export function validateConfig(raw) {
   if (!raw || raw.spec !== 1 || !['local', 'remote'].includes(raw.mode)) throw new Error('grid-fleet.json needs spec: 1 and mode: local or remote.');
-  if (raw.grid !== null && (typeof raw.grid !== 'string' || !raw.grid.trim() || raw.grid.length > 240 || raw.grid.startsWith('-') || /[\x00-\x1f]/.test(raw.grid))) throw new Error('grid must be a name, ID, URL, or null.');
+  if (raw.grid !== null && (typeof raw.grid !== 'string' || !raw.grid.trim() || raw.grid.length > 240 || raw.grid.startsWith('-') || /[\x00-\x1f]/.test(raw.grid) || rewrittenGridUrl(raw.grid))) throw new Error('grid must be a name, ID, URL, or null.');
   if (!Array.isArray(raw.machines) || !raw.machines.length || raw.machines.length > 32) throw new Error('machines must contain 1–32 local, Harness, or SSH targets.');
   const ids = new Set();
   const machines = raw.machines.map(m => {
