@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,54 +7,39 @@ import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_login.dart';
 import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/config.dart';
-import 'package:harness/core/harness_cli_runner.dart';
-import 'package:harness/core/local_key_value_store.dart';
-import 'package:harness/core/local_mode.dart';
-import 'package:harness/core/wsl_runtime.dart';
 import 'package:harness/screens/login_screen.dart';
+import 'package:harness/settings/sections/account_section.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 import 'package:harness/ws/ws_conn.dart';
 
-/// Local mode: this computer runs without an account.
+/// Local mode, as this fork labels it: upstream's guest desk.
 ///
-/// The choice is remembered by [LocalModeStore], carried to every `harness`
-/// command as `HARNESS_LOCAL_ONLY=true` by [HarnessCliRunner], echoed back by
-/// the CLI as `localOnly` in `auth status`, and routed by [AppNotifier] to the
-/// same home screen a sign-in reaches — with no profile, because there is no
-/// account to fetch one for.
-
-class _MemoryStore implements LocalKeyValueStore {
-  final values = <String, String>{};
-
-  @override
-  Future<String?> read(String key) async => values[key];
-
-  @override
-  Future<void> write(String key, String value) async {
-    values[key] = value;
-  }
-
-  @override
-  Future<void> delete(String key) async {
-    values.remove(key);
-  }
-}
+/// A signed-out desktop window opens on this computer's desk, and an account
+/// is asked for only when another machine is reached for. The fork adds two
+/// things on top: the labels ("Local mode") and, on the login screen a desktop
+/// window can still meet (a cancelled or failed sign-in, a CLI that could not
+/// answer), the way back to that desk.
 
 /// The CLI's answer to `auth status --json`, scripted; never a real process.
 class _ScriptedCli extends CliLogin {
   _ScriptedCli(this.answer);
 
-  final CliAuthStatus answer;
+  CliAuthStatus answer;
+  int checks = 0;
   int logouts = 0;
 
   @override
-  Future<CliAuthStatus> checkStatus() async => answer;
+  Future<CliAuthStatus> checkStatus() async {
+    checks++;
+    return answer;
+  }
 
   @override
   Future<void> logout() async {
     logouts++;
+    answer = const CliAuthStatus(loggedIn: false);
   }
 }
 
@@ -85,18 +69,13 @@ class _ReadyProvisioner extends EnvironmentProvisioner {
 class _ReadyDiscovery extends LocalCliDiscovery {
   _ReadyDiscovery() : super(config: AppConfig.dev);
 
-  int ensureCalls = 0;
-  Future<bool> Function()? stillSignedIn;
   Timer? supervision;
 
   @override
   Future<LocalCliProbe> ensureRunning({
     Duration timeout = const Duration(seconds: 15),
     Duration readyTimeout = LocalCliDiscovery.defaultReadyTimeout,
-  }) async {
-    ensureCalls++;
-    return LocalCliProbe.ready(_endpoint);
-  }
+  }) async => LocalCliProbe.ready(_endpoint);
 
   @override
   Timer startSupervising({
@@ -112,10 +91,7 @@ class _ReadyDiscovery extends LocalCliDiscovery {
     void Function(LocalCliEndpoint endpoint)? onReady,
     void Function(LocalCliEndpoint endpoint)? onSnapshot,
     void Function(bool online)? onBackendOnline,
-  }) {
-    this.stillSignedIn = stillSignedIn;
-    return supervision = Timer(const Duration(days: 1), () {});
-  }
+  }) => supervision = Timer(const Duration(days: 1), () {});
 }
 
 /// A socket that answers nothing: the load a connect triggers must not reach for a real pool.
@@ -156,23 +132,20 @@ class _CountingApi extends ApiClient {
 }
 
 class _Notifier extends AppNotifier {
-  _Notifier({
-    required LocalCliDiscovery discovery,
-    required CliLogin cli,
-    required LocalModeStore localMode,
-  }) : super(
-         config: AppConfig.dev,
-         authSession: AuthSession(),
-         configStore: null,
-         localCliDiscovery: discovery,
-         cliLogin: cli,
-         localMode: localMode,
-         environmentProvisioner: _ReadyProvisioner(),
-         connectionForTest: (_) => _QuietConnection(),
-       ) {
+  _Notifier({required this.discovery, required CliLogin cli})
+    : super(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: null,
+        localCliDiscovery: discovery,
+        cliLogin: cli,
+        environmentProvisioner: _ReadyProvisioner(),
+        connectionForTest: (_) => _QuietConnection(),
+      ) {
     api = profileReads;
   }
 
+  final _ReadyDiscovery discovery;
   final profileReads = _CountingApi();
   int refreshes = 0;
 
@@ -180,6 +153,12 @@ class _Notifier extends AppNotifier {
   Future<bool> refreshMachines() async {
     refreshes++;
     return true;
+  }
+
+  @override
+  void dispose() {
+    discovery.supervision?.cancel();
+    super.dispose();
   }
 }
 
@@ -192,335 +171,147 @@ final _endpoint = LocalCliEndpoint(
   backendOnline: false,
 );
 
-const _localCli = CliAuthStatus(
-  loggedIn: false,
-  localOnly: true,
-  computerId: '0123456789abcdef0123456789abcdef',
+Widget _host(AppNotifier app, Widget Function() child) => MaterialApp(
+  theme: grid.buildAppTheme(brightness: Brightness.light),
+  home: MediaQuery(
+    data: const MediaQueryData(size: Size(880, 560)),
+    child: grid.BrightnessScope(
+      child: ListenableBuilder(listenable: app, builder: (_, _) => child()),
+    ),
+  ),
 );
-
-LocalModeStore _store({bool remembered = false}) {
-  final storage = _MemoryStore();
-  if (remembered) storage.values[LocalModeStore.key] = 'true';
-  return LocalModeStore(storage: storage);
-}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('LocalModeStore', () {
+  group('the login screen\'s way back to this computer', () {
     test(
-      'remembers the choice across a reload, and forgets it on the way out',
+      'a signed-out CLI lands on the guest desk, with no profile read',
       () async {
-        final storage = _MemoryStore();
-        final store = LocalModeStore(storage: storage);
-        await store.load();
-        expect(store.value, isFalse);
-
-        await store.set(true);
-        expect(storage.values[LocalModeStore.key], 'true');
-        final reloaded = LocalModeStore(storage: storage);
-        await reloaded.load();
-        expect(reloaded.value, isTrue);
-
-        await reloaded.set(false);
-        expect(storage.values.containsKey(LocalModeStore.key), isFalse);
-      },
-    );
-
-    test(
-      'an unreadable store lands on the login screen, not on an exception',
-      () async {
-        final store = LocalModeStore(storage: _ThrowingStore());
-        await store.load();
-        expect(store.value, isFalse);
-        await store.set(
-          true,
-        ); // the run keeps the choice even when the write failed
-        expect(store.value, isTrue);
-      },
-    );
-  });
-
-  test(
-    'CliAuthStatus reads the CLI\'s local-mode answer, and defaults it off',
-    () {
-      final local = CliAuthStatus.fromJson({
-        'loggedIn': false,
-        'localOnly': true,
-        'computerId': 'abc',
-      });
-      expect(local.loggedIn, isFalse);
-      expect(local.localOnly, isTrue);
-      expect(local.computerId, 'abc');
-      expect(CliAuthStatus.fromJson({'loggedIn': false}).localOnly, isFalse);
-    },
-  );
-
-  group('boot', () {
-    test(
-      'a remembered local mode boots to the home screen with no profile read',
-      () async {
-        final store = _store(remembered: true);
-        await store.load();
-        final discovery = _ReadyDiscovery();
-        final app = _Notifier(
-          discovery: discovery,
-          cli: _ScriptedCli(_localCli),
-          localMode: store,
-        );
-        addTearDown(app.dispose);
-
-        await app.bootstrap();
-
-        expect(app.status, AppStatus.authenticated);
-        expect(app.localOnly, isTrue);
-        expect(app.currentUser, isNull);
-        expect(app.profileReads.meCalls, 0);
-        expect(app.refreshes, 1);
-        expect(discovery.ensureCalls, 1);
-        // The supervisor never treats "no session" as a sign-out here.
-        expect(await discovery.stillSignedIn!(), isTrue);
-      },
-    );
-
-    test('a CLI that predates local mode sends the person back to sign in, with the reason', () async {
-      final store = _store(remembered: true);
-      await store.load();
-      final app = _Notifier(
-        discovery: _ReadyDiscovery(),
-        cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
-        localMode: store,
-      );
-      addTearDown(app.dispose);
-
-      await app.bootstrap();
-
-      expect(app.status, AppStatus.unauthenticated);
-      expect(app.localOnly, isFalse);
-      expect(app.lastError, AppNotifier.localModeUnsupportedMessage);
-      expect(app.refreshes, 0);
-    });
-
-    test('a saved sign-in outranks a remembered local mode', () async {
-      final store = _store(remembered: true);
-      await store.load();
-      final app = _Notifier(
-        discovery: _ReadyDiscovery(),
-        cli: _ScriptedCli(
-          const CliAuthStatus(loggedIn: true, machineId: 'm-1'),
-        ),
-        localMode: store,
-      );
-      addTearDown(app.dispose);
-
-      await app.bootstrap();
-
-      expect(app.status, AppStatus.authenticated);
-      expect(app.localOnly, isFalse);
-      expect(app.profileReads.meCalls, 1);
-    });
-  });
-
-  group('the login screen\'s other door', () {
-    test('continueWithoutAccount remembers the choice and boots', () async {
-      final store = _store();
-      final app = _Notifier(
-        discovery: _ReadyDiscovery(),
-        cli: _ScriptedCli(_localCli),
-        localMode: store,
-      );
-      addTearDown(app.dispose);
-      app.status = AppStatus.unauthenticated;
-
-      await app.continueWithoutAccount();
-
-      expect(app.status, AppStatus.authenticated);
-      expect(app.localOnly, isTrue);
-      expect(app.currentUser, isNull);
-      expect(app.profileReads.meCalls, 0);
-      expect(app.refreshes, 1);
-    });
-
-    test(
-      'a CLI without local mode refuses with the reason and forgets the choice',
-      () async {
-        final store = _store();
         final app = _Notifier(
           discovery: _ReadyDiscovery(),
           cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
-          localMode: store,
         );
         addTearDown(app.dispose);
+        // Where a cancelled sign-in leaves a desktop window.
         app.status = AppStatus.unauthenticated;
 
         await app.continueWithoutAccount();
 
-        expect(app.status, AppStatus.unauthenticated);
-        expect(app.localOnly, isFalse);
-        expect(app.lastError, AppNotifier.localModeUnsupportedMessage);
+        expect(app.status, AppStatus.authenticated);
+        expect(app.isGuest, isTrue);
+        expect(app.currentUser, isNull);
+        expect(app.profileReads.meCalls, 0);
+        expect(app.refreshes, 1);
       },
     );
 
-    test('leaving local mode is a sign-out: the choice is forgotten and the daemon is stopped', () async {
-      final store = _store();
-      final cli = _ScriptedCli(_localCli);
+    test('a CLI that signed in meanwhile lands on the account desk', () async {
       final app = _Notifier(
         discovery: _ReadyDiscovery(),
-        cli: cli,
-        localMode: store,
+        cli: _ScriptedCli(const CliAuthStatus(loggedIn: true)),
       );
       addTearDown(app.dispose);
       app.status = AppStatus.unauthenticated;
+
       await app.continueWithoutAccount();
-      expect(app.localOnly, isTrue);
+
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isFalse);
+      expect(app.profileReads.meCalls, 1);
+    });
+
+    testWidgets('the wall offers it, and the tap opens the desk', (
+      tester,
+    ) async {
+      grid.AppTheme.brightness.value = Brightness.light;
+      final app = _Notifier(
+        discovery: _ReadyDiscovery(),
+        cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
+      );
+      addTearDown(app.dispose);
+      app.status = AppStatus.unauthenticated;
+
+      await tester.pumpWidget(_host(app, () => LoginScreen(notifier: app)));
+
+      final door = find.byKey(const Key('use-without-account-button'));
+      expect(door, findsOneWidget);
+      expect(find.text('Use this computer without an account'), findsOneWidget);
+      await tester.tap(door);
+      // Not pumpAndSettle: the fleet diagram on this screen animates for as
+      // long as it is shown, so the frame never settles. Pump until the boot
+      // lands, bounded.
+      for (var i = 0; i < 40 && app.status != AppStatus.authenticated; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      // The stub supervisor's timer would otherwise still be pending when the
+      // fake clock is checked at the end of this test.
+      app.discovery.supervision?.cancel();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the sheet over the desk does not repeat it', (tester) async {
+      grid.AppTheme.brightness.value = Brightness.light;
+      final app = _Notifier(
+        discovery: _ReadyDiscovery(),
+        cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
+      );
+      addTearDown(app.dispose);
+
+      // The sheet is the screen with a close button; its X is the way back.
+      await tester.pumpWidget(
+        _host(app, () => LoginScreen(notifier: app, onClose: () {})),
+      );
+
+      expect(find.byKey(const Key('login-close-button')), findsOneWidget);
+      expect(find.byKey(const Key('use-without-account-button')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  test(
+    'signing out keeps a desktop window on its desk, in local mode',
+    () async {
+      final cli = _ScriptedCli(const CliAuthStatus(loggedIn: true));
+      final app = _Notifier(discovery: _ReadyDiscovery(), cli: cli)
+        ..status = AppStatus.authenticated;
+      addTearDown(app.dispose);
+      expect(app.isGuest, isFalse);
 
       await app.logout();
+      // The desk is sat back down in the background once the daemon answers.
+      for (var i = 0; i < 100 && app.refreshes == 0; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
 
-      expect(app.status, AppStatus.unauthenticated);
-      expect(app.localOnly, isFalse);
       expect(cli.logouts, 1);
-    });
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      expect(app.signOutError, isNull);
+      expect(app.refreshes, 1);
+    },
+  );
 
-    testWidgets(
-      'the login screen offers it, and the tap boots without an account',
-      (tester) async {
-        grid.AppTheme.brightness.value = Brightness.light;
-        final store = _store();
-        final discovery = _ReadyDiscovery();
-        final app = _Notifier(
-          discovery: discovery,
-          cli: _ScriptedCli(_localCli),
-          localMode: store,
-        );
-        addTearDown(app.dispose);
-        app.status = AppStatus.unauthenticated;
+  testWidgets('Settings names local mode and offers the sign-in', (
+    tester,
+  ) async {
+    grid.AppTheme.brightness.value = Brightness.light;
+    final app = _Notifier(
+      discovery: _ReadyDiscovery(),
+      cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
+    )..signedIn = false;
+    addTearDown(app.dispose);
 
-        await tester.pumpWidget(
-          MaterialApp(
-            theme: grid.buildAppTheme(brightness: Brightness.light),
-            home: MediaQuery(
-              data: const MediaQueryData(size: Size(880, 560)),
-              child: grid.BrightnessScope(
-                child: ListenableBuilder(
-                  listenable: app,
-                  builder: (_, _) => LoginScreen(notifier: app),
-                ),
-              ),
-            ),
-          ),
-        );
-
-        final door = find.byKey(const Key('use-without-account-button'));
-        expect(door, findsOneWidget);
-        expect(
-          find.text('Use this computer without an account'),
-          findsOneWidget,
-        );
-        await tester.tap(door);
-        // Not pumpAndSettle: the fleet diagram on this screen animates for as
-        // long as it is shown, so the frame never settles. Pump until the boot
-        // lands, bounded.
-        for (var i = 0; i < 40 && app.status != AppStatus.authenticated; i++) {
-          await tester.pump(const Duration(milliseconds: 50));
-        }
-
-        expect(app.status, AppStatus.authenticated);
-        expect(app.localOnly, isTrue);
-        // The stub supervisor's timer would otherwise still be pending when the
-        // fake clock is checked at the end of this test.
-        discovery.supervision?.cancel();
-      },
+    await tester.pumpWidget(
+      _host(app, () => Scaffold(body: AccountSection(notifier: app))),
     );
+
+    expect(find.text('Local mode'), findsOneWidget);
+    expect(find.byKey(const Key('settings-sign-in-button')), findsOneWidget);
+    expect(find.byKey(const Key('settings-sign-out-button')), findsNothing);
+    await tester.pumpWidget(const SizedBox());
   });
-
-  group('HarnessCliRunner', () {
-    late Directory scratch;
-
-    setUp(() async {
-      scratch = await Directory.systemTemp.createTemp('harness-local-mode-');
-    });
-
-    tearDown(() async {
-      if (await scratch.exists()) await scratch.delete(recursive: true);
-    });
-
-    test('carries the flag to the CLI only while local mode is on', () async {
-      final home = Directory('${scratch.path}/home')..createSync();
-      final harnessHome = Directory('${home.path}/.harness')..createSync();
-      var local = false;
-      final runner = HarnessCliRunner(
-        harnessHome: harnessHome,
-        environment: {'HOME': home.path, 'PATH': '/usr/bin'},
-        isWindows: false,
-        localMode: () => local,
-      );
-
-      expect(
-        (await runner.resolve(['start'])).environment['HARNESS_LOCAL_ONLY'],
-        isNull,
-      );
-      local = true; // read per command, never captured at construction
-      expect(
-        (await runner.resolve(['start'])).environment['HARNESS_LOCAL_ONLY'],
-        'true',
-      );
-    });
-
-    test('forwards the flag into WSL beside the router variables', () async {
-      final bundle = Directory('${scratch.path}/harness-cli')
-        ..createSync(recursive: true);
-      File('${bundle.path}/cli.js').writeAsStringSync('cli');
-      File('${bundle.path}/notify.mjs').writeAsStringSync('notify');
-      final runtime = WslRuntime(
-        runProcess: (executable, arguments, {environment}) async {
-          final joined = arguments.join(' ');
-          if (joined.contains('--status')) return ProcessResult(0, 0, 'ok', '');
-          if (joined.contains('-l -q')) {
-            return ProcessResult(0, 0, 'Ubuntu\r\n', '');
-          }
-          return ProcessResult(0, 0, 'cli launcher\ntmux yes\n', '');
-        },
-      );
-
-      final invocation = await HarnessCliRunner(
-        harnessHome: Directory('${scratch.path}/host-home/.harness'),
-        environment: {
-          'USERPROFILE': '${scratch.path}/host-home',
-          'PATH': '',
-          'WSLENV': 'EXISTING',
-        },
-        isWindows: true,
-        requiresWindowsBundle: true,
-        windowsBundleDirectory: bundle,
-        wslRuntime: runtime,
-        localMode: () => true,
-      ).resolve(['start']);
-
-      expect(invocation.source, HarnessCliSource.wsl);
-      expect(invocation.environment['HARNESS_LOCAL_ONLY'], 'true');
-      expect(
-        invocation.environment['WSLENV']!.split(':'),
-        containsAll(['EXISTING', 'HARNESS_LOCAL_ONLY']),
-      );
-      // The environment, never the script: nothing about the choice is argv.
-      expect(
-        invocation.arguments.join(' '),
-        isNot(contains('HARNESS_LOCAL_ONLY')),
-      );
-    });
-  });
-}
-
-class _ThrowingStore implements LocalKeyValueStore {
-  @override
-  Future<String?> read(String key) async =>
-      throw const FileSystemException('unreadable');
-
-  @override
-  Future<void> write(String key, String value) async =>
-      throw const FileSystemException('unwritable');
-
-  @override
-  Future<void> delete(String key) async =>
-      throw const FileSystemException('unwritable');
 }

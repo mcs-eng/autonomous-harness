@@ -30,7 +30,6 @@ import '../core/agent_preference.dart';
 import '../core/dsh_catalog.dart';
 import '../core/engine_availability.dart';
 import '../core/local_hostname.dart';
-import '../core/local_mode.dart';
 import '../core/local_git_projects.dart';
 import '../core/test_run.dart';
 import '../core/models.dart';
@@ -590,6 +589,9 @@ class AppNotifier extends ChangeNotifier {
   // successful bootstrap (see `ensureCliDaemonReady`), cancelled on dispose. Cancelling only stops this
   // Dart-side loop; the daemon itself self-daemonizes and must keep running after the app quits.
   Timer? _daemonSupervisionTimer;
+  // The auth revision [_daemonSupervisionTimer] was started under (fork; see
+  // `_startDaemonSupervision`).
+  int? _daemonSupervisionRevision;
   // Backend REST can fail while the daemon and its WebSocket remain ready. Recover that list
   // independently, with capped backoff and the same in-flight request as a manual retry.
   Timer? _machineRecoveryTimer;
@@ -1412,9 +1414,9 @@ class AppNotifier extends ChangeNotifier {
   /// A desktop window running without an account. A viewer is never a guest: it
   /// has no local daemon, so there is nothing it could show signed out.
   ///
-  /// Fork: local mode is not a guest. It is a remembered choice with its own
-  /// labels and exit ("Leave local mode"), so the guest prompts stay out of it.
-  bool get isGuest => viewer == null && !signedIn && !localOnly;
+  /// Fork: this is what the fork's labels call local mode (see
+  /// `desktop/WINDOWS_QUICKSTART.md`).
+  bool get isGuest => viewer == null && !signedIn;
 
   int _paneFocusRequest = 0;
 
@@ -1603,18 +1605,6 @@ class AppNotifier extends ChangeNotifier {
   Future<void>? _logoutInFlight;
   Future<void>? _workspaceCleanup;
 
-  /// Whether this computer runs without an account (see [LocalModeStore]). One store for the boot
-  /// path, the login screen, the account menu and the daemon supervisor, so they cannot disagree.
-  final LocalModeStore _localMode;
-  bool get localOnly => _localMode.value;
-
-  /// Shown on the login screen when local mode is remembered but the installed CLI predates it: a
-  /// `harness start` without a session would only refuse, and the app would sit on an error it
-  /// could not explain.
-  static const localModeUnsupportedMessage =
-      'The harness CLI on this computer cannot run without an account. Update it to a build with '
-      'local mode, or sign in.';
-
   AppNotifier({
     required AppConfig config,
     required AuthSession authSession,
@@ -1629,7 +1619,6 @@ class AppNotifier extends ChangeNotifier {
     PeerLinkClient? peerLinks,
     ViewerServices? viewer,
     PaneLayoutStore? paneLayoutStore,
-    LocalModeStore? localMode,
     this.turnActivityTimeout = const Duration(seconds: 12),
     AlertSounds? alerts,
     AgentAlerts? agentAlerts,
@@ -1638,7 +1627,6 @@ class AppNotifier extends ChangeNotifier {
        agentAlerts = agentAlerts ?? AgentAlerts(),
        agentUnread = agentUnread ?? AgentUnread(),
        _paneLayout = paneLayoutStore,
-       _localMode = localMode ?? localModeStore,
        // Remembers "a dial has been seen here" on the same terms the pane
        // layout is remembered: with a layout store there is a state file, and
        // without one (the tests) nothing is written anywhere.
@@ -2620,32 +2608,17 @@ class AppNotifier extends ChangeNotifier {
       signedIn = authStatus.loggedIn;
       if (!authStatus.loggedIn) {
         currentUser = null;
-        if (localOnly && authStatus.localOnly) {
-          // Chosen on the login screen and remembered: no account, this computer alone. The CLI
-          // answered for the same flag, so its daemon starts on this computer's own id and lists
-          // it as the one machine; the home screen is drawn through the signed-in path from here.
-          status = AppStatus.bootstrapping;
+        // A VIEWER has nothing to show without an account — no daemon, no
+        // machine of its own — so it keeps its login screen. A desktop window
+        // has this computer, and opens on it: the sign-in becomes a sheet it
+        // raises when the person reaches for another machine, not a wall in
+        // front of agents that are already running.
+        if (viewer != null) {
+          status = AppStatus.unauthenticated;
           notifyListeners();
-          await _finishBootstrapSignedIn();
           return;
         }
-        if (localOnly) {
-          // Remembered, but this CLI does not know the flag (an upstream build). Say so rather
-          // than start a daemon that can only refuse.
-          unawaited(_localMode.set(false));
-          _lastError = localModeUnsupportedMessage;
-          _lastErrorRetryable = false;
-        }
-        // Fork: a signed-out desktop window still opens on the login screen, which offers
-        // Sign in and "Use this computer without an account" (local mode). Upstream now opens
-        // a signed-out desktop straight onto the desk as a guest; this fork keeps its login
-        // screen until that choice is made deliberately.
-        status = AppStatus.unauthenticated;
-        notifyListeners();
-        return;
       }
-      // A sign-in on disk outranks the flag in the CLI, so it does here too.
-      unawaited(_localMode.set(false));
       status = AppStatus.bootstrapping;
       notifyListeners();
       await _finishBootstrapSignedIn();
@@ -2658,8 +2631,9 @@ class AppNotifier extends ChangeNotifier {
       _bootStatusMessage = null;
       if (error is CliNotAvailableException || error is FormatException) {
         // The CLI itself could not answer: it did not run, or did not speak
-        // JSON. Trying again cannot change that, so the login screen, with its
-        // account-free and environment routes, is the surface that can help.
+        // JSON. Trying again cannot change that, so the login screen, which
+        // names the error and offers this computer without an account again,
+        // is the surface that can help.
         currentUser = null;
         _lastError = '$error';
         _lastErrorRetryable = false;
@@ -2936,17 +2910,13 @@ class AppNotifier extends ChangeNotifier {
     notifyListeners();
     // The CLI has confirmed daemon readiness. Display-name/avatar metadata is
     // independent of machine discovery and must not delay work — and a guest
-    // has no profile to load. Local mode has neither: its daemon answers
-    // `/api/auth/me` with 401 by design, and a request it can only refuse is
-    // not worth making.
-    if (signedIn && !localOnly) {
-      unawaited(_loadProfile());
-      // The desk too: tabs from the other computers appear as intent, like the
-      // restored ones, and attach as their machines answer. It is the ACCOUNT's
-      // desk (`Desk{userId}`), so a guest has none — asking for one would earn a
-      // 401 on every poll for a document that cannot exist.
-      _deskEnsure(revision);
-    }
+    // has no profile to load.
+    if (signedIn) unawaited(_loadProfile());
+    // The desk too: tabs from the other computers appear as intent, like the
+    // restored ones, and attach as their machines answer. It is the ACCOUNT's
+    // desk (`Desk{userId}`), so a guest has none — asking for one would earn a
+    // 401 on every poll for a document that cannot exist.
+    if (signedIn) _deskEnsure(revision);
     try {
       await refreshMachines();
     } catch (error) {
@@ -3019,9 +2989,6 @@ class AppNotifier extends ChangeNotifier {
   /// orphan its own wait. A session that ended underneath us passes none and
   /// invalidates for itself — the in-flight work belongs to the account that
   /// just left.
-  // Fork: unreachable while this fork keeps its login-screen account model; kept
-  // unchanged so later upstream syncs still merge cleanly.
-  // ignore: unused_element
   Future<void> _becomeGuest({String? banner, int? revision}) async {
     revision ??= _invalidateAuthWork();
     final before = localMachineState?.machine.machineId;
@@ -3205,9 +3172,7 @@ class AppNotifier extends ChangeNotifier {
           rethrow;
         }
         if (!_authWorkCurrent(revision)) return;
-        // Local mode has no session to lose, so a daemon that is down there is
-        // down for an ordinary reason and gets the ordinary advice.
-        if (!authStatus.loggedIn && signedIn && !localOnly) {
+        if (!authStatus.loggedIn && signedIn) {
           _signedOutAtRuntime(_signedOutMessage);
           return;
         }
@@ -3256,13 +3221,23 @@ class AppNotifier extends ChangeNotifier {
 
   /// Supervise even a failed start once sign-in is confirmed. The existing
   /// backoff and spawn-slot gate handle recovery without a second app launch.
+  ///
+  /// The callbacks answer only for the auth revision they were started under,
+  /// so a supervisor left from an earlier one — a session that ended while the
+  /// window stayed open, which re-seats it as a guest — is replaced here rather
+  /// than kept running deaf.
   void _startDaemonSupervision(LocalCliDiscovery discovery) {
     final revision = _authRevision;
+    if (_daemonSupervisionRevision != revision) {
+      _daemonSupervisionTimer?.cancel();
+      _daemonSupervisionTimer = null;
+    }
+    _daemonSupervisionRevision = revision;
     _daemonSupervisionTimer ??= discovery.startSupervising(
       spawnAllowedAt: inSpawnSlot,
       stillSignedIn: () async {
         if (!_authWorkCurrent(revision)) return false;
-        final stillIn = localOnly || (await cliLogin.checkStatus()).loggedIn;
+        final stillIn = (await cliLogin.checkStatus()).loggedIn;
         return _authWorkCurrent(revision) && stillIn;
       },
       // Only the first time: the supervisor asks once per spawn attempt, and a guest window is
@@ -3338,7 +3313,8 @@ class AppNotifier extends ChangeNotifier {
   /// machine was deleted from another machine or the SSO token simply expired, and guessing between
   /// them in the copy would sometimes be wrong. Signing in again is the answer to both.
   static const _signedOutMessage =
-      'You were signed out on this computer. Sign in again to reconnect.';
+      'You were signed out on this computer. This computer\'s agents keep '
+      'running; sign in again to reach your other machines.';
 
   /// The session went away while the app was already running — send the user to [LoginScreen] with a
   /// reason, and stop the background work that can only fail from here.
@@ -3358,16 +3334,29 @@ class AppNotifier extends ChangeNotifier {
     pendingAuthorizeUrl = null;
     _awaitingFirstMessage = null;
     analyticsAccount.clear();
-    // Fork: every window goes back to its login screen, which offers Sign in and
-    // local mode. Upstream turns a desktop window into a guest here
-    // ([_becomeGuest]); this fork keeps its login-screen account model.
-    signedIn = false;
-    _clearAccountWorkspace();
-    _lastError = message;
-    _lastErrorRetryable = true;
-    status = AppStatus.unauthenticated;
-    notifyListeners();
+    // A VIEWER has nowhere to be but its login screen — no daemon, nothing of
+    // its own to show.
+    if (viewer != null) {
+      _clearAccountWorkspace();
+      _lastError = message;
+      _lastErrorRetryable = true;
+      status = AppStatus.unauthenticated;
+      notifyListeners();
+      return;
+    }
+    // A desktop window becomes a GUEST instead: the daemon comes back signed out
+    // and goes on serving this computer, so the agents that were running are
+    // still running. This computer's tiles stay (under the id it serves now),
+    // the other machines' leave, and the banner says why the list got shorter.
+    _closedHistory.clear();
+    unawaited(_becomeGuest(banner: message));
   }
+
+  /// Fork test seam: the session ending under an open window, as the relay or
+  /// the daemon reports it. Upstream's account tests reach it through a daemon
+  /// probe, which a viewer (where their login screen still follows) never makes.
+  @visibleForTesting
+  void signedOutAtRuntimeForTest() => _signedOutAtRuntime(_signedOutMessage);
 
   /// Remove the old account's live objects without overwriting its saved desk.
   /// In particular, multiple emptied tabs must not prevent the next restore.
@@ -3608,10 +3597,6 @@ class AppNotifier extends ChangeNotifier {
     _closedHistory.clear();
     _monitorHarnesses.clear();
     _lastError = null;
-    // A sign-in ends local mode: the CLI lets a saved session win over the
-    // flag, and the app stops passing it so the two never disagree. Not
-    // awaited: the value moves at once, and the write is the store's business.
-    unawaited(_localMode.set(false));
     status = AppStatus.bootstrapping;
     signingIn = true;
     pendingAuthorizeUrl = null;
@@ -3690,47 +3675,20 @@ class AppNotifier extends ChangeNotifier {
     loginBrowserError = null;
   }
 
-  /// The login screen's other door: run this computer without an account.
+  /// Fork: the login screen's way back to this computer without an account —
+  /// the guest desk, which this fork's labels call local mode.
   ///
-  /// Remembers the choice, confirms the installed CLI knows the flag (it answers `localOnly` to
-  /// `auth status` when it does), and boots through the same path a sign-in takes: the daemon
-  /// comes up on this computer's own id, lists this computer as its one machine, and the home
-  /// screen draws it. A CLI that predates local mode sends the person back here with a reason.
+  /// A desktop window meets the login screen only when a sign-in was cancelled
+  /// or failed, or when the CLI could not answer the startup check; upstream
+  /// leaves Sign in as the one way on from there. This asks the CLI again and
+  /// continues as a launch does: signed out, onto the guest desk; signed in
+  /// after all (a `harness login` in a terminal meanwhile), onto the account's.
   Future<void> continueWithoutAccount() async {
-    if (_disposed || signingIn) return;
-    final revision = _invalidateAuthWork();
-    _closedHistory.clear();
+    if (_disposed || viewer != null || signingIn || signingOut) return;
+    _invalidateAuthWork();
     _lastError = null;
-    status = AppStatus.bootstrapping;
-    notifyListeners();
-    unawaited(_localMode.set(true));
-    try {
-      final authStatus = await cliLogin.checkStatus();
-      if (!_authWorkCurrent(revision)) return;
-      if (authStatus.loggedIn) {
-        // A session is on disk after all; it outranks the flag in the CLI and so here.
-        unawaited(_localMode.set(false));
-      } else if (!authStatus.localOnly) {
-        unawaited(_localMode.set(false));
-        currentUser = null;
-        status = AppStatus.unauthenticated;
-        _lastError = localModeUnsupportedMessage;
-        _lastErrorRetryable = false;
-        notifyListeners();
-        return;
-      }
-      if (!_authWorkCurrent(revision)) return;
-      await _finishBootstrapSignedIn();
-    } catch (error) {
-      if (!_authWorkCurrent(revision)) return;
-      unawaited(_localMode.set(false));
-      currentUser = null;
-      status = AppStatus.unauthenticated;
-      _lastError = error.toString();
-      _lastErrorRetryable = true;
-      notifyListeners();
-    }
-    if (_authWorkCurrent(revision)) notifyListeners();
+    _lastErrorRetryable = true;
+    await _continueAfterEnvironmentReady();
   }
 
   /// Reopens the current authorization URL without creating another login.
@@ -3821,15 +3779,11 @@ class AppNotifier extends ChangeNotifier {
     pendingAuthorizeUrl = null;
     _closedHistory.clear();
     _monitorHarnesses.clear();
-    // Leaving local mode is the fork's exit to the login screen: the tiles go,
-    // the daemon is restarted through `harness logout` below (nothing to clear,
-    // but the next start must run on the account rather than on this computer's
-    // bare id), and the login screen is next.
-    unawaited(_localMode.set(false));
-    // Fork: signing out returns every window to its login screen. Upstream keeps
-    // a desktop window on the desk as a guest ([_becomeGuest]).
-    signedIn = false;
-    status = AppStatus.unauthenticated;
+    // A VIEWER goes back to its login screen; a desktop window stays on the desk
+    // and becomes a guest — the daemon comes back signed out and keeps serving
+    // this computer, so signing out of the account is not a reason to take the
+    // agents off the screen. The rebind at the end sits the desk back down.
+    if (viewer != null) status = AppStatus.unauthenticated;
     currentUser = null;
     analyticsAccount.clear();
     notifyListeners();
@@ -3859,7 +3813,9 @@ class AppNotifier extends ChangeNotifier {
     // The CLI restarts its daemon signed out (`harness logout` does it itself),
     // so this window waits for that one and sits its desk back down on the id it
     // serves. In the background: the person asked to sign out, and that is done.
-    // Fork: no guest desk to sit back down (see above); the login screen is next.
+    if (viewer == null && didClear) {
+      unawaited(_becomeGuest(revision: revision));
+    }
   }
 
   void _onLocalFailure(String machineId, int code, String reason) {

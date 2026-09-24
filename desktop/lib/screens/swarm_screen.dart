@@ -55,6 +55,7 @@ import '../widgets/delete_agent_dialog.dart';
 import '../widgets/fork_agent_dialog.dart';
 import '../widgets/restart_agent_action.dart';
 import '../widgets/machines_manager.dart';
+import 'login_screen.dart';
 import '../widgets/new_agent_dialog.dart';
 import '../widgets/box_chrome.dart';
 import '../widgets/new_harness_box.dart';
@@ -242,6 +243,16 @@ class _SwarmScreenState extends State<SwarmScreen>
     onNewProject: () => unawaited(_createInProject()),
     onNewAgent: (location) => unawaited(_createInProject(location)),
     onOpenAgent: _openProjectSession,
+    onShowMachines: () {
+      _scaffold.currentState?.closeDrawer();
+      unawaited(
+        _dialog(() => showMachinesManager(context, app, keymap: _keymap)),
+      );
+    },
+    onSignIn: () {
+      _scaffold.currentState?.closeDrawer();
+      unawaited(_dialog(() => showSignInSheet(context, app)));
+    },
   );
 
   void _openProjectSession(SwarmAgentRef row) {

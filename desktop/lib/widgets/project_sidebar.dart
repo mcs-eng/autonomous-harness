@@ -8,11 +8,14 @@ import '../shared/widgets/app_icon_button.dart';
 import '../state/app_state.dart';
 import '../state/project_navigation.dart';
 import '../state/swarm_catalog.dart';
+import 'agent_drag.dart';
 import 'engine_identity.dart';
-import 'machine_rail.dart';
 
 /// A view of the existing project catalog. Expanding a project has no terminal
 /// side effects; only choosing a session or explicitly creating one opens work.
+///
+/// Machines are upstream's Machines Manager ([onShowMachines]); this sidebar
+/// keeps no machine tree of its own.
 class ProjectSidebar extends StatefulWidget {
   const ProjectSidebar({
     super.key,
@@ -23,6 +26,8 @@ class ProjectSidebar extends StatefulWidget {
     required this.onNewAgent,
     required this.onOpenAgent,
     required this.onCollapse,
+    required this.onShowMachines,
+    required this.onSignIn,
   });
 
   final AppNotifier app;
@@ -31,12 +36,17 @@ class ProjectSidebar extends StatefulWidget {
   final ValueChanged<ProjectLocation> onNewAgent;
   final ValueChanged<SwarmAgentRef> onOpenAgent;
 
+  /// Opens the machine list and its actions (link, rename, delete).
+  final VoidCallback onShowMachines;
+
+  /// Raises the sign-in over the desk, from local mode.
+  final VoidCallback onSignIn;
+
   @override
   State<ProjectSidebar> createState() => _ProjectSidebarState();
 }
 
 class _ProjectSidebarState extends State<ProjectSidebar> {
-  bool _machines = false;
   String _query = '';
   final _collapsed = <String>{};
   final _filter = TextEditingController();
@@ -59,35 +69,28 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+                padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
                 child: Row(
                   children: [
                     Expanded(
-                      child: SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment(value: false, label: Text('Projects')),
-                          ButtonSegment(value: true, label: Text('Machines')),
-                        ],
-                        selected: {_machines},
-                        showSelectedIcon: false,
-                        style: ButtonStyle(
-                          visualDensity: VisualDensity.compact,
-                          backgroundColor: WidgetStateProperty.resolveWith(
-                            (states) => states.contains(WidgetState.selected)
-                                ? grid.AppPalette.swarmAccent
-                                : Colors.transparent,
-                          ),
-                          foregroundColor: WidgetStateProperty.resolveWith(
-                            (states) => states.contains(WidgetState.selected)
-                                ? grid.AppPalette.swarmTabBar
-                                : grid.AppPalette.textSecondary,
-                          ),
+                      child: Text(
+                        'Projects',
+                        style: TextStyle(
+                          color: grid.AppPalette.textPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
                         ),
-                        onSelectionChanged: (value) =>
-                            setState(() => _machines = value.single),
                       ),
                     ),
-                    const SizedBox(width: 4),
+                    // Upstream's Machines Manager: every machine, its state,
+                    // and link, rename, password and delete. The fork's own
+                    // machine tree gave way to it with the 2026-09-23 sync.
+                    AppIconButton(
+                      key: const ValueKey('project-sidebar-machines'),
+                      icon: Icons.dns_outlined,
+                      tooltip: 'Machines',
+                      onPressed: widget.onShowMachines,
+                    ),
                     AppIconButton(
                       icon: Icons.chevron_left,
                       tooltip: 'Hide sidebar',
@@ -96,70 +99,58 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                   ],
                 ),
               ),
-              if (_machines)
-                Expanded(
-                  child: MachineRail(
-                    notifier: widget.app,
-                    onOpenAgent: _openOrExplain,
-                    onEscape: widget.onCollapse,
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: TextField(
+                  key: const ValueKey('project-filter'),
+                  controller: _filter,
+                  decoration: const InputDecoration(
+                    hintText: 'Find project or session',
+                    prefixIcon: Icon(Icons.search, size: 18),
+                    isDense: true,
                   ),
-                )
-              else ...[
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: TextField(
-                    key: const ValueKey('project-filter'),
-                    controller: _filter,
-                    decoration: const InputDecoration(
-                      hintText: 'Find project or session',
-                      prefixIcon: Icon(Icons.search, size: 18),
-                      isDense: true,
-                    ),
-                    onChanged: (value) =>
-                        setState(() => _query = value.trim().toLowerCase()),
-                  ),
+                  onChanged: (value) =>
+                      setState(() => _query = value.trim().toLowerCase()),
                 ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 8,
-                  ),
-                  child: Wrap(
-                    spacing: 4,
-                    children: [
-                      TextButton.icon(
-                        style: TextButton.styleFrom(
-                          foregroundColor: grid.AppPalette.accentOnSurface,
-                        ),
-                        onPressed: widget.onAddProject,
-                        icon: const Icon(
-                          Icons.create_new_folder_outlined,
-                          size: 16,
-                        ),
-                        label: const Text('Add folder'),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                child: Wrap(
+                  spacing: 4,
+                  children: [
+                    TextButton.icon(
+                      style: TextButton.styleFrom(
+                        foregroundColor: grid.AppPalette.accentOnSurface,
                       ),
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          foregroundColor: grid.AppPalette.accentOnSurface,
-                        ),
-                        onPressed: widget.onNewProject,
-                        child: const Text('New project'),
+                      onPressed: widget.onAddProject,
+                      icon: const Icon(
+                        Icons.create_new_folder_outlined,
+                        size: 16,
                       ),
-                    ],
-                  ),
-                ),
-                Expanded(child: _projectList()),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    'Closing a view keeps its agent running.',
-                    style: TextStyle(
-                      color: grid.AppPalette.textSecondary,
-                      fontSize: 11,
+                      label: const Text('Add folder'),
                     ),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: grid.AppPalette.accentOnSurface,
+                      ),
+                      onPressed: widget.onNewProject,
+                      child: const Text('New project'),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(child: _projectList()),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  'Closing a view keeps its agent running.',
+                  style: TextStyle(
+                    color: grid.AppPalette.textSecondary,
+                    fontSize: 11,
                   ),
                 ),
-              ],
+              ),
+              if (widget.app.isGuest) _LocalModeLine(onSignIn: widget.onSignIn),
             ],
           ),
         ),
@@ -405,7 +396,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     final selected =
         widget.app.focusedPane?.machineId == row.machineId &&
         widget.app.focusedPane?.agentId == row.agent.id;
-    return Column(
+    final entry = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SidebarItem(
@@ -439,11 +430,33 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         ),
       ],
     );
+    // A session without a terminal cannot fill a tile, so it cannot be dragged
+    // to one either: the grid would answer a deliberate gesture with nothing.
+    if (!row.agent.terminalAvailable) return entry;
+    final drag = AgentDragRef(
+      machineId: row.machineId,
+      agentId: row.agent.id,
+      name: shown,
+    );
+    // Onto a tile or the grid's empty slot, as the machine tree this sidebar
+    // replaced allowed. Horizontal only: the list scrolls vertically, and the
+    // tiles are to the right.
+    return Draggable<AgentDragRef>(
+      data: drag,
+      affinity: Axis.horizontal,
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      onDragStarted: () => agentDrag.value = drag,
+      onDragEnd: (_) => agentDrag.value = null,
+      onDraggableCanceled: (_, _) => agentDrag.value = null,
+      feedback: _DragChip(label: shown, agent: row.agent),
+      childWhenDragging: Opacity(opacity: 0.4, child: entry),
+      child: entry,
+    );
   }
 
   /// Open a session that has a view or a live terminal; otherwise say why it
-  /// cannot be opened. Both tabs of the sidebar route through here, so a tap or
-  /// Enter on the Machines tab never closes the drawer and then does nothing.
+  /// cannot be opened, so a tap or Enter never closes the drawer and then does
+  /// nothing.
   void _openOrExplain(SwarmAgentRef row) {
     final hasView = widget.app.swarms.any(
       (swarm) => swarm.panes.any(
@@ -512,7 +525,110 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
       ),
     );
     if (!mounted) return;
-    if (action == 'machines') setState(() => _machines = true);
+    if (action == 'machines') widget.onShowMachines();
     if (action == 'refresh') await widget.app.reloadMachineData(machineId);
+  }
+}
+
+/// What travels with the pointer while a session is dragged to the grid.
+class _DragChip extends StatelessWidget {
+  const _DragChip({required this.label, required this.agent});
+
+  final String label;
+  final Agent agent;
+
+  @override
+  Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: grid.AppPalette.windowBg,
+          border: Border.all(color: grid.AppPalette.divider),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            EngineMark.forAgent(agent, size: 14),
+            const SizedBox(width: 7),
+            Text(
+              label,
+              style: TextStyle(
+                color: grid.AppPalette.textPrimary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Fork: the sidebar's statement that this window runs without an account —
+/// upstream's guest desk, which the fork calls local mode — and its way to the
+/// other machines.
+class _LocalModeLine extends StatelessWidget {
+  const _LocalModeLine({required this.onSignIn});
+
+  final VoidCallback onSignIn;
+
+  @override
+  Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
+    return Container(
+      key: const ValueKey('project-sidebar-local-mode'),
+      padding: const EdgeInsets.fromLTRB(14, 8, 8, 10),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: grid.AppPalette.divider)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.laptop_outlined,
+            size: 16,
+            color: grid.AppPalette.textSecondary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Local mode',
+                  style: TextStyle(
+                    color: grid.AppPalette.textPrimary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  'This computer, no account',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: grid.AppPalette.textSecondary,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            key: const ValueKey('project-sidebar-sign-in'),
+            style: TextButton.styleFrom(
+              foregroundColor: grid.AppPalette.accentOnSurface,
+              visualDensity: VisualDensity.compact,
+            ),
+            onPressed: onSignIn,
+            child: const Text('Sign in'),
+          ),
+        ],
+      ),
+    );
   }
 }

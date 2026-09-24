@@ -12,9 +12,10 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
    `data`, the DLLs, and `harness-cli` together. Do not run it inside the ZIP.
 3. Open `Release/harness.exe`. The preview is unsigned; Windows may warn about an
    unknown publisher. Review the source and checksum before deciding to run it.
-4. Follow the setup screen, then either select **Sign in** and finish in your
-   browser, or select **Use this computer without an account** for
-   [local mode](#local-mode-no-account).
+4. Follow the setup screen. Without a saved sign-in, Harness opens on this
+   computer in [local mode](#local-mode-no-account). To reach your other
+   machines, select **Sign in** at the foot of the projects sidebar or in
+   **Settings → Account**, and finish in your browser.
 5. Create a project and agent. Install and authenticate the coding agent in the
    selected development distribution if its engine is missing. Prefer native Linux
    agent installations; WSL interop discovery is also supported.
@@ -28,8 +29,10 @@ Get-Content .\harness-desktop-windows-x64-1.0.0-windows.7.zip.sha256
 
 ## Projects sidebar (source builds after Preview 7)
 
-The sidebar switches between **Projects** and the existing **Machines** view.
-Choose a session to return to its existing tab, or reopen its view if closed.
+The sidebar lists **Projects**. Its **Machines** button opens upstream's
+machine list, where you link, rename, or remove machines. Choose a session to
+return to its existing tab, or reopen its view if closed; drag a session onto a
+pane to show it there.
 Project headings expand the list without starting agents. Non-Git folders work
 too; a repository with several checkouts lists each working folder, and each host
 when there is more than one.
@@ -178,15 +181,15 @@ installed Preview 7 bundle.
 
 Source builds after this also incorporate upstream `461ff2bf` (September 23),
 190 commits. Upstream now lets the CLI daemon start without an account and opens
-a signed-out desktop on a guest desk. This fork's CLI takes that change, but its
-desktop keeps the login screen with **Use this computer without an account**: at
-startup, after signing out, and when a session ends while the app is open. Local
-mode works as before. The projects sidebar keeps its **Machines** view, so the
-fork retains the machine rail and account footer that upstream removed as
-unused. The model picker takes upstream's searchable panel; registered local
-fleets appear in it as **Local** sections, and the account's own grid is headed
-**Your private cloud**. The startup screen takes upstream's terminal-style
-design and keeps **Try again** when the saved sign-in cannot be checked.
+a signed-out desktop on this computer's desk. This fork takes both, and calls
+that desk local mode; it replaces the fork's own login-screen choice and its
+`HARNESS_LOCAL_ONLY` flag. The projects sidebar's **Machines** view gives way to
+upstream's machine list, so the machine rail and account footer that upstream
+removed are gone here too. The model picker takes upstream's searchable panel;
+registered local fleets appear in it as **Local** sections beside the account's
+own grid, headed **On your machines** as upstream heads it. The startup screen
+takes upstream's terminal-style design and keeps **Try again** when the saved
+sign-in cannot be checked.
 
 Close the old Harness window. If a previous Harness daemon is running, stop that
 daemon from its WSL distribution (`harness stop`) before opening the new preview.
@@ -286,27 +289,24 @@ separate from the dashboard and can be skipped to continue with the installed ve
 
 ## Local mode (no account)
 
-The login screen offers **Use this computer without an account**. The app then
-runs the bundled CLI with `HARNESS_LOCAL_ONLY=true` (forwarded into WSL through
-`WSLENV`, never as an argument): the daemon starts on this computer's own id,
-never dials the Harness backend, installs no grid, and lists this computer as
-its one machine. Everything on this PC works as it does when signed in: create
-agents, attach terminals, switch panes. The choice is remembered across
-launches in `state.json` beside the theme.
+Without a saved sign-in, Harness opens on this computer's own desk: local mode,
+upstream's guest desk. The daemon runs on this computer's own id, never dials the
+Harness backend, and lists this computer as its one machine. Everything on this
+PC works as it does when signed in: create agents, attach terminals, switch panes.
 
 What needs the account stays off until you sign in: other machines, linking,
-shared harnesses, the Harness Store, and the signed-in profile. The account
-menu and Settings say **Local mode** and offer **Leave local mode**, which
-restarts the local daemon for this computer only and returns to the login
-screen; signing in there ends
-local mode, because the CLI lets a saved sign-in win over the flag and the app
-agrees with it.
+shared harnesses, the shared desk, and the signed-in profile. The foot of the
+projects sidebar and **Settings → Account** say **Local mode** and offer
+**Sign in**; linking another machine asks for the sign-in too. If a sign-in is
+cancelled or fails, the sign-in screen offers **Use this computer without an
+account** to return to the desk.
 
-Only the CLI included in this ZIP knows the flag. The upstream launcher does
-not, and a remembered local mode against it returns to the login screen with a
-sentence saying so. From a WSL terminal, the same daemon is
-`HARNESS_LOCAL_ONLY=true harness start`; `harness auth status --json` then
-answers `localOnly: true`, and `harness status` reads `local mode, no account`.
+**Sign out** runs `harness logout`, which clears this computer's saved sign-in
+and restarts a running daemon signed out, for this computer only. The window
+stays on the desk in local mode: this computer's tiles stay, and the other
+machines' leave. A session that ends while the app is open does the same and
+says so. From a WSL terminal, `harness start` without a saved sign-in runs the
+same daemon, and `harness status` reads `this computer only (not signed in)`.
 
 ## Preview limitations and recovery
 

@@ -13,6 +13,8 @@ import 'package:harness/screens/login_screen.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
 import 'package:harness/terminal/terminal_session.dart';
+import 'package:harness/viewer/viewer_key_store.dart';
+import 'package:harness/viewer/viewer_services.dart';
 
 import 'support/real_fonts.dart';
 import 'swarm_state_test.dart' show MemoryStore;
@@ -58,11 +60,18 @@ Widget signOutHost(
   );
 }
 
+/// Fork: a VIEWER, explicitly — see `WorkspaceAccountFixture`. A desktop
+/// window's sign-out ends on its desk as a guest, not on this login screen.
 AppNotifier signOutApp(SignOutFixture cli, {bool local = false}) => AppNotifier(
   config: AppConfig.dev,
   configStore: null,
   authSession: AuthSession(storage: MemoryStore()),
   cliLogin: cli,
+  viewer: ViewerServices(
+    config: AppConfig.dev,
+    session: AuthSession(storage: MemoryStore()),
+    keys: ViewerKeyStore(storage: MemoryStore()),
+  ),
   localManualFixture: local
       ? const LocalManualFixture(
           apiBaseUrl: 'http://127.0.0.1:1',

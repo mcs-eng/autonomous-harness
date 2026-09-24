@@ -214,47 +214,57 @@ void main() {
     expect(app.currentUser?.displayName, 'Local session');
   });
 
-  test('config-store failure falls back without resetting auth preferences', () async {
-    final store = _BrokenConfigStore();
-    final app = _GuestApp(
-      config: AppConfig.dev,
-      authSession: AuthSession(),
-      configStore: store,
-      cliLogin: _FakeCliLogin(loggedIn: false),
-      environmentProvisioner: _ReadyEnvironmentProvisioner(),
-    );
+  test(
+    'config-store failure falls back without resetting auth preferences',
+    () async {
+      final store = _BrokenConfigStore();
+      final app = _GuestApp(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: store,
+        cliLogin: _FakeCliLogin(loggedIn: false),
+        environmentProvisioner: _ReadyEnvironmentProvisioner(),
+      );
 
-    await app.bootstrap();
+      await app.bootstrap();
 
-    // Fork: a signed-out desktop window opens on the login screen, which offers
-    // Sign in and local mode; upstream opens a guest desk here instead.
-    expect(app.status, AppStatus.unauthenticated);
-    expect(app.config.apiBaseUrl, ConfigStore.defaultBaseUrl);
-    expect(app.autonomousEnv, 'prod');
-    expect(store.resetCalls, 0);
-  });
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      expect(app.config.apiBaseUrl, ConfigStore.defaultBaseUrl);
+      expect(app.autonomousEnv, 'prod');
+      expect(store.resetCalls, 0);
+    },
+  );
 
-  test('a legacy setup version never bypasses the live readiness probe', () async {
-    final storage = _FakeKeyValueStore()
-      ..values['environment_setup_version'] = '3';
-    final provisioner = _ReadyEnvironmentProvisioner();
-    final app = _GuestApp(
-      config: AppConfig.dev,
-      authSession: AuthSession(),
-      configStore: ConfigStore(storage: storage),
-      cliLogin: _FakeCliLogin(loggedIn: false),
-      environmentProvisioner: provisioner,
-    );
+  test(
+    'a legacy setup version never bypasses the live readiness probe',
+    () async {
+      final storage = _FakeKeyValueStore()
+        ..values['environment_setup_version'] = '3';
+      final provisioner = _ReadyEnvironmentProvisioner();
+      final app = _GuestApp(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: ConfigStore(storage: storage),
+        cliLogin: _FakeCliLogin(loggedIn: false),
+        environmentProvisioner: provisioner,
+      );
 
-    await app.bootstrap();
+      await app.bootstrap();
 
-    expect(provisioner.called, isTrue);
-    expect(app.environmentReadiness.isReady, isTrue);
-    // Reached the login check rather than getting stuck on preparingEnvironment.
-    // Fork: a signed-out desktop window opens on the login screen, which offers
-    // Sign in and local mode; upstream opens a guest desk here instead.
-    expect(app.status, AppStatus.unauthenticated);
-  });
+      expect(provisioner.called, isTrue);
+      expect(app.environmentReadiness.isReady, isTrue);
+      // Reached the login check rather than getting stuck on preparingEnvironment.
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+    },
+  );
 
   test(
     'a successful readiness probe does not persist a setup version',
@@ -276,101 +286,114 @@ void main() {
     },
   );
 
-  test('boot probes read-only and installs only after explicit confirmation', () async {
-    final missing = EnvironmentReadiness(
-      steps: {
-        EnvironmentStep.harness: EnvironmentStepStatus.failed,
-        EnvironmentStep.tmux: EnvironmentStepStatus.ready,
-      },
-      phase: EnvironmentSetupPhase.review,
-    );
-    final ready = EnvironmentReadiness(
-      steps: {
-        for (final step in EnvironmentStep.values)
-          step: EnvironmentStepStatus.ready,
-      },
-      phase: EnvironmentSetupPhase.ready,
-      mode: EnvironmentSetupMode.automatic,
-    );
-    final provisioner = _ScriptedEnvironmentProvisioner([missing, ready]);
-    final app = _GuestApp(
-      config: AppConfig.dev,
-      authSession: AuthSession(),
-      configStore: ConfigStore(storage: _FakeKeyValueStore()),
-      cliLogin: _FakeCliLogin(loggedIn: false),
-      environmentProvisioner: provisioner,
-    );
+  test(
+    'boot probes read-only and installs only after explicit confirmation',
+    () async {
+      final missing = EnvironmentReadiness(
+        steps: {
+          EnvironmentStep.harness: EnvironmentStepStatus.failed,
+          EnvironmentStep.tmux: EnvironmentStepStatus.ready,
+        },
+        phase: EnvironmentSetupPhase.review,
+      );
+      final ready = EnvironmentReadiness(
+        steps: {
+          for (final step in EnvironmentStep.values)
+            step: EnvironmentStepStatus.ready,
+        },
+        phase: EnvironmentSetupPhase.ready,
+        mode: EnvironmentSetupMode.automatic,
+      );
+      final provisioner = _ScriptedEnvironmentProvisioner([missing, ready]);
+      final app = _GuestApp(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: ConfigStore(storage: _FakeKeyValueStore()),
+        cliLogin: _FakeCliLogin(loggedIn: false),
+        environmentProvisioner: provisioner,
+      );
 
-    await app.bootstrap();
-    expect(provisioner.installCalls, [isFalse]);
-    expect(app.status, AppStatus.preparingEnvironment);
+      await app.bootstrap();
+      expect(provisioner.installCalls, [isFalse]);
+      expect(app.status, AppStatus.preparingEnvironment);
 
-    app.selectEnvironmentSetupMode(EnvironmentSetupMode.automatic);
-    final painted = <(AppStatus, EnvironmentSetupPhase)>[];
-    app.addListener(
-      () => painted.add((app.status, app.environmentReadiness.phase)),
-    );
-    await app.startEnvironmentSetup();
-    expect(provisioner.installCalls, [isFalse, isTrue]);
-    // Fork: a signed-out desktop window opens on the login screen, which offers
-    // Sign in and local mode; upstream opens a guest desk here instead.
-    expect(app.status, AppStatus.unauthenticated);
-    expect(app.environmentReadiness.phase, EnvironmentSetupPhase.ready);
-    expect(
-      painted,
-      isNot(
-        contains((AppStatus.preparingEnvironment, EnvironmentSetupPhase.ready)),
-      ),
-    );
-    app.dispose();
-  });
+      app.selectEnvironmentSetupMode(EnvironmentSetupMode.automatic);
+      final painted = <(AppStatus, EnvironmentSetupPhase)>[];
+      app.addListener(
+        () => painted.add((app.status, app.environmentReadiness.phase)),
+      );
+      await app.startEnvironmentSetup();
+      expect(provisioner.installCalls, [isFalse, isTrue]);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      expect(app.environmentReadiness.phase, EnvironmentSetupPhase.ready);
+      expect(
+        painted,
+        isNot(
+          contains((
+            AppStatus.preparingEnvironment,
+            EnvironmentSetupPhase.ready,
+          )),
+        ),
+      );
+      app.dispose();
+    },
+  );
 
-  test('recheckEnvironmentStep succeeds and continues past environment setup', () async {
-    final stuck = EnvironmentReadiness(
-      steps: {
-        EnvironmentStep.harness: EnvironmentStepStatus.ready,
-        EnvironmentStep.tmux: EnvironmentStepStatus.needsTerminal,
-      },
-      phase: EnvironmentSetupPhase.waitingForTerminal,
-      mode: EnvironmentSetupMode.automatic,
-    );
-    final ready = EnvironmentReadiness(
-      steps: {
-        for (final step in EnvironmentStep.values)
-          step: EnvironmentStepStatus.ready,
-      },
-      phase: EnvironmentSetupPhase.ready,
-    );
-    final storage = _FakeKeyValueStore();
-    final provisioner = _ScriptedEnvironmentProvisioner([stuck, ready]);
-    final app = _GuestApp(
-      config: AppConfig.dev,
-      authSession: AuthSession(),
-      configStore: ConfigStore(storage: storage),
-      cliLogin: _FakeCliLogin(loggedIn: false),
-      environmentProvisioner: provisioner,
-    );
+  test(
+    'recheckEnvironmentStep succeeds and continues past environment setup',
+    () async {
+      final stuck = EnvironmentReadiness(
+        steps: {
+          EnvironmentStep.harness: EnvironmentStepStatus.ready,
+          EnvironmentStep.tmux: EnvironmentStepStatus.needsTerminal,
+        },
+        phase: EnvironmentSetupPhase.waitingForTerminal,
+        mode: EnvironmentSetupMode.automatic,
+      );
+      final ready = EnvironmentReadiness(
+        steps: {
+          for (final step in EnvironmentStep.values)
+            step: EnvironmentStepStatus.ready,
+        },
+        phase: EnvironmentSetupPhase.ready,
+      );
+      final storage = _FakeKeyValueStore();
+      final provisioner = _ScriptedEnvironmentProvisioner([stuck, ready]);
+      final app = _GuestApp(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: ConfigStore(storage: storage),
+        cliLogin: _FakeCliLogin(loggedIn: false),
+        environmentProvisioner: provisioner,
+      );
 
-    await app.bootstrap();
-    expect(
-      app.environmentReadiness.steps[EnvironmentStep.tmux],
-      EnvironmentStepStatus.needsTerminal,
-    );
-    expect(app.status, AppStatus.preparingEnvironment);
+      await app.bootstrap();
+      expect(
+        app.environmentReadiness.steps[EnvironmentStep.tmux],
+        EnvironmentStepStatus.needsTerminal,
+      );
+      expect(app.status, AppStatus.preparingEnvironment);
 
-    await app.recheckEnvironmentStep(EnvironmentStep.tmux);
+      await app.recheckEnvironmentStep(EnvironmentStep.tmux);
 
-    // The user's current (stuck) readiness was handed back in, not a fresh `initial()` — this is
-    // what lets the provisioner skip the already-`ready` harness step during the recheck.
-    expect(provisioner.resumeFromCalls.last, same(stuck));
-    expect(app.environmentReadiness.isReady, isTrue);
-    // Fork: a signed-out desktop window opens on the login screen, which offers
-    // Sign in and local mode; upstream opens a guest desk here instead.
-    expect(app.status, AppStatus.unauthenticated);
-    expect(storage.values['environment_setup_version'], isNull);
-    expect(app.environmentRecheckPending, isFalse);
-    app.dispose();
-  });
+      // The user's current (stuck) readiness was handed back in, not a fresh `initial()` — this is
+      // what lets the provisioner skip the already-`ready` harness step during the recheck.
+      expect(provisioner.resumeFromCalls.last, same(stuck));
+      expect(app.environmentReadiness.isReady, isTrue);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      expect(storage.values['environment_setup_version'], isNull);
+      expect(app.environmentRecheckPending, isFalse);
+      app.dispose();
+    },
+  );
 
   test(
     'recheckEnvironmentStep still stuck keeps polling instead of advancing',
@@ -569,53 +592,57 @@ void main() {
     expect(find.text('Pre-flight check'), findsNothing);
   });
 
-  testWidgets('names the sign-in check while auth resolves, then opens login', (
-    tester,
-  ) async {
-    final cliLogin = _ControlledCliLogin();
-    final app = AppNotifier(
-      config: AppConfig.dev,
-      authSession: AuthSession(),
-      configStore: ConfigStore(storage: _FakeKeyValueStore()),
-      cliLogin: cliLogin,
-      environmentProvisioner: _ReadyEnvironmentProvisioner(),
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [appStateProvider.overrideWithValue(app)],
-        child: HarnessApp(authenticatedScreen: _swarm),
-      ),
-    );
+  // Fork: the startup box names the sign-in check (upstream holds the ready
+  // pre-flight screen instead), then a signed-out window opens on the desk.
+  testWidgets(
+    'names the sign-in check while auth resolves, then opens the desk',
+    (tester) async {
+      final cliLogin = _ControlledCliLogin();
+      final app = _GuestApp(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: ConfigStore(storage: _FakeKeyValueStore()),
+        cliLogin: cliLogin,
+        environmentProvisioner: _ReadyEnvironmentProvisioner(),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [appStateProvider.overrideWithValue(app)],
+          child: HarnessApp(authenticatedScreen: _swarm),
+        ),
+      );
 
-    final bootstrap = app.bootstrap();
-    await tester.pump();
-    await tester.pump();
+      final bootstrap = app.bootstrap();
+      await tester.pump();
+      await tester.pump();
 
-    expect(app.status, AppStatus.bootstrapping);
-    expect(find.text('Checking sign-in…'), findsOneWidget);
-    expect(find.text('Continue to sign in'), findsNothing);
-    expect(find.text('ENVIRONMENT SETUP'), findsNothing);
+      expect(app.status, AppStatus.bootstrapping);
+      expect(find.text('Checking sign-in…'), findsOneWidget);
+      expect(find.text('Continue to sign in'), findsNothing);
+      expect(find.text('ENVIRONMENT SETUP'), findsNothing);
 
-    cliLogin.status.complete(const CliAuthStatus(loggedIn: false));
-    await bootstrap;
-    await tester.pump();
+      cliLogin.status.complete(const CliAuthStatus(loggedIn: false));
+      await bootstrap;
+      await tester.pump();
 
-    expect(app.status, AppStatus.unauthenticated);
-    expect(find.text('Sign in'), findsOneWidget);
-    app.dispose();
-  });
+      // A signed-out DESKTOP window lands on the desk as a guest (local mode).
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      expect(find.text('Sign in'), findsNothing);
+      app.dispose();
+    },
+  );
 
   testWidgets(
     'a failed session check retries without opening browser sign-in',
     (tester) async {
       final login = _ControlledCliLogin();
-      final provisioner = _ReadyEnvironmentProvisioner();
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: _FakeKeyValueStore()),
         cliLogin: login,
-        environmentProvisioner: provisioner,
+        environmentProvisioner: _ReadyEnvironmentProvisioner(),
       );
       await tester.pumpWidget(
         ProviderScope(
@@ -648,8 +675,10 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(app.bootError, isNull);
-      expect(app.status, AppStatus.unauthenticated);
-      expect(find.text('Sign in'), findsOneWidget);
+      // Signed out after all: the desk, as a guest, not a browser sign-in.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      expect(find.text('Sign in'), findsNothing);
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
@@ -659,7 +688,7 @@ void main() {
     'a CLI that cannot answer the sign-in check opens login, not an endless retry',
     (tester) async {
       final login = _ControlledCliLogin();
-      final app = AppNotifier(
+      final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: _FakeKeyValueStore()),
@@ -687,6 +716,11 @@ void main() {
         findsNothing,
       );
       expect(find.text('Sign in'), findsOneWidget);
+      // The wall keeps the way back to this computer without an account.
+      expect(
+        find.byKey(const Key('use-without-account-button')),
+        findsOneWidget,
+      );
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
@@ -797,10 +831,13 @@ void main() {
       await tester.tap(find.text('Install 1 tool'));
       await tester.pump();
       expect(provisioner.installCalls, [true]);
-      // Fork: a signed-out desktop window still opens on the login screen, which
-      // offers Sign in and local mode (upstream opens a guest desk here).
-      expect(app.status, AppStatus.unauthenticated);
-      expect(find.text('Sign in'), findsOneWidget);
+      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
+      // computer is served by the daemon over the loopback, and the sign-in is a sheet
+      // raised when the person reaches for another machine.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      // …on the desk, not in front of it.
+      expect(find.text('Sign in'), findsNothing);
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },

@@ -1015,11 +1015,13 @@ void main() {
     expect(spawnCount, lessThan(6));
   });
 
-  // The bug this closes: a daemon that signed ITSELF out (its machine was deleted from another
-  // machine) exits, and the supervisor respawned it forever — every replacement starting without a
-  // session and exiting again, silently, for the app's whole lifetime.
+  // A daemon that signed ITSELF out (its machine was deleted from another machine, or its session
+  // expired) used to exit and refuse to start again, so respawning it could only fail. A daemon
+  // now starts signed out and serves this computer, so the supervisor brings it back and tells
+  // the window, which becomes a guest. Fork: upstream's code does this, but its copy of this
+  // test still expected supervision to stop; the expectations below follow the code.
   test(
-    'startSupervising stops respawning once the CLI reports it is signed out',
+    'startSupervising respawns a signed-out daemon and tells the caller',
     () async {
       const computerId = '0123456789abcdef0123456789abcdef';
       final identityFile = File('${scratch.path}/computer-id')
@@ -1066,11 +1068,15 @@ void main() {
 
       expect(
         spawnCount,
-        0,
-        reason: 'a signed-out daemon must never be respawned',
+        greaterThan(0),
+        reason: 'a signed-out daemon still serves this computer',
       );
-      expect(signedOutCalls, 1, reason: 'the caller is told exactly once');
-      expect(timer.isActive, isFalse, reason: 'supervision stops for good');
+      expect(
+        signedOutCalls,
+        spawnCount,
+        reason: 'the caller is told before every spawn; the app notes it once',
+      );
+      expect(timer.isActive, isTrue, reason: 'supervision goes on');
     },
   );
 

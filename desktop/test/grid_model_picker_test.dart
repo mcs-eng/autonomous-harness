@@ -147,7 +147,7 @@ void main() {
     // carries — this control cannot put an agent on an API provider, so offering one would be a
     // choice that goes nowhere.
     expect(find.text('SUBSCRIPTION'), findsOneWidget);
-    expect(find.text('YOUR PRIVATE CLOUD'), findsOneWidget);
+    expect(find.text('ON YOUR MACHINES'), findsOneWidget);
     expect(find.text('API'), findsNothing);
 
     // A picker that can only move an agent ONTO a grid is a one-way door, so the engine's own login
@@ -337,7 +337,7 @@ void main() {
     expect(find.text('Qwen3.5-4B'), findsOneWidget);
     expect(find.text('LFM2.5-8B'), findsOneWidget);
     // Still one menu, redrawn — not a second one over the first.
-    expect(find.text('YOUR PRIVATE CLOUD'), findsOneWidget);
+    expect(find.text('ON YOUR MACHINES'), findsOneWidget);
   });
 
   testWidgets('shared model changes refresh the open picker', (tester) async {
@@ -399,7 +399,7 @@ void main() {
       );
       await open(tester, onSelected: (m) => picked = m);
 
-      expect(find.text('YOUR PRIVATE CLOUD'), findsOneWidget);
+      expect(find.text('ON YOUR MACHINES'), findsOneWidget);
       expect(find.text('SHARED · AUTONOMOUS.AI'), findsOneWidget);
       // The grid's name is folded INTO its heading now, not hung on a line beneath it —
       // where it read as an entry of the same kind as the models under it.
@@ -407,7 +407,7 @@ void main() {
       expect(find.text('DeepSeek-V4-Flash'), findsOneWidget);
       // Own first: Local sits above the shared grids.
       expect(
-        tester.getTopLeft(find.text('YOUR PRIVATE CLOUD')).dy <
+        tester.getTopLeft(find.text('ON YOUR MACHINES')).dy <
             tester.getTopLeft(find.text('SHARED · AUTONOMOUS.AI')).dy,
         isTrue,
       );
@@ -466,6 +466,9 @@ void main() {
       );
 
       expect(find.text('LOCAL · BRAN FLEET · BRAN-A'), findsOneWidget);
+      // Fork: the account's own grid keeps upstream's heading beside a
+      // registered local fleet's.
+      expect(find.text('ON YOUR MACHINES'), findsOneWidget);
       final rows = find.widgetWithText(ModelPickerRow, 'qwen3.5:12b');
       expect(rows, findsNWidgets(2));
       await tester.tap(rows.first);

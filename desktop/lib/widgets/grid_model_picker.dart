@@ -466,27 +466,11 @@ class _GridModelPickerState extends State<GridModelPicker> {
           left.models.length != right.models.length) {
         return false;
       }
-      for (var m = 0; m < left.models.length; m += 1) {
-        if (left.models[m].id != right.models[m].id ||
-            left.models[m].node != right.models[m].node ||
-            left.models[m].targetId != right.models[m].targetId) {
-          return false;
-        }
-      }
-    }
-    if (a.grids.length != b.grids.length) return false;
-    for (var i = 0; i < a.grids.length; i += 1) {
-      final left = a.grids[i];
-      final right = b.grids[i];
-      if (left.name != right.name ||
-          left.own != right.own ||
-          left.models.length != right.models.length) {
-        return false;
-      }
       for (var j = 0; j < left.models.length; j += 1) {
         if (left.models[j].id != right.models[j].id ||
             left.models[j].node != right.models[j].node ||
-            left.models[j].grid != right.models[j].grid) {
+            left.models[j].grid != right.models[j].grid ||
+            left.models[j].targetId != right.models[j].targetId) {
           return false;
         }
       }
@@ -652,9 +636,8 @@ class _ModelPickerPanelState extends State<_ModelPickerPanel> {
         account.toLowerCase().contains(needle);
   }
 
-  /// Fork: a registered local fleet is headed by its label (and profile), the account's own grid
-  /// as the private cloud it is (upstream calls it "On your machines"), and a shared grid as
-  /// upstream names it.
+  /// Fork: a registered local fleet is headed by its label (and profile). The account's own grid
+  /// and a shared grid keep upstream's headings.
   static String _sectionLabel(GridSection section) {
     if (section.source == 'local') {
       final name = section.label ?? section.name;
@@ -663,7 +646,7 @@ class _ModelPickerPanelState extends State<_ModelPickerPanel> {
           : 'Local · $name · ${section.profileId}';
     }
     if (section.own || section.source == 'private') {
-      return 'Your private cloud';
+      return 'On your machines';
     }
     return 'Shared · ${section.name}';
   }

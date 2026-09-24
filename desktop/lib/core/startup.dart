@@ -2,7 +2,6 @@ import '../shared/theme/appearance_prefs_store.dart';
 import '../stats/harness_stats.dart';
 import '../terminal/terminal_font_store.dart';
 import '../terminal/terminal_theme_store.dart';
-import 'local_mode.dart';
 import 'wsl_preferences.dart';
 import '../notify/alert_sounds.dart';
 
@@ -23,7 +22,6 @@ Future<void> loadPersistedSettings({
   TerminalThemeStore? terminalTheme,
   AppearancePrefsStore? appearance,
   HarnessStats? stats,
-  LocalModeStore? localMode,
   WslPreferencesStore? wslPreferences,
   AlertSoundStore? alertSounds,
   ScreenAlertStore? screenAlerts,
@@ -43,10 +41,6 @@ Future<void> loadPersistedSettings({
     // Counters begin moving with the first agent event. Loading them later
     // could overwrite a new event with the old count from disk.
     (stats ?? harnessStats).load(),
-    // The boot path reads this before it picks a screen: a computer that runs
-    // without an account must not land on the login screen while its choice
-    // is still on its way from disk.
-    (localMode ?? localModeStore).load(),
     // Runtime identity must be fixed before any WSL runner is constructed.
     (wslPreferences ?? wslPreferencesStore).load(),
     // Before the first agent event, not after: the setting decides whether that event makes a

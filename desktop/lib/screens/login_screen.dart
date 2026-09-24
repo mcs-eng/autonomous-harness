@@ -139,7 +139,16 @@ class LoginScreen extends StatelessWidget {
                               const LoginFleetMap(),
                               SizedBox(height: gap),
                             ],
-                            _Action(notifier: notifier, waiting: waiting),
+                            _Action(
+                              notifier: notifier,
+                              waiting: waiting,
+                              // Fork: the wall a desktop window can meet (a
+                              // cancelled or failed sign-in) offers this
+                              // computer again. Not the sheet over the desk,
+                              // whose X already goes back to it.
+                              offerLocalMode:
+                                  onClose == null && notifier.viewer == null,
+                            ),
                             if (notifier.lastError != null &&
                                 !notifier.sessionExpired) ...[
                               const SizedBox(height: 16),
@@ -172,10 +181,15 @@ class LoginScreen extends StatelessWidget {
 /// moves position, so the wait reads as *this button is working* rather than as
 /// a new screen.
 class _Action extends StatefulWidget {
-  const _Action({required this.notifier, required this.waiting});
+  const _Action({
+    required this.notifier,
+    required this.waiting,
+    this.offerLocalMode = false,
+  });
 
   final AppNotifier notifier;
   final bool waiting;
+  final bool offerLocalMode;
 
   @override
   State<_Action> createState() => _ActionState();
@@ -256,19 +270,21 @@ class _ActionState extends State<_Action> {
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
-          const SizedBox(height: 16),
-          // The other door. Not a second filled button: one primary action per
-          // card, and the quiet weight says what this is — a way to run this
-          // computer's agents with no relay and no account, not a rival to
-          // signing in. Other machines need the sign-in; this one does not.
-          TextButton(
-            key: const Key('use-without-account-button'),
-            onPressed: notifier.continueWithoutAccount,
-            style: TextButton.styleFrom(
-              foregroundColor: grid.AppPalette.textSecondary,
+          if (widget.offerLocalMode) ...[
+            const SizedBox(height: 16),
+            // Fork: the other door, back to this computer's desk without an
+            // account (local mode). Not a second filled button: one primary
+            // action per card, and the quiet weight says what this is — this
+            // computer's agents with no relay, not a rival to signing in.
+            TextButton(
+              key: const Key('use-without-account-button'),
+              onPressed: notifier.continueWithoutAccount,
+              style: TextButton.styleFrom(
+                foregroundColor: grid.AppPalette.textSecondary,
+              ),
+              child: const Text('Use this computer without an account'),
             ),
-            child: const Text('Use this computer without an account'),
-          ),
+          ],
         ],
       );
     }

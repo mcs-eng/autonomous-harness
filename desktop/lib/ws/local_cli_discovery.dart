@@ -509,12 +509,7 @@ class LocalCliDiscovery {
           // the respawn point is already rate-limited by the backoff above — so this runs once per
           // spawn attempt rather than once every [checkInterval].
           if (stillSignedIn != null && !await stillSignedIn()) {
-            // Fork: the window this supervises goes back to its login screen
-            // when signed out, so supervision stops here rather than keeping a
-            // signed-out daemon up behind it (upstream respawns it for a guest).
-            timer.cancel();
             onSignedOut?.call();
-            return;
           }
           // Canceling a periodic timer does not cancel its active async tick.
           // A closed window during the auth check must not respawn the daemon.

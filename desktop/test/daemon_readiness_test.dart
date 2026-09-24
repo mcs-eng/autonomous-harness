@@ -22,6 +22,7 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
   void Function(LocalCliEndpoint endpoint)? onSnapshot;
   void Function(bool online)? onBackendOnline;
   Future<bool> Function()? stillSignedIn;
+  void Function()? onSignedOut;
 
   @override
   Future<LocalCliProbe> ensureRunning({
@@ -52,6 +53,7 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
     this.onSnapshot = onSnapshot;
     this.onBackendOnline = onBackendOnline;
     this.stillSignedIn = stillSignedIn;
+    this.onSignedOut = onSignedOut;
     return Timer(const Duration(days: 1), () {});
   }
 }
@@ -59,6 +61,14 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
 class _SignedInCli extends CliLogin {
   @override
   Future<CliAuthStatus> checkStatus() async => CliAuthStatus(loggedIn: true);
+}
+
+/// Signed in until the test says otherwise.
+class _SwitchableCli extends CliLogin {
+  bool loggedIn = true;
+  @override
+  Future<CliAuthStatus> checkStatus() async =>
+      CliAuthStatus(loggedIn: loggedIn);
 }
 
 class _DelayedStatus extends CliLogin {
@@ -127,6 +137,37 @@ final _endpoint = LocalCliEndpoint(
 );
 
 void main() {
+  // Fork: the supervisor's callbacks answer only for the auth revision they
+  // were started under. A session that ends while the window is open turns it
+  // into a guest (upstream's desk, the fork's local mode) under a new revision,
+  // so the supervisor has to be started again rather than kept running deaf.
+  test('a session that ends while the app is open leaves a guest with a live supervisor', () async {
+    final discovery = _ScriptedDiscovery([LocalCliProbe.ready(_endpoint)]);
+    final login = _SwitchableCli();
+    final notifier = _Notifier(discovery, cliLogin: login)
+      ..status = AppStatus.authenticated;
+    addTearDown(notifier.dispose);
+    await notifier.retryMachines();
+    expect(discovery.superviseCalls, 1);
+    final staleBackendOnline = discovery.onBackendOnline!;
+
+    // What the supervisor calls when the daemon it would respawn is signed out.
+    login.loggedIn = false;
+    discovery.onSignedOut!();
+    for (var i = 0; i < 100 && discovery.superviseCalls < 2; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(notifier.status, AppStatus.authenticated);
+    expect(notifier.isGuest, isTrue);
+    expect(notifier.lastError, contains('signed out'));
+    expect(discovery.superviseCalls, 2);
+    staleBackendOnline(false);
+    expect(notifier.backendOnline, isTrue, reason: 'the old one is inert');
+    discovery.onBackendOnline!(false);
+    expect(notifier.backendOnline, isFalse, reason: 'the new one is live');
+  });
+
   test(
     'a late sign-in check cannot authorize restart after disposal',
     () async {

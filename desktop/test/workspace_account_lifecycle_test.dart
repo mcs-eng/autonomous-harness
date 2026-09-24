@@ -11,6 +11,8 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_layout_store.dart';
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/terminal/terminal_session.dart';
+import 'package:harness/viewer/viewer_key_store.dart';
+import 'package:harness/viewer/viewer_services.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 
 import 'swarm_screen_test.dart' show terminal;
@@ -62,6 +64,12 @@ class _Api extends ApiClient {
   }
 }
 
+/// Fork: a VIEWER, explicitly. These are the flows where a sign-out or an
+/// expired session ends on the login screen, which in upstream's current model
+/// only a viewer has: a desktop window stays on its desk as a guest (the fork's
+/// local mode; see local_mode_test.dart). Upstream runs this file as a viewer
+/// on Windows implicitly (its `kViewerMode` includes Windows); this fork's
+/// Windows build is a desktop, so the viewer is named here.
 class WorkspaceAccountFixture extends AppNotifier {
   WorkspaceAccountFixture(MemoryStore storage, this.cli)
     : super(
@@ -70,22 +78,22 @@ class WorkspaceAccountFixture extends AppNotifier {
         cliLogin: cli,
         localCliDiscovery: _Discovery(),
         paneLayoutStore: PaneLayoutStore(storage: storage),
+        viewer: ViewerServices(
+          config: AppConfig.dev,
+          session: AuthSession(storage: MemoryStore()),
+          keys: ViewerKeyStore(storage: MemoryStore()),
+        ),
       ) {
     api = _Api();
     status = AppStatus.authenticated;
   }
   final WorkspaceAccountLogin cli;
   int get inventoryRequests => (api as _Api).inventoryRequests;
-  var expired = false;
-  @override
-  Future<void> ensureCliDaemonReady() async {
-    if (expired) await super.ensureCliDaemonReady();
-  }
 
   Future<void> expire() async {
-    expired = true;
-    await ensureCliDaemonReady();
-    expired = false;
+    // Fork: a viewer probes no daemon, so the session ends the way a viewer
+    // meets it, at runtime, rather than through `ensureCliDaemonReady`.
+    signedOutAtRuntimeForTest();
   }
 }
 
@@ -176,7 +184,10 @@ void main() {
       expect(app.machineStates, isEmpty);
       expect(app.machinesAreStale, isFalse);
       expect(app.closedHistory, isEmpty);
-      expect(app.lastError, contains('Sign in again'));
+      expect(
+        app.lastError,
+        matches(RegExp('sign in again', caseSensitive: false)),
+      );
     },
   );
 

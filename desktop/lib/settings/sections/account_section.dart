@@ -15,7 +15,6 @@ class AccountSection extends StatelessWidget {
     listenable: notifier,
     builder: (context, _) {
       final local = notifier.localManualFixture != null;
-      final localMode = notifier.localOnly;
       final profile = notifier.currentUser;
       // A guest's row says what an account is FOR and offers it; the sheet opens
       // over Settings, which stays where it is — there is nothing to leave, and
@@ -27,9 +26,10 @@ class AccountSection extends StatelessWidget {
               'This computer works without one. An account adds your other '
               'machines, the shared desk and voice on the dial.',
           child: SingleChildScrollView(
+            // Fork: the guest desk is what this fork's labels call local mode.
             child: SettingRow(
-              title: 'Not signed in',
-              detail: 'Sign in to reach your other machines',
+              title: 'Local mode',
+              detail: 'Not signed in. Sign in to reach your other machines',
               control: FilledButton(
                 key: const Key('settings-sign-in-button'),
                 // Straight back to the desk once the account lands. Settings is
@@ -51,38 +51,21 @@ class AccountSection extends StatelessWidget {
         title: 'Account',
         subtitle: local
             ? 'Connected to a local development session.'
-            : localMode
-            ? 'This computer runs without an account. Sign in to reach other machines.'
             : 'Your Harness sign-in on this computer.',
         child: SingleChildScrollView(
           child: SettingRow(
             title:
-                profile?.displayName ??
-                (local
-                    ? 'Local session'
-                    : localMode
-                    ? 'Local mode'
-                    : 'Signed in'),
+                profile?.displayName ?? (local ? 'Local session' : 'Signed in'),
             detail:
                 profile?.email ??
-                (local
-                    ? 'Loopback backend'
-                    : localMode
-                    ? 'This computer, no account'
-                    : 'Profile unavailable'),
+                (local ? 'Loopback backend' : 'Profile unavailable'),
             control: OutlinedButton(
               key: const Key('settings-sign-out-button'),
               onPressed: () {
                 Navigator.of(context).pop();
                 notifier.logout();
               },
-              child: Text(
-                local
-                    ? 'Disconnect local session'
-                    : localMode
-                    ? 'Leave local mode'
-                    : 'Sign out',
-              ),
+              child: Text(local ? 'Disconnect local session' : 'Sign out'),
             ),
           ),
         ),
