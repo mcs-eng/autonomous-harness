@@ -246,6 +246,30 @@ test('a porkchop does not price a transfer over 15 years', () => {
   assert.notEqual(grid.best.dv, undefined)
 })
 
+test('a porkchop does not let a past departure win Best window', () => {
+  const past = '2018-05-07T19:02:36.521Z'
+  const future = '2033-04-19T00:00:00.000Z'
+  assert.ok(Date.parse(past) < Date.now())
+  assert.ok(Date.parse(future) > Date.now())
+  const span = (Date.parse(future) - Date.parse(past)) / (DAY_S * 1000)
+  const grid = porkchop({
+    from: 'earth',
+    to: 'mars',
+    depart0: past,
+    departSpanDays: span,
+    tof0Days: 200,
+    tofSpanDays: 0,
+    nDep: 2,
+    nTof: 1,
+    parkingKm: 200,
+    captureKm: 250,
+  })
+  assert.equal(grid.cells[0][0], null)
+  assert.ok(grid.cells[1][0] && Number.isFinite(grid.cells[1][0].dv))
+  assert.equal(grid.best.depart, future)
+  assert.equal(grid.best.dv, grid.cells[1][0].dv)
+})
+
 test('an Earth–Neptune Hohmann over 15 years stays not ready', () => {
   const mission = {
     spec: 1,
