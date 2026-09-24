@@ -62,8 +62,10 @@ export function validateConfig(raw) {
     for (const key of ['gridBinary', 'gridHome']) if (m[key] !== undefined && (typeof m[key] !== 'string' || !m[key].startsWith('/') || m[key].includes('\0') || m[key].length > 1024)) throw new Error(`${key} for ${m.id} must be an absolute path.`);
     return { id: m.id, name: text(m.name) || m.id, transport: m.transport, ...(m.transport === 'harness' ? { machineId: m.machineId } : {}), ...(m.transport === 'ssh' ? { host: m.host, ...(m.port ? { port: m.port } : {}) } : {}), ...(m.gridBinary ? { gridBinary: m.gridBinary } : {}), ...(m.gridHome ? { gridHome: m.gridHome } : {}) };
   });
-  // The controller is explicit, so editing the order of an inventory cannot redirect fleet reads.
-  const controller = raw.controller || machines.find(m => m.transport === 'local')?.id || machines[0].id;
+  // Absent picks the local machine, then the first. A present empty value must not collapse to that,
+  // or inventory order becomes the controller.
+  if (raw.controller != null && (typeof raw.controller !== 'string' || !ids.has(raw.controller))) throw new Error('controller must name a configured machine.');
+  const controller = raw.controller ?? machines.find(m => m.transport === 'local')?.id ?? machines[0].id;
   if (!ids.has(controller)) throw new Error('controller must name a configured machine.');
   const sourceIds = new Set(), sensorEndpoints = new Set();
   if (raw.sensors !== undefined && (!Array.isArray(raw.sensors) || raw.sensors.length > 16)) throw new Error('sensors must contain at most 16 sources.');
