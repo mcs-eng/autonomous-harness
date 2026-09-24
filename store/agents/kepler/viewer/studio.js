@@ -452,6 +452,12 @@ document.querySelector('#mode').addEventListener('change', () => {
 document.querySelector('#window').addEventListener('click', async () => {
   const leg = legOf()
   if (!leg) return
+  const parkingRaw = document.querySelector('#parking').value
+  const parkingKm = Number(parkingRaw)
+  if (parkingRaw === '' || !(parkingKm >= 50)) {
+    say('Parking altitude must be at least 50 km.')
+    return
+  }
   say('Searching the window…')
   await new Promise((r) => setTimeout(r, 20))
   const captureRaw = document.querySelector('#capture').value
@@ -464,7 +470,7 @@ document.querySelector('#window').addEventListener('click', async () => {
     tofSpanDays: 220,
     nDep: 24,
     nTof: 18,
-    parkingKm: Number(document.querySelector('#parking').value) || 200,
+    parkingKm,
     captureKm: captureRaw === '' ? null : Number(captureRaw),
     prograde: document.querySelector('#prograde').value === 'true',
   })

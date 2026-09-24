@@ -35,6 +35,17 @@ test('Best window treats a blank Capture field as a flyby', () => {
   assert.doesNotMatch(call, /\|\|\s*250/)
 })
 
+test('Best window does not turn a blank Parking field into a 200 km burn', () => {
+  const src = fs.readFileSync(path.join(root, 'viewer/studio.js'), 'utf8')
+  const handler = src.slice(src.indexOf("document.querySelector('#window')"), src.indexOf("document.querySelector('#chart')"))
+  assert.match(handler, /parkingRaw === ''/)
+  assert.match(handler, /!\(parkingKm >= 50\)/)
+  assert.doesNotMatch(handler, /\|\|\s*200/)
+  const searchAt = handler.indexOf("say('Searching the window…')")
+  const refuseAt = handler.indexOf('Parking altitude must be at least 50 km.')
+  assert.ok(refuseAt !== -1 && refuseAt < searchAt)
+})
+
 test('a broken mission stays not ready', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler-'))
   fs.writeFileSync(path.join(dir, 'mission.json'), '{')
