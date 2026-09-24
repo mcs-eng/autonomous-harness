@@ -1,0 +1,12 @@
+{
+  "name": "@autonomous/kepler-harness",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node skills/kepler/scripts/check.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

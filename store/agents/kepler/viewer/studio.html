@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kepler</title>
+  <link rel="stylesheet" href="/studio.css">
+</head>
+<body>
+  <canvas id="sky"></canvas>
+  <header class="mast">
+    <p class="mark">Kepler</p>
+    <h1 id="title">Mission</h1>
+    <p id="clock" class="clock">—</p>
+  </header>
+  <aside class="dossier" id="dossier">
+    <form id="plan">
+      <div class="row">
+        <label>From
+          <select id="from"></select>
+        </label>
+        <label>To
+          <select id="to"></select>
+        </label>
+      </div>
+      <div class="row">
+        <label>Depart
+          <input id="depart" type="date" required>
+        </label>
+        <label>Arrive
+          <input id="arrive" type="date" required>
+        </label>
+      </div>
+      <div class="row">
+        <label>Mode
+          <select id="mode">
+            <option value="lambert">Lambert</option>
+            <option value="hohmann">Hohmann</option>
+          </select>
+        </label>
+        <label>Way
+          <select id="prograde">
+            <option value="true">Prograde</option>
+            <option value="false">Retrograde</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>Parking km
+          <input id="parking" type="number" min="50" step="10" value="200">
+        </label>
+        <label>Capture km
+          <input id="capture" type="number" min="50" step="10" placeholder="flyby">
+        </label>
+      </div>
+      <div class="actions">
+        <button type="submit" id="save">Save</button>
+        <button type="button" id="window">Best window</button>
+        <button type="button" id="chart">Porkchop</button>
+      </div>
+    </form>
+    <section id="budget" class="budget"></section>
+    <section id="findings" class="findings"></section>
+    <canvas id="pork" hidden></canvas>
+    <p id="porkhint" class="hint" hidden>Click a cell to take its dates. Darker teal is cheaper. The cross is this leg.</p>
+    <section id="almanac" class="almanac"></section>
+    <p class="fine">Two-body J2000 elements, mean anomaly only. A concept trajectory, not a navigation ephemeris.</p>
+  </aside>
+  <footer class="transport">
+    <button type="button" id="play" aria-label="Play">Play</button>
+    <input id="scrub" type="range" min="0" max="1000" value="0">
+    <div class="views">
+      <button type="button" data-view="inner">Inner</button>
+      <button type="button" data-view="system">System</button>
+      <button type="button" data-view="outer">Outer</button>
+    </div>
+  </footer>
+  <p id="status" class="status" role="status"></p>
+  <script type="module" src="/studio.js"></script>
+</body>
+</html>

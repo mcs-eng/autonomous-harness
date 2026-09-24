@@ -1,0 +1,32 @@
+{
+  "spec": 1,
+  "id": "autonomous/kepler",
+  "name": "Kepler",
+  "category": "Mission design",
+  "author": "Autonomous",
+  "description": "Design an interplanetary transfer — dates, parking orbit, capture or flyby — and watch the trajectory in an orrery. The pane budgets injection and capture, and a porkchop shows cheaper windows.",
+  "engine": "claude",
+  "workspace": {
+    "template": "template",
+    "marker": "mission.json",
+    "init": "toolchain/init-workspace.sh"
+  },
+  "agent": {
+    "instructions": "AGENTS.md",
+    "skills": ["skills"],
+    "env": {
+      "KEPLER_TOOLCHAIN": "${dsh}/toolchain",
+      "KEPLER_SKILLS": "${dsh}/skills"
+    }
+  },
+  "toolchain": {
+    "setup": "toolchain/setup.sh",
+    "doctor": "toolchain/doctor.sh"
+  },
+  "viewer": {
+    "command": "viewer/viewer.sh",
+    "url": "http://127.0.0.1:${port}/",
+    "artifactExtensions": [".json"]
+  },
+  "verdict": ".harness/verdict.json"
+}
