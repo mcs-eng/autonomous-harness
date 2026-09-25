@@ -1,3 +1,4 @@
+import * as gitPullRequest from './lib/gitPullRequest.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
@@ -9,7 +10,9 @@ import type { TerminalStreamManager } from './lib/terminalStreamManager.js'
 import { decodeTerminalLocal, TerminalBinaryKind } from './lib/terminalBinary.js'
 import { registry, type RegisteredSession } from './lib/registry.js'
 import { stoppedAgents } from './lib/stoppedAgents.js'
+import { AgentStopError } from './lib/stopAgentService.js'
 import * as mediaPreview from './lib/mediaPreview.js'
+import * as gitProject from './lib/gitProject.js'
 import * as projectFolder from './lib/projectFolder.js'
 import * as projectPreview from './lib/projectPreview.js'
 import * as storeCatalog from './dsh/catalog.js'
@@ -19,6 +22,72 @@ import { clearGridMcpUrlCache } from './lib/gridMcpUrl.js'
 import { removeLocalGridProfile, setLocalGridProfile } from './lib/gridProfiles.js'
 import { env } from './config/env.js'
 import { forgetGridModels } from './lib/gridModels.js'
+import { LocalModels } from './lib/localModels.js'
+
+describe('local model lifecycle RPCs', () => {
+  afterEach(() => vi.restoreAllMocks())
+  it.each(['grid_fleet_models_list', 'grid_fleet_model_start', 'grid_fleet_model_stop'])('dispatches %s and returns its correlated result', async type => {
+    const socket = new BackendSocket('fixture')
+    socket.setHarnessGridName('home')
+    const frames: any[] = []
+    socket.registerLocalClient('local:models', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
+    const list = vi.spyOn(LocalModels.prototype, 'list').mockResolvedValue({ models: [], busy: false, observedAt: 'fixture' })
+    const act = vi.spyOn(LocalModels.prototype, 'act').mockResolvedValue({ error: 'fixture refusal' })
+    socket.handleLocalFrame('local:models', { type, payload: { requestId: 'models-rpc', modelId: 'fixture/model', refresh: true } })
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === `${type}_result`)).toBe(true))
+    expect(frames.find(frame => frame.type === `${type}_result`).payload.requestId).toBe('models-rpc')
+    if (type === 'grid_fleet_models_list') expect(list).toHaveBeenCalledWith('home', true)
+    else expect(act).toHaveBeenCalledWith('home', 'fixture/model', type.endsWith('start') ? 'start' : 'stop')
+    await socket.stop()
+  })
+
+  it('a slow catalog never blocks terminal or agent inventory, and errors stay redacted', async () => {
+    const socket = new BackendSocket('fixture')
+    socket.setHarnessGridName('home')
+    const frames: any[] = []
+    socket.registerLocalClient('local:models', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
+    let reject!: (cause: Error) => void
+    vi.spyOn(LocalModels.prototype, 'list').mockReturnValue(new Promise((_resolve, fail) => { reject = fail }))
+    socket.handleLocalFrame('local:models', { type: 'grid_fleet_models_list', payload: { requestId: 'catalog' } })
+    socket.handleLocalFrame('local:models', { type: 'agents_list', payload: { requestId: 'agents' } })
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === 'agents_list_result')).toBe(true))
+    expect(frames.some(frame => frame.type === 'grid_fleet_models_list_result')).toBe(false)
+    reject(new Error('private-token'))
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === 'grid_fleet_models_list_result')).toBe(true))
+    expect(frames.find(frame => frame.type === 'grid_fleet_models_list_result').payload).toMatchObject({ requestId: 'catalog', error: 'Models are unavailable. Try again.' })
+    expect(JSON.stringify(frames)).not.toContain('private-token')
+    await socket.stop()
+  })
+
+  it('rejects unencrypted remote lifecycle requests before reaching the model service', async () => {
+    const socket = new BackendSocket('fixture')
+    const act = vi.spyOn(LocalModels.prototype, 'act')
+    for (const type of ['grid_fleet_model_start', 'grid_fleet_model_stop']) {
+      await (socket as any).dispatchDown({ type, payload: { requestId: 'unsafe', modelId: 'fixture/model' } }, 'remote')
+    }
+    expect(act).not.toHaveBeenCalled()
+    await socket.stop()
+  })
+})
+
+describe('confirmed harness pause replies', () => {
+  it.each(['unsupported', 'unconfirmed', 'confirmed'] as const)('%s stop never sends a false success', async state => {
+    const socket = new BackendSocket('fixture')
+    const frames: any[] = []
+    socket.registerLocalClient('local:pause', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
+    if (state !== 'unsupported') socket.onDeleteAgent = async () => {
+      if (state === 'unconfirmed') throw new AgentStopError('The process could not be verified.')
+    }
+    await (socket as any).dispatchDown({ type: 'agent_delete', payload: { requestId: 'pause', agentId: 'fixture' } }, 'local:pause')
+    const reply = frames.find(frame => frame.type === 'agent_delete_result')?.payload
+    expect(reply).toMatchObject(state === 'confirmed' ? { deleted: true } : {
+      error: state === 'unsupported' ? 'UNSUPPORTED' : 'STOP_UNCONFIRMED',
+    })
+    if (state !== 'confirmed') expect(reply.deleted).toBeUndefined()
+    if (state === 'unconfirmed') expect(reply.detail).toBe('The process could not be verified.')
+    await socket.stop()
+  })
+})
 
 describe('viewer forwarding authentication', () => {
   it('requires encryption and a web-role session remotely, while permitting trusted local clients', async () => {
@@ -500,6 +569,80 @@ describe('BackendSocket outbound queue', () => {
     await socket.stop()
   })
 
+  it('returns Git branch choices only to the requesting encrypted connection', async () => {
+    const preview = { isGit: true, root: '/remote/workspace', branch: 'main', branches: [{ ref: 'refs/heads/private-branch', name: 'private-branch', remote: false }] }
+    const read = vi.spyOn(gitProject, 'readGitProject').mockResolvedValue(preview)
+    const socket = new BackendSocket('token')
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    vi.spyOn(socket.e2ee, 'unwrapDown').mockReturnValue({ type: 'git_project_info', payload: {
+      requestId: 'preview-1', path: '/remote/workspace',
+    } })
+    vi.spyOn(socket.e2ee, 'hasSession').mockReturnValue(true)
+    const wrap = vi.spyOn(socket.e2ee, 'wrapRpcReply').mockReturnValue({
+      type: 'git_project_info_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-preview' } },
+    })
+    ws.message({ t: 'down', connId: 'viewer-a', frame: {
+      type: 'git_project_info', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-request' } },
+    } })
+    await vi.waitFor(() => expect(wrap).toHaveBeenCalledWith('viewer-a', 'git_project_info_result', 'preview-1', preview))
+    expect(read).toHaveBeenCalledWith('/remote/workspace')
+    expect(parseSent(ws)).toContainEqual(expect.objectContaining({ targetConnId: 'viewer-a', frame: {
+      type: 'git_project_info_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-preview' } },
+    } }))
+    expect(JSON.stringify(parseSent(ws))).not.toContain('private-branch')
+    await socket.stop()
+  })
+
+  it('returns PR status only to the requesting encrypted connection', async () => {
+    const preview = { status: 'found' as const, number: 12, state: 'Merged' as const, url: 'https://github.com/private/repo/pull/12' }
+    vi.spyOn(registry, 'resolve').mockReturnValue({ cwd: '/remote/workspace' } as RegisteredSession)
+    const read = vi.spyOn(gitPullRequest, 'readGitPullRequest').mockResolvedValue(preview)
+    const socket = new BackendSocket('token')
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    vi.spyOn(socket.e2ee, 'unwrapDown').mockReturnValue({ type: 'git_pull_request', payload: {
+      requestId: 'preview-1', agentId: 'agent1',
+    } })
+    vi.spyOn(socket.e2ee, 'hasSession').mockReturnValue(true)
+    const wrap = vi.spyOn(socket.e2ee, 'wrapRpcReply').mockReturnValue({
+      type: 'git_pull_request_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-preview' } },
+    })
+    ws.message({ t: 'down', connId: 'viewer-a', frame: {
+      type: 'git_pull_request', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-request' } },
+    } })
+    await vi.waitFor(() => expect(wrap).toHaveBeenCalledWith('viewer-a', 'git_pull_request_result', 'preview-1', preview))
+    expect(read).toHaveBeenCalledWith('/remote/workspace')
+    expect(parseSent(ws)).toContainEqual(expect.objectContaining({ targetConnId: 'viewer-a', frame: {
+      type: 'git_pull_request_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-preview' } },
+    } }))
+    expect(JSON.stringify(parseSent(ws))).not.toContain('github.com/private')
+    await socket.stop()
+  })
+
+  it('returns a correlated Git error when discovery rejects or the path is malformed', async () => {
+    const read = vi.spyOn(gitProject, 'readGitProject').mockRejectedValue(new Error('unavailable'))
+    const socket = new BackendSocket('token')
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    vi.spyOn(socket.e2ee, 'unwrapDown').mockReturnValue({ type: 'git_project_info', payload: {
+      requestId: 'git-error', path: 42,
+    } })
+    vi.spyOn(socket.e2ee, 'hasSession').mockReturnValue(true)
+    const wrap = vi.spyOn(socket.e2ee, 'wrapRpcReply').mockReturnValue({
+      type: 'git_project_info_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-error' } },
+    })
+    ws.message({ t: 'down', connId: 'viewer-a', frame: {
+      type: 'git_project_info', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-request' } },
+    } })
+    await vi.waitFor(() => expect(wrap).toHaveBeenCalledWith('viewer-a', 'git_project_info_result', 'git-error', { error: 'UNAVAILABLE' }))
+    expect(read).toHaveBeenCalledWith('')
+    await socket.stop()
+  })
+
   it('serves media only to the requesting encrypted connection', async () => {
     vi.spyOn(registry, 'resolve').mockReturnValue({ cwd: '/remote/workspace' } as RegisteredSession)
     const media = { media: true as const, filename: 'preview.png', offset: 0, totalBytes: 3,
@@ -912,7 +1055,11 @@ describe('BackendSocket outbound queue', () => {
     }
   })
 
-  it('prepares a remote project once under its creation receipt and retains its folder after a refused launch', async () => {
+  it.each([
+    { projectSource: 'remote', repositoryUrl: 'owner/repo' },
+    { projectSource: 'worktree', gitSource: '/remote/repo', branchRef: 'refs/heads/main' },
+    { projectSource: 'branch', gitSource: '/remote/repo', branchRef: 'refs/heads/feature' },
+  ])('prepares $projectSource once under its creation receipt and retains its folder after a refused launch', async (project) => {
     const socket = new BackendSocket('token')
     const frames: Array<Record<string, unknown>> = []
     socket.registerLocalClient('local:project', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
@@ -921,7 +1068,7 @@ describe('BackendSocket outbound queue', () => {
     const create = vi.fn(async () => ({ ok: false as const, error: 'TMUX_UNAVAILABLE' }))
     socket.onCreateAgent = create
     const creationId = randomUUID()
-    const payload = { creationId, engine: 'claude', projectSource: 'remote', repositoryUrl: 'owner/repo' }
+    const payload = { creationId, engine: 'claude', ...project }
     const ask = (type: string, requestId: string, choices = payload) => socket.handleLocalFrame('local:project', { type, payload: { requestId, ...choices } })
     try {
       ask('agent_create', 'first')
@@ -936,7 +1083,7 @@ describe('BackendSocket outbound queue', () => {
       }
       expect(create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ cwd: '/remote/Harness Projects/repo' }))
       expect(prepare).toHaveBeenCalledTimes(1)
-      ask('agent_create', 'changed', { ...payload, repositoryUrl: 'owner/different' })
+      ask('agent_create', 'changed', { ...payload, engine: 'codex' })
       await vi.waitFor(() => expect(frames).toContainEqual(expect.objectContaining({ payload: expect.objectContaining({ requestId: 'changed', error: 'CREATION_CONFLICT' }) })))
       expect(prepare).toHaveBeenCalledTimes(1)
       ask('agent_create_status', 'saved')

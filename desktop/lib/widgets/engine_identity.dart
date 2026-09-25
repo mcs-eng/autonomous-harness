@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:harness/terminal/terminal_text.dart';
 
 import '../core/harness_catalog.dart';
 import '../core/models.dart';
@@ -396,7 +397,8 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/jev-sheets',
     label: 'Jev Sheets',
     category: 'Productivity',
-    tagline: 'Drop in any spreadsheet, ask in plain words, get every row answered in seconds',
+    tagline:
+        "Ask every row a question, test better wording, and keep the evidence",
     creator: 'Autonomous',
     color: Color(0xfffbbf24),
     asset: 'assets/engine-icons/jev-sheets.png',
@@ -428,7 +430,7 @@ const _harnesses = <String, EngineIdentity>{
   // branding/app_icon.svg); ours, like Circuit's and Workshop's.
   'autonomous/autonomous-grid': EngineIdentity(
     id: 'autonomous/autonomous-grid',
-    label: 'Grid',
+    label: 'Model Manager',
     category: 'Local AI',
     tagline: 'Deploy open-weight models across your machines and watch the fleet live',
     creator: 'Autonomous',
@@ -468,7 +470,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/typst',
     label: 'Typst',
     category: 'Documents',
-    tagline: 'Markup-based typesetting system',
+    tagline: "Make beautiful documents and carry precise feedback into the next draft",
     creator: 'Typst GmbH',
     color: Color(0xff239dad),
     asset: 'assets/engine-icons/typst.png',
@@ -513,7 +515,8 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/blender',
     label: 'Blender',
     category: '3D',
-    tagline: 'Free and open source 3D creation software',
+    tagline:
+        "Build in 3D, shape your own variations, and keep the designs you love",
     creator: 'Blender Foundation',
     color: Color(0xffe87d0d),
     asset: 'assets/engine-icons/blender.png',
@@ -522,7 +525,8 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/mujoco',
     label: 'MuJoCo',
     category: 'Simulation',
-    tagline: 'Advanced physics simulation',
+    tagline:
+        "Run real physics, change the world, and compare what happens next",
     creator: 'Google DeepMind',
     color: Color(0xff1b2a6b),
     asset: 'assets/engine-icons/mujoco.png',
@@ -540,7 +544,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/strudel',
     label: 'Strudel',
     category: 'Music',
-    tagline: 'Music live coding environment for the browser',
+    tagline: "Write music, perform it live, and keep the sound with its source",
     creator: 'Strudel',
     color: Color(0xffe0577b),
     asset: 'assets/engine-icons/strudel.png',
@@ -549,7 +553,8 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/rdkit',
     label: 'RDKit',
     category: 'Chemistry',
-    tagline: 'Open-source cheminformatics software',
+    tagline:
+        "Explore molecules in 3D, turn a bond, and keep a reproducible study",
     creator: 'RDKit',
     color: Color(0xff1d7bb8),
     asset: 'assets/engine-icons/rdkit.png',
@@ -567,7 +572,8 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/circuitjs',
     label: 'CircuitJS',
     category: 'Circuits',
-    tagline: 'Electronic circuit simulator in the browser',
+    tagline:
+        "Build a circuit, compare native traces, and keep what you discovered",
     creator: 'Paul Falstad',
     color: Color(0xff50fa78),
     asset: 'assets/engine-icons/circuitjs.png',
@@ -605,7 +611,7 @@ const _harnesses = <String, EngineIdentity>{
     id: 'autonomous/godogen',
     label: 'Godogen',
     category: 'Games',
-    tagline: 'Autonomous game development',
+    tagline: "Make a game, rewind a run, and turn playtest moments into the next version",
     creator: 'Alex Ermolov',
     color: Color(0xffb5d9ae),
     asset: 'assets/engine-icons/godogen.png',
@@ -942,6 +948,7 @@ class EngineMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    TerminalFontScope.watch(context);
     final identity = engineIdentity(engine, displayName: displayName);
     final mark = identity.asset != null
         ? Image.asset(
@@ -1011,6 +1018,7 @@ class _InitialMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    TerminalFontScope.watch(context);
     return SizedBox.square(
       dimension: size,
       child: Center(

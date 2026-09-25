@@ -1,16 +1,17 @@
 /** Exact-resume lifecycle shared by the daemon and its isolated acceptance tests. */
-import { statSync } from 'node:fs'
 import { isTerminalEngine } from '../engines/types.js'
 import { installedDsh } from '../dsh/installed.js'
-import { registry as liveRegistry, validTranscriptPath, type RegisteredSession } from './registry.js'
+import { engineKeepsTranscriptFile, registry as liveRegistry, validTranscriptPath, type RegisteredSession } from './registry.js'
 import type { StoppedAgentStore } from './stoppedAgents.js'
 import { resumeStoppedAgent, waitForResumedAgent, resumeChanged, resumeUnconfirmed } from './resumeStoppedAgent.js'
+import { awaitsResumeHook } from './resumeCapability.js'
 import { checkPidRuntime } from './deleteAgentFallback.js'
 import { checkSessionRuntime, clearPaneRemainOnExit, resolvePaneEngineProcess, tmuxPaneState } from './tmux.js'
 import { listTmuxPanes } from './tmuxAgentDiscovery.js'
 import { enginePathOverride } from './engineBin.js'
 import { engineInstallRecipe } from './engineInstall.js'
 import { buildEngineLaunchArgv } from './engineLaunch.js'
+import { workspaceMissing } from './workspaceCheck.js'
 import { buildHarnessSessionLabel } from './harnessSessionLabel.js'
 import { createAndRegisterPane, type CreateAgentPaneDeps } from './createAgentPane.js'
 import type { LaunchOverrides, LaunchOverridesResult } from './launchOverrides.js'
@@ -41,6 +42,13 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     // Registry observations may update the same object; pin the route being verified.
     const saved = { ...entry }
     const ownsRoute = () => current() && registry.byAgent(saved.agentId)?.tmuxPane === saved.tmuxPane
+    // A second look at an unconfirmed resume: the verdict is withdrawn before the check, or the
+    // readiness probe would return it straight back. The desk sees the tile leave "Start failed".
+    const unconfirmed = ownsRoute() ? registry.byAgent(saved.agentId) : undefined
+    if (unconfirmed?.launch?.state === 'failed' && unconfirmed.launch.error === 'RESUME_UNCONFIRMED') {
+      // No await separates the verified row above from this synchronous update.
+      announceSession(registry.setLaunch(saved.agentId, { state: 'starting' })!)
+    }
     const result = await waitForResumedAgent(saved, {
       current: ownsRoute,
       session: () => registry.byAgent(saved.agentId),
@@ -53,7 +61,15 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
       await clearPaneRemainOnExit(saved.tmuxPane)
       if (!ownsRoute()) return resumeChanged
       stoppedAgents.finishResume(saved.agentId)
-      announceSession(result.session)
+      // A resume confirmed by its process rather than by a startup hook has nothing else coming to
+      // mark the row ready, and a row left `starting` reads as "Starting" for ever and keeps
+      // discovery out of it (see cli.ts's resumeOnly guard). Same condition as the proof itself in
+      // `waitForResumedAgent`: only a resume that ASKED for a conversation, on an engine that hooks
+      // at launch, is marked ready by `register` instead.
+      const ready = awaitsResumeHook(saved.engine, saved.sessionId)
+        ? result.session
+        : registry.setLaunch(saved.agentId, { state: 'ready' }) ?? result.session
+      announceSession(ready)
     } else if (result.error !== 'AGENT_CHANGED') {
       const row = registry.byAgent(saved.agentId)!
       const failed = registry.setLaunch(row.agentId, { state: 'failed', error: result.error, detail: result.detail })
@@ -104,10 +120,14 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
       if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
       if (saved.grid && !saved.gridLaunch) return { ok: false, error: 'GRID_CREDENTIAL_REQUIRED', detail: 'The saved provider configuration is unavailable.' }
       if (saved.dsh && !installedDsh(saved.dsh)) return { ok: false, error: 'INVALID_DSH', detail: 'Install this harness from the Harness Store before resuming it.' }
-      try {
-        if (!saved.cwd || !statSync(saved.cwd).isDirectory()) return { ok: false, error: 'CWD_NOT_FOUND', detail: 'The saved project folder is no longer available.' }
-      } catch { return { ok: false, error: 'CWD_NOT_FOUND', detail: 'The saved project folder is no longer available.' } }
-      if (resumeSessionId && (!saved.transcriptPath || !validTranscriptPath(saved.engine, saved.transcriptPath, saved.codexHome ?? undefined))) {
+      if (!saved.cwd) return { ok: false, error: 'CWD_NOT_FOUND', detail: 'The saved project folder is no longer available.' }
+      const missing = workspaceMissing(saved.cwd)
+      if (missing) return missing
+      // Only for an engine whose conversation IS a file. opencode, kilo, hermes and devin keep
+      // theirs in a database, so they have no transcript to point at and demanding one here refused
+      // a resume that works — after the harness had already been paused.
+      if (resumeSessionId && engineKeepsTranscriptFile(saved.engine)
+        && (!saved.transcriptPath || !validTranscriptPath(saved.engine, saved.transcriptPath, saved.codexHome ?? undefined))) {
         return { ok: false, error: 'RESUME_UNAVAILABLE', detail: 'The saved conversation file is unavailable. Start a new conversation separately.' }
       }
       // Match the registry's globally unique conversation index, including aliases/profiles.

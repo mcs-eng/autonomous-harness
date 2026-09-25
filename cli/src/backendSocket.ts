@@ -1,3 +1,4 @@
+import { readGitPullRequest } from './lib/gitPullRequest.js'
 import type { HarnessShareOwner } from './sharing/owner.js'
 import { SHARE_REQUEST_TYPES } from './sharing/protocol.js'
 import { AutonomousDeviceRelay } from './lib/autonomous-device/relay.js'
@@ -26,11 +27,13 @@ import { env } from './config/env.js'
 import { AuthSessionManager, AuthSessionError } from './lib/authSession.js'
 import { VERSION } from './version.js'
 import { registry, projectDisplayName, type RegisteredSession } from './lib/registry.js'
+import { AgentStopError } from './lib/stopAgentService.js'
 import { ENGINES, PROCESS_ENGINES, isTerminalEngine, type AgentEngine, type ProcessEngine } from './engines/types.js'
 import { listDir } from './lib/fsBrowse.js'
 import { linkCodexProfile, listCodexProfiles } from './lib/codexProfiles.js'
 import { gridCliPresence } from './lib/gridExec.js'
 import { GridFleetRpc, GRID_FLEET_PROTOCOL, GRID_FLEET_MAX_TIMEOUT_MS, parseGridFleetRequest } from './lib/gridFleetRpc.js'
+import { LocalModels } from './lib/localModels.js'
 import { gridCapableEngines, parseGridLaunchOverride, type GridLaunchOverride } from './lib/gridLaunch.js'
 import { listAllGridModels, resolveGridTarget } from './lib/gridModels.js'
 import { localGridTargetId, readLocalGridProfiles } from './lib/gridProfiles.js'
@@ -43,7 +46,9 @@ import { engineInstallRecipe } from './lib/engineInstall.js'
 import { parseProjectFolder, prepareProjectFolder, ProjectFolderError } from './lib/projectFolder.js'
 import { preTrustClaudeProject, preTrustCodexProject } from './lib/claudeTrust.js'
 import { projectPreview } from './lib/projectPreview.js'
+import { readGitProject } from './lib/gitProject.js'
 import { agentFrame, lastActivityAt, type AgentDshContext, type AgentFrame } from './lib/agentFrame.js'
+import { agentTokenUsage } from './lib/agentTokenUsage.js'
 import { installedDsh, listInstalledDsh } from './dsh/installed.js'
 import { OrchestratorService } from './orchestrator/service.js'
 import { OrchestratorError } from './orchestrator/model.js'
@@ -82,6 +87,7 @@ import { commandcodeMessagesToEvents, windowCommandCodeLines } from './engines/c
 import { hermesMessagesToEvents, windowHermesMessages } from './engines/hermes/normalizer.js'
 import { devinMessagesToEvents, windowDevinMessages } from './engines/devin/normalizer.js'
 import { readHermesMessages } from './engines/hermes/reader.js'
+import { hermesDbForSession } from './lib/hermesHome.js'
 import { readDevinMessages } from './engines/devin/reader.js'
 import { readOpencodeMessages } from './engines/opencode/reader.js'
 import { readKiloMessages } from './engines/kilo/reader.js'
@@ -114,8 +120,8 @@ const OPENCODE_DB = join(env.OPENCODE_DATA_DIR, 'opencode.db')
 // Kilo keeps history the same way opencode does, in its own store.
 const KILO_DB = join(env.KILO_DATA_DIR, 'kilo.db')
 const DEVIN_DB = join(env.DEVIN_HOME, 'sessions.db')
-// Hermes history likewise comes from a SQLite store, not a per-session file.
-const HERMES_DB = join(env.HERMES_HOME, 'state.db')
+// Hermes history likewise comes from a SQLite store, not a per-session file — one per HOME, so the
+// path is the session's own (`hermesDbForSession`) rather than this machine's default.
 
 /** Answers the device `project_recent` RPC — set by cli.ts to the CommanderMirror's `recent`. */
 export type RecentProvider = (sessionId: string, n: number) => Array<{ kind: string; text: string; recap?: string }>
@@ -359,6 +365,7 @@ async function enrichSubagentStats(events: SessionEvent[], transcriptPath: strin
 
 export class BackendSocket {
   private readonly gridFleet = new GridFleetRpc()
+  private readonly localModels = new LocalModels({ stateDir: join(env.ADAPTER_DATA_DIR, 'local-models') })
   private ws: WebSocket | null = null
   private connecting = false
   /** A 401 on the upgrade is being answered with a token refresh; that refresh owns the next connect. */
@@ -755,6 +762,10 @@ export class BackendSocket {
 
   /** Which grid this machine's agents can be pointed at — for `harness status` and the models RPC. */
   gridName(): string | null { return this.harnessGridName }
+
+  /** The account's private grid, resolved the way the models RPC resolves it — for a harness
+   *  workspace that must be told which grid is "yours" rather than work it out or ask. */
+  privateGridName(): Promise<string | null> { return this.resolveGridName() }
 
   /**
    * The account's private grid: the backend's word when it gave one, else what this machine can
@@ -1309,7 +1320,7 @@ export class BackendSocket {
   private emitReply(connId: string, type: string, requestId: unknown, payload: Record<string, unknown>): void {
     const resultType = `${type}_result`
     // Before the E2EE wrap: an RPC reply is only readable here.
-    if (env.LOG_FRAMES && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && !SHARE_REQUEST_TYPES.has(type)) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
+    if (env.LOG_FRAMES && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && !SHARE_REQUEST_TYPES.has(type)) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
     if (this.localClients.has(connId)) {
       this.sendTo(connId, { type: resultType, payload: { requestId, ...payload } })
       return
@@ -1412,7 +1423,7 @@ export class BackendSocket {
     // than as an opaque __e2e envelope.
     // Terminal frames contain raw keystrokes, paste text and screen bytes after
     // unwrap. Never pass them to the frame logger, even in diagnostic mode.
-    if (env.LOG_FRAMES && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'orchestrator' && !SHARE_REQUEST_TYPES.has(type)) {
+    if (env.LOG_FRAMES && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && type !== 'orchestrator' && !SHARE_REQUEST_TYPES.has(type)) {
       logFrame('←', connId ? `conn:${sid(connId)}` : 'backend', frame)
     }
     const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => this.emitReply(connId, t, rid, p)
@@ -1545,6 +1556,18 @@ export class BackendSocket {
 
     try {
       switch (type) {
+        case 'grid_fleet_models_list':
+        case 'grid_fleet_model_start':
+        case 'grid_fleet_model_stop': {
+          // A daemon-owned operation survives panel closure and a lost reply.
+          // Keep hardware/catalog/network reads off the ordered terminal queue.
+          void this.resolveGridName().then(async grid => type === 'grid_fleet_models_list'
+            ? this.localModels.list(grid, payload.refresh === true)
+            : this.localModels.act(grid, payload.modelId, type === 'grid_fleet_model_start' ? 'start' : 'stop'))
+            .then(result => reply(type, requestId, { ...result }))
+            .catch(() => reply(type, requestId, { error: 'Models are unavailable. Try again.' }))
+          return
+        }
         case 'grid_fleet_capabilities':
           reply(type, requestId, { protocol: GRID_FLEET_PROTOCOL, gridCli: gridCliPresence(), maxTimeoutMs: GRID_FLEET_MAX_TIMEOUT_MS, thinkingControl: true })
           return
@@ -1660,7 +1683,7 @@ export class BackendSocket {
             const rawLimit = payload.limit
             const limit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 500) : undefined
             const before = typeof payload.before === 'string' ? payload.before : undefined
-            const messages = await readHermesMessages(HERMES_DB, sessionId)
+            const messages = await readHermesMessages(await hermesDbForSession(s), sessionId)
             const timestamp = new Date(s.updatedAt).toISOString()
             if (!limit) {
               reply(type, requestId, { id: sessionId, title: projectDisplayName(s), events: hermesMessagesToEvents(messages), timestamp, engine: s.engine })
@@ -2359,7 +2382,13 @@ export class BackendSocket {
         case 'agent_delete': {
           const target = (payload.agentId as string | undefined) || (payload.sessionId as string | undefined)
           if (!target) { reply(type, requestId, { error: 'MISSING_AGENT_ID' }); return }
-          await this.onDeleteAgent?.(target)
+          if (!this.onDeleteAgent) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
+          try { await this.onDeleteAgent(target) }
+          catch (error) {
+            if (!(error instanceof AgentStopError)) throw error
+            reply(type, requestId, { error: error.code, detail: error.message })
+            return
+          }
           reply(type, requestId, { deleted: true })
           return
         }
@@ -2449,6 +2478,22 @@ export class BackendSocket {
           if (!s?.cwd) { reply(type, requestId, { error: 'AGENT_NOT_FOUND' }); return }
           try { reply(type, requestId, { files: listFileTree(s.cwd) }) }
           catch (e) { reply(type, requestId, { error: e instanceof Error ? e.message : 'FILE_TREE_ERROR' }) }
+          return
+        }
+
+        case 'git_pull_request': {
+          const id = payload.agentId
+          const agent = typeof id === 'string' ? registry.resolve(id) : undefined
+          if (!agent?.cwd) { reply(type, requestId, { status: 'unavailable' }); return }
+          void readGitPullRequest(agent.cwd).then(result => reply(type, requestId, result))
+          return
+        }
+
+        case 'git_project_info': {
+          const path = typeof payload.path === 'string' ? payload.path : ''
+          void readGitProject(path)
+            .then(result => reply(type, requestId, result))
+            .catch(() => reply(type, requestId, { error: 'UNAVAILABLE' }))
           return
         }
 
@@ -2628,7 +2673,8 @@ export class BackendSocket {
   }
 
   private async toStoppedProject(s: RegisteredSession): Promise<AgentFrame> {
-    const frame = await agentFrame(s, { selectedModel: s.model, terminalAvailable: false, dsh: this.dshFrameProvider?.(s) ?? null })
+    const frame = await agentFrame(s, { selectedModel: s.model, terminalAvailable: false, dsh: this.dshFrameProvider?.(s) ?? null,
+      tokenUsage: agentTokenUsage.get(s) })
     return {
       ...frame,
       status: 'stopped',
@@ -2642,6 +2688,7 @@ export class BackendSocket {
   /** Map a registered tmux session onto the web's Project shape (tabs in ProjectTabs). */
   private toProject(s: RegisteredSession): Promise<AgentFrame> {
     return agentFrame(s, {
+      tokenUsage: agentTokenUsage.get(s),
       selectedModel: this.runtimeProfileProvider?.(s) ?? null,
       terminalAvailable: registry.terminalAvailable(s.agentId),
       dsh: this.dshFrameProvider?.(s) ?? null,

@@ -1,5 +1,10 @@
 # Autonomous device ↔ Mac: direct discovery and original Harness E2EE
 
+## Store discovery and agent preparation (v1)
+
+Paired robots can negotiate Store discovery and durable agent preparation separately from task delivery. See the [shared OS contract](autonomous-device-store.md), including JSON schemas, recovery rules and the Blender walkthrough. Older clients keep the operations below unchanged.
+
+
 The Mac discovers Autonomous OS on the local network and connects **directly to the device**.
 No manual IP address, device backend credentials, cloud device registration, or backend relay is
 involved in this path. The existing Harness Mac login/start behavior is unchanged; an already
@@ -60,7 +65,7 @@ All routes remain on the credential-checked loopback hook server. There is no ne
 
 | Route | Input/result |
 |---|---|
-| GET `/api/autonomous-device/discover` | `{devices:[{id,name,host,port}]}` discovered candidates |
+| GET `/api/autonomous-device/discover` | `{devices:[{id,name,host,port}]}` discovered candidates; 503 `LOCAL_NETWORK_BLOCKED` when the OS refused the multicast query and nothing answered (macOS Local Network privacy) |
 | POST `/api/autonomous-device/pair/start` | `{code,device:<discovery-id>}` → `{state:"paired",label,fingerprint}` |
 | GET `/api/autonomous-device/pair/status` | existing pending device status idle/waiting/running |
 | GET `/api/autonomous-device/status` | `{transport:"direct",connected,paired,sessions,proto:1}`; connected/sessions count authenticated application-ready direct sessions only |

@@ -150,18 +150,25 @@ void main() {
             );
             await tester.enterText(search, '');
             await tester.pumpAndSettle();
-            final scaffold = find.byType(SectionScaffold);
-            final heading = find.descendant(
-              of: scaffold,
-              matching: find.text(
-                tester.widget<SectionScaffold>(scaffold).title,
-              ),
-            );
-            expect(
-              tester.getCenter(find.text('Back to app')).dy,
-              closeTo(tester.getCenter(heading).dy, 1),
-              reason: 'Back and the section title share a header at every text size.',
-            );
+            if (section == SettingsSection.shortcuts) {
+              expect(
+                find.byKey(const ValueKey('shortcuts-search')),
+                findsOneWidget,
+              );
+            } else {
+              final scaffold = find.byType(SectionScaffold);
+              final heading = find.descendant(
+                of: scaffold,
+                matching: find.text(
+                  tester.widget<SectionScaffold>(scaffold).title,
+                ),
+              );
+              expect(
+                tester.getCenter(find.text('Back to app')).dy,
+                closeTo(tester.getCenter(heading).dy, 1),
+                reason: 'Back and the section title share a header at every text size.',
+              );
+            }
             if (section == SettingsSection.about) {
               await tester.runAsync(() async {
                 await precacheImage(
@@ -237,14 +244,24 @@ void main() {
               }
             }
             if (section == SettingsSection.shortcuts) {
+              // Rows outside the viewport are now built on demand.
+              await tester.scrollUntilVisible(
+                find.text('Workspace'),
+                200,
+                scrollable: find
+                    .descendant(
+                      of: find.byType(ListView),
+                      matching: find.byType(Scrollable),
+                    )
+                    .last,
+              );
               final label = tester.renderObject<RenderParagraph>(
                 find.text('Workspace'),
               );
               expect(
                 label.getMaxIntrinsicWidth(double.infinity),
                 lessThanOrEqualTo(label.size.width + 0.1),
-                reason:
-                    'The shortcut context must be readable without opening it.',
+                reason: 'Shortcut group headings remain readable at every text size.',
               );
               unawaited(
                 showShortcutsSheet(tester.element(find.byType(SettingsScreen))),

@@ -37,8 +37,9 @@ Future<void> configureDesktopWindow({
   // return before native setup finishes and detach any error from this future.
   await windowManager.waitUntilReadyToShow(options);
   if (Platform.isMacOS) {
-    await const MethodChannel('harness/swarm_tabs')
-        .invokeMethod('configure', {'palette': palette.nativeColors});
+    await const MethodChannel('harness/swarm_tabs').invokeMethod('configure', {
+      'palette': palette.nativeColors,
+    });
   }
   // Always open filling the screen (owner, 2026-09-15): the tabs, a viewer
   // beside its terminal and the rail all want the width. The options above

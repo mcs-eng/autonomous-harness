@@ -41,6 +41,13 @@ function envFor(root: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv 
     ADAPTER_CLI_DIR: join(root, 'cli'),
     ADAPTER_COMPUTER_ID_FILE: join(root, 'computer-id'),
     ADAPTER_UPDATE_DISABLE: 'true',
+    // HOME does not isolate tmux's /tmp socket. Never discover or attach to the
+    // developer's real panes during a CLI startup test.
+    TERMINAL_BACKENDS: 'tmux',
+    TMUX: '',
+    TMUX_TMPDIR: root,
+    DISABLE_GRID_INSTALL: 'true',
+    DISABLE_HOOK_INSTALL: 'true',
     // Nothing listens on port 1. A `start` asks the daemon on PORT which account it serves and would
     // otherwise ask this machine's REAL daemon — and the backend is where a start that decided to
     // (re)start goes next, which must never be the production one.
@@ -99,13 +106,36 @@ async function daemonStatusServer(machineId: string): Promise<number> {
 }
 
 describe('CLI login/start command contract', () => {
-  it('does not start or open SSO when start has no saved session', () => {
-    const result = run('start')
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('Not signed in. Run: harness login')
-    expect(result.stdout).not.toContain('Sign in to Harness in your browser')
-  })
+  it('starts without a saved session, serving this computer only, and never opens SSO', async () => {
+    // An account buys the OTHER machines; everything on this computer — discovery, terminals, hooks,
+    // the cabled dial — is served by the daemon over the loopback and needs none. Refusing to start
+    // without one put a browser sign-in in front of every local thing the product does on day one.
+    //
+    // Run in its own process group and killed as one: a dev-mode start becomes the daemon itself, and
+    // tsx wraps it in a child of its own.
+    const root = freshRoot()
+    const child = spawn(process.execPath, [TSX, CLI_SOURCE, 'start'], {
+      cwd: CLI_ROOT,
+      detached: true,
+      env: envFor(root, { PORT: String(20_000 + Math.floor(Math.random() * 20_000)) }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    children.push(child)
+    let said = ''
+    child.stdout?.on('data', (chunk: Buffer) => { said += chunk.toString() })
+    child.stderr?.on('data', (chunk: Buffer) => { said += chunk.toString() })
+    const deadline = Date.now() + 25_000
+    while (Date.now() < deadline && !/serving this computer only|Not signed in|Sign in to Harness/.test(said)) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    try {
+      expect(said).toContain('not signed in — serving this computer only')
+      expect(said).not.toContain('Sign in to Harness in your browser')
+      expect(said).not.toContain('dialing')   // no backend leg is attempted without a session
+    } finally {
+      try { process.kill(-child.pid!, 'SIGKILL') } catch { /* already gone */ }
+    }
+  }, 40_000)
 
   it('rejects the removed join command with the two-step migration', () => {
     const result = run('join')
@@ -255,108 +285,4 @@ describe('start beside a daemon that serves another account', () => {
     await expect(Promise.race([daemon.exited.then(() => 'exited'), new Promise((r) => setTimeout(() => r('alive'), 300))]))
       .resolves.toBe('alive')
   }, 20_000)
-})
-
-describe('local mode (HARNESS_LOCAL_ONLY)', () => {
-  // An account-free daemon: this computer's own id, no session file, no backend. The grid and hook
-  // installs are off as they are for every test here — they write to the real home and the network.
-  const LOCAL: NodeJS.ProcessEnv = { HARNESS_LOCAL_ONLY: 'true', DISABLE_HOOK_INSTALL: 'true', DISABLE_GRID_INSTALL: 'true' }
-
-  function lastLine(stdout: string): string {
-    const lines = stdout.trim().split('\n').filter((l) => l.trim())
-    return lines[lines.length - 1] ?? ''
-  }
-
-  async function freePort(): Promise<number> {
-    const server = createServer()
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as AddressInfo).port
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-    return port
-  }
-
-  async function waitForStatus(port: number, deadlineMs: number): Promise<Record<string, unknown>> {
-    const until = Date.now() + deadlineMs
-    let lastError = 'no answer yet'
-    while (Date.now() < until) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${port}/api/status`, { signal: AbortSignal.timeout(1_000) })
-        if (res.ok) return await res.json() as Record<string, unknown>
-        lastError = `HTTP ${res.status}`
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err)
-      }
-      await new Promise((r) => setTimeout(r, 250))
-    }
-    throw new Error(`the daemon never answered /api/status on ${port}: ${lastError}`)
-  }
-
-  it('auth status names local mode, with the computer id, and writes no session', () => {
-    const root = freshRoot()
-    const result = spawnSync(process.execPath, [TSX, CLI_SOURCE, 'auth', 'status', '--json'], {
-      cwd: CLI_ROOT, encoding: 'utf8', env: envFor(root, LOCAL),
-    })
-    expect(result.status).toBe(0)
-    const payload = JSON.parse(lastLine(result.stdout)) as Record<string, unknown>
-    expect(payload).toMatchObject({ loggedIn: false, localOnly: true })
-    expect(payload.computerId).toMatch(/^[0-9a-f-]{16,64}$/i)
-    expect(existsSync(join(root, 'auth', 'session.json'))).toBe(false)
-  })
-
-  it('a saved sign-in wins over the flag', () => {
-    const root = freshRoot()
-    seedSession(root)
-    const result = spawnSync(process.execPath, [TSX, CLI_SOURCE, 'auth', 'status', '--json'], {
-      cwd: CLI_ROOT, encoding: 'utf8', env: envFor(root, LOCAL),
-    })
-    expect(result.status).toBe(0)
-    const payload = JSON.parse(lastLine(result.stdout)) as Record<string, unknown>
-    expect(payload.loggedIn).toBe(true)
-    expect(payload.machineId).toBe('m_seeded')
-    expect(payload).not.toHaveProperty('localOnly')
-  })
-
-  it('without the flag, a missing session still refuses to start', () => {
-    const result = run('start')
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('Not signed in. Run: harness login')
-  })
-
-  it('start boots the daemon on the computer id, never dials, and serves this computer alone', async () => {
-    const root = freshRoot()
-    const port = await freePort()
-    const child = spawn(process.execPath, [TSX, CLI_SOURCE, 'start'], {
-      cwd: CLI_ROOT, env: envFor(root, { ...LOCAL, PORT: String(port) }), stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    children.push(child)
-    let stdout = ''
-    let stderr = ''
-    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
-
-    const status = await waitForStatus(port, 25_000)
-    expect(status).toMatchObject({ localOnly: true, connected: false })
-    expect(status.machineId).toBe(status.computerId)
-    expect(status.computerId).toMatch(/^[0-9a-f-]{16,64}$/i)
-
-    const base = `http://127.0.0.1:${port}`
-    const machines = await (await fetch(`${base}/api/machines`)).json() as Record<string, unknown>
-    expect(machines).toMatchObject({
-      success: true,
-      data: { machines: [{ machineId: status.machineId, computerId: status.computerId, status: 'running' }] },
-    })
-    const me = await fetch(`${base}/api/auth/me`)
-    expect(me.status).toBe(401)
-    expect(((await me.json()) as { error: { code: string } }).error.code).toBe('LOCAL_ONLY')
-    const shares = await (await fetch(`${base}/api/harness-shares`)).json()
-    expect(shares).toEqual({ success: true, data: { machines: [] } })
-
-    child.kill('SIGTERM')
-    await exited
-    expect(stdout).toContain('local mode')
-    expect(stdout + stderr).not.toContain('dialing')
-    expect(stdout + stderr).not.toContain('resolve-computer')
-    expect(existsSync(join(root, 'auth', 'session.json'))).toBe(false)
-  }, 40_000)
 })

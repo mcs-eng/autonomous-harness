@@ -2,13 +2,63 @@
 // bookkeeping around two frames — `commander_question` and its close — which is
 // what decides whether a row can lie: a question that outlives its dialog, a
 // wait clock that resets itself, a stale close wiping a live question.
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/state/app_state.dart';
+import 'package:harness/ws/ws_conn.dart';
+import 'package:harness/state/terminal_pane.dart';
+import 'package:harness/terminal/terminal_session.dart';
+import 'package:harness/core/local_key_value_store.dart';
+import 'package:harness/notify/agent_alerts.dart';
+import 'package:harness/notify/alert_sounds.dart';
 import 'package:harness/state/pending_question.dart';
+
+/// A key/value store that lives in memory. Tests must never touch the real one.
+class _Memory implements LocalKeyValueStore {
+  final values = <String, String?>{};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async => values[key] = value;
+
+  @override
+  Future<void> delete(String key) async => values.remove(key);
+}
+
+/// A connection that answers nothing and dials nowhere.
+///
+/// `focusPane` announces the new focus to the machine, and without this the notifier builds a real
+/// `WsConn` that never connects — the test then hangs rather than failing, which is how this was
+/// found.
+class _Silent extends WsConn {
+  _Silent()
+    : super(
+        wsBaseUrl: 'ws://fixture.invalid',
+        autonomousEnv: 'test',
+        machineId: 'm1',
+        accessTokenProvider: (_, _) async => '',
+        onAuthFailure: (_) {},
+        onEvent: (_) {},
+        onStatus: (_) {},
+      );
+
+  @override
+  Future<bool> sendTerminalFrame(String type, Map<String, dynamic> payload) async => true;
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String type, {
+    Map<String, dynamic> payload = const {},
+    Duration timeout = const Duration(seconds: 20),
+  }) async => const {};
+}
 
 const _machine = Machine(
   machineId: 'm1',
@@ -55,6 +105,9 @@ Map<String, dynamic> closed({
 };
 
 void main() {
+  // The alert group installs a mock method-call handler, which needs the binding up.
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('shaping', () {
     test('reads the prompt, its options and its answer key', () {
       final question = PendingQuestion.fromPayload(
@@ -178,6 +231,396 @@ void main() {
         'payload': <String, dynamic>{},
       });
       expect(n.questionFor('m1', 'a1'), isNull);
+    });
+  });
+
+  // ── the sound the window makes ────────────────────────────────────────────────────────────────
+  //
+  // Two moments are worth interrupting someone over: an agent finished, and an agent stopped to
+  // ask. Everything else in this file is about what the window DRAWS; this is about what it plays.
+
+  group('alert sounds', () {
+    late List<String> played;
+    const channel = MethodChannel('harness/swarm_tabs');
+
+    setUp(() {
+      played = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'playAlert') {
+              played.add((call.arguments as Map)['sound'] as String);
+            }
+            return null;
+          });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    /// A clock the test drives, so the rate limiter cannot be mistaken for the thing under test.
+    /// Feeding repeats "instantly" made the re-announcement test pass with the guard REMOVED —
+    /// the gap was swallowing them, not the guard.
+    late DateTime clock;
+
+    /// Never the default storage. `AlertSoundStore()` with no argument writes to the real
+    /// preferences file on this machine, and the "switch off" test below turned the feature off
+    /// for the developer running it — a test that silently changes the app you are building.
+    AlertSoundStore store({bool on = true}) {
+      final made = AlertSoundStore(storage: _Memory());
+      // Switched ON explicitly: silence is the default now, so a wiring test that forgot this
+      // would pass by making no sound for the wrong reason.
+      if (on) made.value = true;
+      return made;
+    }
+
+    AppNotifier wired() {
+      clock = DateTime(2026, 9, 23, 12);
+      final notifier = AppNotifier(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        alerts: AlertSounds(
+          store: store(),
+          channel: channel,
+          now: () => clock,
+        ),
+        // Injected, and switched on. Left to the default this would read the app's own global
+        // store — the real file-backed one — so the banner assertions would pass or fail on a
+        // preference belonging to whoever ran the suite, and silently stop testing anything the
+        // day that default flipped. Which it has.
+        agentAlerts: AgentAlerts(
+          store: ScreenAlertStore(storage: _Memory())..value = true,
+        ),
+      );
+      notifier.machines = [_machine];
+      notifier.machineStates['m1'] = MachineState(_machine);
+      return notifier;
+    }
+
+    test('an agent that stops to ask is heard', () async {
+      final app = wired();
+      addTearDown(app.dispose);
+      await app.handleMachineEventForTest('m1', asked());
+      await Future<void>.delayed(Duration.zero);
+      expect(played, [AlertKind.needsYou.sound]);
+    });
+
+    test('the daemon re-announcing the SAME question is not heard again', () async {
+      // Every reconnect re-sends every open question, and attaching to a turn that is already
+      // mid-dialog does too. A window that beeped at those would sound an alarm whenever the
+      // network hiccuped — for a question the person has been looking at for ten minutes.
+      final app = wired();
+      addTearDown(app.dispose);
+      await app.handleMachineEventForTest('m1', asked());
+      // Well past the rate limiter, so silence here is the guard's doing and nothing else.
+      clock = clock.add(const Duration(minutes: 5));
+      await app.handleMachineEventForTest('m1', asked());
+      clock = clock.add(const Duration(minutes: 5));
+      await app.handleMachineEventForTest('m1', asked());
+      await Future<void>.delayed(Duration.zero);
+      expect(played, [AlertKind.needsYou.sound]);
+    });
+
+    test('a DIFFERENT question from the same agent is heard', () async {
+      final app = wired();
+      addTearDown(app.dispose);
+      await app.handleMachineEventForTest('m1', asked(requestId: 'q_1'));
+      clock = clock.add(const Duration(minutes: 5));
+      await app.handleMachineEventForTest(
+        'm1',
+        asked(requestId: 'q_2', prompt: 'Overwrite the file?'),
+      );
+      await Future<void>.delayed(Duration.zero);
+      // Two questions, two answers owed, and far enough apart that the gap is not the reason.
+      expect(played, [AlertKind.needsYou.sound, AlertKind.needsYou.sound]);
+    });
+
+    test('a finished turn is heard, with its own sound', () async {
+      final app = wired();
+      addTearDown(app.dispose);
+      await app.handleMachineEventForTest('m1', {
+        'type': 'turn_ended',
+        'agentId': 'a1',
+        'payload': {'agentId': 'a1'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(played, [AlertKind.done.sound]);
+    });
+
+    test('a finished turn also raises a banner, named after the agent', () async {
+      final app = wired();
+      addTearDown(app.dispose);
+      app.machineStates['m1']!.agents = [
+        const Agent(id: 'a1', name: 'Respond to greeting', engine: 'codex'),
+      ];
+      await app.handleMachineEventForTest('m1', {
+        'type': 'turn_ended',
+        'agentId': 'a1',
+        'payload': {'agentId': 'a1'},
+      });
+      final raised = app.agentAlerts.alerts;
+      expect(raised, hasLength(1));
+      // The agent's own NAME. A banner naming a uuid tells nobody which pane to look at.
+      expect(raised.single.title, 'Respond to greeting');
+      expect(raised.single.kind, AlertKind.done);
+      expect(raised.single.agentId, 'a1');
+    });
+
+    test('a question raises a banner too, and a re-announced one does not', () async {
+      final app = wired();
+      addTearDown(app.dispose);
+      await app.handleMachineEventForTest('m1', asked());
+      clock = clock.add(const Duration(minutes: 5));
+      await app.handleMachineEventForTest('m1', asked());
+      expect(app.agentAlerts.alerts, hasLength(1));
+      expect(app.agentAlerts.alerts.single.kind, AlertKind.needsYou);
+    });
+
+    test('both moments mark the harness unread, whatever the switches say', () async {
+      // The mark is not an interruption — it sits still until somebody goes looking — so it is
+      // deliberately outside the banner and sound switches. Somebody who turned the noisy halves
+      // off still wants the window to say which agent moved while they were away.
+      final app = AppNotifier(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        alerts: AlertSounds(store: store(on: false), channel: channel),
+        agentAlerts: AgentAlerts(
+          store: ScreenAlertStore(storage: _Memory()),
+        ),
+      );
+      addTearDown(app.dispose);
+      app.machines = [_machine];
+      app.machineStates['m1'] = MachineState(_machine);
+
+      await app.handleMachineEventForTest('m1', {
+        'type': 'turn_ended',
+        'agentId': 'a1',
+        'payload': {'agentId': 'a1'},
+      });
+      expect(app.agentUnread.kindFor('m1', 'a1'), AlertKind.done);
+      expect(app.agentAlerts.alerts, isEmpty, reason: 'banners were off');
+
+      await app.handleMachineEventForTest('m1', asked());
+      expect(app.agentUnread.kindFor('m1', 'a1'), AlertKind.needsYou);
+
+      // And going to it is what makes it read.
+      app.markAgentSeen('m1', 'a1');
+      expect(app.agentUnread.count, 0);
+    });
+
+    test('a deleted harness stops being counted', () async {
+      final app = wired();
+      addTearDown(app.dispose);
+      await app.handleMachineEventForTest('m1', asked());
+      expect(app.agentUnread.count, 1);
+      await app.handleMachineEventForTest('m1', {
+        'type': 'agent_deleted',
+        'payload': {'agentId': 'a1'},
+      });
+      expect(app.agentUnread.count, 0);
+    });
+
+    test('nothing is heard while the switch is off', () async {
+      final off = store(on: false);
+      final app = AppNotifier(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        alerts: AlertSounds(store: off, channel: channel),
+      );
+      addTearDown(app.dispose);
+      app.machines = [_machine];
+      app.machineStates['m1'] = MachineState(_machine);
+      await app.handleMachineEventForTest('m1', asked());
+      await app.handleMachineEventForTest('m1', {
+        'type': 'turn_ended',
+        'agentId': 'a1',
+        'payload': {'agentId': 'a1'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(played, isEmpty);
+    });
+  });
+
+  // ── the harness you are already looking at ────────────────────────────────────────────────────
+  //
+  // A sound, a banner and a count are three ways of saying "look over here". All three are noise
+  // about the pane already in front of you.
+
+  group('the watched harness', () {
+    late List<String> played;
+    const channel = MethodChannel('harness/swarm_tabs');
+
+    setUp(() {
+      played = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'playAlert') {
+              played.add((call.arguments as Map)['sound'] as String);
+            }
+            return null;
+          });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    /// [watching] is the agent in front of the person, or null for none.
+    ///
+    /// Injected rather than reached through a real pane: focusing one announces the focus to the
+    /// machine, which dials it, and a test with no live connection HANGS rather than failing.
+    /// That cost an hour to find, which is why the decision has a seam now.
+    AppNotifier app({String? watching}) {
+      final made = AppNotifier(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        alerts: AlertSounds(
+          store: AlertSoundStore(storage: _Memory())..value = true,
+          channel: channel,
+        ),
+        agentAlerts: AgentAlerts(
+          store: ScreenAlertStore(storage: _Memory())..value = true,
+        ),
+      );
+      made.watchedAgent = () =>
+          watching == null ? null : (machineId: 'm1', agentId: watching);
+      made.machines = [_machine];
+      made.machineStates['m1'] = MachineState(_machine)
+        ..agents = [
+          const Agent(id: 'a1', name: 'One', engine: 'codex'),
+          const Agent(id: 'a2', name: 'Two', engine: 'codex'),
+        ];
+      return made;
+    }
+
+    Future<void> finish(AppNotifier a, String agentId) =>
+        a.handleMachineEventForTest('m1', {
+          'type': 'turn_ended',
+          'agentId': agentId,
+          'payload': {'agentId': agentId},
+        });
+
+    test('says nothing at all about the pane in front of you', () async {
+      final a = app(watching: 'a1');
+      addTearDown(a.dispose);
+      await finish(a, 'a1');
+      await Future<void>.delayed(Duration.zero);
+      expect(a.agentUnread.count, 0, reason: 'nothing to count');
+      expect(a.agentAlerts.alerts, isEmpty, reason: 'nothing to show');
+      expect(played, isEmpty, reason: 'nothing to hear');
+    });
+
+    test('still speaks for a harness you are NOT in', () async {
+      final a = app(watching: 'a1');
+      addTearDown(a.dispose);
+      await finish(a, 'a2');
+      await Future<void>.delayed(Duration.zero);
+      expect(a.agentUnread.kindFor('m1', 'a2'), AlertKind.done);
+      expect(played, hasLength(1));
+    });
+
+    test('a question about the watched harness is silent too', () async {
+      final a = app(watching: 'a1');
+      addTearDown(a.dispose);
+      await a.handleMachineEventForTest('m1', asked());
+      await Future<void>.delayed(Duration.zero);
+      expect(a.agentUnread.count, 0);
+      expect(a.agentAlerts.alerts, isEmpty);
+      expect(played, isEmpty);
+    });
+
+    test('with nothing watched, everything is announced', () async {
+      final a = app();
+      addTearDown(a.dispose);
+      await finish(a, 'a1');
+      await Future<void>.delayed(Duration.zero);
+      expect(a.agentUnread.kindFor('m1', 'a1'), AlertKind.done);
+    });
+
+    test('the same agent id on ANOTHER machine is not the one you are watching', () async {
+      // The key is the machine and the agent. Ignoring the machine would silence a harness on a
+      // different computer that happens to share an id with the one in front of you.
+      final a = app(watching: 'a1');
+      addTearDown(a.dispose);
+      const other = Machine(
+        machineId: 'm2',
+        authMode: MachineAuthMode.remote,
+        name: 'other',
+      );
+      a.machines = [_machine, other];
+      a.machineStates['m2'] = MachineState(other)
+        ..agents = [const Agent(id: 'a1', name: 'One', engine: 'codex')];
+
+      await a.handleMachineEventForTest('m2', {
+        'type': 'turn_ended',
+        'agentId': 'a1',
+        'payload': {'agentId': 'a1'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(a.agentUnread.kindFor('m2', 'a1'), AlertKind.done);
+      expect(a.agentUnread.kindFor('m1', 'a1'), isNull);
+    });
+
+    test('a focused pane is NOT watched while the window is behind another app', () async {
+      // The default answer — no seam here, because this is the half that decides whether the
+      // feature works at all. A pane keeps its focus the whole time the app sits behind a browser,
+      // and treating that as "being watched" would swallow exactly the news this exists for.
+      //
+      // `adoptSessionForTest` focuses a tile WITHOUT announcing it to the machine; `focusPane`
+      // announces, which dials, which hangs a test with no live connection.
+      for (final (state, watched) in [
+        (AppLifecycleState.resumed, true),
+        (AppLifecycleState.inactive, false),
+        (AppLifecycleState.hidden, false),
+      ]) {
+        final a = app();
+        addTearDown(a.dispose);
+        a.lifecycle = () => state;
+        a.watchedAgent = a.watchedAgentFromFocusForTest;
+        a.adoptSessionForTest(
+          TerminalSession(
+            machineId: 'm1',
+            agentId: 'a1',
+            agentName: 'One',
+            engineId: 'codex',
+            send: (_, _) async => true,
+            sendBinary: (_) async => true,
+          ),
+        );
+        expect(
+          a.watchedAgent() != null,
+          watched,
+          reason: 'lifecycle $state',
+        );
+      }
+    });
+
+    test('switching to a marked harness clears it', () async {
+      var watching = 'a1';
+      final a = AppNotifier(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        alerts: AlertSounds(
+          store: AlertSoundStore(storage: _Memory()),
+          channel: channel,
+        ),
+        agentAlerts: AgentAlerts(store: ScreenAlertStore(storage: _Memory())),
+      );
+      addTearDown(a.dispose);
+      a.watchedAgent = () => (machineId: 'm1', agentId: watching);
+      a.machines = [_machine];
+      a.machineStates['m1'] = MachineState(_machine);
+
+      // A finishes while you are in B.
+      await finish(a, 'a2');
+      expect(a.agentUnread.kindFor('m1', 'a2'), AlertKind.done);
+
+      // Going to it is reading it — focus alone, with no row or banner clicked.
+      watching = 'a2';
+      a.seeWatchedAgent();
+      expect(a.agentUnread.count, 0);
     });
   });
 }

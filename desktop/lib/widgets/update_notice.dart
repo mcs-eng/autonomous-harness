@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:harness/terminal/terminal_text.dart';
 
 import '../core/app_version.dart';
 import '../shared/theme/app_theme.dart' as grid;
@@ -39,6 +40,10 @@ class UpdateNotice extends StatelessWidget {
     if (update == null) return const SizedBox.shrink();
 
     final installing = notifier.isInstallingUpdate;
+    // Null until the first bytes land, and again while the download is being
+    // verified and unpacked — the bar is honest about not knowing then.
+    final fraction = installing ? notifier.updateDownloadFraction : null;
+    final percent = installing ? notifier.updateDownloadPercent : null;
     final error = notifier.updateError;
     final failed = error != null && !installing;
 
@@ -127,19 +132,31 @@ class UpdateNotice extends StatelessWidget {
                               message,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
+                              style: grid.AppType.body(
                                 color: grid.AppPalette.textPrimary,
-                                fontSize: 12.5,
                               ),
                             ),
                           ),
-                          if (!installing && !failed && update.size > 0) ...[
+                          // The size answers "how long will this take?" before
+                          // the download; the percent answers it during, and
+                          // says it alone — the two together read as arithmetic
+                          // homework in a band this narrow.
+                          if (percent != null) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              '· $percent%',
+                              style: grid.AppType.monoMeta(
+                                color: grid.AppPalette.textFaint,
+                              ),
+                            ),
+                          ] else if (!installing &&
+                              !failed &&
+                              update.size > 0) ...[
                             const SizedBox(width: 8),
                             Text(
                               '· ${formatDownloadSize(update.size)}',
-                              style: TextStyle(
+                              style: grid.AppType.monoMeta(
                                 color: grid.AppPalette.textFaint,
-                                fontSize: 11.5,
                               ),
                             ),
                           ],
@@ -185,15 +202,17 @@ class UpdateNotice extends StatelessWidget {
                   ],
                 ),
               ),
-              // Indeterminate on purpose: downloadAndStage() resolves once, with
-              // no byte counter to read, so a percentage here would be invented.
+              // Determinate while the bytes are arriving; indeterminate for the
+              // verify-and-unpack tail, which has nothing to count.
               if (installing)
                 Positioned(
                   left: 0,
                   right: 0,
                   bottom: 0,
                   child: LinearProgressIndicator(
+                    key: const ValueKey('update-progress-bar'),
                     minHeight: 2,
+                    value: fraction,
                     backgroundColor: Colors.transparent,
                     color: grid.AppPalette.accentOnSurface,
                   ),
@@ -244,10 +263,7 @@ class _NoticeAction extends StatelessWidget {
               ? BorderSide(color: grid.AppGlass.hair)
               : BorderSide.none,
         ),
-        textStyle: TextStyle(
-          fontFamily: grid.AppFont.sans,
-          fontFamilyFallback: grid.AppFont.sansFallback,
-          fontSize: 12,
+        textStyle: grid.AppType.label(
           fontWeight: primary ? grid.AppFont.semibold : grid.AppFont.regular,
         ),
       ),
@@ -348,55 +364,68 @@ Future<void> showUpdateCheckDialog(
           }
           return PopScope(
             canPop: !installing,
-            child: _UpdateDialog(
-              icon: LucideIcons.arrowDownToLine300,
-              title: installing
-                  ? 'Installing Harness ${update.version}…'
-                  : 'Harness ${update.version} is available',
-              body: installing
-                  ? 'Don’t quit Harness. It will restart on its own.'
-                  : current.isSkipped
-                  ? 'You skipped this version earlier. You can still install it.'
-                  : 'Download and install it now? Harness will restart when it '
-                        'finishes.',
-              busy: installing,
-              update: installing ? null : update,
-              actions: installing
-                  ? const []
-                  : [
-                      _DialogAction(
-                        key: const Key('close-update-dialog-button'),
-                        label: 'Close',
-                        onPressed: () async {
-                          Navigator.of(dialogContext).pop();
-                        },
-                      ),
-                      if (!current.isSkipped)
+            // The percentage moves while this dialog is up, and the
+            // StatefulBuilder above only rebuilds on ITS own setState — which
+            // the download never calls. Listening to the notifier is what lets
+            // the number here count along with the band behind it.
+            child: ListenableBuilder(
+              listenable: notifier,
+              builder: (context, _) => _UpdateDialog(
+                icon: LucideIcons.arrowDownToLine300,
+                title: installing
+                    ? 'Installing Harness ${update.version}…'
+                    : 'Harness ${update.version} is available',
+                body: installing
+                    ? [
+                        if (notifier.updateDownloadPercent case final percent?)
+                          'Downloading… $percent%.',
+                        'Don’t quit Harness. It will restart on its own.',
+                      ].join(' ')
+                    : current.isSkipped
+                    ? 'You skipped this version earlier. You can still install it.'
+                    : 'Download and install it now? Harness will restart when it '
+                          'finishes.',
+                busy: installing,
+                update: installing ? null : update,
+                actions: installing
+                    ? const []
+                    : [
                         _DialogAction(
-                          label: 'Skip ${update.version}',
+                          key: const Key('close-update-dialog-button'),
+                          label: 'Close',
                           onPressed: () async {
-                            await notifier.skipAvailableUpdate(update: update);
-                            if (dialogContext.mounted) {
-                              Navigator.of(dialogContext).pop();
-                            }
+                            Navigator.of(dialogContext).pop();
                           },
                         ),
-                      _DialogAction(
-                        label: 'Update',
-                        primary: true,
-                        onPressed: () async {
-                          setState(() => installing = true);
-                          final installed = await notifier
-                              .installAvailableUpdate(update: update);
-                          // A successful install never returns — the process is
-                          // replaced. Reaching here means it failed, and the banner
-                          // behind this dialog is already showing why.
-                          if (!context.mounted || installed) return;
-                          setState(() => installing = false);
-                          Navigator.of(dialogContext).pop();
-                        },
-                      ),
-                    ],
+                        if (!current.isSkipped)
+                          _DialogAction(
+                            label: 'Skip ${update.version}',
+                            onPressed: () async {
+                              await notifier.skipAvailableUpdate(
+                                update: update,
+                              );
+                              if (dialogContext.mounted) {
+                                Navigator.of(dialogContext).pop();
+                              }
+                            },
+                          ),
+                        _DialogAction(
+                          label: 'Update',
+                          primary: true,
+                          onPressed: () async {
+                            setState(() => installing = true);
+                            final installed = await notifier
+                                .installAvailableUpdate(update: update);
+                            // A successful install never returns — the process is
+                            // replaced. Reaching here means it failed, and the banner
+                            // behind this dialog is already showing why.
+                            if (!context.mounted || installed) return;
+                            setState(() => installing = false);
+                            Navigator.of(dialogContext).pop();
+                          },
+                        ),
+                      ],
+              ),
             ),
           );
         },
@@ -456,7 +485,7 @@ class _UpdateDialog extends StatelessWidget {
       // it belongs to the menu panel, not to a dialog.
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: 372 * MediaQuery.textScalerOf(context).scale(12.5) / 12.5,
+          maxWidth: 372 * grid.appTextScaleOf(context),
         ),
         child: SingleChildScrollView(
           child: Padding(
@@ -489,18 +518,15 @@ class _UpdateDialog extends StatelessWidget {
                 const SizedBox(height: 12),
                 Text(
                   title,
-                  style: TextStyle(
+                  style: grid.AppType.heading(
                     color: grid.AppPalette.textPrimary,
-                    fontSize: 15,
-                    fontWeight: grid.AppFont.semibold,
                   ),
                 ),
                 const SizedBox(height: 5),
                 Text(
                   body,
-                  style: TextStyle(
+                  style: grid.AppType.body(
                     color: grid.AppPalette.textSecondary,
-                    fontSize: 12.5,
                     height: 1.5,
                   ),
                 ),
@@ -578,19 +604,18 @@ class _Fact extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SizedBox(
-          width: 96 * MediaQuery.textScalerOf(context).scale(11.5) / 11.5,
+          width: 96 * grid.appTextScaleOf(context),
           child: Text(
             label,
-            style: TextStyle(color: grid.AppPalette.textFaint, fontSize: 11.5),
+            style: grid.AppType.body(color: grid.AppPalette.textFaint),
           ),
         ),
         Expanded(
+          // Versions and sizes: copied into a report, so set in mono.
           child: DefaultTextStyle(
-            style: TextStyle(
+            style: grid.AppType.monoLabel(
+              fontWeight: FontWeight.w400,
               color: grid.AppPalette.textSecondary,
-              fontSize: 11.5,
-              fontFamily: grid.AppFont.mono,
-              fontFamilyFallback: grid.AppFont.monoFallback,
             ),
             child: value,
           ),
@@ -611,22 +636,25 @@ class _InstalledVersionState extends State<_InstalledVersion> {
   late final Future<String> _info = runningAppVersion();
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<String>(
-    future: _info,
-    builder: (context, snapshot) {
-      final version = snapshot.data;
-      if (version == null) {
-        // Still reading: a blank measured against the ambient mono style the
-        // row sets, so it and the version it becomes are the same line.
-        // Answered with nothing: the dash, which is a value.
-        return snapshot.connectionState == ConnectionState.done
-            ? const Text('—')
-            : SkeletonText(
-                style: DefaultTextStyle.of(context).style,
-                width: 44,
-              );
-      }
-      return Text(version);
-    },
-  );
+  Widget build(BuildContext context) {
+    TerminalFontScope.watch(context);
+    return FutureBuilder<String>(
+      future: _info,
+      builder: (context, snapshot) {
+        final version = snapshot.data;
+        if (version == null) {
+          // Still reading: a blank measured against the ambient mono style the
+          // row sets, so it and the version it becomes are the same line.
+          // Answered with nothing: the dash, which is a value.
+          return snapshot.connectionState == ConnectionState.done
+              ? const Text('—')
+              : SkeletonText(
+                  style: DefaultTextStyle.of(context).style,
+                  width: 44,
+                );
+        }
+        return Text(version);
+      },
+    );
+  }
 }

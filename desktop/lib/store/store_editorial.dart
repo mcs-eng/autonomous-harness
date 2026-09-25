@@ -67,9 +67,9 @@ const storeStories = <String, StoreStory>{
   'autonomous/autonomous-grid': StoreStory(
     benefit: 'Your machines. Your models. One conversation.',
     headline: 'Meet your\npersonal AI fleet.',
-    description: 'Deploy open-weight models by talking to Grid.\nWatch your machines, models, and performance live.',
+    description: 'Deploy open-weight models by talking to Model Manager.\nWatch your machines, models, and performance live.',
     asset: 'assets/store/grid-fleet.png',
-    caption: 'Grid Viewer · Illustrative telemetry',
+    caption: 'Model Manager · Illustrative telemetry',
     prompts: [
       'Discover my machines and deploy an open-weight model that fits.',
       'Find the best placement for a coding model and a fast chat model across my fleet.',
@@ -80,7 +80,7 @@ const storeStories = <String, StoreStory>{
     headline: 'You can\ndesign in 3D.',
     description: 'Describe a scene. Shape every detail.\nMake something you never thought you could.',
     asset: 'assets/store/blender-studio.png',
-    caption: 'A scene made with Blender · Original OpenHarness artwork',
+    caption: 'A scene made with Blender · Original Harness artwork',
     prompts: [
       'Create a sculptural scene with an orange arch, a chrome sphere, and soft studio lighting.',
       'Design a ceramic mug with a rounded handle. Show me a turntable view.',
@@ -257,6 +257,7 @@ bool storeMatches(DshEntry entry, String query) {
     storeProjectExamples[entry.id]?.prompt,
     storeProjectExamples[entry.id]?.title,
     ...entry.examples.map((example) => example.prompt),
+    ...entry.examples.map((example) => example.caption),
   ].join(' ').toLowerCase();
   return terms.every(text.contains);
 }

@@ -34,6 +34,7 @@ void main() {
       'waiting composer',
       'tab',
       'close pane',
+      if (nativeEntry) 'close pane menu',
       'close tab',
       'new tab',
     ]) {
@@ -86,11 +87,14 @@ void main() {
                 LogicalKeyboardKey.arrowLeft,
               ),
               'tab' => ('swarm.select_1', LogicalKeyboardKey.digit1),
-              'close pane' => ('pane.close', LogicalKeyboardKey.keyW),
+              'close pane' ||
+              'close pane menu' => ('pane.close', LogicalKeyboardKey.keyW),
               'close tab' => ('swarm.close', LogicalKeyboardKey.keyW),
               _ => ('swarm.new', LogicalKeyboardKey.keyT),
             };
-            if (nativeEntry) {
+            if (action == 'close pane menu') {
+              await native(tester, 'closePane');
+            } else if (nativeEntry) {
               await native(tester, 'keymapCommand', {'command': commandId});
             } else {
               await command(tester, key, shift: action == 'close pane');
@@ -108,13 +112,8 @@ void main() {
               expect(app.swarms, hasLength(2));
               expect(firstInput, isEmpty);
               expect(
-                tester
-                    .widget<TextField>(
-                      find.byKey(const ValueKey('swarm-search-input')),
-                    )
-                    .focusNode!
-                    .hasFocus,
-                isTrue,
+                find.byKey(const ValueKey('swarm-search-input')),
+                findsNothing,
               );
             } else if (action == 'waiting composer') {
               expect(app.focusedPane, same(first));

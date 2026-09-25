@@ -1,3 +1,4 @@
+
 import 'dart:async';
 import 'dart:io';
 
@@ -139,7 +140,9 @@ void main() {
       final setup = configureDesktopWindow(palette: palette);
       await tester.pump();
       await setup;
-      expect(nativeCalls.single.arguments, {'palette': palette.nativeColors});
+      expect(nativeCalls.single.arguments, {
+        'palette': palette.nativeColors,
+      });
       expect(
         calls.indexOf('native:configure'),
         lessThan(calls.indexOf('show')),

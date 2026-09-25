@@ -5,7 +5,7 @@ import 'package:flutter/widgets.dart';
 import '../logging/debug_surface.dart';
 
 /// Harness uses Command as a direct prefix for frequent workspace actions.
-/// T opens a tab, P adds a pane, N creates a harness, S opens the Store,
+/// T opens a tab, O opens a harness, P opens commands, N creates a harness, S opens the Store,
 /// Shift-L chooses a layout. H/J/K/L and arrows focus panes; B routes a task.
 /// The same definitions feed live keys, help and search.
 ///
@@ -36,6 +36,9 @@ enum ShortcutAction {
   movePaneUp,
   movePaneDown,
 
+  /// Send the focused pane to another tab, terminal and all.
+  movePaneToTab,
+
   /// The agent this window was on before the current one — tmux's `prefix ;`.
   lastPane,
 
@@ -63,6 +66,11 @@ enum ShortcutAction {
   /// profile and permission mode — with a fresh conversation: fork minus the
   /// context. No dialog, like [newTerminal].
   cloneAgent,
+
+  /// Start the focused pane's harness again in place, resuming its
+  /// conversation where the engine can — the pane, its folder and its settings
+  /// all stay. Asks first, unlike [cloneAgent]: the running process ends.
+  restartAgent,
   routeTask,
   orchestrate,
   reload,
@@ -214,6 +222,16 @@ const List<AppShortcut> kAppShortcuts = [
     label: 'Move this pane right',
     group: ShortcutGroup.panes,
   ),
+  AppShortcut(
+    action: ShortcutAction.movePaneToTab,
+    activator: SingleActivator(
+      LogicalKeyboardKey.keyM,
+      meta: true,
+      shift: true,
+    ),
+    label: 'Move this pane to another tab',
+    group: ShortcutGroup.panes,
+  ),
 
   // ⌘⏎ — tmux's `prefix z`, one of the most-pressed keys that multiplexer has.
   // Enter because it reads as "make THIS the thing", and because it is the one
@@ -355,8 +373,8 @@ List<AppShortcut> appShortcuts({bool swarmMode = true}) => [
 const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.addAgent,
-    activator: SingleActivator(LogicalKeyboardKey.keyP, meta: true),
-    label: 'New Pane',
+    activator: SingleActivator(LogicalKeyboardKey.keyO, meta: true),
+    label: 'Open Harness',
     group: ShortcutGroup.actions,
   ),
   AppShortcut(
@@ -372,7 +390,7 @@ const kSwarmShortcuts = [
     group: ShortcutGroup.navigate,
   ),
   // ⌘⇧T is New Terminal, as it is in a terminal app. "Reopen last closed
-  // harness" used to sit on it; it lives on in the History menu, the ⌘⇧P
+  // harness" used to sit on it; it lives on in the History menu, the ⌘P
   // command palette and `keybindings.jsonc`, without a default chord.
   AppShortcut(
     action: ShortcutAction.newTerminal,
@@ -384,6 +402,18 @@ const kSwarmShortcuts = [
     label: 'New Terminal',
     group: ShortcutGroup.actions,
   ),
+  // ⌘⇧E, not ⌘⇧R: R is Rename Tab, and ⌘R is Split Right. E for "engine
+  // again" — the pane stays, the process starts over.
+  AppShortcut(
+    action: ShortcutAction.restartAgent,
+    activator: SingleActivator(
+      LogicalKeyboardKey.keyE,
+      meta: true,
+      shift: true,
+    ),
+    label: 'Restart Harness',
+    group: ShortcutGroup.actions,
+  ),
   // ⌘⇧N was Create Agent until ⌘N became New Harness (01989f5a); reclaimed
   // for its shifted sibling: ⌘N starts a new one, ⌘⇧N another of this one.
   AppShortcut(
@@ -393,7 +423,7 @@ const kSwarmShortcuts = [
       meta: true,
       shift: true,
     ),
-    label: 'Clone Agent',
+    label: 'Clone Harness',
     group: ShortcutGroup.actions,
   ),
   AppShortcut(
@@ -585,6 +615,12 @@ List<TerminalKey> get kTerminalOwnedKeys => [
   ],
   const TerminalKey(['esc'], 'Interrupt the engine'),
   const TerminalKey(['⌥', '⏎'], "Newline in the engine's prompt"),
+  // Kept as short as the rows around them: the deck's narrowest card is 280px, where a label much
+  // past thirty characters takes a second line to itself.
+  const TerminalKey(['⌥', '⌫'], 'Delete the previous word'),
+  // ⌘⌫ is taken in the pane on Apple only — elsewhere ⌘ is Super and stays the app's.
+  if (defaultTargetPlatform != TargetPlatform.linux)
+    const TerminalKey(['⌘', '⌫'], "Delete to the line's start"),
   const TerminalKey(['⌃', 'C'], 'Cancel / interrupt in the agent'),
 ];
 

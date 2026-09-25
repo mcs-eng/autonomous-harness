@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
+import { execFileSync } from 'child_process'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { claudeContinuation } from './sessionRepair.js'
@@ -387,7 +388,10 @@ describe('claudeContinuation', () => {
         JSON.stringify({ type: 'continued-in', sessionId: 'old-session', continuedInSessionId: newId }),
       ].join('\n') + '\n',
     )
-    writeFileSync(join(dir, `${newId}.jsonl`), `${JSON.stringify({ type: 'session', cwd: CWD, id: newId })}\n`)
+    writeFileSync(join(dir, `${newId}.jsonl`), [
+      JSON.stringify({ type: 'session', cwd: CWD, id: newId }),
+      JSON.stringify({ type: 'user', sessionId: newId, message: { role: 'user', content: 'carry on' } }),
+    ].join('\n') + '\n')
 
     await expect(claudeContinuation(oldPath)).resolves.toEqual({
       sessionId: newId,
@@ -420,12 +424,60 @@ describe('claudeContinuation', () => {
     const lines = Array.from({ length: 50 }, () => filler)
     lines.push(JSON.stringify({ type: 'continued-in', continuedInSessionId: newId }))
     writeFileSync(oldPath, lines.join('\n') + '\n')
-    writeFileSync(join(dir, `${newId}.jsonl`), `${JSON.stringify({ type: 'session', cwd: CWD, id: newId })}\n`)
+    writeFileSync(join(dir, `${newId}.jsonl`), [
+      JSON.stringify({ type: 'session', cwd: CWD, id: newId }),
+      JSON.stringify({ type: 'assistant', sessionId: newId, message: { role: 'assistant', content: 'hello' } }),
+    ].join('\n') + '\n')
 
     await expect(claudeContinuation(oldPath)).resolves.toEqual({
       sessionId: newId,
       transcriptPath: join(dir, `${newId}.jsonl`),
     })
+  })
+
+  it('does not follow the marker to a background session nobody has spoken in', async () => {
+    // `claude` writes the same marker when it moves a session to the BACKGROUND, and that file holds
+    // two bookkeeping lines forever while the conversation goes on in the original. Following it left
+    // the agent on an empty session, and Open then asked `--resume` for an id the CLI refuses because
+    // it is running in the background (#262 follow-up, measured on a real transcript).
+    const dir = tempRoot()
+    const oldPath = join(dir, 'old-session.jsonl')
+    const newId = '47a2bb52-5511-40ba-a9fb-8390572bc3de'
+    writeFileSync(oldPath, [
+      JSON.stringify({ type: 'user', sessionId: 'old-session', message: { role: 'user', content: 'hi' } }),
+      JSON.stringify({ type: 'continued-in', sessionId: 'old-session', continuedInSessionId: newId }),
+    ].join('\n') + '\n')
+    const background = join(dir, `${newId}.jsonl`)
+    writeFileSync(background, [
+      JSON.stringify({ type: 'ai-title', sessionId: newId, title: 'Merge PR' }),
+      JSON.stringify({ type: 'agent-name', sessionId: newId, name: 'harness Merge PR' }),
+    ].join('\n') + '\n')
+
+    await expect(claudeContinuation(oldPath)).resolves.toBeNull()
+
+    // The pass after its first turn lands binds it, so a real continuation is only ever deferred.
+    writeFileSync(background, [
+      JSON.stringify({ type: 'ai-title', sessionId: newId, title: 'Merge PR' }),
+      JSON.stringify({ type: 'user', sessionId: newId, message: { role: 'user', content: 'carry on' } }),
+    ].join('\n') + '\n')
+    await expect(claudeContinuation(oldPath)).resolves.toEqual({ sessionId: newId, transcriptPath: background })
+  })
+
+  it('follows a continuation whose first turn is past the bounded read', async () => {
+    // A rollover can open on a `file-history-snapshot` big enough to push the first turn out of the
+    // head this check reads. What it rules out is two short lines, so size alone answers for a file
+    // larger than the bound — the bound must never be the thing that refuses a real conversation.
+    const dir = tempRoot()
+    const oldPath = join(dir, 'old-session.jsonl')
+    const newId = 'c1d2e3f4-5511-40ba-a9fb-8390572bc3de'
+    writeFileSync(oldPath, `${JSON.stringify({ type: 'continued-in', continuedInSessionId: newId })}\n`)
+    const nextPath = join(dir, `${newId}.jsonl`)
+    writeFileSync(nextPath, [
+      JSON.stringify({ type: 'file-history-snapshot', sessionId: newId, blob: 'x'.repeat(300 * 1024) }),
+      JSON.stringify({ type: 'user', sessionId: newId, message: { role: 'user', content: 'carry on' } }),
+    ].join('\n') + '\n')
+
+    await expect(claudeContinuation(oldPath)).resolves.toEqual({ sessionId: newId, transcriptPath: nextPath })
   })
 
   it('returns null for a missing file', async () => {
@@ -491,4 +543,67 @@ it.each(['bad pid', 'bad start', 'missing file', 'bad json', 'different pid', 'd
   mkdirSync(join(home, 'sessions'))
   if (mode !== 'missing file') writeFileSync(join(home, 'sessions', '77.json'), mode === 'bad json' ? '{' : JSON.stringify(record))
   expect(await claudeProcessSession(mode === 'bad pid' ? -1 : 77, CWD, mode === 'bad start' ? NaN : STARTED_AT)).toBeNull()
+})
+
+/**
+ * Hermes keeps one store per HOME, and `hermes -p <name>` has its own. A repair that only asked
+ * `<HERMES_HOME>/state.db` could never rebind a profile agent after a restart — its row is in a
+ * database that store has never heard of (openharness#191).
+ */
+describe('hermes repair across profile homes', () => {
+  const hasSqlite = (() => {
+    try { execFileSync('sqlite3', ['-version'], { stdio: 'ignore' }); return true } catch { return false }
+  })()
+  const t = hasSqlite ? it : it.skip
+  const SID_DEFAULT = '20260727_162325_e25264'
+  const SID_PROFILE = '20260921_152236_a1b2c3'
+
+  /** A home whose store holds one session started in `cwd`. */
+  function hermesHome(root: string, sessionId: string | null, cwd = CWD): string {
+    mkdirSync(root, { recursive: true })
+    execFileSync('sqlite3', [join(root, 'state.db'),
+      'CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, cwd TEXT, started_at REAL);'
+      + (sessionId ? `INSERT INTO sessions VALUES ('${sessionId}','cli','${cwd}',${Math.trunc(STARTED_AT / 1000) + 5});` : '')])
+    return root
+  }
+
+  async function loadWithHome(home: string) {
+    vi.resetModules()
+    process.env.CLAUDE_PROJECTS_DIR = home
+    process.env.HERMES_HOME = home
+    const homes = await import('../engines/hermes/home.js')
+    homes.forgetHermesHomes()
+    return import('./sessionRepair.js')
+  }
+
+  t('binds a profile session and says which home it came from', async () => {
+    const home = tempRoot()
+    hermesHome(home, null)                                          // the default store: no session here
+    const demo = hermesHome(join(home, 'profiles', 'demo'), SID_PROFILE)
+    const { findLiveSession } = await loadWithHome(home)
+
+    expect(await findLiveSession('hermes', CWD, STARTED_AT, { bornOnly: true }))
+      .toMatchObject({ sessionId: SID_PROFILE, hermesHome: demo })
+  })
+
+  t('a default-home session still binds, and names the default home', async () => {
+    const home = tempRoot()
+    hermesHome(home, SID_DEFAULT)
+    hermesHome(join(home, 'profiles', 'demo'), null)
+    const { findLiveSession } = await loadWithHome(home)
+
+    expect(await findLiveSession('hermes', CWD, STARTED_AT, { bornOnly: true }))
+      .toMatchObject({ sessionId: SID_DEFAULT, hermesHome: home })
+  })
+
+  t('refuses when two homes both claim the directory', async () => {
+    // Same rule as two rows in one store: ambiguous is a refusal, not a coin toss — pointing an agent
+    // at another agent's history is the failure this whole file exists to prevent.
+    const home = tempRoot()
+    hermesHome(home, SID_DEFAULT)
+    hermesHome(join(home, 'profiles', 'demo'), SID_PROFILE)
+    const { findLiveSession } = await loadWithHome(home)
+
+    expect(await findLiveSession('hermes', CWD, STARTED_AT, { bornOnly: true })).toBeNull()
+  })
 })
