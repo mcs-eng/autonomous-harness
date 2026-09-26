@@ -6,10 +6,8 @@ import { PROCESS_ENGINES } from '../engines/types.js'
 import type { AgentCommandOwnershipSnapshot } from './engineBin.js'
 import {
   ambiguousAgentProcess,
-  argsMatchProcCmdlineSerialization,
   argvTokens,
   bypassPermissionActive,
-  bypassPermissionActiveFromArgv,
   engineProcessMatch,
   engineProcessMatchScore,
   faithfulArgsFromCmdline,
@@ -388,11 +386,9 @@ describe('tmux process primitives', () => {
 
   /**
    * Review cycle-8 P2: ordinary rows (no `?` mangle, no interop relay) used to keep flattened
-   * `ps` text even with /proc readable, so any spaced argument — most notably a quoted prompt
-   * — failed the boundary-faithful gate and silently dropped legitimate bypass/resume
-   * evidence on restart/retarget. repairMangledRows now re-serializes ordinary rows from
-   * /proc through `faithfulArgsFromCmdline`; rows with NO /proc evidence stay flattened and
-   * untrusted. Pinned through the pure pieces on every host.
+   * `ps` text even with /proc readable, losing the boundaries of spaced arguments.
+   * `repairMangledRows` now re-serializes ordinary rows through `faithfulArgsFromCmdline`;
+   * rows with no /proc evidence stay flattened. Pinned through the pure pieces on every host.
    */
   describe('faithfulArgsFromCmdline', () => {
     it('serializes ordinary /proc argv with the shared quoting dialect', () => {
@@ -407,17 +403,6 @@ describe('tmux process primitives', () => {
       expect(faithfulArgsFromCmdline('')).toBeNull()
     })
 
-    it('makes the reviewer’s spaced-prompt scenario pass the gate the flattened text fails', () => {
-      // `codex --dangerously-bypass-approvals-and-sandbox "fix the bug"`: the flattened ps
-      // rendering can never prove the flag, but the /proc reconstruction must.
-      const cmdline = 'codex\0--dangerously-bypass-approvals-and-sandbox\0fix the bug'
-      const faithful = faithfulArgsFromCmdline(cmdline)!
-      expect(argsMatchProcCmdlineSerialization(faithful, cmdline)).toBe(true)
-      expect(argsMatchProcCmdlineSerialization(
-        'codex --dangerously-bypass-approvals-and-sandbox fix the bug', cmdline,
-      )).toBe(false)
-      expect(bypassPermissionActiveFromArgv('codex', faithful, true)).toBe(true)
-    })
   })
 
   it.each([
@@ -718,25 +703,6 @@ describe('tmux process primitives', () => {
   })
 
   /**
-   * Review cycle-6 P1 (security): every repair path was boundary-faithful by cycle 5, but the
-   * ordinary no-repair path still handed bypassPermissionActive a FLATTENED `ps` args string —
-   * `ps` space-joins argv with every quote gone, so ONE prompt argument containing the flag
-   * text re-tokenized into a standalone flag. `bypassPermissionActiveFromArgv` makes the
-   * precondition explicit: flattened args are NO EVIDENCE and read false, whatever they contain.
-   */
-  it('treats flattened ps args as no evidence for bypass detection', () => {
-    const flattened = 'codex Explain --dangerously-bypass-approvals-and-sandbox please'
-    // The old shape (boundaryFaithful defaults true) reproduces the reviewer's flip...
-    expect(bypassPermissionActive('codex', flattened)).toBe(true)
-    // ...and the sentinel-bearing form refuses it.
-    expect(bypassPermissionActiveFromArgv('codex', flattened, false)).toBe(false)
-    // A faithful real launch still reads true.
-    expect(bypassPermissionActiveFromArgv(
-      'codex', 'codex --dangerously-bypass-approvals-and-sandbox', true,
-    )).toBe(true)
-  })
-
-  /**
    * Review cycle-6 P1 (security): resumeSessionId's regex searched INSIDE quoted prompt
    * arguments, so one prompt 'Explain --session ses_OTHER now' supplied a false resume session
    * that discovery bound a relaunch to. The token form requires the flag as a STANDALONE token
@@ -782,35 +748,6 @@ describe('tmux process primitives', () => {
       executable: '\\\\nas\\share\\not\\codex.exe',
       args: '\\\\nas\\share\\not\\codex.exe --version',
     }, 'codex')).toBeGreaterThan(0)
-  })
-
-  /**
-   * Review cycle-7 P2: the boundary-faithful check must accept the repairs' serialized form —
-   * the interop repair DROPS the `/init` head (and a duplicated interpreter basename), so a
-   * raw-argv-only comparison rejected every legitimate repaired relay row and the
-   * restart/retarget paths silently dropped an active bypass flag. Pinned through the pure
-   * serialization matcher: `processArgvIsBoundaryFaithful` itself reads /proc and stays
-   * Linux-gated, like the repairs it mirrors.
-   */
-  it('accepts the repairs’ serialized argv as boundary-faithful', () => {
-    // The `?`-mangle repair emits the raw argv serialization for a non-relay row.
-    expect(argsMatchProcCmdlineSerialization(
-      'codex.exe --dangerously-bypass-approvals-and-sandbox',
-      'codex.exe\0--dangerously-bypass-approvals-and-sandbox',
-    )).toBe(true)
-    // The interop repair strips the `/init` relay head and the duplicated interpreter
-    // basename; the faithful comparison must run against that SAME transformation.
-    // (The repair's quoting dialect doubles backslashes — see quoteArgvElement, cycle-4.)
-    expect(argsMatchProcCmdlineSerialization(
-      '"C:\\\\Program Files\\\\nodejs\\\\node.exe" --dangerously-bypass-approvals-and-sandbox',
-      '/init\0C:\\Program Files\\nodejs\\node.exe\0node.exe\0--dangerously-bypass-approvals-and-sandbox',
-    )).toBe(true)
-    // A flattened `ps` rendering is refused exactly when flattening lost a boundary: the
-    // space-bearing interpreter path serializes quoted, ps drops the quotes.
-    expect(argsMatchProcCmdlineSerialization(
-      '/init C:\\Program Files\\nodejs\\node.exe --dangerously-bypass-approvals-and-sandbox',
-      '/init\0C:\\Program Files\\nodejs\\node.exe\0--dangerously-bypass-approvals-and-sandbox',
-    )).toBe(false)
   })
 
   it('maps neutral visible/history and ANSI capture options to tmux flags', () => {

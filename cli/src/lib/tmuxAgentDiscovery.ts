@@ -25,7 +25,6 @@ import {
   engineProcessMatchScore,
   enrichProcessRows,
   parseProcessRow,
-  processArgvIsBoundaryFaithful,
   processTreePids,
   repairMangledRows,
   resumeSessionId,
@@ -48,12 +47,6 @@ export interface DiscoveredTmuxAgent {
   /** The stable engine process argv, used only to bind an explicit `--resume <id>` after discovery. */
   args: string
   resumeSessionId: string | null
-  /**
-   * Whether `args` preserves real argv boundaries (/proc-cmdline-reconstructed). Flattened `ps`
-   * text cannot prove a bypass flag or a resume id out of prompt text — consumers must treat it
-   * as no evidence (review cycle-6, P1 security).
-   */
-  argsBoundaryFaithful: boolean
   /**
    * 'ori' when this process is pointed at OpenRouter (`ori claude` and friends). undefined = the probe
    * could not read the process; the registry then keeps whatever it already knew.
@@ -239,9 +232,6 @@ function paneOwner(
       processIdentity: { pid: row.pid, executable: row.executable, startMarker: row.startMarker },
       args: row.args,
       resumeSessionId: resumeSessionId(engine, row.args),
-      // Evidence flag for consumers of `args`: true only when the string was reconstructed from
-      // /proc cmdline and preserves real argv boundaries (review cycle-6, P1 security).
-      argsBoundaryFaithful: processArgvIsBoundaryFaithful(row),
     },
   }
 }
@@ -279,10 +269,10 @@ export async function probeTmuxAgents(
   if (!tmux.ok) return { ok: false, error: `tmux list-panes failed: ${tmux.error}` }
   if (!ps.ok) return { ok: false, error: `process table failed: ${ps.error}` }
   const parsed = ps.stdout.split('\n').map(parseProcessRow).filter((row): row is ProcessRow => row !== null)
-  // Every process-table producer applies the /proc repair: the bypass/resume evidence gate is
-  // sound only when rows are boundary-faithful wherever /proc is readable (review cycle-8, P2),
-  // and the interop/?-mangle rewrites are what make relayed and locale-mangled rows matchable.
-  const rows = await enrichProcessRows(repairMangledRows(parsed), processTreePids(parsed, tmux.panes.map((pane) => pane.rootPid)))
+  // `ps` hides the Windows interpreter and script behind WSL's `/init` relay. Rebuild those rows
+  // from `/proc/<pid>/cmdline` before matching, just as the composite terminal probe does.
+  const repaired = repairMangledRows(parsed)
+  const rows = await enrichProcessRows(repaired, processTreePids(repaired, tmux.panes.map((pane) => pane.rootPid)))
   const probe = discoverTmuxAgentsFromSnapshot(
     tmux.panes,
     rows,

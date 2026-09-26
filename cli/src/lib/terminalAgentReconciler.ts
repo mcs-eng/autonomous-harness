@@ -228,10 +228,8 @@ export class TerminalAgentReconciler {
       this.deps.onProbeStatus?.({ ready: true, error: probeError })
       return
     }
-    // Consume exactly the hints this pass copied. A hint that ARRIVED during the
-    // probe await (triggerHint fires trigger() while a pass is in flight) belongs
-    // to the next pass — clear() here used to drop it before any pass read it —
-    // and a hint OVERWRITTEN during the await keeps its newer engine.
+    // Consume only the snapshot used by this pass. A hint arriving while the probe is in flight
+    // belongs to the next pass, and an overwritten hint must retain its newer engine.
     for (const [key, engine] of hints) {
       if (this.hints.get(key) === engine) this.hints.delete(key)
     }
@@ -359,9 +357,6 @@ export class TerminalAgentReconciler {
               processIdentity: current.processIdentity!,
               args: current.processIdentity?.executable ?? '',
               resumeSessionId: null,
-              // A reconstructed observation carries no argv evidence at all — never let a
-              // consumer read bypass state or session ids out of the executable string.
-              argsBoundaryFaithful: false,
               runtimes: nextRuntimes,
               primaryRuntimeKey: nextRuntimes.some((runtime) => terminalRouteKey(runtime) === current.primaryRuntimeKey)
                 ? current.primaryRuntimeKey

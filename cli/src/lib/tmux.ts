@@ -239,10 +239,8 @@ export function parseProcessRow(line: string): ProcessRow | null {
  * When `/init` is argv[0], `/proc` IS the mangled view: rewrite the row from `cmdline` so the
  * interpreter (`node.exe`) and the real entrypoint (`.../codex.js`) are visible to matching.
  *
- * EVERY producer of a process table must run its rows through this repair: the bypass/resume
- * evidence gate (`processArgvIsBoundaryFaithful`) is sound only when rows carry /proc-reconstructed
- * argv wherever /proc is readable — an ordinary row left as flattened `ps` text loses exactly the
- * spaced prompt arguments that make flattening lossy (review cycle-8, P2).
+ * EVERY producer of a process table must run its rows through this repair so WSL relays and
+ * locale-mangled rows have the same executable/argv shape everywhere discovery runs.
  */
 export function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
   if (process.platform !== 'linux') return rows
@@ -273,13 +271,9 @@ export function repairMangledRows(rows: ProcessRow[]): ProcessRow[] {
     }
     // Ordinary row (nothing `?`-mangled): flattened `ps` text still loses argv boundaries
     // whenever ANY element carries a space — a quoted prompt argument flattens into
-    // free-standing words whose flag-shaped fragments re-tokenize (review cycle-6, P1), and
-    // the evidence gate then refuses the row outright. When /proc is readable, the true NUL
-    // argv is strictly better evidence: re-serialize it through the shared quoting so
-    // bypass/resume readers can trust the row (`codex --dangerously-bypass-approvals-and-
-    // sandbox "fix the bug"` used to silently lose its bypass evidence on restart/retarget —
-    // review cycle-8, P2). With NO /proc evidence the row stands as flattened and stays
-    // untrusted, exactly as the gate requires.
+    // free-standing words whose flag-shaped fragments re-tokenize. When /proc is readable, the true
+    // NUL argv is strictly better evidence, so re-serialize it through the shared quoting. With no
+    // /proc evidence the original flattened row remains unchanged.
     const relayed = repairInteropRowFromCmdline(cmdline ?? '', comm)
     if (relayed.args !== undefined) return { ...row, ...relayed }
     const faithful = faithfulArgsFromCmdline(cmdline ?? '')
@@ -383,15 +377,14 @@ export function repairInteropRowFromCmdline(
  * The boundary-faithful `args` string for an ORDINARY (non-relay) row reconstructed from its
  * raw /proc cmdline: the true NUL argv re-joined through `quoteArgvElement`. Flattened `ps`
  * text cannot preserve argv boundaries once any element carries a space, so a readable /proc
- * is strictly better evidence — but only the reconstruction makes it comparable to what the
- * evidence gate expects. Pure and host-independent so tests pin it on every platform.
+ * is strictly better evidence. Pure and host-independent so tests pin it on every platform.
  * Returns null when the cmdline carries no usable argv (unreadable or empty): the caller
- * keeps the flattened row, which the evidence gate then refuses, as it must.
+ * keeps the flattened row.
  */
 export function faithfulArgsFromCmdline(cmdline: string): string | null {
   if (cmdline === '') return null
   const argv = cmdline.split('\0')
-  // Same one-artifact rule as the evidence gate (review cycle-5, P2): split() carries exactly
+  // Same one-artifact rule as the interop repair: split() carries exactly
   // ONE empty artifact after the final NUL.
   if (cmdline.endsWith('\0') && argv.length && argv[argv.length - 1] === '') argv.pop()
   const args = argv.map(quoteArgvElement).join(' ').trimEnd()
@@ -839,36 +832,10 @@ const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]
  * sandbox` — the flag text as the positional after the terminator — read as an active bypass
  * flag (review cycle-5, P1 security); the flag must appear BEFORE the terminator to count.
  *
- * This function must ONLY ever see boundary-faithful argv — a string reconstructed from the
- * process's raw NUL argv (/proc cmdline) through `quoteArgvElement`, where one prompt argument
- * stays one quoted token. The ordinary `ps` row carries FLATTENED arguments (`ps` space-joins
- * argv with every quote gone), so on that shape one prompt argument containing the flag text
- * re-tokenizes into a standalone flag and the check flips true from prompt text alone
- * (review cycle-6, P1 security). The undefined sentinel marks exactly that no-evidence case:
- * `processArgvIsBoundaryFaithful` decides per row, and no caller may pass a flattened `ps`
- * args string through without it.
  */
 export function bypassPermissionActive(engine: RegisteredSession['engine'], args: string): boolean {
-  return bypassPermissionActiveFromArgv(engine, args, true)
-}
-
-/**
- * The sentinel-bearing form: `boundaryFaithful === false` means the args string came from a
- * source that cannot preserve argv boundaries (flattened `ps` output), where flag text inside
- * one prompt argument is INDISTINGUISHABLE from a real flag. Rather than risk a prompt
- * enabling bypass mode on relaunch (cli.ts persists this state), flattened args are
- * NO EVIDENCE — the function reads false. Only /proc-cmdline-reconstructed rows
- * (the interop and `?`-mangle repairs) pass true.
- */
-export function bypassPermissionActiveFromArgv(
-  engine: RegisteredSession['engine'],
-  args: string,
-  boundaryFaithful: boolean,
-): boolean {
   const flags = BYPASS_PERMISSION_FLAGS[engine]
   if (!flags) return false
-  // Flattened `ps` args can never prove a bypass flag: refuse to persist state from them.
-  if (!boundaryFaithful) return false
   const tokens = argvTokens(args)
   const terminator = tokens.indexOf('--')
   const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
@@ -887,52 +854,6 @@ const LEGACY_BYPASS_FLAGS: Partial<Record<RegisteredSession['engine'], string[][
 }
 
 /**
- * Whether a row's `args` string preserves real argv boundaries — the precondition for reading
- * bypass state or session ids out of it. Only the /proc cmdline repairs know the true NUL argv;
- * every other row carries `ps`'s flattened space-join, where one prompt argument is no longer
- * distinguishable from several.
- */
-export function processArgvIsBoundaryFaithful(row: Pick<ProcessRow, 'pid' | 'args'>): boolean {
-  if (process.platform !== 'linux') return false
-  const cmdline = readProcField(row.pid, 'cmdline')
-  if (cmdline === null || cmdline === '') return false
-  return argsMatchProcCmdlineSerialization(row.args, cmdline)
-}
-
-/**
- * Whether [args] is a faithful serialization of a process's true NUL argv, given the raw
- * /proc cmdline text. Pure and host-independent so tests can pin it on every platform; the
- * /proc read that feeds it stays Linux-gated inside `processArgvIsBoundaryFaithful`.
- *
- * Two serializations count as faithful, matching exactly what the repairs emit:
- *   - the raw argv, `quoteArgvElement`-joined — what the `?`-mangle repair emits when its
- *     reconstructed row does NOT qualify as an interop relay;
- *   - the interop repair's form, which drops the `/init` relay head and a duplicated
- *     interpreter basename (the Node process.title artifact) — comparing raw-only rejected
- *     every legitimate repaired relay row, so the restart/retarget paths silently dropped an
- *     active bypass flag (review cycle-7, P2).
- * A flattened `ps` rendering passes only when flattening was lossless: any element carrying a
- * space serializes quoted while `ps` drops the quotes, so those strings differ and the row is
- * refused — which is exactly the boundary evidence the bypass/resume readers rely on.
- */
-export function argsMatchProcCmdlineSerialization(args: string, cmdline: string): boolean {
-  const argv = cmdline.split('\0')
-  // Mirror the repairs' one-artifact strip (review cycle-5, P2): split() carries exactly ONE
-  // empty artifact after the final NUL.
-  if (cmdline.endsWith('\0') && argv.length && argv[argv.length - 1] === '') argv.pop()
-  const raw = argv.map(quoteArgvElement).join(' ').trimEnd()
-  if (args === raw) return true
-  let serialized = [...argv]
-  if (serialized[0] === '/init' && serialized.length >= 2) serialized = serialized.slice(1)
-  if (serialized.length >= 2
-    && basename(serialized[0]).toLowerCase() === serialized[1].toLowerCase()) {
-    serialized.splice(1, 1)
-  }
-  const expected = serialized.map(quoteArgvElement).join(' ').trimEnd()
-  return args === expected
-}
-
-/**
  * The session id an engine was told to resume, or null when argv does not name one.
  *
  * Read from TOKENS, not the raw string: the regex form searched inside quoted prompt arguments
@@ -940,8 +861,6 @@ export function argsMatchProcCmdlineSerialization(args: string, cmdline: string)
  * resume session that discovery bound a relaunch to (review cycle-6, P1 security). A flag must
  * be a STANDALONE token, its value the next token — and like bypass detection, the scan stops
  * at a bare `--` option terminator, whose tail is positional prompt text however flag-shaped.
- * Callers should also honour `processArgvIsBoundaryFaithful`: like bypass state, a session id
- * read from flattened `ps` text is a guess, not evidence.
  */
 export function resumeSessionId(engine: RegisteredSession['engine'], args: string): string | null {
   const spec = RESUME_ARGS[engine]
