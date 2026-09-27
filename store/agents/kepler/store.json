@@ -1,0 +1,7 @@
+{
+  "listed": false,
+  "homepage": "https://github.com/mcs-eng/autonomous-harness/tree/main/store/agents/kepler",
+  "upstream": "https://ssd.jpl.nasa.gov/planets/approx_pos.html",
+  "license": "MIT",
+  "tagline": "Design a transfer and watch it fly"
+}

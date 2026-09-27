@@ -1,0 +1,226 @@
+:root {
+  --ink: #e7e1d6;
+  --muted: #a79e90;
+  --line: rgba(231, 225, 214, 0.16);
+  --brass: #e8b86d;
+  --brass-dim: #8c6a32;
+  --panel: rgba(12, 13, 16, 0.78);
+  --danger: #e07a6a;
+  --ok: #8fbfa8;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #07080c;
+  color: var(--ink);
+  font-family: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+}
+
+button, input, select {
+  font: inherit;
+  color: inherit;
+}
+
+#sky {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+}
+
+#sky.dragging { cursor: grabbing; }
+
+.mast {
+  position: fixed;
+  top: 22px;
+  left: 28px;
+  z-index: 2;
+  pointer-events: none;
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.65);
+}
+
+.mark {
+  margin: 0;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--brass);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.mast h1 {
+  margin: 4px 0 0;
+  font-weight: 500;
+  font-size: 34px;
+  letter-spacing: -0.03em;
+}
+
+.clock {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.dossier {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  bottom: 78px;
+  width: min(360px, calc(100vw - 32px));
+  z-index: 2;
+  overflow: auto;
+  padding: 16px 16px 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  backdrop-filter: blur(10px);
+}
+
+.dossier label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+input, select {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 14px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 14px;
+}
+
+button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+}
+
+button:hover { border-color: var(--brass-dim); color: var(--brass); }
+
+#save {
+  background: var(--brass);
+  color: #1a140c;
+  border-color: transparent;
+}
+
+#save:hover { color: #1a140c; }
+
+.budget {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.stat b { font-weight: 550; }
+
+.findings p, .almanac p, .hint, .fine, .status {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.findings .error { color: var(--danger); }
+.findings .warning { color: var(--brass); }
+.findings .info { color: var(--ok); }
+
+#pork {
+  width: 100%;
+  height: 180px;
+  border-radius: 10px;
+  background: #0c0e12;
+  margin-bottom: 6px;
+  cursor: crosshair;
+}
+
+.almanac {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+  margin-top: 8px;
+}
+
+.fine { margin-top: 14px; }
+
+.transport {
+  position: fixed;
+  left: 20px;
+  right: 392px;
+  bottom: 18px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#scrub {
+  flex: 1;
+  accent-color: var(--brass);
+}
+
+.views { display: flex; gap: 6px; }
+
+.status {
+  position: fixed;
+  left: 28px;
+  bottom: 58px;
+  z-index: 2;
+  margin: 0;
+  min-height: 1em;
+}
+
+@media (max-width: 800px) {
+  .dossier {
+    top: auto;
+    left: 10px;
+    right: 10px;
+    bottom: 72px;
+    width: auto;
+    max-height: 42vh;
+  }
+  .transport { right: 16px; }
+  .mast h1 { font-size: 26px; }
+}

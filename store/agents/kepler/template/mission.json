@@ -1,0 +1,24 @@
+{
+  "spec": 1,
+  "name": "Ares 2033",
+  "notes": "A one-revolution Lambert transfer opened from the porkchop. Departure is a 200 km Earth parking orbit on 2033-04-19; arrival is a circular capture at 250 km above Mars on 2033-11-05. Two-body J2000 elements only — a concept, not a flight ephemeris.",
+  "ships": [
+    {
+      "id": "ares",
+      "name": "Ares",
+      "color": "#e8b86d",
+      "legs": [
+        {
+          "from": "earth",
+          "to": "mars",
+          "mode": "lambert",
+          "depart": "2033-04-19",
+          "arrive": "2033-11-05",
+          "parkingKm": 200,
+          "captureKm": 250,
+          "prograde": true
+        }
+      ]
+    }
+  ]
+}
