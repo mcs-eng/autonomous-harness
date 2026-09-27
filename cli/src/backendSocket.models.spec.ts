@@ -62,6 +62,23 @@ it('receipts retain semantic model identity across retries, never credentials', 
   const receipts = readdirSync(join(root, 'agent-creations')).map(name => readFileSync(join(root, 'agent-creations', name), 'utf8')).join('')
   expect(receipts).not.toMatch(/fixture-secret|rotated-secret|apiKey/)
 })
+it('creation receipts distinguish same-name local targets and retain the chosen target on retry', async () => {
+  const creationId = 'local-model-launch-00001'
+  const gridTarget = 'local:a:0123456789abcdef'
+  vi.mocked(resolveNewAgentModel).mockResolvedValue({ ...target, targetId: gridTarget })
+  expect(await ask({ creationId, gridTarget })).toMatchObject({ state: 'failed', failure: { code: 'TEST_STOP' } })
+  expect(resolveNewAgentModel).toHaveBeenCalledWith({ model: 'Qwen-35B', grid: 'my-grid', targetId: gridTarget })
+  expect(socket.onCreateAgent).toHaveBeenCalledWith(expect.objectContaining({ grid: expect.objectContaining({ targetId: gridTarget }) }))
+  expect(await ask({ creationId, gridTarget })).toMatchObject({ state: 'failed' })
+  expect(await ask({ creationId, gridTarget: 'local:b:0123456789abcdef' })).toMatchObject({ error: 'CREATION_CONFLICT' })
+  expect(socket.onCreateAgent).toHaveBeenCalledOnce()
+  expect(resolveNewAgentModel).toHaveBeenCalledOnce()
+})
+it('rejects local model engines that need a protocol the profile does not serve', async () => {
+  expect(await ask({ engine: 'claude', gridTarget: 'local:a:0123456789abcdef' })).toMatchObject({ error: 'INVALID_GRID' })
+  expect(resolveNewAgentModel).not.toHaveBeenCalled()
+  expect(socket.onCreateAgent).not.toHaveBeenCalled()
+})
 it.each([null, new Error('private error')])('records a safe model failure before folder creation: %j', async value => {
   if (value instanceof Error) vi.mocked(resolveNewAgentModel).mockRejectedValue(value)
   else vi.mocked(resolveNewAgentModel).mockResolvedValue(value)

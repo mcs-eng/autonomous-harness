@@ -7498,6 +7498,7 @@ class AppNotifier extends ChangeNotifier {
       'dsh': ?dsh,
       'gridModel': ?model?.id,
       'gridName': ?model?.grid,
+      'gridTarget': ?model?.targetId,
       // A first message the engine is opened with, and the pane's name before
       // the engine reports a session title. Both absent unless asked for: a
       // daemon that predates them ignores an unknown field, but one that knows
@@ -7764,6 +7765,10 @@ class AppNotifier extends ChangeNotifier {
           !models.sections.any(
             (section) =>
                 section.name == choices['gridName'] &&
+                (choices['gridTarget'] == null
+                    ? section.source != 'local'
+                    : section.targetId == choices['gridTarget']) &&
+                models.canRunSection(section, choices['engine'] as String) &&
                 section.models.any((model) => model.id == choices['gridModel']),
           )) {
         return creation._complete(

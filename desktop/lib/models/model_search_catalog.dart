@@ -35,6 +35,7 @@ class ModelSearchEntry {
     this.searchAliases = const [],
     this.controller,
     this.own = false,
+    this.localProfile = false,
     this.gridModel,
     this.sharedBy,
   });
@@ -46,6 +47,9 @@ class ModelSearchEntry {
   final List<String> searchAliases;
   final ModelManagerController? controller;
   final bool own;
+
+  /// A configured local route belongs in the local section without granting host control.
+  final bool localProfile;
   final GridModel? gridModel;
   final String? sharedBy;
 
@@ -53,7 +57,7 @@ class ModelSearchEntry {
       ? ModelSearchSection.subscriptions
       : api != null
       ? ModelSearchSection.apis
-      : own
+      : own || localProfile
       ? ModelSearchSection.local
       : ModelSearchSection.shared;
 
@@ -218,15 +222,29 @@ class ModelSearchCatalog extends ChangeNotifier {
           ModelSearchEntry(
             id: id,
             name: model.id,
-            source: section.own
+            source: section.source == 'local'
+                ? [
+                    'Local',
+                    section.label ?? section.name,
+                    ?section.profileId,
+                  ].join(' · ')
+                : section.own
                 ? 'On your machines'
                 : 'Shared · ${section.name}',
             node: owner?.machine?.machine.displayName ?? model.node,
-            searchAliases: [model.node, if (section.own) 'local'],
+            searchAliases: [
+              model.node,
+              if (section.own || section.source == 'local') 'local',
+              ?section.label,
+              ?section.profileId,
+            ],
             own: section.own,
+            localProfile: section.source == 'local',
             controller: owner,
             gridModel: gridModel,
-            sharedBy: section.own ? null : model.node,
+            sharedBy: section.own || section.source == 'local'
+                ? null
+                : model.node,
             status:
                 offlineRowNote(model) ??
                 words.sentence ??

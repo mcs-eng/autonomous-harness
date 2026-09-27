@@ -43,6 +43,34 @@ Map<String, dynamic> catalog() => {
   ],
 };
 
+Map<String, dynamic> profileCatalog() => {
+  ...catalog(),
+  'grids': [
+    for (final id in ['a', 'b'])
+      {
+        'name': 'same-grid',
+        'source': 'local',
+        'own': false,
+        'label': 'Studio',
+        'profileId': id,
+        'targetId': 'local:$id:fixture',
+        'engines': ['codex'],
+        'models': [
+          {'id': 'SameModel', 'node': 'Studio'},
+        ],
+      },
+    {
+      'name': 'same-grid',
+      'source': 'shared',
+      'own': false,
+      'targetId': 'remote:same-grid',
+      'models': [
+        {'id': 'SameModel', 'node': 'Remote'},
+      ],
+    },
+  ],
+};
+
 class _Connection extends WsConn {
   _Connection()
     : super(
@@ -167,6 +195,104 @@ void main() {
     seedMixedAgents(app);
     app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
     addTearDown(app.dispose);
+  });
+  test('same-named profiles stay distinct through selection, draft and creation payload', () async {
+    final connection = connections.putIfAbsent('m', _Connection.new)
+      ..answer = profileCatalog();
+    final box = controller();
+    await load(box);
+    final choices = box.options.where((row) => row.model != null).toList();
+    expect(choices.map((row) => row.id).toSet(), hasLength(3));
+    expect(
+      choices.map((row) => row.group),
+      containsAll([
+        'Local · Studio · a',
+        'Local · Studio · b',
+        'Shared · same-grid',
+      ]),
+    );
+    final selected = choices.singleWhere(
+      (row) => row.model?.targetId == 'local:b:fixture',
+    );
+    box.applyOption(selected);
+    expect(box.modelLabel, 'SameModel · Studio · b');
+    await box.refreshModels();
+    expect(box.model?.targetId, 'local:b:fixture');
+    final restored = controller(draft: box.draft);
+    await load(restored);
+    expect(restored.model?.targetId, 'local:b:fixture');
+    expect(await restored.create(), NewHarnessOutcome.created);
+    expect(connection.creates.single['gridTarget'], 'local:b:fixture');
+    expect(connection.creates.single['gridName'], 'same-grid');
+  });
+  test(
+    'local profile search and counts honor section engine capability',
+    () async {
+      connections.putIfAbsent('m', _Connection.new).answer = profileCatalog();
+      final box = controller();
+      await load(box);
+      box.setQuery('Studio · b');
+      expect(
+        box.options
+            .where((row) => row.model != null)
+            .map((row) => row.model!.targetId),
+        ['local:b:fixture'],
+      );
+      box.setQuery('');
+      select(box, NewHarnessField.agent, 'claude');
+      await load(box);
+      expect(
+        box.options
+            .where((row) => row.model != null)
+            .map((row) => row.model!.targetId),
+        ['remote:same-grid'],
+      );
+      expect(box.total, 2); // Subscription plus the compatible remote model.
+    },
+  );
+  test('direct creation retains target, rejects stale profiles and honors section engines', () async {
+    final connection = connections.putIfAbsent('m', _Connection.new)
+      ..answer = profileCatalog();
+    const selected = GridModel(
+      id: 'SameModel',
+      node: 'Studio',
+      grid: 'same-grid',
+      targetId: 'local:b:fixture',
+    );
+    expect(
+      await app.createAgent(
+        'm',
+        engine: 'codex',
+        folder: '/work',
+        model: selected,
+      ),
+      isNull,
+    );
+    expect(connection.creates.single['gridTarget'], 'local:b:fixture');
+    connection.creates.clear();
+    expect(
+      await app.createAgent(
+        'm',
+        engine: 'claude',
+        folder: '/work',
+        model: selected,
+      ),
+      contains('unavailable'),
+    );
+    connection.answer = {
+      ...profileCatalog(),
+      'grids': [(profileCatalog()['grids'] as List).last],
+    };
+    expect(
+      await app.createAgent(
+        'm',
+        engine: 'codex',
+        folder: '/work',
+        model: selected,
+      ),
+      contains('unavailable'),
+    );
+    expect(connection.creates, isEmpty);
   });
   test('creation rejects an old daemon, lost connection, unsupported engine and missing model before launching', () async {
     final connection = connections.putIfAbsent('m', _Connection.new);

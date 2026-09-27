@@ -335,6 +335,11 @@ The updated model and machine controls retain Windows local-profile routing:
 same-named local and remote models remain separate choices in pane pickers and
 model search. Resting remote grids keep their last observation without automatic
 wake requests; background model-list pushes reuse the last local-profile list.
+New Harness preserves the selected local profile through creation and retries,
+including when another profile or remote grid serves the same model name.
+Local profile labels and IDs appear in model search and the new-session picker.
+An unavailable profile or incompatible agent is refused without switching routes;
+local profile entries do not gain managed-machine controls.
 Workspaces use one model selector for the focused pane and keep each pane's hover
 close control. Standalone compact terminals retain their own model selector. The
 projects sidebar and Continue working list remain available.

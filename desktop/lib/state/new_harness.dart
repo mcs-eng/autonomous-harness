@@ -865,11 +865,23 @@ class NewHarnessController extends ChangeNotifier {
     'claude' => 'Anthropic',
     _ => agentLabel,
   };
-  String get modelLabel => _model == null
-      ? subscriptionLabel
-      : [_model!.id, if (_model!.node.isNotEmpty) _model!.node].join(' · ');
+  String get modelLabel {
+    final model = _model;
+    if (model == null) return subscriptionLabel;
+    for (final section in _modelCatalog?.sections ?? const <GridSection>[]) {
+      if (section.source == 'local' && section.targetId == model.targetId) {
+        return [
+          model.id,
+          section.label ?? section.name,
+          ?section.profileId,
+        ].join(' · ');
+      }
+    }
+    return [model.id, if (model.node.isNotEmpty) model.node].join(' · ');
+  }
+
   static String _modelId(GridModel model) =>
-      'model:${jsonEncode([model.grid, model.id])}';
+      'model:${jsonEncode([model.targetId, model.grid, model.id])}';
   bool _modelAvailable(GridModel model) =>
       !isTerminal &&
       _modelCatalog?.supportsModelLaunch == true &&
@@ -878,6 +890,10 @@ class NewHarnessController extends ChangeNotifier {
       _modelCatalog!.sections.any(
         (section) =>
             section.name == model.grid &&
+            (model.targetId == null
+                ? section.source != 'local'
+                : section.targetId == model.targetId) &&
+            _modelCatalog!.canRunSection(section, _engine) &&
             section.models.any((candidate) => candidate.id == model.id),
       );
 
@@ -951,30 +967,50 @@ class NewHarnessController extends ChangeNotifier {
       if (catalog?.supportsModelLaunch == true &&
           catalog!.canRunLocally(_engine))
         for (final section in catalog.sections)
-          ..._ranked([
-            for (final model in section.models)
-              NewHarnessOption(
-                id: _modelId(
-                  GridModel(id: model.id, node: model.node, grid: section.name),
+          if (catalog.canRunSection(section, _engine))
+            ..._ranked([
+              for (final model in section.models)
+                NewHarnessOption(
+                  id: _modelId(
+                    GridModel(
+                      id: model.id,
+                      node: model.node,
+                      grid: section.name,
+                      targetId: model.targetId ?? section.targetId,
+                    ),
+                  ),
+                  title: model.id,
+                  // Every read now asks for row state, so the daemon no longer folds "seems
+                  // offline" into the node — this row puts back what an older build showed.
+                  detail: [
+                    if (section.source == 'local') ...[
+                      section.label ?? section.name,
+                      ?section.profileId,
+                    ],
+                    switch (model.unavailable) {
+                      final offline? => offlineNodeLabel(offline.machine),
+                      null => model.node,
+                    },
+                  ].where((text) => text.isNotEmpty).join(' · '),
+                  group: section.source == 'local'
+                      ? [
+                          'Local',
+                          section.label ?? section.name,
+                          ?section.profileId,
+                        ].join(' · ')
+                      : section.own
+                      ? 'On your machines'
+                      : 'Shared · ${section.name}',
+                  model: GridModel(
+                    id: model.id,
+                    node: model.node,
+                    grid: section.name,
+                    targetId: model.targetId ?? section.targetId,
+                    unavailable: model.unavailable,
+                  ),
+                  machineId: _machineId,
                 ),
-                title: model.id,
-                // Every read now asks for row state, so the daemon no longer folds "seems
-                // offline" into the node — this row puts back what an older build showed.
-                detail: switch (model.unavailable) {
-                  final offline? => offlineNodeLabel(offline.machine),
-                  null => model.node,
-                },
-                group: section.own
-                    ? 'On your machines'
-                    : 'Shared · ${section.name}',
-                model: GridModel(
-                  id: model.id,
-                  node: model.node,
-                  grid: section.name,
-                ),
-                machineId: _machineId,
-              ),
-          ]),
+            ]),
       NewHarnessOption(
         id: refreshModelsId,
         title: _loadingModels ? 'Loading models…' : 'Refresh models',
@@ -992,7 +1028,11 @@ class NewHarnessController extends ChangeNotifier {
         (catalog?.supportsModelLaunch == true && catalog!.canRunLocally(_engine)
             ? catalog.sections.fold<int>(
                 0,
-                (count, section) => count + section.models.length,
+                (count, section) =>
+                    count +
+                    (catalog.canRunSection(section, _engine)
+                        ? section.models.length
+                        : 0),
               )
             : 0);
     return groups;

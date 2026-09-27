@@ -73,6 +73,71 @@ void main() {
     app.dispose();
   });
 
+  test('local profiles are visibly distinct and searchable without managed-host privileges', () async {
+    app.inventory = const GridModels(
+      gridName: 'same-grid',
+      models: [],
+      grids: [
+        GridSection(
+          name: 'same-grid',
+          own: false,
+          source: 'local',
+          label: 'Studio',
+          profileId: 'a',
+          targetId: 'local:a:fixture',
+          models: [GridModel(id: 'SameModel', node: 'Studio')],
+        ),
+        GridSection(
+          name: 'same-grid',
+          own: false,
+          source: 'local',
+          label: 'Studio',
+          profileId: 'b',
+          targetId: 'local:b:fixture',
+          models: [GridModel(id: 'SameModel', node: 'Studio')],
+        ),
+        GridSection(
+          name: 'same-grid',
+          own: false,
+          source: 'shared',
+          targetId: 'remote:same-grid',
+          models: [GridModel(id: 'SameModel', node: 'Remote')],
+        ),
+      ],
+    );
+    await app.modelManager.refresh();
+    final profiles = catalog.entries.values
+        .where(
+          (entry) => entry.gridModel?.targetId?.startsWith('local:') == true,
+        )
+        .toList();
+    expect(profiles, hasLength(2));
+    expect(
+      profiles.map((entry) => entry.section),
+      everyElement(ModelSearchSection.local),
+    );
+    expect(profiles.map((entry) => entry.source), [
+      'Local · Studio · a',
+      'Local · Studio · b',
+    ]);
+    for (final entry in profiles) {
+      expect(entry.own, isFalse);
+      expect(entry.controller, isNull);
+      expect(entry.sharedBy, isNull);
+      expect(entry.destination.detail, contains(entry.source));
+      expect(entry.destination.fields, contains(entry.source.toLowerCase()));
+    }
+    expect(
+      catalog.entries.values
+          .singleWhere(
+            (entry) => entry.gridModel?.targetId == 'remote:same-grid',
+          )
+          .section,
+      ModelSearchSection.shared,
+    );
+    expect(app.actions, isEmpty);
+  });
+
   test(
     'four sections separate installed and shared models from downloads',
     () async {
