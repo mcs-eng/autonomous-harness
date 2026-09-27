@@ -119,7 +119,7 @@ void main() {
     );
   }
 
-  test('Cmd-P opens a pane and the orchestrator remains a palette command', () {
+  test('Cmd-O opens a pane and the orchestrator remains a palette command', () {
     final shortcut = appShortcuts()
         .singleWhere((s) => s.action == ShortcutAction.addAgent)
         .activator;

@@ -98,6 +98,10 @@ PhoneDestination _agent(
   final agent = entry.agent;
   final project = entry.project;
   final offline = entry.machine.nodeOnline == false;
+  // The desktop's name for it ([Agent.displayName]); the CLI's own stays
+  // searchable beside it, so typing what the terminal's title bar says still
+  // finds the row.
+  final renamed = agent.displayName != agent.name;
   final detail = _harnessDetail(
     label,
     project,
@@ -108,17 +112,16 @@ PhoneDestination _agent(
   return PhoneDestination(
     id: phoneAgentId(entry.machineId, agent.id),
     kind: PhoneDestinationKind.agent,
-    title: agent.name,
+    title: agent.displayName,
     detail: detail.text,
     detailBranchOffset: detail.branchOffset,
     promptContext: PhonePromptContext(
       harness: label,
       machine: entry.machineName,
-      // The FOLDER, not the project's reported name — the desktop's picker
-      // shows `Desktop` and `autonomous-harness`, which is the tail of the path
-      // somebody actually recognises, and a phone has no width for the rest.
-      project: project?.folder,
-      branch: project?.branchLabel,
+      // The desktop's label — the repository, or the subfolder chosen inside
+      // it — never a worktree's made-up folder. See [AgentProject.label].
+      project: project?.label,
+      branch: project?.shownBranch,
       leading: offline ? 'Offline' : null,
     ),
     machineId: entry.machineId,
@@ -132,8 +135,10 @@ PhoneDestination _agent(
     // whose folder or recap happens to mention fab.
     searchFields: [
       agent.title,
+      if (renamed) agent.name,
       label,
       entry.machineName,
+      project?.label,
       project?.name,
       project?.branchLabel,
       project?.cwd,
@@ -144,7 +149,7 @@ PhoneDestination _agent(
       agent.selectedModel,
       agent.dshName,
     ],
-    titleFields: agent.title == null ? 1 : 2,
+    titleFields: 1 + (agent.title == null ? 0 : 1) + (renamed ? 1 : 0),
   );
 }
 
@@ -254,9 +259,9 @@ List<PhoneDestination> _projects(
 }) {
   final prefix = [
     type,
-    project?.name,
+    project?.label,
   ].whereType<String>().where((part) => part.isNotEmpty).join(' · ');
-  final branch = project?.branchLabel;
+  final branch = project?.shownBranch;
   return (
     text: [
       prefix,

@@ -9,7 +9,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fakeGridAnswers, installFakeGrid, type FakeGrid, type FakeGridPlan } from './__fixtures__/fakeGrid.js'
 import { clearGridMcpUrlCache } from './gridMcpUrl.js'
-import { listAllGridModels, resolveGridTarget } from './gridModels.js'
+import { listAllGridModels } from './gridModels.js'
+import { resolveGridTarget } from './gridTarget.js'
 import { localGridTargetId } from './gridProfiles.js'
 
 const { gridName: GRID, networkId, baseUrl: BASE_URL, mcpUrl: MCP_URL, token: TOKEN, plan } = fakeGridAnswers()
@@ -44,7 +45,7 @@ describe('isolated local Grid profiles', () => {
       return new Promise<Response>(() => {})
     })
     const configured = profile()
-    const sections = await listAllGridModels(null, [configured])
+    const sections = await listAllGridModels(null, { profiles: [configured] })
     expect(sections[0]).toMatchObject({
       source: 'local', label: 'Bran local fleet', profileId: 'bran-local',
       targetId: localGridTargetId(configured),
@@ -52,6 +53,18 @@ describe('isolated local Grid profiles', () => {
     expect(sections[0]?.engines).toContain('codex')
     expect(sections[0]?.engines).not.toContain('claude')
     expect(sections[0]?.models.map((m) => m.id)).toEqual(['same-name', 'qwen3.5:12b'])
+    const localReads = () => fake!.calls().filter(args => args[0] === '--local')
+    const callsBeforePush = localReads()
+    const fetchesBeforePush = vi.mocked(fetch).mock.calls.length
+    const cached = await listAllGridModels(null, { profiles: [configured], refresh: false })
+    expect(cached[0]).toEqual(sections[0])
+    expect(localReads()).toEqual(callsBeforePush)
+    expect(vi.mocked(fetch).mock.calls.length).toBe(fetchesBeforePush)
+    const changed = { ...configured, gridName: configured.gridName + '-edited' }
+    const invalidated = await listAllGridModels(null, { profiles: [changed], refresh: false })
+    expect(invalidated.some(section => section.source === 'local')).toBe(false)
+    expect(localReads()).toEqual(callsBeforePush)
+    expect(vi.mocked(fetch).mock.calls.length).toBe(fetchesBeforePush)
   })
 
   it('resolves a same-named local model through its profile, never the remote target', async () => {

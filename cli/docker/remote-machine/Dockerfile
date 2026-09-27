@@ -24,11 +24,16 @@
 # Runs as the unprivileged `node` user (uid 1000, already in the base image) rather than root, because
 # Claude Code refuses `--dangerously-skip-permissions` when it is root — and that flag is reachable
 # from the app's New agent dialog, so a root container would quietly take a testable option away.
-FROM node:22-bookworm-slim
+#
+# ⚠️ **Debian 13 (trixie), not 12 (bookworm), because of the grid.** The managed `grid` the CLI
+# downloads for linux-arm64 is linked against glibc 2.38; bookworm ships 2.36, so on this box grid
+# never ran at all — `GLIBC_2.38 not found`, a `.unrunnable` marker, and "no grid after 5 attempts" in
+# the daemon's log — and nothing grid-backed could be tested here. trixie ships 2.41.
+FROM node:22-trixie-slim
 
 # A UTF-8 locale, because the base image has none.
 #
-# `node:22-bookworm-slim` sets no LANG, which leaves `LC_CTYPE=POSIX` — and a program that decides
+# `node:22-trixie-slim` sets no LANG, which leaves `LC_CTYPE=POSIX` — and a program that decides
 # what it may draw from the locale rather than from the terminal takes its ASCII path there. tmux
 # negotiates UTF-8 with the client either way (`client_utf8=1` on this box), so the damage is not the
 # box-drawing a terminal shows; it is every engine, and every tool an agent runs inside one, that
@@ -50,9 +55,11 @@ ENV LC_ALL=C.UTF-8
 #   from the host can ever reach a loopback bind. socat bridges exactly that gap, on the container
 #   side, for the duration of a sign-in. Doing it here rather than teaching the CLI to bind 0.0.0.0
 #   keeps a real computer's SSO callback on its own loopback, where it belongs.
+# tini: pid 1. Every engine a stopped agent leaves behind is orphaned to pid 1, and only a real init
+#   reaps it — see the ENTRYPOINT below.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-       tmux procps git curl ca-certificates less socat \
+       tmux procps git curl ca-certificates less socat tini \
   && rm -rf /var/lib/apt/lists/*
 
 # The engine under test. Pinned by the build so a rebuild is reproducible; bump it deliberately.
@@ -124,4 +131,10 @@ USER node
 WORKDIR /home/node
 VOLUME ["/home/node/.harness"]
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# ⚠️ **tini is pid 1, not the entrypoint, and a real computer's init is what it stands in for.** The
+# entrypoint used to `exec tail -f /dev/null` as pid 1, and tail never calls wait(): every engine
+# orphaned when its agent stopped stayed a zombie for the life of the box — with the pid, name and
+# start time of the engine it had been. The daemon's identity check read that as the engine still
+# running, and refused to resume the agent ("The previous process is still running"). tini reaps
+# them, and forwards `docker stop`'s SIGTERM to the entrypoint as tail's pid-1 role did.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

@@ -10,3 +10,10 @@ node skills/kepler/scripts/check.mjs template
 ```
 
 The package is unlisted (`store.json`) until a real studio screenshot is published. The kernel and the pane do not need the Store to run.
+
+## Credit and stewardship
+
+Kepler is maintained in this fork under the [MIT licence](LICENSE). Its approximate
+planet positions use JPL's published Keplerian elements, credited above; the
+mission solver and viewer are part of this package. The model is intended for
+concept exploration and does not replace a flight ephemeris.

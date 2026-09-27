@@ -23,6 +23,7 @@ import '../core/agent_preference.dart';
 import '../core/engine_availability.dart';
 import '../core/device_name.dart';
 import '../core/local_hostname.dart';
+import '../core/permission_modes.dart';
 import '../core/local_git_projects.dart';
 import '../core/last_opened_agent.dart';
 import '../core/phone_search_history.dart';
@@ -34,6 +35,9 @@ import '../core/project_history.dart';
 import '../core/retry.dart';
 import '../logging/app_log.dart';
 import '../logging/startup_trace.dart';
+import '../notify/agent_announcer.dart';
+import '../notify/done_notice.dart';
+import '../notify/system_notices.dart';
 import '../settings/config_store.dart';
 import '../stats/harness_stats.dart';
 import '../terminal/terminal_session.dart';
@@ -85,16 +89,19 @@ class RestartAgentResult {
 
 /// One deliberate creation, retained by the form if its reply is lost. Reusing
 /// it checks the original request; opening New agent starts a fresh intent.
-class AgentCreationAttempt {
-  AgentCreationAttempt() {
-    final random = Random.secure();
-    _id = List.generate(
-      16,
-      (_) => random.nextInt(256),
-    ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
-  }
+/// The id a lifecycle request is checked by when its reply is lost — see `agent_create_status`.
+String _newReceiptId() {
+  final random = Random.secure();
+  return List.generate(
+    16,
+    (_) => random.nextInt(256),
+  ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+}
 
-  late final String _id;
+class AgentCreationAttempt {
+  AgentCreationAttempt() : _id = _newReceiptId();
+
+  final String _id;
   String? _machineId, _targetId;
   Map<String, dynamic>? _choices;
   PaneSplitRequest? _split;
@@ -129,21 +136,19 @@ String? _normalizeComputerId(String? raw) {
 /// Explicit, compile-time guarded fixture used only by `main_local_manual.dart`.
 ///
 /// It lets a normal Flutter window exercise the local Backend -> Harness CLI ->
-/// tmux path without depending on SSO. The API key and setup token are random,
-/// disposable values produced by the local launcher and are never persisted.
+/// tmux path without depending on SSO. The API key is a random, disposable
+/// value produced by the local launcher and is never persisted.
 class LocalManualFixture {
   final String apiBaseUrl;
   final String apiKey;
   final String machineId;
   final String machineName;
-  final String setupToken;
 
   const LocalManualFixture({
     required this.apiBaseUrl,
     required this.apiKey,
     required this.machineId,
     required this.machineName,
-    required this.setupToken,
   });
 }
 
@@ -339,6 +344,16 @@ class RailRow {
 /// this app pairs as `'web'`, so it is honoured here.
 const kAgentsListPayload = {'includeStopped': true};
 
+/// Who asked for a terminal to be opened.
+///
+/// A terminal has ONE controller and an ordinary `terminal_open` wins it, so
+/// every attach has to say whether a person on THIS phone asked for it.
+/// [person] may take the terminal from whoever holds it; [automatic] never may
+/// — it opens as a watcher where the daemon supports that (`noTakeover`), and
+/// does not open at all where it does not. The dial turning, a reconnect, a
+/// desk another screen wrote, a push: all automatic.
+enum AttachIntent { person, automatic }
+
 class AppNotifier extends ChangeNotifier {
   final AuthSession session;
   AppConfig config;
@@ -403,6 +418,10 @@ class AppNotifier extends ChangeNotifier {
       timeout: const Duration(seconds: 6),
     ),
   );
+
+  /// What a finished turn or a question is worth — a tap, an unread mark, a
+  /// system notice — decided by the dial's rules (`notify/`).
+  final AgentAnnouncer agentNotices;
 
   SessionPreviewKey previewKey(String machineId, Agent agent) =>
       (machineId: machineId, agentId: agent.id, sessionId: agent.sessionId);
@@ -555,15 +574,30 @@ class AppNotifier extends ChangeNotifier {
   /// before the desk existed.
   List<DeskTab> get deskTabs => _desk.tabs;
 
-  /// The tab the phone is in, or null for the agents no tab holds.
+  /// The tab the phone is in, or null for an agent no tab holds.
   String? get activeDeskTabId => _desk.activeTabId;
+
+  /// Whether the desk's first read has come back — see [PhoneDesk.settled].
+  bool get deskSettled => _desk.settled;
 
   /// A tab picked by hand, in the tabs panel — set as the agent chosen there
   /// is opened, so the swipe walks that tab from then on.
-  void selectDeskTab(String? tabId) => _desk.select(tabId);
+  void selectDeskTab(String? tabId) {
+    _desk.select(tabId);
+    _rememberDeskTab(tabId);
+  }
 
   /// The tab the screen has worked out it is showing — see [PhoneDesk.note].
-  void noteDeskTab(String? tabId) => _desk.note(tabId);
+  void noteDeskTab(String? tabId) {
+    _desk.note(tabId);
+    _rememberDeskTab(tabId);
+  }
+
+  /// Kept for the next launch to fall back on — see [LastOpenedAgent.rememberTab]. Only a real
+  /// tab: an agent opened from search, in none, leaves the last tab standing.
+  void _rememberDeskTab(String? tabId) {
+    if (tabId != null) lastOpenedAgent.rememberTab(tabId);
+  }
 
   /// Whether the desk can be WRITTEN to — what the two `+`s on the tabs panel
   /// are drawn on. False before the first read answers, and on a backend with
@@ -577,8 +611,7 @@ class AppNotifier extends ChangeNotifier {
 
   /// A tab renamed by hand, from a double tap on its name in the tabs panel.
   /// See [PhoneDesk.renameTab].
-  void renameDeskTab(String tabId, String name) =>
-      _desk.renameTab(tabId, name);
+  void renameDeskTab(String tabId, String name) => _desk.renameTab(tabId, name);
 
   /// An agent that already exists opens a tab of its own — the `+` on the tab
   /// row. See [PhoneDesk.createTabFor].
@@ -728,7 +761,12 @@ class AppNotifier extends ChangeNotifier {
     _announceAppFocus();
     if (attachPending) {
       for (final machine in machineStates.values) {
-        _attachPendingPanes(machine, retryExisting: false);
+        // A tab the person switched to.
+        _attachPendingPanes(
+          machine,
+          retryExisting: false,
+          intent: AttachIntent.person,
+        );
       }
     }
     notifyListeners();
@@ -876,7 +914,8 @@ class AppNotifier extends ChangeNotifier {
     selectedMachineId = focusedPane?.machineId;
     _announceAppFocus();
     for (final machine in machineStates.values) {
-      _attachPendingPanes(machine);
+      // A tab closed here; the tiles behind it are theirs.
+      _attachPendingPanes(machine, intent: AttachIntent.person);
     }
     for (final pane in removed.panes) {
       if (!allPanes.contains(pane)) await _detachSession(pane, sendClose: true);
@@ -1239,8 +1278,18 @@ class AppNotifier extends ChangeNotifier {
     PeerLinkClient? peerLinks,
     ViewerServices? viewer,
     PaneLayoutStore? paneLayoutStore,
+    SystemNotices? systemNotices,
     this.turnActivityTimeout = const Duration(seconds: 12),
   }) : _paneLayout = paneLayoutStore,
+       // On the same terms as the stores below: no layout store means a test,
+       // which must never reach the OS notification centre.
+       agentNotices = AgentAnnouncer(
+         system:
+             systemNotices ??
+             (paneLayoutStore == null
+                 ? SilentSystemNotices()
+                 : LocalSystemNotices()),
+       ),
        // Remembers "a dial has been seen here" on the same terms the pane
        // layout is remembered: with a layout store there is a state file, and
        // without one (the tests) nothing is written anywhere.
@@ -2653,15 +2702,7 @@ class AppNotifier extends ChangeNotifier {
       pendingAuthorizeUrl = null;
       _resetLoginBrowser();
       notifyListeners();
-      await _finishBootstrapSignedIn();
-      if (!_authWorkCurrent(revision) || status != AppStatus.authenticated) {
-        return;
-      }
-      analytics.signedIn();
-      // Restarts the clock even if `_trackAppOpened` already started one: this
-      // person met the login screen, so their wait begins where the launch's
-      // did not.
-      _armFirstMessage('sign_in');
+      await _enterSignedIn(revision);
     } catch (error) {
       if (!_authWorkCurrent(revision)) return;
       status = AppStatus.unauthenticated;
@@ -2689,6 +2730,71 @@ class AppNotifier extends ChangeNotifier {
       }
     }
     if (_authWorkCurrent(revision)) notifyListeners();
+  }
+
+  /// A session was just saved: load everything behind the login screen, and
+  /// count the sign-in. The one road in for every way of signing in.
+  Future<void> _enterSignedIn(int revision) async {
+    await _finishBootstrapSignedIn();
+    if (!_authWorkCurrent(revision) || status != AppStatus.authenticated) {
+      return;
+    }
+    analytics.signedIn();
+    // Restarts the clock even if `_trackAppOpened` already started one: this
+    // person met the login screen, so their wait begins where the launch's
+    // did not.
+    _armFirstMessage('sign_in');
+  }
+
+  /// Whether this build signs in with an emailed code rather than the browser
+  /// — a phone. See `viewer/email_code_api.dart`.
+  bool get signsInWithEmailCode => viewer != null;
+
+  /// The phone's sign-in, first step: email [email] a one-time code. Throws the
+  /// service's own reason ("Email is invalid") for the form to show.
+  Future<void> sendLoginCode(String email) {
+    final login = viewer?.emailLogin;
+    if (login == null) throw StateError('This build signs in with a browser.');
+    return login.sendCode(email);
+  }
+
+  /// The phone's sign-in, second step: trade the emailed [code] for a session
+  /// and go in.
+  ///
+  /// A wrong or expired code is thrown for the form to show beside the field —
+  /// never raised to [lastError], which would put a second, generic error under
+  /// the one the person is already reading. The login card stays up throughout:
+  /// [signingIn] keeps it there (see `RootShell`), so the form keeps what was
+  /// typed into it.
+  Future<void> signInWithCode({
+    required String email,
+    required String code,
+  }) async {
+    final login = viewer?.emailLogin;
+    if (_disposed || signingIn || login == null) return;
+    final revision = _invalidateAuthWork();
+    _closedHistory.clear();
+    _lastError = null;
+    signingIn = true;
+    notifyListeners();
+    try {
+      await login.signIn(email: email, code: code);
+      if (!_authWorkCurrent(revision)) return;
+      status = AppStatus.bootstrapping;
+      notifyListeners();
+      await _enterSignedIn(revision);
+    } catch (_) {
+      if (_authWorkCurrent(revision)) {
+        status = AppStatus.unauthenticated;
+        analytics.signInFailed('failed');
+      }
+      rethrow;
+    } finally {
+      if (_authWorkCurrent(revision)) {
+        signingIn = false;
+        notifyListeners();
+      }
+    }
   }
 
   void _resetLoginBrowser() {
@@ -2797,6 +2903,7 @@ class AppNotifier extends ChangeNotifier {
     // ever read after a sign-in that this clears the way for.
     unawaited(_machineCache?.clear());
     sessionPreviews.clear();
+    agentNotices.reset();
     expandedMachines.clear();
     selectedMachineId = null;
     status = AppStatus.unauthenticated;
@@ -3971,7 +4078,8 @@ class AppNotifier extends ChangeNotifier {
       // Publish discovery immediately. The capability loader attaches waiting
       // panes when its reply arrives; either response may finish first.
       if (machine.terminalCapabilityLoadInFlight == null) {
-        _attachPendingPanes(machine);
+        // The machine answered its agent list; nobody asked.
+        _attachPendingPanes(machine, intent: AttachIntent.automatic);
         _autoPickFirstAgent();
       }
       notifyListeners();
@@ -4017,7 +4125,8 @@ class AppNotifier extends ChangeNotifier {
     if (!_machineWorkCurrent(machine, revision)) return;
     // Order matters: a restored tile for THIS machine claims its agent before
     // the first-run convenience gets to look, so the two can never both open.
-    _attachPendingPanes(machine);
+    // Same list, the other branch of its reply.
+    _attachPendingPanes(machine, intent: AttachIntent.automatic);
     _autoPickFirstAgent();
     notifyListeners();
   }
@@ -4221,7 +4330,8 @@ class AppNotifier extends ChangeNotifier {
     if (!_machineWorkCurrent(machine, revision)) return;
     if (machine.agentLoadStatus != AgentLoadStatus.loading &&
         !machine.agentsRefreshing) {
-      _attachPendingPanes(machine);
+      // Terminal capabilities landed; nobody asked.
+      _attachPendingPanes(machine, intent: AttachIntent.automatic);
       _autoPickFirstAgent();
       notifyListeners();
     }
@@ -4326,6 +4436,10 @@ class AppNotifier extends ChangeNotifier {
         .where((agent) => agent.id != agentId)
         .toList();
     sessionPreviews.removeAgent(machine.machine.machineId, agentId);
+    agentNotices.forgetAgent((
+      machineId: machine.machine.machineId,
+      agentId: agentId,
+    ));
     machine.sessionAgentIds.removeWhere((_, id) => id == agentId);
     machine.agentActivityAt.remove(agentId);
     _cancelTurnActivity(machine.machine.machineId, agentId);
@@ -4702,6 +4816,38 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
+  /// The Git choices [path] offers, read ON the machine that owns it.
+  ///
+  /// ⚠️ **The phone never looks at a repository itself, and could not.** The
+  /// folder is on somebody's laptop; `git` runs there. The desktop has a local
+  /// branch of this same call for its own machine — see `readGitProject` there
+  /// — and this is the half that is always remote.
+  ///
+  /// Answers `{isGit, branch, branches: [...], defaultRef, root, ...}`, parsed
+  /// by [GitProjectInfo.fromJson], or `{error}` — which the form draws as "no
+  /// Git choices here" rather than as a failure, because a folder that is not a
+  /// repository answers the same way.
+  ///
+  /// A short timeout on purpose: this runs while somebody is looking at a form
+  /// they have already half filled in, and a machine that cannot answer in six
+  /// seconds should leave the rest of the form working.
+  Future<Map<String, dynamic>> readGitProject(
+    String machineId,
+    String path,
+  ) async {
+    final machine = machineStates[machineId];
+    if (machine == null) return {'error': 'UNAVAILABLE'};
+    try {
+      return await _conn(machineId).request(
+        'git_project_info',
+        payload: {'path': path},
+        timeout: const Duration(seconds: 6),
+      );
+    } catch (_) {
+      return {'error': 'UNAVAILABLE'};
+    }
+  }
+
   /// Every Codex profile folder the CLI on [machineId] can offer, merged with [observedPaths]
   /// (Codex homes already known from this same machine's other Codex agents). Runs entirely on that
   /// machine — this app never touches a filesystem itself, which is what makes it work for a remote
@@ -4756,7 +4902,7 @@ class AppNotifier extends ChangeNotifier {
     required String engine,
     required String folder,
     ProjectFolderRequest? projectFolder,
-    bool bypassPermission = false,
+    String? permissionMode,
     String? codexHome,
     String? swarmId,
     PaneSplitRequest? split,
@@ -4767,7 +4913,16 @@ class AppNotifier extends ChangeNotifier {
       'engine': engine,
       if (projectFolder == null) 'cwd': folder,
       ...?projectFolder?.payload,
-      'bypassPermission': bypassPermission,
+      'permissionMode': ?permissionMode,
+      // ⚠️ **Both keys, and the older one is not redundant.** `permissionMode`
+      // is the whole menu (`core/permission_modes.dart`); `bypassPermission` is
+      // the yes/no a daemon from before that menu understands, and it is all
+      // such a machine reads. Sent alone, "Plan first" on an old machine would
+      // launch as "approve everything" — so the boolean is derived from the
+      // mode rather than asked for separately. See [permissionModeApproves].
+      'bypassPermission': permissionMode == null
+          ? false
+          : permissionModeApproves(permissionMode),
       'codexHome': ?codexHome,
     };
     if (creation._choices != null &&
@@ -4969,7 +5124,10 @@ class AppNotifier extends ChangeNotifier {
     // Created HERE, so it joins the tab this phone is in — the way an agent
     // created in a window joins that window's tab. See [PhoneDesk.adopt] for
     // what happens when the phone is in no tab.
-    _desk.adopt((machineId: machineId, agentId: agent.id), name: agent.name);
+    _desk.adopt(
+      (machineId: machineId, agentId: agent.id),
+      name: agent.displayName,
+    );
     await assignAgentToPane(
       null,
       machineId,
@@ -5092,22 +5250,135 @@ class AppNotifier extends ChangeNotifier {
   ///
   /// An agent that already has a terminal succeeds without touching the machine:
   /// the caller's job is "make it openable", and it is.
+  ///
+  /// ⚠️ **`agent_resume`, never `agent_restart`.** The daemon routes the two to different services
+  /// (`backendSocket.ts`): restart swaps the process inside a LIVE pane and refuses an agent with
+  /// none (`NO_ACTIVE_PROCESS`, `RESTART_UNSUPPORTED_BACKEND`) — which is every stopped agent — while
+  /// resume builds a pane and reopens the saved conversation by its session id. This used to send
+  /// restart, so tapping a Stopped row could only ever fail.
   Future<RestartAgentResult> resumeAgent(String machineId, String agentId) {
-    final agent = stateOf(
-      machineId,
-    )?.agents.where((agent) => agent.id == agentId).firstOrNull;
+    final machine = stateOf(machineId);
+    final agent = machine?.agents
+        .where((agent) => agent.id == agentId)
+        .firstOrNull;
     if (agent?.terminalAvailable == true) {
       return Future.value(const RestartAgentResult());
     }
-    if (agent?.isStopped != true) {
+    if (machine == null || agent == null || !agent.isStopped) {
       return Future.value(
         const RestartAgentResult(
           error: 'That harness is no longer available. Search again.',
         ),
       );
     }
-    return restartAgent(machineId, agentId);
+    // Refused here rather than round-tripped: the machine can only say RESUME_UNAVAILABLE.
+    if (!agent.canPauseAndResume) {
+      return Future.value(
+        const RestartAgentResult(
+          error: 'This harness has no supported saved conversation to resume.',
+        ),
+      );
+    }
+    return _resumeWithReceipt(machine, agent);
   }
+
+  /// Resumes whose outcome the machine has not confirmed yet, by agent → the receipt id they were
+  /// sent with.
+  ///
+  /// ⚠️ **A lost reply is not a failed resume.** The daemon may be starting the conversation right
+  /// now, and a second `agent_resume` would start it twice. So the next tap on the same agent asks
+  /// `agent_create_status` about the SAME id instead, exactly as the desktop's restart attempt does;
+  /// only a confirmed outcome — started, refused, gone — clears the entry.
+  final Map<(String, String), String> _agentResumes = {};
+
+  Future<RestartAgentResult> _resumeWithReceipt(
+    MachineState machine,
+    Agent stopped,
+  ) async {
+    final key = (machine.machine.machineId, stopped.id);
+    final checking = _agentResumes[key];
+    final receipt = checking ?? _newReceiptId();
+    _agentResumes[key] = receipt;
+    RestartAgentResult settle(String error) {
+      _agentResumes.remove(key);
+      return RestartAgentResult(error: error);
+    }
+
+    const unconfirmed = RestartAgentResult(
+      error: 'The machine has not confirmed the resume yet. Tap the harness again to check.',
+    );
+    final Map<String, dynamic> result;
+    try {
+      result = await _conn(machine.machine.machineId).request(
+        checking == null ? 'agent_resume' : 'agent_create_status',
+        payload: {
+          'creationId': receipt,
+          if (checking == null) 'agentId': stopped.id,
+        },
+      );
+    } on WsRequestFailure catch (failure) {
+      // A refusal to a first send happened before anything launched; anything else — a timeout,
+      // INTERNAL, a status check the machine cannot answer — leaves the outcome unknown.
+      if (checking != null || failure.code == 'INTERNAL') return unconfirmed;
+      return settle(_resumeFailure(failure.code, failure.detail));
+    } catch (_) {
+      return unconfirmed;
+    }
+    if (result['creationId'] != receipt) return unconfirmed;
+    switch (result['state']) {
+      case 'created':
+        break;
+      case 'pending':
+        return const RestartAgentResult(
+          error: 'The machine is still resuming this harness. Tap it again in a moment.',
+        );
+      case 'unavailable':
+        return settle('That harness is no longer available. Search again.');
+      case 'failed':
+        final failure = result['failure'];
+        if (failure is! Map || failure['code'] is! String) return unconfirmed;
+        return settle(
+          _resumeFailure(failure['code'] as String, failure['detail']),
+        );
+      default:
+        return unconfirmed;
+    }
+    final raw = result['agent'];
+    if (raw is! Map || raw['id'] != stopped.id) return unconfirmed;
+    final Agent resumed;
+    try {
+      resumed = Agent.fromJson(Map<String, dynamic>.from(raw));
+    } catch (_) {
+      return unconfirmed;
+    }
+    // The desktop's bar for "resumed": the conversation promised ([Agent.resumedAsPromised]),
+    // started — not one still starting or already failed.
+    final promised = stopped.resumedAsPromised(
+      resumed,
+      reportedResumed: result['resumed'] != false,
+    );
+    if (!promised || resumed.launchState != 'ready') {
+      return unconfirmed;
+    }
+    _agentResumes.remove(key);
+    if (_disposed || machineStates[machine.machine.machineId] != machine) {
+      return const RestartAgentResult();
+    }
+    _upsertAgent(machine, resumed);
+    notifyListeners();
+    return const RestartAgentResult();
+  }
+
+  /// The desktop's `_restartFailure` wording for a resume the machine refused.
+  String _resumeFailure(String code, Object? detail) =>
+      detail is String && detail.isNotEmpty
+      ? detail
+      : switch (code) {
+          'UNSUPPORTED_ON_REMOTE' || 'UNSUPPORTED' =>
+            'Update the harness CLI on this machine to open saved harnesses.',
+          'AGENT_BUSY' => 'Another operation is changing this harness. Wait for it to finish, then retry.',
+          _ => 'Could not open this harness: $code',
+        };
 
   Future<RestartAgentResult> restartAgent(
     String machineId,
@@ -5408,7 +5679,13 @@ class AppNotifier extends ChangeNotifier {
           // here would yank their focus back to what they were looking at before, mid-navigation.
           // The recovered agent still shows normally in the rail; they can click it themselves.
           if (selectedMachineId == machineId) {
-            await selectAgent(machineId, agentId);
+            // A machine coming back is not somebody picking the phone up: the
+            // agent shows again, its terminal stays with whoever holds it.
+            await selectAgent(
+              machineId,
+              agentId,
+              intent: AttachIntent.automatic,
+            );
           } else {
             notifyListeners();
           }
@@ -5466,7 +5743,8 @@ class AppNotifier extends ChangeNotifier {
     late Future<void> selection;
     _deviceFocusRevision = focusRevision;
     try {
-      selection = selectAgent(machineId, agentId);
+      // The WiFi device asked, not a hand on this phone — see [AttachIntent].
+      selection = _showAgentFromDevice(machineId, agentId);
     } finally {
       _deviceFocusRevision = null;
     }
@@ -5480,7 +5758,27 @@ class AppNotifier extends ChangeNotifier {
   /// which tile it had walked off. The carousel walks only open panes now, so there is no off-desk
   /// landing left to place and nothing to replace.
   Future<void> selectAgentFromDial(String machineId, String agentId) async {
-    await selectAgent(machineId, agentId);
+    // ⚠️ Not `selectAgent`: arriving is a claim, and the dial turning is
+    // not a person arriving at THIS phone. The agent comes on screen; its
+    // terminal stays with whoever types in it, and the band offers it back.
+    await _showAgentFromDevice(machineId, agentId);
+  }
+
+  /// Put an agent on screen because a device asked — the dial, the WiFi
+  /// device — without taking its terminal. See [AttachIntent].
+  Future<void> _showAgentFromDevice(String machineId, String agentId) async {
+    final existing = paneOfAgent(machineId, agentId);
+    if (existing == null) {
+      await selectAgent(machineId, agentId, intent: AttachIntent.automatic);
+      return;
+    }
+
+    selectedMachineId = machineId;
+    machineStates[machineId]?.activeAgentId = agentId;
+    focusPane(existing.id);
+    if (existing.session == null) {
+      await _attachSession(existing, takeControl: false);
+    }
   }
 
   /// Open [agentId] on this phone, taking its terminal.
@@ -5496,7 +5794,14 @@ class AppNotifier extends ChangeNotifier {
   ///
   /// The one open that stays polite is [warmAgentPane]'s guess about the next swipe, which is
   /// nobody arriving anywhere. See [_attachSession].
-  Future<void> selectAgent(String machineId, String agentId) async {
+  Future<void> selectAgent(
+    String machineId,
+    String agentId, {
+    /// [AttachIntent.automatic] shows the agent without claiming its
+    /// terminal — the road `_showAgentFromDevice` and recovery take.
+    AttachIntent intent = AttachIntent.person,
+  }) async {
+    final person = intent == AttachIntent.person;
     final existing = paneOfAgent(machineId, agentId);
     if (existing != null) {
       selectedMachineId = machineId;
@@ -5516,14 +5821,14 @@ class AppNotifier extends ChangeNotifier {
         // armed is answered (see the `terminal_ready` branch of `TerminalSession`), so a claim
         // cannot outlive the arrival that made it and come back as a reconnect hours later. Coming
         // back to the agent raises it again, because that is another arrival.
-        terminal.takeover = true;
+        terminal.takeover = person;
       }
       if (terminal == null) {
         // The pane wanted this agent before `_attachSession` could actually attach it (the agent's
         // terminal wasn't verified yet, the machine was briefly offline, ...). Nothing else retries a
         // null session on its own — see `_attachPendingPanes` — so a click here has to.
-        await _attachSession(existing);
-      } else if (terminal.watching) {
+        await _attachSession(existing, takeControl: person);
+      } else if (terminal.watching && person) {
         // ⚠️ **The one reopen that replaces a perfectly live stream.** A watcher renders the
         // terminal without holding it (see [TerminalSession.watching]), so by every other measure
         // here it is healthy — `controlling`, with a stream id — and the branches below would
@@ -5546,7 +5851,7 @@ class AppNotifier extends ChangeNotifier {
       }
       return;
     }
-    await addAgentToSwarm(machineId, agentId, takeControl: true);
+    await addAgentToSwarm(machineId, agentId, takeControl: person);
   }
 
   /// Opens [agentId]'s stream for a tile nobody is looking at yet — the phone's
@@ -6454,7 +6759,17 @@ class AppNotifier extends ChangeNotifier {
   /// and the machine's terminal protocol has been negotiated — become true at
   /// different moments, and a machine that goes away and returns has to be able
   /// to re-arrive at them.
-  void _attachPendingPanes(MachineState machine, {bool retryExisting = true}) {
+  void _attachPendingPanes(
+    MachineState machine, {
+    bool retryExisting = true,
+    required AttachIntent intent,
+  }) {
+    // Nobody asked on this phone, and this machine's CLI cannot open a terminal
+    // without taking it from whoever has it — so it opens nothing.
+    if (intent == AttachIntent.automatic &&
+        !machine.terminalNoTakeoverAvailable) {
+      return;
+    }
     final machineId = machine.machine.machineId;
     for (final pane in allPanes.toList()) {
       if (!panes.contains(pane) && pane.session == null) continue;
@@ -6468,7 +6783,7 @@ class AppNotifier extends ChangeNotifier {
       // reconnect left every tile but one frozen on "restoring terminal…":
       // recovery ran off pendingOfflineAgentId, which is a single slot, so it
       // could only ever promise restoration to one of them.
-      unawaited(_reattachPane(pane));
+      unawaited(_reattachPane(pane, intent: intent));
     }
   }
 
@@ -6491,12 +6806,19 @@ class AppNotifier extends ChangeNotifier {
 
   /// Reopen a dead stream in its existing session, keeping its rendered output.
   /// An already-lost stream needs no close addressed to its previous owner.
-  Future<void> _reattachPane(TerminalPane pane) async {
+  Future<void> _reattachPane(
+    TerminalPane pane, {
+    AttachIntent intent = AttachIntent.person,
+  }) async {
     if (!_canAttachPane(pane)) return;
     final session = pane.session;
     if (session == null) {
-      await _attachSession(pane);
+      await _attachSession(
+        pane,
+        takeControl: intent == AttachIntent.person,
+      );
     } else {
+      if (intent == AttachIntent.person) session.takeover = true;
       await session.reopen();
     }
   }
@@ -6681,14 +7003,24 @@ class AppNotifier extends ChangeNotifier {
         if (raw is Map) {
           try {
             final agent = Agent.fromJson(Map<String, dynamic>.from(raw));
+            _upsertAgent(machine, agent);
             if (agent.terminalAvailable) {
-              _upsertAgent(machine, agent);
               // A pane created before this agent's terminal was verified is still sitting on
               // "Attaching…" with no session — nothing else re-checks it once agentLoadStatus is
               // already `loaded`, so this push is the only signal that it can attach now.
-              _attachPendingPanes(machine);
+              // A push about an agent synced elsewhere.
+              _attachPendingPanes(machine, intent: AttachIntent.automatic);
             } else {
-              await _removeAgent(machine, agent.id);
+              // ⚠️ **Kept, not removed — the desktop's rule.** This is how a STOP arrives
+              // (`publishStoppedAgent` pushes the agent with `status: 'stopped'`), and also how an
+              // agent looks for a moment while its pane is re-verified. Removing it here made
+              // stopped work vanish from the phone until the next full reload, so there was no row
+              // left to resume. `agent_deleted` is what removes an agent; this only lets go of the
+              // streams, which have no terminal behind them any more.
+              for (final pane in panesFor(machine.machine.machineId).toList()) {
+                if (pane.agentId != agent.id) continue;
+                await _detachSession(pane, sendClose: false);
+              }
             }
           } catch (_) {
             unawaited(_loadMachineData(machine, force: true));
@@ -6705,7 +7037,8 @@ class AppNotifier extends ChangeNotifier {
             _upsertAgent(machine, agent);
             // Same reattach as `agent_synced` above — a pane can be waiting on this exact agent
             // (e.g. one this window's own New Agent dialog just opened) with no session yet.
-            _attachPendingPanes(machine);
+            // A push about an agent created elsewhere.
+            _attachPendingPanes(machine, intent: AttachIntent.automatic);
           } catch (_) {
             unawaited(_loadMachineData(machine, force: true));
           }
@@ -6753,6 +7086,11 @@ class AppNotifier extends ChangeNotifier {
                 known != null && known.sameAs(asked)
                 ? asked.withSince(known.since)
                 : asked;
+            // Whether it is NEWS is the announcer's to say, not [known]'s:
+            // `blockedAgents` is emptied on every dropped socket, and the
+            // re-announce that follows is the same question — see
+            // `notify/question_notice.dart`.
+            _announceQuestion(machine, asked);
           }
         }
         break;
@@ -6772,6 +7110,10 @@ class AppNotifier extends ChangeNotifier {
                   open.requestId == requestId)) {
             machine.blockedAgents.remove(agentId);
           }
+          agentNotices.questionClosed((
+            machineId: machine.machine.machineId,
+            agentId: agentId,
+          ), requestId: requestId is String ? requestId : null);
         }
         break;
       case 'turn_started':
@@ -6809,6 +7151,7 @@ class AppNotifier extends ChangeNotifier {
           // The answer just landed — the moment a recency sort should follow.
           machine.agentActivityAt[agentId] = DateTime.now();
           _cancelTurnActivity(machine.machine.machineId, agentId);
+          _announceTurnEnd(machine, agentId, event, payload);
         } else {
           final sessionId = _eventSessionId(event, payload);
           if (sessionId != null) {
@@ -6868,6 +7211,86 @@ class AppNotifier extends ChangeNotifier {
     Map<String, dynamic> event,
   ) => _handleEvent(machineId, event);
 
+  /// The agent on screen, when the app is in front of anybody.
+  AgentRef? get _watchedAgent {
+    if (!agentNotices.inFront) return null;
+    final pane = focusedPane;
+    final agentId = pane?.agentId;
+    if (pane == null || agentId == null) return null;
+    return (machineId: pane.machineId, agentId: agentId);
+  }
+
+  void _seeWatchedAgent() {
+    final watched = _watchedAgent;
+    if (watched != null) agentNotices.seen(watched);
+  }
+
+  /// Every change the screens hear about is also a chance that the agent on
+  /// screen is a different one — and going to an agent is what reads its news.
+  ///
+  /// ⚠️ **Here, and not in the `focusedPaneId` setter where it first went.**
+  /// Half the roads onto an agent never touch that setter: a NEW pane — a row
+  /// tapped, a notice tapped — is focused on its swarm directly, and so are a
+  /// restored layout and a swarm switched to. Hooked there, the mark outlived
+  /// the person opening the very agent it pointed at. Every one of those roads
+  /// ends by notifying, so this is the one place none of them can miss. It
+  /// costs a lookup: [AgentAnnouncer.seen] is silent for an agent with no mark.
+  @override
+  void notifyListeners() {
+    _seeWatchedAgent();
+    super.notifyListeners();
+  }
+
+  /// [agent] on [machine], as a notice names it.
+  NoticeAgent _noticeAgent(MachineState machine, Agent agent) => (
+    ref: (machineId: machine.machine.machineId, agentId: agent.id),
+    name: agent.displayName,
+    machine: machine.machine.displayName,
+  );
+
+  /// An agent this phone has not been told about is never announced: a notice
+  /// about it could not open anything.
+  Agent? _knownAgent(MachineState machine, String agentId) =>
+      machine.agents.where((a) => a.id == agentId).firstOrNull;
+
+  /// One agent's turn ended: tell the person as the dial would — see
+  /// `notify/done_notice.dart` for when that is a tap, a mark or a notice.
+  void _announceTurnEnd(
+    MachineState machine,
+    String agentId,
+    Map<String, dynamic> event,
+    Map<String, dynamic> payload,
+  ) {
+    final agent = _knownAgent(machine, agentId);
+    if (agent == null) return;
+    final who = _noticeAgent(machine, agent);
+    agentNotices.turnEnded(
+      who,
+      turnEndFrom(
+        event,
+        payload,
+        reply: sessionPreviews
+            .read(previewKey(who.ref.machineId, agent))
+            ?.turnReply,
+      ),
+      watching: () => _watchedAgent == who.ref,
+    );
+  }
+
+  /// An agent stopped to ask the person something — see
+  /// `notify/question_notice.dart`.
+  void _announceQuestion(MachineState machine, PendingQuestion asked) {
+    final agent = _knownAgent(machine, asked.agentId);
+    if (agent == null) return;
+    final who = _noticeAgent(machine, agent);
+    agentNotices.questionAsked(
+      who,
+      requestId: asked.requestId,
+      prompt: asked.prompt,
+      watching: () => _watchedAgent == who.ref,
+    );
+  }
+
   /// The app is back in front of somebody: every machine socket the phone lost while it was away
   /// dials again now instead of waiting out a backoff nobody is watching.
   ///
@@ -6880,6 +7303,9 @@ class AppNotifier extends ChangeNotifier {
   /// and connections somebody closed on purpose, so a tab switch that cost nothing costs nothing.
   void handleAppResumed() {
     _pool?.reconnectAll();
+    // Back in front of the agent that was on screen: whatever it finished
+    // while the phone was in a pocket has now been seen.
+    _seeWatchedAgent();
     // ⚠️ **The desk is re-read here and not only on a push.** A backgrounded
     // phone runs no code, so every `desk_changed` sent while it was away
     // reached a socket nobody was listening on: without this the tabs would be
@@ -6921,6 +7347,7 @@ class AppNotifier extends ChangeNotifier {
     }
     unawaited(_spokenTasks.close());
     sessionPreviews.dispose();
+    agentNotices.dispose();
     _desk.dispose();
     super.dispose();
   }

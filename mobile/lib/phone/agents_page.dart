@@ -153,6 +153,7 @@ class AgentsPage extends StatelessWidget {
     final name = machine.machine.displayName;
     final confirmed = await confirmPhoneAction(
       context,
+      icon: LucideIcons.unlink300,
       title: 'Unlink $name?',
       message:
           'This phone will need $name\'s password again to open its harnesses. '
@@ -278,7 +279,7 @@ Future<void> showAgentActions(
   Agent agent,
 ) => showPhoneSheet(
   context,
-  title: agent.name,
+  title: agent.displayName,
   actions: [
     PhoneSheetAction(
       icon: LucideIcons.trash2300,

@@ -1,6 +1,7 @@
 import 'package:harness_mobile/api/api_client.dart';
 import 'package:harness_mobile/auth/auth_session.dart';
 import 'package:harness_mobile/core/config.dart';
+import 'package:harness_mobile/core/local_key_value_store.dart';
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/state/desk_sync.dart';
 import 'package:harness_mobile/state/phone_desk.dart';
@@ -39,10 +40,17 @@ class DeskApi extends ApiClient {
   }
 }
 
-/// A tab of `m`'s agents, named.
-DeskTab deskTab(String id, String name, List<String> agentIds) => DeskTab(
+/// A tab of `m`'s agents, named — by hand unless [custom] is false, when the
+/// name is the desk's placeholder and the tab is called after its first agent.
+DeskTab deskTab(
+  String id,
+  String name,
+  List<String> agentIds, {
+  bool custom = true,
+}) => DeskTab(
   id: id,
   name: name,
+  nameIsCustom: custom,
   panes: [
     for (final agentId in agentIds)
       DeskPaneRef(machineId: 'm', agentId: agentId),
@@ -60,8 +68,9 @@ Future<AppNotifier> deskApp(
   PagerConn conn, {
   List<DeskTab> tabs = const [],
   bool opensTerminals = true,
+  LocalKeyValueStore? storage,
 }) async {
-  final app = pagerApp(conn);
+  final app = pagerApp(conn, storage: storage);
   app.api = DeskApi(tabs: tabs);
   if (!opensTerminals) {
     app.stateOf('m')!.terminalCapabilityAvailable = false;

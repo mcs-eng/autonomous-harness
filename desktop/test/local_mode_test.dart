@@ -229,7 +229,8 @@ void main() {
         discovery: _ReadyDiscovery(),
         cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
       );
-      addTearDown(app.dispose);
+      var disposed = false;
+      addTearDown(() { if (!disposed) app.dispose(); });
       app.status = AppStatus.unauthenticated;
 
       await tester.pumpWidget(_host(app, () => LoginScreen(notifier: app)));
@@ -251,6 +252,9 @@ void main() {
       // fake clock is checked at the end of this test.
       app.discovery.supervision?.cancel();
       await tester.pumpWidget(const SizedBox());
+      app.dispose();
+      disposed = true;
+      await tester.pump();
     });
 
     testWidgets('the sheet over the desk does not repeat it', (tester) async {

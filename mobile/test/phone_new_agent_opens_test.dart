@@ -95,12 +95,19 @@ void main() {
       );
       await tester.pump();
 
-      // Recent is folded shut, so its entries are not on screen until it is opened.
-      await tester.tap(find.text('Recent'));
+      // PROJECT and ENGINE are folded shut — the page says what is chosen and
+      // opens onto the choices. The folders already worked in are behind Search
+      // project, which is a sheet rather than a second fold.
+      await tester.tap(find.text('Choose a folder'));
       await tester.pump();
+      await tester.tap(find.text('Search project'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       await tester.tap(find.text('grid'));
       await tester.pump();
-      await tester.tap(find.text('Claude'));
+      await tester.pump(const Duration(milliseconds: 400));
+      // Claude is the engine the form starts on, and the ENGINE row now shows
+      // it rather than offering it — so there is nothing to tap.
       await tester.pump();
       await tester.tap(find.text('Create Harness'));
       // The create resolves on a microtask, then the route it pushes has to slide in — and only once

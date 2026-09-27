@@ -66,6 +66,7 @@ class _Notifier extends AppNotifier {
     String? permissionMode,
     String? codexHome,
     String? dsh,
+    GridModel? model,
     String? prompt,
     String? name,
     String? agent,
@@ -141,8 +142,9 @@ void main() {
     await tester.pump();
   }
 
-  String engineField(WidgetTester tester) =>
-      tester.widget<AgentPicker>(find.byType(AgentPicker)).value;
+  String engineField(WidgetTester tester) => tester
+      .widget<AgentPicker>(find.byKey(const Key('new-agent-agent-picker')))
+      .value;
 
   testWidgets(
     'companion cancellation preserves the draft; success closes it without creating',

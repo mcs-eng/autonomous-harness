@@ -2,7 +2,7 @@ name: harness_mobile
 description: "Harness viewer for iOS and Android."
 publish_to: 'none'
 
-version: 1.0.0+32
+version: 1.0.0+45
 
 environment:
   sdk: ^3.13.0
@@ -19,6 +19,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # `compareNatural` — the desktop's name order, so `harness 9` sorts before `harness 10` on both.
+  collection: ^1.19.1
 
   cupertino_icons: ^1.0.8
   lucide_icons_flutter: ^3.1.15
@@ -65,6 +67,12 @@ dependencies:
   # `/api/voice/stt`, the same endpoint the dial's recordings go to. The OS
   # recognizer was tried first and misheard Vietnamese badly.
   record: ^7.1.1
+
+  # An agent finishing while the phone is in a pocket: the OS notification the
+  # dial's "wake the panel and open the drawer" becomes on a phone
+  # (`lib/notify/system_notices.dart`). Local only — it fires from the machine socket,
+  # so it reaches a phone whose app is still alive, not one iOS has suspended.
+  flutter_local_notifications: ^22.2.0
 
 dev_dependencies:
   flutter_test:

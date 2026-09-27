@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,7 +9,7 @@ import 'package:harness/core/git_worktree.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/e2ee/envelope.dart';
 import 'package:harness/state/new_harness.dart';
-import 'package:harness/widgets/new_harness_box.dart';
+import 'package:harness/widgets/new_harness_form.dart';
 import 'package:harness/ws/ws_conn.dart';
 
 import 'box_render_preview_test.dart' show loadPreviewFonts;
@@ -45,10 +44,13 @@ class _Connection extends WsConn {
       );
   final starts = <Map<String, dynamic>>[];
   final reads = <String>[];
+  final refreshes = <String>[];
+  Completer<Map<String, dynamic>>? refreshing;
   final pending = <String, Completer<Map<String, dynamic>>>{};
   final answers = <String, Map<String, dynamic>>{};
   Map<String, dynamic>? failure;
   bool loseReply = false;
+  int gitFailures = 0;
   @override
   Future<Map<String, dynamic>> request(
     String type, {
@@ -57,7 +59,16 @@ class _Connection extends WsConn {
   }) async {
     if (type == 'git_project_info') {
       final path = payload['path'] as String;
+      if (payload['refresh'] == true) {
+        refreshes.add(path);
+        return refreshing?.future ??
+            Future.value({..._git, ...?answers[path], 'refreshed': true});
+      }
       reads.add(path);
+      if (gitFailures > 0) {
+        gitFailures--;
+        throw const WsRequestTimeout('git_project_info');
+      }
       return pending[path]?.future ??
           Future.value(
             answers[path] ?? (path == '/plain' ? {'isGit': false} : _git),
@@ -110,9 +121,389 @@ void main() {
   );
 
   Future<void> settle() => Future<void>.delayed(Duration.zero);
+
+  test(
+    'missing main requires choosing a branch without changing Worktree',
+    () async {
+      final connection = _Connection()
+        ..answers['/repo'] = {
+          'isGit': true,
+          'branch': 'master',
+          'defaultRef': 'refs/remotes/origin/master',
+          'branches': [
+            {'ref': 'refs/heads/master', 'name': 'master'},
+            {'ref': 'refs/heads/feature', 'name': 'feature'},
+          ],
+        };
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
+      final box = NewHarnessController(
+        app,
+        machineId: 'm',
+        engine: 'codex',
+        folder: '/repo',
+      );
+      addTearDown(app.dispose);
+      addTearDown(box.dispose);
+      await settle();
+      expect(box.branchRef, isNull);
+      expect(box.worktree, isTrue);
+      expect(box.requiredChoice?.field, NewHarnessField.branch);
+      expect(await box.create(), NewHarnessOutcome.failed);
+      expect(box.error, contains('Choose a branch'));
+      expect(connection.starts, isEmpty);
+      expect(box.worktree, isTrue);
+      box.accept(
+        box.options.singleWhere((option) => option.id == 'refs/heads/feature'),
+      );
+      expect(box.branchRef, 'refs/heads/feature');
+      expect(box.requiredChoice, isNull);
+    },
+  );
+
+  test('an unavailable saved folder requires choosing a project', () async {
+    final connection = _Connection()
+      ..answers['/missing'] = {'error': 'PROJECT_UNAVAILABLE'};
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/missing',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    expect(await box.create(), NewHarnessOutcome.failed);
+    expect(box.field, NewHarnessField.projectMenu);
+    expect(box.error, contains('Choose a project'));
+    expect(box.project.folder, '/missing');
+    expect(connection.starts, isEmpty);
+  });
+
+  test('Branch opens immediately, discovers remote matches, and never queries on typing', () async {
+    final connection = _Connection()..refreshing = Completer();
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    expect(box.refreshingBranches, true);
+    expect(box.checkingGit, false);
+    expect(box.options.any((row) => row.title == 'feature'), true);
+    for (final query in ['t', 'to', 'toolbar']) {
+      box.setQuery(query);
+    }
+    expect(connection.refreshes, ['/repo']);
+    expect(
+      box.options.any(
+        (row) => row.id.startsWith(NewHarnessController.createBranchId),
+      ),
+      false,
+    );
+    connection.refreshing!.complete({
+      ..._git,
+      'refreshed': true,
+      'branches': [
+        ..._git['branches'] as List,
+        {
+          'ref': 'refs/remotes/origin/feat/toolbar-onboarding',
+          'name': 'origin/feat/toolbar-onboarding',
+          'remote': true,
+        },
+      ],
+    });
+    await settle();
+    expect(box.query, 'toolbar');
+    expect(box.selected!.title, 'origin/feat/toolbar-onboarding');
+    expect(box.refreshingBranches, false);
+    expect(box.branchRefreshError, isNull);
+    box.accept();
+    expect(
+      box.projectFolderRequest!.payload['branchRef'],
+      'refs/remotes/origin/feat/toolbar-onboarding',
+    );
+    expect(connection.starts, isEmpty);
+  });
+
+  test('failed branch refresh preserves usable choices and manual retry keeps the query', () async {
+    final connection = _Connection()..refreshing = Completer();
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    box.setQuery('feature');
+    connection.refreshing!.completeError(StateError('offline'));
+    await settle();
+    expect(box.selected!.title, 'feature');
+    expect(box.branchRefreshError, contains('Showing saved branches'));
+    expect(box.gitError, isNull);
+    connection.refreshing = Completer();
+    box.refreshChoices();
+    box.refreshChoices();
+    expect(connection.refreshes, ['/repo', '/repo']);
+    connection.refreshing!.complete({..._git, 'refreshed': true});
+    await settle();
+    expect(box.query, 'feature');
+    expect(box.selected!.title, 'feature');
+    expect(box.branchRefreshError, isNull);
+  });
+
+  test('filtering 2000 branches stays local during a slow refresh', () async {
+    final connection = _Connection()
+      ..refreshing = Completer()
+      ..answers['/repo'] = {
+        ..._git,
+        'branches': [
+          for (var i = 0; i < 2000; i++)
+            {
+              'ref': 'refs/remotes/origin/feature/$i',
+              'name': 'origin/feature/$i',
+              'remote': true,
+            },
+        ],
+      };
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    final timings = <int>[];
+    for (var i = 0; i < 100; i++) {
+      final watch = Stopwatch()..start();
+      box.setQuery('feature/$i');
+      timings.add(watch.elapsedMicroseconds);
+    }
+    timings.sort();
+    // A diagnostic, not a flaky wall-clock threshold on a shared build machine.
+    debugPrint(
+      'Branch search / 2000 refs / 100 queries: p50=${timings[50]}us p95=${timings[95]}us',
+    );
+    expect(connection.reads, ['/repo']);
+    expect(connection.refreshes, ['/repo']);
+    connection.refreshing!.complete({
+      ...connection.answers['/repo']!,
+      'refreshed': true,
+    });
+    await settle();
+  });
+
+  test('a late refresh from another project is discarded', () async {
+    final connection = _Connection()..refreshing = Completer();
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    box.setFolder('/plain');
+    await settle();
+    connection.refreshing!.complete({..._git, 'refreshed': true});
+    await settle();
+    expect(box.project.folder, '/plain');
+    expect(box.isGitProject, false);
+    expect(box.refreshingBranches, false);
+  });
+
+  testWidgets(
+    'Branch shows refresh progress and manual refresh keeps the typed query',
+    (tester) async {
+      final connection = _Connection()..refreshing = Completer();
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
+      final box = NewHarnessController(
+        app,
+        machineId: 'm',
+        engine: 'codex',
+        folder: '/repo',
+      );
+      addTearDown(app.dispose);
+      addTearDown(box.dispose);
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: NewHarnessForm(
+              controller: box,
+              onClose: () {},
+              onCreated: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await openLaunchRow(tester, 'branch');
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const ValueKey('new-harness-query')),
+        'toolbar',
+      );
+      await tester.pump();
+      expect(find.text('Checking remote branches…'), findsOneWidget);
+      expect(find.text('No matches'), findsNothing);
+      connection.refreshing!.complete({..._git, 'refreshed': false});
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Showing saved branches'), findsOneWidget);
+      connection.refreshing = Completer();
+      await tester.tap(find.byTooltip('Refresh results'));
+      await tester.pump();
+      expect(box.query, 'toolbar');
+      expect(connection.refreshes, ['/repo', '/repo']);
+      connection.refreshing!.complete({..._git, 'refreshed': true});
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Showing saved branches'), findsNothing);
+      for (final modifier in [
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        final previous = connection.refreshes.length;
+        connection.refreshing = Completer();
+        await tester.tap(find.byKey(const ValueKey('new-harness-query')));
+        await tester.sendKeyDownEvent(modifier);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyR);
+        await tester.sendKeyUpEvent(modifier);
+        await tester.pump();
+        expect(connection.refreshes.length, previous + 1);
+        expect(box.query, 'toolbar');
+        connection.refreshing!.complete({..._git, 'refreshed': true});
+        await tester.pumpAndSettle();
+      }
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  test(
+    'failed Git discovery blocks launch and the next Start retries it',
+    () async {
+      final connection = _Connection()..gitFailures = 2;
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
+      final box = NewHarnessController(
+        app,
+        machineId: 'm',
+        engine: 'codex',
+        folder: '/repo',
+      );
+      addTearDown(app.dispose);
+      addTearDown(box.dispose);
+      await settle();
+      expect(box.gitError, isNotNull);
+      expect(await box.create(), NewHarnessOutcome.failed);
+      expect(box.error, contains('Could not check Git'));
+      expect(box.busy, isFalse);
+      expect(connection.starts, isEmpty);
+
+      expect(await box.create(), NewHarnessOutcome.created);
+      expect(connection.starts, hasLength(1));
+      expect(connection.starts.single['projectSource'], 'worktree');
+      expect(connection.reads, ['/repo', '/repo', '/repo']);
+    },
+  );
+
+  test('a remote branch cannot launch in the main folder after Worktree is disabled', () async {
+    final connection = _Connection();
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    box.accept(box.options.firstWhere((row) => row.title == 'origin/release'));
+    box.toggleWorktree();
+    expect(await box.create(), NewHarnessOutcome.failed);
+    expect(box.error, 'Choose a local branch, or turn Worktree on.');
+    expect(connection.starts, isEmpty);
+    box.toggleWorktree();
+    expect(await box.create(), NewHarnessOutcome.created);
+    expect(
+      connection.starts.single['branchRef'],
+      'refs/remotes/origin/release',
+    );
+    expect(connection.starts.single['branchName'], 'release');
+  });
+
+  test('closing during Git discovery never sends a late create', () async {
+    final connection = _Connection();
+    final pending = connection.pending['/repo'] = Completer();
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    final creating = box.create();
+    expect(box.busy, isTrue);
+    box.dispose();
+    pending.complete(_git);
+    expect(await creating, NewHarnessOutcome.failed);
+    expect(connection.starts, isEmpty);
+  });
+
   test('Git defaults follow the project, late replies are ignored, and draft choices survive', () async {
     final connection = _Connection();
-    final app = createApp(connectionForTest: (_) => connection);
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
     final box = NewHarnessController(
       app,
       machineId: 'm',
@@ -178,10 +569,51 @@ void main() {
     expect(box.branchRef, 'refs/heads/main');
   });
 
+  test('the form filters a field and takes what it landed on', () async {
+    final connection = _Connection();
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    await settle();
+    expect(box.branchLabel, 'main');
+    // Typing narrows the row, and the row takes what it narrowed to: on the
+    // form there is no list to press Return in, so nothing else would.
+    box.setQuery('feat');
+    box.takeSelection();
+    await settle();
+    expect(box.branchLabel, 'feature');
+    expect(box.matchCount, lessThan(box.total));
+
+    // And the arrows step from the value the field HAS, through a stable
+    // order — the displayed list re-ranks the chosen row to the front, which
+    // is why stepping through THAT walked in circles.
+    box.setQuery('');
+    final wheel = box.stepValues();
+    final at = wheel.indexWhere(box.isCurrent);
+    expect(at, isNonNegative, reason: 'The taken branch must be on the wheel.');
+    box.applyOption(wheel[(at + 1) % wheel.length]);
+    await settle();
+    expect(box.branchLabel, isNot('feature'));
+  });
+
   test('one Start waits for Git detection and lost replies reuse the original receipt', () async {
     final connection = _Connection()..loseReply = true;
     final ready = connection.pending['/repo'] = Completer();
-    final app = createApp(connectionForTest: (_) => connection);
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
     final box = NewHarnessController(
       app,
       machineId: 'm',
@@ -214,7 +646,10 @@ void main() {
         'preparedFolder': '/prepared',
         'failure': {'code': 'TMUX_UNAVAILABLE'},
       };
-    final app = createApp(connectionForTest: (_) => connection);
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
     final box = NewHarnessController(
       app,
       machineId: 'm',
@@ -248,7 +683,10 @@ void main() {
       const folder = '/harnesses/worktrees/repo/claude-0922-1136';
       final connection = _Connection()
         ..answers[folder] = linked('harness/claude-0922-1136');
-      final app = createApp(connectionForTest: (_) => connection);
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
       final box = NewHarnessController(
         app,
         machineId: 'm',
@@ -293,7 +731,10 @@ void main() {
         'preparedFolder': prepared,
         'failure': {'code': 'TMUX_UNAVAILABLE'},
       };
-    final app = createApp(connectionForTest: (_) => connection);
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
     final box = NewHarnessController(
       app,
       machineId: 'm',
@@ -350,11 +791,74 @@ void main() {
     ],
   };
 
+  test('search finds remote-qualified and older Harness branches', () async {
+    final connection = _Connection()..answers['/repo'] = rich;
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    await settle();
+    for (final name in ['origin/main', 'harness/old']) {
+      box.setQuery(name);
+      expect(box.options.first.title, name);
+      expect(box.options.first.enabled, true);
+      expect(box.options.where((row) => row.synthetic), isEmpty);
+    }
+    box.setQuery('');
+    expect(
+      box.options.map((row) => row.title),
+      isNot(anyOf(contains('origin/main'), contains('harness/old'))),
+    );
+  });
+
+  test('a hidden local branch does not hide its remote counterpart', () async {
+    final connection = _Connection()
+      ..answers['/repo'] = {
+        ...rich,
+        'branches': [
+          ...rich['branches'] as List,
+          {
+            'ref': 'refs/remotes/origin/harness/old',
+            'name': 'origin/harness/old',
+            'remote': true,
+          },
+        ],
+      };
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
+    final box = NewHarnessController(
+      app,
+      machineId: 'm',
+      engine: 'codex',
+      folder: '/repo',
+    );
+    addTearDown(app.dispose);
+    addTearDown(box.dispose);
+    await settle();
+    box.focusField(NewHarnessField.branch);
+    expect(box.options.map((row) => row.title), contains('origin/harness/old'));
+  });
+
   test(
     'From is where new work starts; Branch is the branch it is on',
     () async {
       final connection = _Connection()..answers['/repo'] = rich;
-      final app = createApp(connectionForTest: (_) => connection);
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
       final box = NewHarnessController(
         app,
         machineId: 'm',
@@ -439,6 +943,7 @@ void main() {
       // A name no branch has: a new branch in a new worktree, from the default.
       box.focusField(NewHarnessField.branch);
       box.setQuery('my work');
+      await settle();
       expect(box.options.last.title, 'Create branch my-work');
       expect(box.options.last.detail, 'New branch from main');
       box.accept(box.options.last);
@@ -481,7 +986,10 @@ void main() {
     'Worktree off can make a new branch for the folder, from its branch',
     () async {
       final connection = _Connection()..answers['/repo'] = rich;
-      final app = createApp(connectionForTest: (_) => connection);
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
       final box = NewHarnessController(
         app,
         machineId: 'm',
@@ -500,6 +1008,7 @@ void main() {
         reason: 'It exists: pick it instead.',
       );
       box.setQuery('login fix');
+      await settle();
       expect(box.options.last.title, 'Create branch login-fix');
       expect(box.options.last.detail, 'New branch from main');
       box.accept(box.options.last);
@@ -527,7 +1036,10 @@ void main() {
 
   test('Create branch cleans up a typed name', () async {
     final connection = _Connection()..answers['/repo'] = rich;
-    final app = createApp(connectionForTest: (_) => connection);
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
     final box = NewHarnessController(
       app,
       machineId: 'm',
@@ -539,6 +1051,7 @@ void main() {
     await settle();
     box.focusField(NewHarnessField.branch);
     box.setQuery('john smith');
+    await settle();
     expect(box.options.last.title, 'Create branch john-smith');
     box.setQuery('fix: it');
     box.accept(box.options.last);
@@ -549,7 +1062,10 @@ void main() {
     'Worktree off never switches a folder a harness is working in',
     () async {
       final connection = _Connection()..answers['/repo'] = rich;
-      final app = createApp(connectionForTest: (_) => connection);
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
       app.machineStates['m']!.agents = [
         const Agent(
           id: 'busy',
@@ -576,10 +1092,13 @@ void main() {
     },
   );
 
-  test('a repository with no commit starts without a worktree', () async {
+  test('an empty repository keeps Worktree on and requires a choice', () async {
     final connection = _Connection()
       ..answers['/empty'] = {'isGit': true, 'branch': 'main', 'branches': []};
-    final app = createApp(connectionForTest: (_) => connection);
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
     final box = NewHarnessController(
       app,
       machineId: 'm',
@@ -590,14 +1109,21 @@ void main() {
     addTearDown(box.dispose);
     await settle();
     expect(box.isGitProject, true);
-    expect(box.worktree, false);
+    expect(box.worktree, true);
+    expect(box.requiredChoice?.message, contains('no commits'));
+    expect(await box.create(), NewHarnessOutcome.failed);
+    expect(box.worktree, true);
+    expect(connection.starts, isEmpty);
   });
 
   testWidgets(
-    'compact launch, checkbox controls, hover selection, branch search and Cmd-Enter start',
+    'setup branch and worktree choices are used by the explicit launch action',
     (tester) async {
       final connection = _Connection();
-      final app = createApp(connectionForTest: (_) => connection);
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
       final box = NewHarnessController(
         app,
         machineId: 'm',
@@ -607,153 +1133,30 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: Center(
-              child: SizedBox(
-                width: 680,
-                height: 440,
-                child: NewHarnessBox(
-                  controller: box,
-                  onClose: () {},
-                  onCreated: () {},
-                  onNeedsForm: () {},
-                ),
+            body: SizedBox(
+              width: 820,
+              height: 450,
+              child: NewHarnessForm(
+                controller: box,
+                onClose: () {},
+                onCreated: () {},
               ),
             ),
           ),
         ),
       );
-      await tester.pump();
-      expect(find.text('New Harness'), findsNothing);
-      expect(find.text('Start Harness'), findsOneWidget);
-      for (final name in ['task', 'placement']) {
-        expect(find.byKey(ValueKey('new-harness-field-$name')), findsNothing);
-      }
-      expect(find.text('[x]'), findsOneWidget);
-      // Worktree sits just above Start.
-      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
-      await tester.sendKeyEvent(LogicalKeyboardKey.space);
-      await tester.pump();
-      expect(box.worktree, false);
-      expect(find.text('[ ]'), findsOneWidget);
-      await tester.tap(
-        find.byKey(const ValueKey('new-harness-field-worktree')),
-      );
-      await tester.pump();
-      expect(find.text('[x]'), findsOneWidget);
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pump();
-      expect(box.worktree, false);
-      final branchRow = find.byKey(const ValueKey('new-harness-field-branch'));
-      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-      await mouse.addPointer(location: Offset.zero);
-      await mouse.moveTo(tester.getCenter(branchRow));
-      await mouse.moveBy(const Offset(4, 0));
-      await tester.pump();
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pump();
-      expect(box.field, NewHarnessField.branch);
-      await mouse.removePointer();
-      expect(box.options.where(box.isCurrent).single.title, 'main');
-      expect(
-        box.options.firstWhere((row) => row.title == 'origin/release').enabled,
-        false,
-      );
-      final input = find.byKey(const ValueKey('new-harness-input'));
-      await tester.enterText(input, 'feature');
+      await tester.pumpAndSettle();
+      await openLaunchRow(tester, 'branch');
+      await typeHarnessQuery(tester, 'feature');
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
       expect(box.branchLabel, 'feature');
       expect(connection.starts, isEmpty);
-      await openLaunchRow(tester, 'worktree');
-      expect(box.worktree, true);
-      await openLaunchRow(tester, 'branch');
-      await tester.enterText(input, 'origin/release');
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
-      await tester.pump();
-      expect(
-        connection.starts.single,
-        containsPair('branchRef', 'refs/remotes/origin/release'),
-      );
+      await startHarness(tester);
+      expect(connection.starts.single['branchRef'], 'refs/heads/feature');
       expect(connection.starts.single['projectSource'], 'worktree');
-      expect(connection.starts.single.containsKey('prompt'), false);
+      expect(connection.starts.single.containsKey('prompt'), isFalse);
       expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-      box.dispose();
-      app.dispose();
-      await tester.pump(const Duration(milliseconds: 200));
-    },
-  );
-  testWidgets(
-    'Git errors retry without losing isolation, and advanced options wait for detection',
-    (tester) async {
-      final connection = _Connection();
-      final ready = connection.pending['/repo'] = Completer();
-      final app = createApp(connectionForTest: (_) => connection);
-      final box = NewHarnessController(
-        app,
-        machineId: 'm',
-        engine: 'codex',
-        folder: '/repo',
-      );
-      var advanced = 0;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: NewHarnessBox(
-              controller: box,
-              onClose: () {},
-              onCreated: () {},
-              onNeedsForm: () => advanced++,
-            ),
-          ),
-        ),
-      );
-      Future<void> options() async {
-        await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
-        await tester.sendKeyEvent(LogicalKeyboardKey.period);
-        await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
-        await tester.pump();
-      }
-
-      await options();
-      expect(advanced, 0);
-      ready.complete({'error': 'GIT_UNAVAILABLE'});
-      await tester.pump();
-      expect(advanced, 0);
-      expect(box.error, contains('Retry Worktree'));
-      final start = find.byKey(const ValueKey('new-harness-field-create'));
-      await tester.tap(start);
-      await tester.pump();
-      expect(box.error, contains('Could not check Git'));
-      expect(connection.starts, isEmpty);
-      connection.pending.remove('/repo');
-      await tester.tap(
-        find.byKey(const ValueKey('new-harness-field-worktree')),
-      );
-      await tester.pump();
-      expect(box.error, isNull);
-      expect(box.worktree, true);
-      expect(find.text('[x]'), findsOneWidget);
-      await options();
-      expect(advanced, 1);
-      await openLaunchRow(tester, 'branch');
-      await tester.enterText(
-        find.byKey(const ValueKey('new-harness-input')),
-        'origin/release',
-      );
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pump();
-      await tester.tap(
-        find.byKey(const ValueKey('new-harness-field-worktree')),
-      );
-      await tester.pump();
-      expect(box.worktree, false);
-      await tester.tap(start);
-      await tester.pump();
-      expect(box.error, contains('Choose a local branch'));
-      expect(connection.starts, isEmpty);
       await tester.pumpWidget(const SizedBox());
       box.dispose();
       app.dispose();
@@ -767,7 +1170,10 @@ void main() {
     final renderDir = Platform.environment['HARNESS_LAUNCH_RENDER_DIR'];
     if (renderDir != null) await tester.runAsync(loadPreviewFonts);
     final connection = _Connection();
-    final app = createApp(connectionForTest: (_) => connection);
+    final app = createApp(
+      connectionForTest: (_) => connection,
+      connected: true,
+    );
     final box = NewHarnessController(
       app,
       machineId: 'm',
@@ -793,8 +1199,7 @@ void main() {
                 alignment: Alignment.bottomCenter,
                 child: SizedBox(
                   width: 720,
-                  child: NewHarnessBox(
-                    docked: true,
+                  child: NewHarnessForm(
                     controller: box,
                     onClose: () {},
                     onCreated: () {},
@@ -807,7 +1212,8 @@ void main() {
         ),
       );
       await tester.pump();
-      expect(find.text('Start Harness').hitTestable(), findsOneWidget);
+      await openLaunchRow(tester, 'start');
+      expect(find.text('New Harness').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
       if (renderDir != null) {
         await expectLater(
@@ -817,8 +1223,9 @@ void main() {
       }
     }
     await openLaunchRow(tester, 'branch');
+    expect(find.textContaining('Search branch'), findsOneWidget);
     expect(
-      find.byKey(const ValueKey('new-harness-input')).hitTestable(),
+      find.byKey(const ValueKey('new-harness-query')).hitTestable(),
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);
@@ -832,11 +1239,12 @@ void main() {
     await tester.pump();
     expect(
       find.byKey(const ValueKey('new-harness-field-branch')),
-      findsNothing,
+      findsOneWidget,
     );
+    // Branch and Worktree remain visible in the form.
     expect(
       find.byKey(const ValueKey('new-harness-field-worktree')),
-      findsNothing,
+      findsOneWidget,
     );
     if (renderDir != null) {
       await expectLater(

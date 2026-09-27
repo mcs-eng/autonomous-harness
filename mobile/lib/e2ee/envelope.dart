@@ -9,9 +9,10 @@ import 'primitives.dart';
 
 const int e2eVersion = 1;
 
-/// Frames this client must send as ciphertext — core.ts `ENCRYPTED_DOWN_TYPES`. test/e2ee/ holds it
-/// to the CLI's own list, because a type missing here fails nowhere: the frame simply leaves in the
-/// clear, and for terminal_* the relay then drops it as TERMINAL_FRAME_REJECTED.
+/// Frames this client must send as ciphertext — core.ts `ENCRYPTED_DOWN_TYPES`.
+/// `test/encrypted_down_types_test.dart` holds it to the CLI's own list, because a type missing here
+/// fails nowhere on the phone: the frame simply leaves in the clear, and the machine refuses it with
+/// E2EE_REQUIRED (for terminal_* the relay drops it as TERMINAL_FRAME_REJECTED).
 const Set<String> encryptedDownTypes = {
   'message',
   'question_response',
@@ -23,12 +24,26 @@ const Set<String> encryptedDownTypes = {
   'agent_create_status',
   'agent_delete',
   'agent_restart',
+  // Reopens stopped work (`AppNotifier.resumeAgent`). Missing here, every tap on a Stopped row came
+  // back "Could not open this harness: E2EE_REQUIRED".
+  'agent_resume',
+  // Carries the fork's name and first task — what the person typed — like agent_create's prompt.
+  'agent_fork',
   'agent_recent',
   'agent_update',
   'agent_files',
   'agent_read_file',
   'fs_list_dir',
   'project_preview',
+  // The branches of a folder on that machine, for the New Harness form
+  // (`AppNotifier.readGitProject`).
+  //
+  // ⚠️ **Not in the CLI's `ENCRYPTED_DOWN_TYPES`, and still required.** The
+  // machine's real rule is `encryptDownFrame` in `cli/src/lib/e2ee/
+  // applicationFrames.ts`, which is that set OR a handful of types named
+  // outright beside it — this one among them. Sent in the clear it came back
+  // `E2EE_REQUIRED`, which on this screen read as a folder with no branches.
+  'git_project_info',
   'codex_profiles_list',
   'codex_profile_link',
   // Asks the machine to read its OWN agent accounts' usage (cli/src/lib/accountUsage.ts). Missing
@@ -37,6 +52,10 @@ const Set<String> encryptedDownTypes = {
   'usage_read',
   // The pane colours this client paints with, for the machine's tmux sessions (cli/src/lib/hostTheme.ts).
   'theme_set',
+  // What somebody searches their conversations for (cli/src/lib/sessionSearch/).
+  'session_search',
+  // Which conversation somebody is previewing, from the same index.
+  'session_tail',
   'device_e2ee_pair',
   'e2ee_pairings_list',
   'e2ee_pairing_unpair',
@@ -59,6 +78,27 @@ const Set<String> encryptedDownTypes = {
   'p2p_abort',
   'p2p_promote',
 };
+
+/// Requests an older CLI took in the clear and a current one refuses unsealed — applicationFrames.ts
+/// `STRICT_DOWN_TYPES`. Sealed only for a machine whose welcome says `strictDown`: an older one would
+/// never open the envelope and would read the request as empty.
+const Set<String> strictDownTypes = {
+  'dsh_install',
+  'dsh_update',
+  'dsh_remove',
+  'dsh_list',
+  'agent_retarget',
+  'engines_probe',
+  'grid_models_list',
+  'cancel',
+  'claude_login_status',
+  'speaking',
+};
+
+/// Whether [type] goes sealed to a machine — applicationFrames.ts `encryptDownFrameFor`.
+bool sealsDown(String type, {required bool strictDown}) =>
+    encryptedDownTypes.contains(type) ||
+    (strictDown && strictDownTypes.contains(type));
 
 Uint8List _aad(int v, String type, String dbSessionId, String k, String epoch) =>
     utf8Bytes('$v|$type|$dbSessionId|$k|$epoch');

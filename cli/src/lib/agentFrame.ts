@@ -24,6 +24,7 @@ import type { AgentTokenUsage } from './agentTokenUsage.js'
 import type { AgentOutputStats } from './agentOutputStats.js'
 import { gridEndpointMatchesLaunch, type GridAssignment } from './gridAssignment.js'
 import type { GridWebSearchStatus } from './gridLaunch.js'
+import { gridAnnotation, type GridAnnotation } from './gridModels.js'
 import { projectDisplayName, sessionDisplayTitle, type RegisteredSession } from './registry.js'
 import { engineCanFork } from './forkAgent.js'
 import { resumeMode, type ResumeMode } from './resumeCapability.js'
@@ -35,7 +36,7 @@ import type { DshVerdict } from '../dsh/verdict.js'
  * say: a discovered grid agent, or a row from before the daemon recorded it. The app shows nothing
  * for absent and for `on`; the two degraded words each get a sentence.
  */
-export type GridFrameBlock = GridAssignment & { webSearch?: GridWebSearchStatus }
+export type GridFrameBlock = GridAssignment & { webSearch?: GridWebSearchStatus } & Partial<GridAnnotation>
 
 /**
  * One agent as it travels to every client.
@@ -132,7 +133,7 @@ export interface AgentFrameContext {
  * When the conversation last moved, in epoch ms: dated work in the transcript, else the last time the engine
  * reported in (a hook, or a session bind — the agent's creation at the latest).
  *
- * ⚠️ Never the registry's `updatedAt`. That is bookkeeping: discovery rewrites it on every pass
+ * ⚠️ Never the registry row's `touchedAt`. That is bookkeeping: discovery rewrites it on every pass
  * (`updateRuntimes`), so falling back to it stamped every agent without a readable transcript "now"
  * — and a client sorting by recency put exactly those agents above the ones just used. File mtime is
  * bookkeeping too: an idle transcript can be rewritten without a new conversation event.
@@ -188,6 +189,7 @@ export async function agentFrame(
     // the block — decided by the launch, kept on the row — so it is gone the moment the block is.
     grid: s.grid ? {
       ...s.grid,
+      ...(s.gridLaunch?.targetId?.startsWith('local:') ? {} : gridAnnotation(s.grid)),
       ...(s.gridLaunch?.targetId && gridEndpointMatchesLaunch(s.engine, s.grid.baseUrl, s.gridLaunch)
         ? { targetId: s.gridLaunch.targetId }
         : {}),

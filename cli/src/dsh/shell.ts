@@ -5,6 +5,9 @@
  * same shell selection) `engineLaunch.ts` uses to exec an engine in a pane.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { harnessNodePrelude, interactiveEngineShell } from '../lib/engineLaunch.js'
 import { managedNodePath } from '../lib/nodeRuntime.js'
 
@@ -43,11 +46,13 @@ export interface DshCommandResult {
 export function isShellNoise(line: string, stream?: 'stdout' | 'stderr'): boolean {
   return /can't change option: zle$/.test(line)
     || /^\(eval\):\d+: can't change option: zle$/.test(line)
-    || /^bash: cannot set terminal process group \(-?\d+\): /.test(line)
-    || line === 'bash: no job control in this shell'
-    || /^bash: \[\d+: \d+ \(\d+\)\] tcsetattr: /.test(line)
+    || /^(?:\S*\/)?bash: cannot set terminal process group \(-?\d+\): /.test(line)
+    || BASH_NO_TTY.test(line)
+    || /^(?:\S*\/)?bash: \[\d+: \d+ \(\d+\)\] tcsetattr: /.test(line)
     || (stream !== 'stdout' && (line === 'exit' || line === 'logout'))
 }
+
+const BASH_NO_TTY = /^(?:\S*\/)?bash: (?:cannot set terminal process group \(-?\d+\): Inappropriate ioctl for device|no job control in this shell)$/
 
 /**
  * The first line of a script run in the user's interactive shell: what lets a timeout end the SHELL,
@@ -63,8 +68,9 @@ export function isShellNoise(line: string, stream?: 'stdout' | 'stderr'): boolea
  * 143 is what a SIGTERM death reports, so a stopped script reads as one whichever way it ended.
  *
  * The trap is in place only once the shell has read its rc files. A SIGTERM that lands before that is
- * still ignored, and the SIGKILL after KILL_GRACE_MS is what ends such a shell — which is why the
- * timeout tests advance through the grace period too, and why nothing here shortens it.
+ * still ignored. Timed commands also check an owned cancellation marker before entering their body;
+ * a shell that never finishes startup is ended by SIGKILL after KILL_GRACE_MS. The normal grace
+ * period remains available for commands that were already running when TERM arrived.
  */
 export const DSH_STOP_TRAP = "trap 'exit 143' TERM"
 
@@ -122,9 +128,26 @@ export function runDshCommand(script: string, opts: DshCommandOptions): Promise<
     let timedOut = false
     let settled = false
     let child: ChildProcess
+    let cancelDir: string | undefined
+    let cancelFile: string | undefined
+    const cleanup = (): void => {
+      if (cancelDir) {
+        try { rmSync(cancelDir, { recursive: true, force: true }) } catch { /* best effort, only our directory */ }
+      }
+    }
     try {
+      if (opts.timeoutMs) {
+        cancelDir = mkdtempSync(join(tmpdir(), 'harness-dsh-cancel-'))
+        chmodSync(cancelDir, 0o700)
+        cancelFile = join(cancelDir, 'cancelled')
+        const quoted = `'${cancelFile.replace(/'/g, `'"'"'`)}'`
+        // Login rc files run before DSH_STOP_TRAP and may ignore an early TERM.
+        // Once they finish, refuse the body if the deadline has already passed.
+        script = `if [ -e ${quoted} ]; then exit 143; fi\n${script}`
+      }
       child = spawnDshCommand(script, { cwd: opts.cwd, env: opts.env })
     } catch (error) {
+      cleanup()
       // spawn throws only Errors (an invalid argument: a NUL in the cwd, say).
       const line = `could not start: ${(error as Error).message}`
       opts.onLine?.(line)
@@ -150,6 +173,7 @@ export function runDshCommand(script: string, opts: DshCommandOptions): Promise<
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      cleanup()
       for (const carry of [out, err]) {
         if (carry.rest) { lines.push(carry.rest); opts.onLine?.(carry.rest) }
       }
@@ -158,6 +182,18 @@ export function runDshCommand(script: string, opts: DshCommandOptions): Promise<
     const timer = opts.timeoutMs
       ? setTimeout(() => {
         timedOut = true
+        try {
+          writeFileSync(cancelFile!, '', { mode: 0o600, flag: 'wx' })
+        } catch {
+          // If the startup barrier cannot be written, do not allow any grace
+          // period in which a shell finishing its rc files could start the body.
+          const pid = child.pid
+          if (pid && pid > 1) {
+            try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
+            try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+          }
+          return
+        }
         killProcessGroup(child)
       }, opts.timeoutMs)
       : null

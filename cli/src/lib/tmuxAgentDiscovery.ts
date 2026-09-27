@@ -25,6 +25,7 @@ import {
   ambiguousAgentProcess,
   engineProcessMatchScore,
   enrichProcessRows,
+  liveProcessRows,
   parseProcessRow,
   processArgvIsBoundaryFaithful,
   processTreePids,
@@ -318,7 +319,7 @@ export async function probeTmuxAgents(
   ])
   if (!tmux.ok) return { ok: false, error: `tmux list-panes failed: ${tmux.error}` }
   if (!ps.ok) return { ok: false, error: `process table failed: ${ps.error}` }
-  const parsed = ps.stdout.split('\n').map(parseProcessRow).filter((row): row is ProcessRow => row !== null)
+  const parsed = liveProcessRows(ps.stdout.split('\n').map(parseProcessRow).filter((row): row is ProcessRow => row !== null))
   // Every process-table producer applies the /proc repair: the bypass/resume evidence gate is
   // sound only when rows are boundary-faithful wherever /proc is readable (review cycle-8, P2),
   // and the interop/?-mangle rewrites are what make relayed and locale-mangled rows matchable.

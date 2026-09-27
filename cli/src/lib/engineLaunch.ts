@@ -273,6 +273,13 @@ export interface LaunchCommandOptions {
   harnessNode?: boolean
   /** Workspace entered after interactive-shell startup, not before it. */
   cwd?: string
+  /**
+   * A conversation taken over from the terminal that has it, once its turn ends (`agent_create`
+   * `takeOver: 'wait'`): the pane says it is waiting and starts the engine when that process is
+   * gone — the daemon stops it when the turn ends. Ctrl-C gives up and leaves it where it was.
+   * Ignored without an interactive shell, like `installFirst`: there is no script to wait in.
+   */
+  waitForPid?: { pid: number; name: string }
 }
 
 /**
@@ -451,7 +458,19 @@ export function buildEngineLaunchArgv(
   // SERVER's soft limit, which is launchd's 256 whenever the desktop app started the daemon that
   // started the server, and an engine (Claude Code refuses outright) or an npm install under 256 is
   // the failure the person then reads in the pane. See openFiles.ts.
-  return [interactive.path, ...interactive.args, RAISE_OPEN_FILES_SH + prelude + cwdPrelude + body, 'harness-engine', ...(opts.cwd ? [opts.cwd] : []), ...command]
+  const wait = opts.waitForPid ? waitForPidScript(opts.waitForPid) : ''
+  return [interactive.path, ...interactive.args, RAISE_OPEN_FILES_SH + prelude + cwdPrelude + wait + body, 'harness-engine', ...(opts.cwd ? [opts.cwd] : []), ...command]
+}
+
+/** Waits in the pane for [wait]'s process to end before the engine starts: see `waitForPid`. */
+function waitForPidScript(wait: { pid: number; name: string }): string {
+  const pid = Math.trunc(wait.pid)
+  const name = wait.name.replace(/[^A-Za-z0-9 ._-]/g, '')
+  return `printf '%s\\n' 'Waiting for the ${name} in your terminal to finish its turn.' 'It moves here when the turn ends. Ctrl-C leaves it there.'\n`
+    + `trap 'printf "\\n%s\\n" "It stays in your terminal."; exit 130' INT\n`
+    + `while kill -0 ${pid} 2>/dev/null; do sleep 1; done\n`
+    + `trap - INT\n`
+    + `printf '\\033[H\\033[2J'\n`
 }
 
 /**
@@ -550,7 +569,7 @@ export function terminalHintLines(machineName: string): string[] {
  * gives the person a prompt.
  */
 export function buildTerminalLaunchArgv(
-  opts: Pick<LaunchCommandOptions, 'cwd' | 'terminalHint'> = {},
+  opts: Pick<LaunchCommandOptions, 'cwd' | 'terminalHint' | 'clearEnv'> = {},
   shell: string | undefined = undefined,
 ): string[] {
   const candidate = shell === undefined ? currentUserShell() : shell
@@ -562,7 +581,7 @@ export function buildTerminalLaunchArgv(
   const hintPrelude = opts.terminalHint
     ? `printf '%s\\n' ${terminalHintLines(opts.terminalHint.machineName).map(shellSingleQuote).join(' ')}\n`
     : ''
-  return [path, '-c', RAISE_OPEN_FILES_SH + cwdPrelude + hintPrelude + 'shift\nexec "$@"', 'harness-terminal', opts.cwd ?? '', path, ...loginArgs]
+  return [path, '-c', RAISE_OPEN_FILES_SH + clearEnvPrelude(opts.clearEnv) + cwdPrelude + hintPrelude + 'shift\nexec "$@"', 'harness-terminal', opts.cwd ?? '', path, ...loginArgs]
 }
 
 /**
@@ -876,6 +895,23 @@ export type CommandFlagSupport = 'supported' | 'unsupported' | 'unknown'
 const FLAG_UNSUPPORTED_EXIT = 64
 
 /**
+ * The pairs this probe has seen the engine SUPPORT.
+ *
+ * Every relaunch asks, and a post-reboot restore asks once per agent, so the working case — which
+ * is nearly every case — is worth answering from memory instead of spawning `--help` again.
+ *
+ * Only `supported` is kept, deliberately. The remedy for the other two answers is to change the
+ * engine on disk: openharness#285 was closed by its reporter upgrading opencode until it had
+ * `--auto`. A cached `unsupported` would go on refusing that upgraded engine until the daemon
+ * happened to restart, which is the one outcome worth more than the spawn it saves. `unknown` is
+ * not kept for the same reason at shorter range: one slow `--help` would turn Auto off machine-wide.
+ */
+const flagSupportCache = new Set<string>()
+
+/** Test seam, and for a machine where the engine was just upgraded. */
+export function resetCommandFlagSupportCache(): void { flagSupportCache.clear() }
+
+/**
  * Checks a CLI's own help from the same interactive shell that would launch
  * it. `unknown` is deliberately non-blocking: a broken or unusually slow help
  * command must not turn an otherwise usable engine into a false refusal.
@@ -885,6 +921,8 @@ export async function commandSupportsFlagInInteractiveShell(
   flag: string,
   shell: string | undefined = undefined,
 ): Promise<CommandFlagSupport> {
+  const key = `${command}\u0000${flag}\u0000${shell ?? ''}`
+  if (flagSupportCache.has(key)) return 'supported'
   const interactive = interactiveEngineShell(shell)
   if (!interactive) return 'unknown'
   // `harness_help_status`, not `status`: in zsh `status` is a read-only special parameter (an alias
@@ -896,7 +934,11 @@ export async function commandSupportsFlagInInteractiveShell(
     'help="$("$1" --help 2>&1)"',
     'harness_help_status=$?',
     '[ "$harness_help_status" -eq 0 ] || exit 2',
-    `case "$help" in *"$2"*) exit 0 ;; *) exit ${FLAG_UNSUPPORTED_EXIT} ;; esac`,
+    // The flag, not a longer one that starts with it. A plain `*"$2"*` reads `--auto-update` in
+    // opencode's help as support for `--auto` — and then launches the very pane openharness#285
+    // reported, full of help text. So: followed by something that cannot continue a flag, or
+    // ending the help. `[!…]` is POSIX and behaves the same in sh, bash and zsh (measured).
+    `case "$help" in *"$2"[!A-Za-z0-9-]*|*"$2") exit 0 ;; *) exit ${FLAG_UNSUPPORTED_EXIT} ;; esac`,
   ].join('\n')
   return await new Promise((resolve) => {
     execFile(
@@ -904,12 +946,99 @@ export async function commandSupportsFlagInInteractiveShell(
       [...interactive.args, script, 'harness-engine-capability', command, flag],
       { timeout: 5_000 },
       (error) => {
-        if (!error) resolve('supported')
-        else {
-          const code = (error as { code?: number | string }).code
-          resolve(Number(code) === FLAG_UNSUPPORTED_EXIT ? 'unsupported' : 'unknown')
-        }
+        const answer: CommandFlagSupport = !error
+          ? 'supported'
+          : Number((error as { code?: number | string }).code) === FLAG_UNSUPPORTED_EXIT ? 'unsupported' : 'unknown'
+        if (answer === 'supported') flagSupportCache.add(key)
+        resolve(answer)
       },
     )
   })
+}
+
+/** What a launch would add for its permission mode, and whether the engine on disk knows it. */
+export interface PermissionLaunchChoice {
+  permissionMode?: string | null
+  bypassPermission?: boolean
+}
+
+/**
+ * The flag whose support decides whether this launch can keep its permission mode, or null when the
+ * launch adds none — an `ask` mode, an engine with no entry in the tables, a terminal.
+ *
+ * Only the flag TOKEN, never its value. `permissionModeFlags('claude', 'auto')` is a pair,
+ * `['--permission-mode', 'auto']`, and so is codex's `readOnly`; no `--help` prints a pair
+ * literally, so a build that lists `--permission-mode` but no longer accepts `auto` is not caught
+ * here. The single-token modes — `opencode --auto`, `cursor --force`, `codex --approve-for-me` —
+ * are answered exactly, and the first of those is what openharness#285 was about.
+ */
+export function permissionFlagToVerify(engine: AgentEngine, choice: PermissionLaunchChoice): string | null {
+  const flags = choice.permissionMode
+    ? permissionModeFlags(engine, choice.permissionMode)
+    : choice.bypassPermission ? BYPASS_PERMISSION_FLAGS[engine] : null
+  return flags?.find((token) => token.startsWith('--')) ?? null
+}
+
+/**
+ * Ask the engine on disk whether it knows the flag this launch would pass it.
+ *
+ * `null` means "launch as asked": either nothing is being added, or the engine takes it, or the
+ * probe could not tell (`unknown` never refuses — see `commandSupportsFlagInInteractiveShell`).
+ *
+ * Best-effort by construction, and that is the right way round. The probe needs an interactive
+ * shell to resolve the engine the way a launch will, so a machine that offers none answers
+ * `unknown` and nothing is refused. A daemon started by systemd or in a container has no `SHELL`
+ * in its environment — measured on a Linux container here — but `currentUserShell` falls back to
+ * the passwd entry, which on a normal account is a real shell, so the check does reach the boxes
+ * openharness#285 came from.
+ */
+async function unsupportedPermissionFlag(
+  engine: AgentEngine,
+  choice: PermissionLaunchChoice,
+  shell: string | undefined,
+): Promise<string | null> {
+  const flag = permissionFlagToVerify(engine, choice)
+  if (!flag) return null
+  const support = await commandSupportsFlagInInteractiveShell(engineBin(engine), flag, shell)
+  return support === 'unsupported' ? flag : null
+}
+
+/**
+ * For a launch somebody is waiting on — create, fork. Refusing is kinder than opening a pane that
+ * the engine will fill with its own help text and leave: the person is here, and Ask works today.
+ *
+ * The wire code is `CODEX_CLI_TOO_OLD` for every engine. The name is historical — this began as a
+ * codex-only check — and it stays because clients key on it: a code missing from the desktop's
+ * `refusedBeforeLaunch` set is not merely unlabelled there, it leaves the New Harness dialog saying
+ * the machine "has not confirmed the new harness yet". The daemon self-updates and the app does
+ * not, so the detail below is what an older app shows, and it names the engine itself.
+ */
+export async function refusePermissionFlagIfUnsupported(
+  engine: AgentEngine,
+  choice: PermissionLaunchChoice,
+  shell: string | undefined = undefined,
+): Promise<{ error: string; detail: string } | null> {
+  const flag = await unsupportedPermissionFlag(engine, choice, shell)
+  if (!flag) return null
+  return {
+    error: 'CODEX_CLI_TOO_OLD',
+    detail: `The ${engine} CLI on this machine does not support ${flag}, which Harness uses for this permission mode. `
+      + `Update ${engine} and try again, or choose Ask permissions for this harness.`,
+  }
+}
+
+/**
+ * For a launch nobody is waiting on — restore after a reboot, resume, restart, retarget. Here a
+ * refusal costs the whole harness, pane and scrollback included, to save a permission mode; so the
+ * flag is dropped and the launch goes ahead in Ask. The caller records that on the row, because a
+ * row that goes on claiming Auto while running without it is the more expensive lie.
+ */
+export async function dropPermissionFlagIfUnsupported<T extends PermissionLaunchChoice>(
+  engine: AgentEngine,
+  choice: T,
+  shell: string | undefined = undefined,
+): Promise<{ choice: T; droppedFlag: string | null }> {
+  const droppedFlag = await unsupportedPermissionFlag(engine, choice, shell)
+  if (!droppedFlag) return { choice, droppedFlag: null }
+  return { choice: { ...choice, permissionMode: 'ask', bypassPermission: false }, droppedFlag }
 }

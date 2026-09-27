@@ -1,3 +1,5 @@
+import 'support/open_harness.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -27,10 +29,14 @@ void main() {
           tester.widget<TextField>(_startInput).focusNode!.requestFocus();
         }
         await tester.pump();
-        await chord(tester, LogicalKeyboardKey.keyP);
+        await chord(tester, LogicalKeyboardKey.keyP, shift: true);
         expect(tester.widget<TextField>(_input).controller!.text, '>');
         expect(
           find.textContaining('run command', findRichText: true),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('swarm-search-preview')),
           findsOneWidget,
         );
         // This fork's Continue working rows stay on the page under the
@@ -48,7 +54,7 @@ void main() {
         );
         expect(
           tester.widget<TextField>(_input).decoration!.hintText,
-          'Search commands…',
+          'Search commands',
         );
         expect(_results, findsOneWidget);
         await tester.enterText(_input, '> rename');
@@ -171,6 +177,8 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('harness-start-new-pane')));
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      expect(find.byType(AlertDialog), findsNothing);
+      await chord(tester, LogicalKeyboardKey.keyN);
       await tester.pump(const Duration(milliseconds: 200));
       expect(find.byType(AlertDialog), findsOneWidget);
       expect(
@@ -208,7 +216,7 @@ void main() {
           expect(app.activeSwarm.isNewTabPage, isTrue);
           final created = app.activeSwarmId;
           expect(_results, findsNothing);
-          await chord(tester, LogicalKeyboardKey.keyO);
+          await openHarnessPicker(tester);
           expect(_results, findsOneWidget);
           expect(_startInput, findsNothing);
           if (dismissal == 'outside') {
@@ -239,7 +247,7 @@ void main() {
     (tester) async {
       final app = createApp();
       await mount(tester, app);
-      await chord(tester, LogicalKeyboardKey.keyO);
+      await openHarnessPicker(tester);
       await tester.enterText(_input, 'Agent 12');
       await tester.pump();
       final text = tester.widget<TextField>(_input).controller!;
@@ -260,11 +268,11 @@ void main() {
       expect(_results, findsNothing);
       expect(_startInput, findsOneWidget);
       expect(tester.widget<TextField>(_startInput).focusNode!.hasFocus, isTrue);
-      await chord(tester, LogicalKeyboardKey.keyP);
+      await chord(tester, LogicalKeyboardKey.keyP, shift: true);
       expect(tester.widget<TextField>(_input).controller!.text, '>');
       expect(
         tester.widget<TextField>(_input).decoration!.hintText,
-        'Search commands…',
+        'Search commands',
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();
@@ -274,15 +282,14 @@ void main() {
   testWidgets('Open reuses a session and hands the terminal its next key', (
     tester,
   ) async {
-    final app = createApp();
-    app.machineStates['m']!.nodeOnline = true;
+    final app = createApp(connected: true);
     final frames = <TerminalBinaryFrame>[];
     final pane = app.adoptSessionForTest(terminal('a0', frames));
     final original = app.activeSwarm;
     app.newSwarm();
     final destination = app.activeSwarmId;
     await mount(tester, app);
-    await chord(tester, LogicalKeyboardKey.keyO);
+    await openHarnessPicker(tester);
     await tester.enterText(_input, 'Agent 0');
     await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);

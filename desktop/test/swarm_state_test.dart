@@ -30,6 +30,7 @@ class MemoryStore implements LocalKeyValueStore {
 AppNotifier createApp({
   MemoryStore? store,
   WsConn Function(String)? connectionForTest,
+  bool connected = false,
 }) {
   final app = AppNotifier(
     config: AppConfig.dev,
@@ -45,7 +46,10 @@ AppNotifier createApp({
   );
   app.machines = [machine];
   app.machineStates['m'] = MachineState(machine)
-    ..nodeOnline = false
+    ..nodeOnline = connected
+    ..connectionStatus = connected
+        ? ConnectionStatus.connected
+        : ConnectionStatus.disconnected
     ..agentLoadStatus = AgentLoadStatus.loaded
     ..agents = [
       for (var i = 0; i < 70; i++)
@@ -152,7 +156,7 @@ void main() {
         final restored = createApp(store: store);
         addTearDown(restored.dispose);
         await restored.restorePaneLayoutForTest();
-        expect(restored.activeSwarm.name, 'Untitled Tab');
+        expect(restored.activeSwarm.name, 'New Tab');
         await restored.addAgentToSwarm('m', 'a0');
         expect(restored.activeSwarm.name, 'Agent 0');
       },

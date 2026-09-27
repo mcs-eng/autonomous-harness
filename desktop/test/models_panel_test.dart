@@ -1,3 +1,6 @@
+import 'support/workspace_tools.dart';
+import 'support/resource_picker.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -37,16 +40,20 @@ class _Subscription implements UsageSource {
 }
 
 class _SubscriptionRows extends ModelsMenuController {
+  _SubscriptionRows([
+    this.entries = const [
+      {
+        'title': 'OpenAI',
+        'account': 'abc123',
+        'status': '0% remaining',
+        'remainingPercent': 0.0,
+      },
+      {'title': 'OpenAI', 'account': 'def456', 'status': 'Usage unavailable'},
+    ],
+  ]);
+  final List<Map<String, Object?>> entries;
   @override
-  List<Map<String, Object?>> get rows => const [
-    {
-      'title': 'OpenAI',
-      'account': 'abc123',
-      'status': '0% remaining',
-      'remainingPercent': 0.0,
-    },
-    {'title': 'OpenAI', 'account': 'def456', 'status': 'Usage unavailable'},
-  ];
+  List<Map<String, Object?>> get rows => entries;
   @override
   Future<void> refresh() async {}
 }
@@ -64,7 +71,7 @@ void main() {
   });
 
   testWidgets(
-    'discovery, empty filters, shared models and retry all have clear states',
+    'source tabs isolate rows, search each source, and keep counts on refresh',
     (tester) async {
       tester.view.devicePixelRatio = 1;
       tester.view.physicalSize = const Size(700, 800);
@@ -87,6 +94,8 @@ void main() {
                 child: ModelsPanel(
                   controller: controller,
                   subscriptions: subscriptions,
+                  newModelIds: const {'qwen'},
+                  initialTab: ModelsTab.subscriptions,
                   onClose: () => closed++,
                   onManage: () {},
                 ),
@@ -95,17 +104,49 @@ void main() {
           ),
         ),
       );
+      expect(find.text('Subscriptions 2'), findsOneWidget);
+      expect(find.text('Local 0'), findsOneWidget);
+      expect(find.text('Shared 0'), findsOneWidget);
+      expect(find.text('All 2'), findsOneWidget);
+      expect(find.textContaining('Running '), findsNothing);
+      expect(find.text('Account abc123'), findsOneWidget);
+      expect(find.text('Account def456'), findsOneWidget);
+      expect(find.text('0% left'), findsOneWidget);
+      expect(find.text('This computer'), findsNothing);
+      final search = find.byKey(const ValueKey('models-search'));
+      await tester.enterText(search, 'ABC123');
+      await tester.pump();
+      expect(find.text('Account abc123'), findsOneWidget);
+      expect(find.text('Account def456'), findsNothing);
+      expect(find.text('Subscriptions 2'), findsOneWidget);
+      await tester.enterText(search, 'missing');
+      await tester.pump();
+      expect(find.text('No matching subscriptions'), findsOneWidget);
+      await tester.tap(find.byTooltip('Clear search'));
+      await tester.tap(find.text('Shared 0'));
+      await tester.pump();
+      expect(find.text('Finding shared models…'), findsOneWidget);
+      await tester.tap(find.text('Local 0'));
+      await tester.pump();
       expect(find.text('Finding models that fit…'), findsOneWidget);
-      app.localInventory = {'models': [], 'busy': false};
+      await tester.tap(find.text('Shared 0'));
+      app.stateOf('m')!.connectionStatus = ConnectionStatus.disconnected;
       await controller.refresh();
       await tester.pump();
-      expect(find.text('No compatible models found'), findsOneWidget);
-      expect(find.text('Account ···abc123'), findsOneWidget);
-      expect(find.text('Account ···def456'), findsOneWidget);
-      expect(find.text('0% left'), findsOneWidget);
-      await tester.tap(find.text('Running 0'));
+      expect(
+        find.text('Connect this computer to see its models.'),
+        findsOneWidget,
+      );
+      expect(find.text('No shared models'), findsNothing);
+      app.stateOf('m')!.connectionStatus = ConnectionStatus.connected;
+      app.localInventory = {'models': [], 'busy': false};
+      await tester.tap(find.text('Try again'));
       await tester.pump();
-      expect(find.text('No models running'), findsOneWidget);
+      expect(find.text('No shared models'), findsOneWidget);
+      await tester.tap(find.text('Local 0'));
+      await tester.pump();
+      expect(find.text('No compatible models found'), findsOneWidget);
+      expect(find.text('Account abc123'), findsNothing);
       expect(find.textContaining('Downloaded'), findsNothing);
       await tester.enterText(
         find.byKey(const ValueKey('models-search')),
@@ -128,7 +169,9 @@ void main() {
       expect(find.byTooltip('Clear search'), findsNothing);
       expect(find.text('No matching models'), findsNothing);
       expect(field.focusNode!.hasFocus, isTrue);
-      await tester.tap(find.text('All 0'));
+      await tester.tap(find.text('Shared 0'));
+      await tester.pump();
+      expect(find.text('No shared models'), findsOneWidget);
       app.inventory = const GridModels(
         gridName: 'home',
         models: [],
@@ -143,21 +186,30 @@ void main() {
       app.localInventory = modelInventory();
       await controller.refresh(force: true);
       await tester.pump();
+      expect(find.text('Local 5'), findsOneWidget);
+      expect(find.text('Shared 1'), findsOneWidget);
+      expect(find.text('Team'), findsOneWidget);
+      expect(find.text('Shared Qwen'), findsOneWidget);
+      expect(find.text('Team computer'), findsOneWidget);
+      expect(find.text('New'), findsNothing);
+      expect(find.text('Qwen3.8-27B'), findsNothing);
+      await tester.enterText(search, 'TEAM COMPUTER');
+      await tester.pump();
+      expect(find.text('Shared Qwen'), findsOneWidget);
+      await tester.enterText(search, 'missing');
+      await tester.pump();
+      expect(find.text('No matching models'), findsOneWidget);
+      await tester.tap(find.byTooltip('Clear search'));
+      await tester.tap(find.text('Local 5'));
+      await tester.pump();
       expect(find.text('gemma-4-12B'), findsOneWidget);
       expect(find.text('Qwen3.8-27B'), findsOneWidget);
+      expect(find.text('New'), findsOneWidget);
       expect(find.text('7.3 GB'), findsOneWidget);
       expect(find.text('16.2 GB'), findsOneWidget);
       expect(find.textContaining(' on disk'), findsNothing);
       expect(find.textContaining(' download'), findsNothing);
-      await tester.enterText(
-        find.byKey(const ValueKey('models-search')),
-        'shared',
-      );
-      await tester.pump();
-      expect(find.text('Shared · Team'), findsOneWidget);
-      expect(find.text('Shared Qwen'), findsOneWidget);
-      expect(find.text('Team computer'), findsOneWidget);
-      await tester.enterText(find.byKey(const ValueKey('models-search')), '');
+      expect(find.text('Shared Qwen'), findsNothing);
       app.localReadFails = true;
       await controller.refresh();
       await tester.pump();
@@ -174,6 +226,16 @@ void main() {
       await tester.tap(find.text('Try again'));
       await tester.pump();
       expect(find.text('Models are unavailable. Try again.'), findsNothing);
+      app.inventory = const GridModels.unreachable();
+      await controller.refresh(force: true);
+      await tester.tap(find.byKey(const ValueKey('models-tab-shared')));
+      await tester.pump();
+      expect(find.text('Shared models are unavailable.'), findsOneWidget);
+      expect(find.text('No shared models'), findsNothing);
+      app.inventory = const GridModels(gridName: 'home', models: []);
+      await tester.tap(find.text('Try again'));
+      await tester.pump();
+      expect(find.text('No shared models'), findsOneWidget);
       await tester.tap(find.byTooltip('Close Models'));
       expect(closed, 1);
       expect(tester.takeException(), isNull);
@@ -182,7 +244,7 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
 
-  testWidgets('play and pause show pending status before the acknowledgement', (
+  testWidgets('download, play and pause reflect file and engine state', (
     tester,
   ) async {
     tester.view.devicePixelRatio = 1;
@@ -196,10 +258,12 @@ void main() {
       subscriptions.dispose();
       app.dispose();
     });
-    for (final running in [false, true]) {
+    for (final state in ['available', 'downloaded', 'running']) {
+      final running = state == 'running';
       app.localInventory = modelInventory(
         scenario: running ? 'ready' : 'first',
       );
+      (app.localInventory['models'] as List).first['state'] = state;
       await controller.refresh();
       app.actionReply = Completer<Map<String, dynamic>>();
       await tester.pumpWidget(
@@ -219,11 +283,17 @@ void main() {
           ),
         ),
       );
+      await tester.tap(find.text('Local 5'));
+      await tester.pump();
       final control = find.byKey(const ValueKey('model-action-qwen'));
       expect(
         find.descendant(
           of: control,
-          matching: find.byIcon(running ? LucideIcons.pause : LucideIcons.play),
+          matching: find.byIcon(switch (state) {
+            'running' => LucideIcons.pause,
+            'downloaded' => LucideIcons.play,
+            _ => LucideIcons.download,
+          }),
         ),
         findsOneWidget,
       );
@@ -232,10 +302,20 @@ void main() {
         find.byTooltip(
           running
               ? 'Pause Qwen3.8-27B and free memory. The download is kept.'
-              : 'Start Qwen3.8-27B',
+              : state == 'downloaded'
+              ? 'Start Qwen3.8-27B'
+              : 'Download and start Qwen3.8-27B',
         ),
         findsOneWidget,
       );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('model-action-gemma')),
+          matching: find.byIcon(LucideIcons.play),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Start gemma-4-12B'), findsOneWidget);
       await tester.tap(control);
       await tester.pump();
       expect(find.text(running ? 'Stopping' : 'Starting'), findsOneWidget);
@@ -272,8 +352,59 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('source changes preserve downloads and open at the top', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(700, 420);
+    addTearDown(tester.view.reset);
+    final app = ModelManagerTestApp(ModelManagerConnection());
+    final controller = ModelManagerController(app, poll: false);
+    final subscriptions = _SubscriptionRows([]);
+    addTearDown(() {
+      controller.dispose();
+      subscriptions.dispose();
+      app.dispose();
+    });
+    await controller.refresh();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModelsPanel(
+            controller: controller,
+            subscriptions: subscriptions,
+            initialTab: ModelsTab.local,
+            onClose: () {},
+            onManage: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('model-action-qwen')));
+    await tester.pump();
+    expect(find.text('Downloading · 42%'), findsOneWidget);
+    await tester.drag(
+      find.byKey(const ValueKey(ModelsTab.local)),
+      const Offset(0, -500),
+    );
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('Downloading · 42%').hitTestable(), findsNothing);
+    await tester.tap(find.text('Subscriptions 0'));
+    await tester.pump();
+    expect(find.text('No subscriptions').hitTestable(), findsOneWidget);
+    expect(find.text('Downloading · 42%'), findsNothing);
+    await tester.tap(find.text('Local 5'));
+    await tester.pump();
+    expect(find.text('Downloading · 42%').hitTestable(), findsOneWidget);
+    expect(app.actions, hasLength(1));
+    expect(controller.busy, isTrue);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
-    'the one-time invitation leads to discovery and verified readiness explains selection',
+    'the one-time invitation leads to discovery, and a started model gets no toast',
     (tester) async {
       final app = ModelManagerTestApp(ModelManagerConnection());
       app.stateOf('m')!.agents = [
@@ -304,17 +435,24 @@ void main() {
       await tester.tap(find.byTooltip('Dismiss'));
       await tester.pump();
       expect(find.text('Run AI on this computer'), findsNothing);
+      // A model that has just started gets no toast — its row in the Models
+      // overview is where it is shown.
       app.localInventory = modelInventory(scenario: 'ready');
       await controller.refresh();
       await tester.pump();
-      expect(find.text('Qwen3.8-27B is running'), findsOneWidget);
+      expect(controller.readyModel?.name, 'Qwen3.8-27B');
+      expect(find.text('Qwen3.8-27B is running'), findsNothing);
       expect(
         find.text('Select it from the model picker in a session.'),
-        findsOneWidget,
+        findsNothing,
       );
-      await tester.tap(find.byTooltip('Dismiss'));
-      await tester.pump();
-      expect(find.text('Qwen3.8-27B is running'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(LocalModelInvitation),
+          matching: find.byType(Material),
+        ),
+        findsNothing,
+      );
       expect(app.sent, isEmpty);
       await tester.pump(const Duration(milliseconds: 100));
       await tester.pumpWidget(const SizedBox());
@@ -387,6 +525,9 @@ void main() {
             ),
           ),
         );
+        await tester.ensureVisible(find.text('Local 5'));
+        await tester.tap(find.text('Local 5'));
+        await tester.pump();
         await tester.runAsync(() async {
           for (final asset in [
             'assets/model-icons/qwen.png',
@@ -412,12 +553,11 @@ void main() {
         if (scenario == 'downloading') {
           expect(find.text('Downloading · 42%'), findsOneWidget);
           expect(
-            tester
-                .widget<LinearProgressIndicator>(
-                  find.byType(LinearProgressIndicator).first,
-                )
-                .value,
-            .42,
+            find.byWidgetPredicate(
+              (widget) =>
+                  widget is LinearProgressIndicator && widget.value == .42,
+            ),
+            findsOneWidget,
           );
         }
         if (scenario == 'ready') {
@@ -465,12 +605,14 @@ void main() {
           expect(find.text('Qwen3.8-27B'), findsNothing);
         }
         if (scenario == 'ready') {
-          await tester.tap(find.text('Running 1'));
+          await tester.tap(find.text('Subscriptions 1'));
           await tester.pump();
-          expect(find.text('Qwen3.8-27B'), findsOneWidget);
+          expect(find.text('OpenAI'), findsOneWidget);
+          expect(find.text('76% left'), findsOneWidget);
+          expect(find.text('Qwen3.8-27B'), findsNothing);
           expect(find.text('gemma-4-12B'), findsNothing);
         }
-        await tester.tap(find.text('Model Manager'));
+        await tester.tap(find.text('Manage models'));
         expect(manages, 1);
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pump();
@@ -499,6 +641,17 @@ void main() {
     app.stateOf('m')!.agents = [
       const Agent(id: 'work', name: 'Build the next thing', engine: 'codex'),
     ];
+    app.localInventory['models'] = [
+      ...app.localInventory['models'] as List,
+      for (var i = 0; i < 8; i++)
+        {
+          'id': 'extra-$i',
+          'name': 'Additional model $i',
+          'state': 'available',
+          'sizeBytes': 4 * 1024 * 1024 * 1024,
+          'canStart': true,
+        },
+    ];
     final session = terminal('work', [])..agentName = 'Build the next thing';
     session.terminal.write(
       '  Ready when you are.\r\n\r\n'
@@ -509,11 +662,12 @@ void main() {
     final projects = SwarmProjectStore();
     final usage = UsageController(sources: [_Subscription()], autoStart: false);
     final subscriptions = ModelsMenuController(usage: usage);
+    var appDisposed = false;
     addTearDown(() {
       subscriptions.dispose();
       usage.dispose();
       projects.dispose();
-      app.dispose();
+      if (!appDisposed) app.dispose();
     });
     final boundary = GlobalKey();
     await tester.pumpWidget(
@@ -533,8 +687,30 @@ void main() {
     );
     final tab = app.activeSwarmId;
     final panes = app.panes.map((pane) => pane.id).toList();
-    final button = find.byKey(const ValueKey('swarm-models-button'));
-    await tester.tap(button);
+    app.modelManager.start();
+    await app.modelManager.refresh();
+    await tester.pump();
+    expect(find.text('Explore models'), findsNothing);
+    await openWorkspaceTool(tester, 'models');
+    await tester.pump();
+    await tester.enterText(resourceField, ':Qwen3.8-27B');
+    await tester.pump();
+    await selectResource(tester, 'model:local:qwen');
+    await tester.pump();
+    expect(find.text('Qwen3.8-27B'), findsWidgets);
+    expect(resourceSearch(tester).isModelMode, isTrue);
+    expect(tester.getSize(resourceScope(':')).height, greaterThan(620));
+    expect(tester.getRect(resourceScope(':')).bottom, lessThan(760));
+    tester.view.physicalSize = const Size(1200, 480);
+    await tester.pump();
+    expect(tester.getRect(resourceScope(':')).bottom, lessThan(480));
+    expect(find.byKey(const ValueKey('search-action-list')), findsNothing);
+    expect(tester.takeException(), isNull);
+    tester.view.physicalSize = const Size(1200, 760);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    await openWorkspaceTool(tester, 'models');
     await tester.pump();
     await tester.runAsync(() async {
       for (final asset in [
@@ -548,20 +724,27 @@ void main() {
       ]) {
         await precacheImage(
           AssetImage(asset),
-          tester.element(find.byType(ModelsPanel)),
+          tester.element(resourceScope(':')),
         );
       }
     });
     await tester.pump(const Duration(milliseconds: 300));
-    final panel = tester.getRect(find.byType(ModelsPanel));
-    expect(panel.right, 1190);
-    expect(panel.top, greaterThan(tester.getRect(button).bottom));
-    expect(panel.width, 640);
-    expect(
-      tester.getRect(find.byTooltip('Harness Monitor')).right,
-      lessThan(tester.getRect(button).left),
-    );
+    final panel = tester.getRect(resourceScope(':'));
+    expect(panel.right, lessThanOrEqualTo(1200));
+    expect(panel.top, greaterThan(0));
+    expect(panel.width, greaterThan(1000));
     expect(find.byType(Dialog), findsNothing);
+    expect(resourceSearch(tester).isModelMode, isTrue);
+    expect(
+      resourceSearch(tester).rows
+          .any((row) => row.modelId == 'model:local:qwen'),
+      isFalse,
+    );
+    expect(
+      resourceSearch(tester).rows
+          .any(resourceSearch(tester).isModelDownloadsRow),
+      isTrue,
+    );
     expect(find.text('Run AI on this computer'), findsNothing);
     expect(app.activeSwarmId, tab);
     expect(app.panes.map((pane) => pane.id), panes);
@@ -582,14 +765,16 @@ void main() {
     }
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
-    expect(find.byType(ModelsPanel), findsNothing);
-    await tester.tap(button);
+    expect(resourceScope(':'), findsNothing);
+    await openWorkspaceTool(tester, 'models');
     await tester.pump();
-    await tester.tapAt(const Offset(50, 400));
+    await tester.tapAt(const Offset(3, 400));
     await tester.pump();
-    expect(find.byType(ModelsPanel), findsNothing);
+    expect(resourceScope(':'), findsNothing);
     expect(app.activeSwarmId, tab);
     expect(app.panes.map((pane) => pane.id), panes);
     await tester.pumpWidget(const SizedBox());
+    app.dispose();
+    appDisposed = true;
   });
 }

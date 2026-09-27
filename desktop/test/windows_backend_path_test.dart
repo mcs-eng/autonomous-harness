@@ -286,6 +286,8 @@ void main() {
         reason: 'a button labelled Recheck must never start an installer',
       );
       expect(recorder.terminalsOpened, 0);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
     });
 
     testWidgets('a Docker-only failure recovers on Recheck once WSL is fixed', (
@@ -350,6 +352,8 @@ void main() {
       // a login wall.
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
     });
   });
 }

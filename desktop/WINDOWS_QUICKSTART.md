@@ -327,3 +327,19 @@ same daemon, and `harness status` reads `this computer only (not signed in)`.
 Report a problem at the fork's issue tracker with the preview version,
 `source-commit.txt`, Windows/WSL versions, and redacted error text. Do not upload
 credentials, authentication files, or unredacted logs.
+
+## September 27 source refresh
+
+This source snapshot incorporates upstream `0a7d3cd` and fork main `7362790`.
+The updated model and machine controls retain Windows local-profile routing:
+same-named local and remote models remain separate choices in pane pickers and
+model search. Resting remote grids keep their last observation without automatic
+wake requests; background model-list pushes reuse the last local-profile list.
+Workspaces use one model selector for the focused pane and keep each pane's hover
+close control. Standalone compact terminals retain their own model selector. The
+projects sidebar and Continue working list remain available.
+
+Named projects and Git worktrees use the existing Windows exclusive directory
+reservation instead of requiring a `mkdir` executable. Files explicitly selected
+by `.worktreeinclude` copy with native file operations on Windows. These are
+source compatibility changes; they do not update an installed desktop or daemon.

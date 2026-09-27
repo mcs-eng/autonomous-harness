@@ -1,3 +1,5 @@
+import 'support/open_harness.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,7 +17,7 @@ void main() {
   testWidgets('New Pane shortcut reuses the chosen session in this workspace', (
     tester,
   ) async {
-    final app = createApp();
+    final app = createApp(connected: true);
     final input = <TerminalBinaryFrame>[];
     final shared = app.adoptSessionForTest(terminal('a0', input));
     final source = app.activeSwarm;
@@ -27,17 +29,14 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('swarm-new-pane-button')), findsNothing);
     expect(find.byType(FloatingActionButton), findsNothing);
-    await chord(tester, LogicalKeyboardKey.keyO);
+    await openHarnessPicker(tester);
     await tester.enterText(
       find.byKey(const ValueKey('swarm-search-input')),
       'Agent 0',
     );
     await tester.pump();
-    expect(
-      find.textContaining('enter  open', findRichText: true),
-      findsOneWidget,
-    );
-    expect(find.byKey(const ValueKey('swarm-row-action')), findsOneWidget);
+    expect(find.byKey(const ValueKey('swarm-search-hints')), findsNothing);
+    expect(find.byKey(const ValueKey('swarm-search-count')), findsNothing);
 
     expect(find.byType(AlertDialog), findsNothing);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
@@ -70,7 +69,7 @@ void main() {
         await tester.pump();
         final neighborRect = tester.getRect(find.byKey(neighbor.cellKey));
         final expected = app.preparePaneSplit(axis)!;
-        await chord(tester, LogicalKeyboardKey.keyP);
+        await chord(tester, LogicalKeyboardKey.keyP, shift: true);
         final inputField = find.byKey(const ValueKey('swarm-search-input'));
         await tester.enterText(
           inputField,

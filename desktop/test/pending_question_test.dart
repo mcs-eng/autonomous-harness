@@ -50,7 +50,10 @@ class _Silent extends WsConn {
       );
 
   @override
-  Future<bool> sendTerminalFrame(String type, Map<String, dynamic> payload) async => true;
+  Future<bool> sendTerminalFrame(
+    String type,
+    Map<String, dynamic> payload,
+  ) async => true;
 
   @override
   Future<Map<String, dynamic>> request(
@@ -280,11 +283,7 @@ void main() {
       final notifier = AppNotifier(
         config: AppConfig.dev,
         authSession: AuthSession(),
-        alerts: AlertSounds(
-          store: store(),
-          channel: channel,
-          now: () => clock,
-        ),
+        alerts: AlertSounds(store: store(), channel: channel, now: () => clock),
         // Injected, and switched on. Left to the default this would read the app's own global
         // store — the real file-backed one — so the banner assertions would pass or fail on a
         // preference belonging to whoever ran the suite, and silently stop testing anything the
@@ -306,21 +305,24 @@ void main() {
       expect(played, [AlertKind.needsYou.sound]);
     });
 
-    test('the daemon re-announcing the SAME question is not heard again', () async {
-      // Every reconnect re-sends every open question, and attaching to a turn that is already
-      // mid-dialog does too. A window that beeped at those would sound an alarm whenever the
-      // network hiccuped — for a question the person has been looking at for ten minutes.
-      final app = wired();
-      addTearDown(app.dispose);
-      await app.handleMachineEventForTest('m1', asked());
-      // Well past the rate limiter, so silence here is the guard's doing and nothing else.
-      clock = clock.add(const Duration(minutes: 5));
-      await app.handleMachineEventForTest('m1', asked());
-      clock = clock.add(const Duration(minutes: 5));
-      await app.handleMachineEventForTest('m1', asked());
-      await Future<void>.delayed(Duration.zero);
-      expect(played, [AlertKind.needsYou.sound]);
-    });
+    test(
+      'the daemon re-announcing the SAME question is not heard again',
+      () async {
+        // Every reconnect re-sends every open question, and attaching to a turn that is already
+        // mid-dialog does too. A window that beeped at those would sound an alarm whenever the
+        // network hiccuped — for a question the person has been looking at for ten minutes.
+        final app = wired();
+        addTearDown(app.dispose);
+        await app.handleMachineEventForTest('m1', asked());
+        // Well past the rate limiter, so silence here is the guard's doing and nothing else.
+        clock = clock.add(const Duration(minutes: 5));
+        await app.handleMachineEventForTest('m1', asked());
+        clock = clock.add(const Duration(minutes: 5));
+        await app.handleMachineEventForTest('m1', asked());
+        await Future<void>.delayed(Duration.zero);
+        expect(played, [AlertKind.needsYou.sound]);
+      },
+    );
 
     test('a DIFFERENT question from the same agent is heard', () async {
       final app = wired();
@@ -348,34 +350,40 @@ void main() {
       expect(played, [AlertKind.done.sound]);
     });
 
-    test('a finished turn also raises a banner, named after the agent', () async {
-      final app = wired();
-      addTearDown(app.dispose);
-      app.machineStates['m1']!.agents = [
-        const Agent(id: 'a1', name: 'Respond to greeting', engine: 'codex'),
-      ];
-      await app.handleMachineEventForTest('m1', {
-        'type': 'turn_ended',
-        'agentId': 'a1',
-        'payload': {'agentId': 'a1'},
-      });
-      final raised = app.agentAlerts.alerts;
-      expect(raised, hasLength(1));
-      // The agent's own NAME. A banner naming a uuid tells nobody which pane to look at.
-      expect(raised.single.title, 'Respond to greeting');
-      expect(raised.single.kind, AlertKind.done);
-      expect(raised.single.agentId, 'a1');
-    });
+    test(
+      'a finished turn also raises a banner, named after the agent',
+      () async {
+        final app = wired();
+        addTearDown(app.dispose);
+        app.machineStates['m1']!.agents = [
+          const Agent(id: 'a1', name: 'Respond to greeting', engine: 'codex'),
+        ];
+        await app.handleMachineEventForTest('m1', {
+          'type': 'turn_ended',
+          'agentId': 'a1',
+          'payload': {'agentId': 'a1'},
+        });
+        final raised = app.agentAlerts.alerts;
+        expect(raised, hasLength(1));
+        // The agent's own NAME. A banner naming a uuid tells nobody which pane to look at.
+        expect(raised.single.title, 'Respond to greeting');
+        expect(raised.single.kind, AlertKind.done);
+        expect(raised.single.agentId, 'a1');
+      },
+    );
 
-    test('a question raises a banner too, and a re-announced one does not', () async {
-      final app = wired();
-      addTearDown(app.dispose);
-      await app.handleMachineEventForTest('m1', asked());
-      clock = clock.add(const Duration(minutes: 5));
-      await app.handleMachineEventForTest('m1', asked());
-      expect(app.agentAlerts.alerts, hasLength(1));
-      expect(app.agentAlerts.alerts.single.kind, AlertKind.needsYou);
-    });
+    test(
+      'a question raises a banner too, and a re-announced one does not',
+      () async {
+        final app = wired();
+        addTearDown(app.dispose);
+        await app.handleMachineEventForTest('m1', asked());
+        clock = clock.add(const Duration(minutes: 5));
+        await app.handleMachineEventForTest('m1', asked());
+        expect(app.agentAlerts.alerts, hasLength(1));
+        expect(app.agentAlerts.alerts.single.kind, AlertKind.needsYou);
+      },
+    );
 
     test('both moments mark the harness unread, whatever the switches say', () async {
       // The mark is not an interruption — it sits still until somebody goes looking — so it is
@@ -385,9 +393,7 @@ void main() {
         config: AppConfig.dev,
         authSession: AuthSession(),
         alerts: AlertSounds(store: store(on: false), channel: channel),
-        agentAlerts: AgentAlerts(
-          store: ScreenAlertStore(storage: _Memory()),
-        ),
+        agentAlerts: AgentAlerts(store: ScreenAlertStore(storage: _Memory())),
       );
       addTearDown(app.dispose);
       app.machines = [_machine];
@@ -404,8 +410,17 @@ void main() {
       await app.handleMachineEventForTest('m1', asked());
       expect(app.agentUnread.kindFor('m1', 'a1'), AlertKind.needsYou);
 
-      // And going to it is what makes it read.
+      // Going to a BLOCKED harness is not answering it, so the mark stays: the
+      // badge counts what is still waiting on a person (owner, 2026-09-24).
       app.markAgentSeen('m1', 'a1');
+      expect(app.agentUnread.count, 1);
+
+      // Answering is what makes it read, wherever that happened.
+      await app.handleMachineEventForTest('m1', {
+        'type': 'commander_question_close',
+        'agentId': 'a1',
+        'payload': {'requestId': asked()['payload']['requestId']},
+      });
       expect(app.agentUnread.count, 0);
     });
 
@@ -447,7 +462,13 @@ void main() {
   // A sound, a banner and a count are three ways of saying "look over here". All three are noise
   // about the pane already in front of you.
 
-  group('the watched harness', () {
+  // ── what the person can see ──────────────────────────────────────────────────────────────────
+  //
+  // A tab of three harnesses is three terminals on screen at once. A turn finishing in any of them
+  // is visible the moment it happens, so none of them earns a sound, a banner or a count. The
+  // harnesses on OTHER tabs are the ones nobody can see, and those are what a notification is for.
+
+  group('the visible tab', () {
     late List<String> played;
     const channel = MethodChannel('harness/swarm_tabs');
 
@@ -467,13 +488,24 @@ void main() {
           .setMockMethodCallHandler(channel, null);
     });
 
-    /// [watching] is the agent in front of the person, or null for none.
+    TerminalSession session(String machineId, String agentId) =>
+        TerminalSession(
+          machineId: machineId,
+          agentId: agentId,
+          agentName: agentId,
+          engineId: 'codex',
+          send: (_, _) async => true,
+          sendBinary: (_) async => true,
+        );
+
+    /// The scenario, built with REAL tabs: A, B, C on tab X; D, E on tab Y; tab X in front.
     ///
-    /// Injected rather than reached through a real pane: focusing one announces the focus to the
-    /// machine, which dials it, and a test with no live connection HANGS rather than failing.
-    /// That cost an hour to find, which is why the decision has a seam now.
-    AppNotifier app({String? watching}) {
-      final made = AppNotifier(
+    /// A stub connection is what lets tabs be built and switched without dialling a machine —
+    /// without one, announcing the new focus hangs the test rather than failing it.
+    ({AppNotifier app, String x, String y}) fiveHarnesses({
+      AppLifecycleState state = AppLifecycleState.resumed,
+    }) {
+      final app = AppNotifier(
         config: AppConfig.dev,
         authSession: AuthSession(),
         alerts: AlertSounds(
@@ -483,144 +515,182 @@ void main() {
         agentAlerts: AgentAlerts(
           store: ScreenAlertStore(storage: _Memory())..value = true,
         ),
-      );
-      made.watchedAgent = () =>
-          watching == null ? null : (machineId: 'm1', agentId: watching);
-      made.machines = [_machine];
-      made.machineStates['m1'] = MachineState(_machine)
+        connectionForTest: (_) => _Silent(),
+      )..lifecycle = () => state;
+      app.machines = [_machine];
+      app.machineStates['m1'] = MachineState(_machine)
         ..agents = [
-          const Agent(id: 'a1', name: 'One', engine: 'codex'),
-          const Agent(id: 'a2', name: 'Two', engine: 'codex'),
+          for (final id in ['A', 'B', 'C', 'D', 'E'])
+            Agent(id: id, name: id, engine: 'codex'),
         ];
-      return made;
+      final x = app.activeSwarmId;
+      for (final id in ['A', 'B', 'C']) {
+        app.adoptSessionForTest(session('m1', id));
+      }
+      app.newSwarm(newTabPage: true);
+      final y = app.activeSwarmId;
+      for (final id in ['D', 'E']) {
+        app.adoptSessionForTest(session('m1', id));
+      }
+      app.selectSwarm(x, attachPending: false);
+      return (app: app, x: x, y: y);
     }
 
-    Future<void> finish(AppNotifier a, String agentId) =>
-        a.handleMachineEventForTest('m1', {
-          'type': 'turn_ended',
-          'agentId': agentId,
-          'payload': {'agentId': agentId},
-        });
-
-    test('says nothing at all about the pane in front of you', () async {
-      final a = app(watching: 'a1');
-      addTearDown(a.dispose);
-      await finish(a, 'a1');
-      await Future<void>.delayed(Duration.zero);
-      expect(a.agentUnread.count, 0, reason: 'nothing to count');
-      expect(a.agentAlerts.alerts, isEmpty, reason: 'nothing to show');
-      expect(played, isEmpty, reason: 'nothing to hear');
+    Future<void> finish(
+      AppNotifier a,
+      String agentId, {
+      String machineId = 'm1',
+    }) => a.handleMachineEventForTest(machineId, {
+      'type': 'turn_ended',
+      'agentId': agentId,
+      'payload': {'agentId': agentId},
     });
 
-    test('still speaks for a harness you are NOT in', () async {
-      final a = app(watching: 'a1');
-      addTearDown(a.dispose);
-      await finish(a, 'a2');
-      await Future<void>.delayed(Duration.zero);
-      expect(a.agentUnread.kindFor('m1', 'a2'), AlertKind.done);
-      expect(played, hasLength(1));
-    });
+    test('harnesses on the tab in front of you finish silently; one on another tab does not', () async {
+      final t = fiveHarnesses();
+      addTearDown(t.app.dispose);
+      expect(t.app.activeSwarmId, t.x);
 
-    test('a question about the watched harness is silent too', () async {
-      final a = app(watching: 'a1');
-      addTearDown(a.dispose);
-      await a.handleMachineEventForTest('m1', asked());
+      await finish(t.app, 'A');
+      await finish(t.app, 'B');
       await Future<void>.delayed(Duration.zero);
-      expect(a.agentUnread.count, 0);
-      expect(a.agentAlerts.alerts, isEmpty);
+      // A and B are on screen: nothing to count, show or hear — and that is true of B as much as
+      // of whichever pane holds the cursor.
+      expect(t.app.agentUnread.count, 0);
+      expect(t.app.agentAlerts.alerts, isEmpty);
       expect(played, isEmpty);
-    });
 
-    test('with nothing watched, everything is announced', () async {
-      final a = app();
-      addTearDown(a.dispose);
-      await finish(a, 'a1');
+      await finish(t.app, 'D');
       await Future<void>.delayed(Duration.zero);
-      expect(a.agentUnread.kindFor('m1', 'a1'), AlertKind.done);
+      // D is on tab Y, which nobody can see.
+      expect(t.app.agentUnread.count, 1);
+      expect(t.app.agentUnread.kindFor('m1', 'D'), AlertKind.done);
+      expect(t.app.agentAlerts.alerts.single.agentId, 'D');
+      expect(played, [AlertKind.done.sound]);
     });
 
-    test('the same agent id on ANOTHER machine is not the one you are watching', () async {
-      // The key is the machine and the agent. Ignoring the machine would silence a harness on a
-      // different computer that happens to share an id with the one in front of you.
-      final a = app(watching: 'a1');
-      addTearDown(a.dispose);
+    test('a question counts wherever it is — the visible tab included', () async {
+      // The opposite of a finished turn, and deliberately. News about a pane in
+      // front of you is noise; a question is a JOB, owed until it is answered,
+      // and being looked at is not an answer (owner, 2026-09-24).
+      //
+      // Skipping it here was also self-defeating: a question asks the window to
+      // bring its agent forward, so "already on screen" was true by the time
+      // anyone could ask — the mark was never raised at all, and looking away
+      // afterwards left nothing behind.
+      final t = fiveHarnesses();
+      addTearDown(t.app.dispose);
+      await t.app.handleMachineEventForTest('m1', asked(agentId: 'C'));
+      expect(t.app.agentUnread.kindFor('m1', 'C'), AlertKind.needsYou);
+
+      await t.app.handleMachineEventForTest(
+        'm1',
+        asked(agentId: 'E', requestId: 'q_e'),
+      );
+      expect(t.app.agentUnread.kindFor('m1', 'E'), AlertKind.needsYou);
+      expect(t.app.agentUnread.count, 2);
+    });
+
+    test(
+      'switching to the tab clears what FINISHED on it, not what is waiting',
+      () async {
+        final t = fiveHarnesses();
+        addTearDown(t.app.dispose);
+        await finish(t.app, 'D');
+        await t.app.handleMachineEventForTest(
+          'm1',
+          asked(agentId: 'E', requestId: 'q_e'),
+        );
+        expect(t.app.agentUnread.count, 2);
+
+        // Tab Y comes to the front. D and E are both on screen now — with no pane clicked, no row,
+        // no banner — and that is the whole of what D was owed: it finished, and it has been seen.
+        //
+        // E has not. A question is a job, not news: it is still waiting on a person however many
+        // times its tab came to the front, and it goes when it is ANSWERED (owner, 2026-09-24).
+        t.app.selectSwarm(t.y, attachPending: false);
+        expect(t.app.agentUnread.count, 1);
+        expect(t.app.agentUnread.kindFor('m1', 'D'), isNull);
+        expect(t.app.agentUnread.kindFor('m1', 'E'), AlertKind.needsYou);
+      },
+    );
+
+    test('switching away does not clear the tab being left', () async {
+      final t = fiveHarnesses();
+      addTearDown(t.app.dispose);
+      await finish(t.app, 'D');
+      // Going to Y and straight back to X: only Y's marks were seen.
+      t.app.selectSwarm(t.y, attachPending: false);
+      t.app.selectSwarm(t.x, attachPending: false);
+      await finish(t.app, 'E');
+      expect(t.app.agentUnread.kindFor('m1', 'E'), AlertKind.done);
+      expect(t.app.agentUnread.kindFor('m1', 'D'), isNull);
+    });
+
+    test('with the window behind another app, even the front tab is not being watched', () async {
+      // Every pane keeps its place on the tab while the app sits behind a browser, and treating
+      // that as being watched would swallow exactly the news this feature exists for.
+      final t = fiveHarnesses(state: AppLifecycleState.inactive);
+      addTearDown(t.app.dispose);
+      await finish(t.app, 'A');
+      expect(t.app.agentUnread.kindFor('m1', 'A'), AlertKind.done);
+    });
+
+    test(
+      'coming back to the window clears the marks on the tab in front of you',
+      () async {
+        var state = AppLifecycleState.inactive;
+        final t = fiveHarnesses();
+        addTearDown(t.app.dispose);
+        t.app.lifecycle = () => state;
+        await finish(
+          t.app,
+          'A',
+        ); // on the front tab, but nobody is looking at the window
+        await finish(t.app, 'D'); // on the other tab
+        expect(t.app.agentUnread.count, 2);
+
+        // The screen's lifecycle listener calls this on resume.
+        state = AppLifecycleState.resumed;
+        t.app.seeWatchedAgents();
+        expect(
+          t.app.agentUnread.kindFor('m1', 'A'),
+          isNull,
+          reason: 'A is on screen again',
+        );
+        expect(
+          t.app.agentUnread.kindFor('m1', 'D'),
+          AlertKind.done,
+          reason: 'D still is not',
+        );
+      },
+    );
+
+    test('the same agent id on another machine is not on this tab', () async {
+      // Visibility is the machine AND the agent. Matching on the id alone would silence a harness
+      // on a different computer that happens to share an id with one on screen.
+      final t = fiveHarnesses();
+      addTearDown(t.app.dispose);
       const other = Machine(
         machineId: 'm2',
         authMode: MachineAuthMode.remote,
         name: 'other',
       );
-      a.machines = [_machine, other];
-      a.machineStates['m2'] = MachineState(other)
-        ..agents = [const Agent(id: 'a1', name: 'One', engine: 'codex')];
+      t.app.machines = [_machine, other];
+      t.app.machineStates['m2'] = MachineState(other)
+        ..agents = [const Agent(id: 'A', name: 'A', engine: 'codex')];
+      await finish(t.app, 'A', machineId: 'm2');
+      expect(t.app.agentUnread.kindFor('m2', 'A'), AlertKind.done);
+    });
 
-      await a.handleMachineEventForTest('m2', {
-        'type': 'turn_ended',
-        'agentId': 'a1',
-        'payload': {'agentId': 'a1'},
+    test('the visible set is the whole front tab, not the focused pane', () {
+      final t = fiveHarnesses();
+      addTearDown(t.app.dispose);
+      expect(t.app.visibleOnTabForTest().map((w) => w.agentId).toSet(), {
+        'A',
+        'B',
+        'C',
       });
-      await Future<void>.delayed(Duration.zero);
-      expect(a.agentUnread.kindFor('m2', 'a1'), AlertKind.done);
-      expect(a.agentUnread.kindFor('m1', 'a1'), isNull);
-    });
-
-    test('a focused pane is NOT watched while the window is behind another app', () async {
-      // The default answer — no seam here, because this is the half that decides whether the
-      // feature works at all. A pane keeps its focus the whole time the app sits behind a browser,
-      // and treating that as "being watched" would swallow exactly the news this exists for.
-      //
-      // `adoptSessionForTest` focuses a tile WITHOUT announcing it to the machine; `focusPane`
-      // announces, which dials, which hangs a test with no live connection.
-      for (final (state, watched) in [
-        (AppLifecycleState.resumed, true),
-        (AppLifecycleState.inactive, false),
-        (AppLifecycleState.hidden, false),
-      ]) {
-        final a = app();
-        addTearDown(a.dispose);
-        a.lifecycle = () => state;
-        a.watchedAgent = a.watchedAgentFromFocusForTest;
-        a.adoptSessionForTest(
-          TerminalSession(
-            machineId: 'm1',
-            agentId: 'a1',
-            agentName: 'One',
-            engineId: 'codex',
-            send: (_, _) async => true,
-            sendBinary: (_) async => true,
-          ),
-        );
-        expect(
-          a.watchedAgent() != null,
-          watched,
-          reason: 'lifecycle $state',
-        );
-      }
-    });
-
-    test('switching to a marked harness clears it', () async {
-      var watching = 'a1';
-      final a = AppNotifier(
-        config: AppConfig.dev,
-        authSession: AuthSession(),
-        alerts: AlertSounds(
-          store: AlertSoundStore(storage: _Memory()),
-          channel: channel,
-        ),
-        agentAlerts: AgentAlerts(store: ScreenAlertStore(storage: _Memory())),
-      );
-      addTearDown(a.dispose);
-      a.watchedAgent = () => (machineId: 'm1', agentId: watching);
-      a.machines = [_machine];
-      a.machineStates['m1'] = MachineState(_machine);
-
-      // A finishes while you are in B.
-      await finish(a, 'a2');
-      expect(a.agentUnread.kindFor('m1', 'a2'), AlertKind.done);
-
-      // Going to it is reading it — focus alone, with no row or banner clicked.
-      watching = 'a2';
-      a.seeWatchedAgent();
-      expect(a.agentUnread.count, 0);
     });
   });
 }
