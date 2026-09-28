@@ -1,11 +1,14 @@
-# Default sdkconfig for the Interns commander device.
-# These are applied on first `idf.py build`; tweak via `idf.py menuconfig`.
+# Settings BOTH boards share. ESP-IDF reads this first, then appends sdkconfig.defaults.<target>
+# for whichever of the two is being built — so anything that names a pin count, a PSRAM mode, a CPU
+# clock or a radio belongs in the per-target file beside this one, not here.
+#
+# `idf.py build` with no target still builds the round dial: sdkconfig.defaults.esp32s3 carries
+# CONFIG_IDF_TARGET, and the Pro is reached through `make pro-build` (see the Makefile) which sets its
+# own target and its own sdkconfig file.
 
-# --- Target / flash ---
-CONFIG_IDF_TARGET="esp32s3"
+# --- Flash (both boards carry 16 MB) ---
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
-CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
@@ -19,41 +22,8 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # refuses a non-verified server ("No option for server verification is enabled").
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 
-# --- PSRAM (ESP32-S3R8 = 8MB octal PSRAM; LVGL object pool lives here) ---
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
-CONFIG_SPIRAM_RODATA=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
-
-# --- CPU ---
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
-
 # --- FreeRTOS ---
 CONFIG_FREERTOS_HZ=1000
-
-# --- WiFi (STA for commander, AP for provisioning portal) ---
-CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
-
-# --- HTTP server (captive portal) ---
-CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
-
-# --- WebSocket client ---
-CONFIG_WS_TRANSPORT=y
-
-# --- TLS (wss:// + https:// to the prod backend) ---
-# Verify the prod cert chain against Mozilla's CA roots via esp_crt_bundle_attach.
-CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
-CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
-# Leave CONFIG_MBEDTLS_HAVE_TIME_DATE OFF (default) so the TLS handshake does NOT depend on a synced
-# clock — REST pairing runs before SNTP, and cert validity dates are not enforced.
-# Allocate mbedTLS buffers (~32KB per TLS conn: two 16KB record buffers) from the 8MB PSRAM instead
-# of the ~150KB internal heap. Internal heap fragments after the first few TLS connections, so the
-# persistent commander WSS + periodic REST fail ssl_setup with -0x7F00 (ALLOC_FAILED) / sock<0.
-CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
 # --- Main task stack (UI + init) ---
 # OTA boot mode performs HTTP download and SHA verification on app_main. The
@@ -83,13 +53,6 @@ CONFIG_LV_ASSERT_HANDLER_INCLUDE="stdlib.h"
 CONFIG_LV_MEM_SIZE_KILOBYTES=8
 CONFIG_LV_MEM_POOL_EXPAND_SIZE_KILOBYTES=512
 
-# --- LWIP: room for commander WS + HTTP client + DNS concurrently ---
-CONFIG_LWIP_MAX_SOCKETS=16
-# Larger TCP send/recv buffers so continuous voice PCM streaming tolerates WiFi jitter
-# (default ~5.7KB fills in ~180ms at 32KB/s → esp_websocket_client tears down on write-0).
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
-CONFIG_LWIP_TCP_WND_DEFAULT=65534
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # Panic output must reach the wire. The PRIMARY console is where the panic handler, the stack-overflow

@@ -749,9 +749,10 @@ void main() {
         await key(tester, LogicalKeyboardKey.keyI, cmd: true);
         expect(search(tester).modelSelectionEngine, 'codex');
         expect(search(tester).selected!.title, 'OpenAI');
+        // The top-5 catalog models are surfaced without pressing "Get models".
         expect(
           search(tester).rows.any((row) => row.modelId == 'model:local:qwen'),
-          isFalse,
+          isTrue,
         );
         for (final heading in [
           'Subscriptions',
@@ -789,7 +790,7 @@ void main() {
             .move(search(tester).rows.indexOf(usable) - search(tester).cursor);
         await tester.pump();
         expect(
-          find.byKey(ValueKey('model-row-action:${usable.id}')),
+          find.byKey(ValueKey('model-row-status:${usable.id}')),
           findsOneWidget,
         );
         expect(search(tester).modelRowAction(usable), 'Use');
@@ -804,7 +805,8 @@ void main() {
               .join('\n'),
         );
         expect(find.text('Enter Use  ·  Tab pane'), findsOneWidget);
-        expect(find.text('M2 · 15.0 GB'), findsOneWidget);
+        expect(find.text('M2'), findsOneWidget);
+        expect(find.text('15.0 GB'), findsOneWidget);
         await capture(tester, 'remote-model-select');
         final origin = search(tester);
         await key(tester, LogicalKeyboardKey.tab);
@@ -942,7 +944,8 @@ void main() {
         await tester.enterText(field, ':mac.lan');
         await tester.pump();
         expect(search(tester).selected!.title, 'qwen3.8-27b');
-        expect(find.text('On your machines · mac.lan'), findsOneWidget);
+        expect(find.text('On your machines'), findsOneWidget);
+        expect(find.text('mac.lan'), findsOneWidget);
         if (mac) await capture(tester, 'own-machine-model');
         await key(tester, LogicalKeyboardKey.escape);
         await key(tester, LogicalKeyboardKey.keyO, cmd: mac, ctrl: !mac);
@@ -1628,7 +1631,30 @@ void main() {
     expect(find.text('https://api.deepseek.com'), findsWidgets);
     expect(find.byType(Dialog), findsNothing);
     final name = find.byKey(const ValueKey('api-form-input:name'));
+    bool focused(Finder input) =>
+        tester.widget<TextField>(input).focusNode!.hasFocus;
     await tester.enterText(name, 'Draft API');
+    // Tab walks the form as any form does: its fields, then its buttons, then out to the list.
+    await key(tester, LogicalKeyboardKey.tab);
+    expect(focused(find.byKey(const ValueKey('api-form-input:url'))), isTrue);
+    await key(tester, LogicalKeyboardKey.tab);
+    expect(focused(find.byKey(const ValueKey('api-form-input:key'))), isTrue);
+    await key(tester, LogicalKeyboardKey.tab);
+    expect(
+      tester
+          .widget<Focus>(
+            find
+                .descendant(
+                  of: find.byKey(const ValueKey('api-form:save')),
+                  matching: find.byType(Focus),
+                )
+                .first,
+          )
+          .focusNode!
+          .hasFocus,
+      isTrue,
+    );
+    expect(controller.managing, isTrue);
     await key(tester, LogicalKeyboardKey.tab);
     expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
     expect(controller.managing, isFalse);

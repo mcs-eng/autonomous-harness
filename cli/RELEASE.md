@@ -56,9 +56,11 @@ A failed build stops the release; nothing is uploaded and no version is consumed
 ## The `curl | bash` installer
 
 `cli/scripts/install.sh` is what `curl -fsSL https://cdn.autonomous.ai/harness/cli/install.sh | bash`
-runs: it installs the managed Node runtime and the CLI bundle from the same manifests the release
-publishes to. It is a static file, versioned by nothing, and does **not** ship with a release — publish
-it on its own whenever it changes:
+runs: it installs the managed Node runtime, CLI bundle and hn from their published manifests.
+After verifying a production CLI release, `release.yml` publishes this installer from the same
+commit and checks that the CDN serves the exact source bytes. Releases to a scratch manifest leave
+the production installer alone. The installer is a static, unversioned file; a maintainer can also
+publish an installer-only correction:
 
 ```bash
 make upload-cli-install-sh          # cli/scripts/install.sh -> harness/cli/install.sh in the bucket

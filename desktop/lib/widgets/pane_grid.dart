@@ -32,6 +32,7 @@ import 'new_agent_dialog.dart';
 import 'delete_agent_dialog.dart';
 import 'restart_agent_action.dart';
 import 'terminal_panel.dart';
+import 'harness_activity_mark.dart';
 import 'web_pane_panel.dart';
 import 'pane_resize_handle.dart';
 import 'box_chrome.dart';
@@ -252,6 +253,7 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
     widget.notifier.focusedPaneId,
     widget.notifier.paneFocusRequest,
     widget.notifier.zoomedPaneId,
+    widget.notifier.tabStripFocused,
   );
 
   @override
@@ -330,7 +332,11 @@ class _SwarmCanvasState extends State<_SwarmCanvas> {
         ModalRoute.of(context)?.isCurrent == false) {
       return;
     }
-    if (app.focusedPane?.session?.focusInput() != true) {
+    // A closed tab left the keyboard on the tab strip: the tab shown now does
+    // not take it until the person goes into it. The screen focuses the strip.
+    if (app.tabStripFocused) return;
+    if (app.focusedPane?.session?.focusInput() != true &&
+        app.focusedPane?.focusViewerInput?.call() != true) {
       // Blank pages and not-yet-mounted destinations must release the old
       // terminal's text client immediately, without focusing welcome search.
       _idleFocus.requestFocus();
@@ -1171,18 +1177,19 @@ class _PaneCell extends StatelessWidget {
   Widget _build(BuildContext context) {
     grid.AppTheme.watch(context);
     final focused = visible && notifier.isPaneFocused(pane.id);
+    // Keep the selected pane clear while a menu or the tab strip owns keyboard
+    // focus. This is paint only: inactive terminals stay mounted and clickable.
+    final dimmed = !_single && notifier.focusedPaneId != pane.id;
     final agentId = pane.agentId;
     final blocked =
         agentId != null &&
         notifier.questionFor(pane.machineId, agentId) != null;
     return Listener(
-      // Translucent so the press still reaches the renderer underneath: on
-      // macOS the terminal is a WebView and AppKit gives it first responder on
-      // its own, so this only has to keep the app's idea of the current tile in
-      // step with the one the keyboard already went to.
+      // The same press selects the pane and reaches its terminal or viewer.
       behavior: HitTestBehavior.translucent,
       onPointerDown: (_) => notifier.focusPane(pane.id),
       child: Container(
+        key: ValueKey('pane-frame:${pane.id}'),
         decoration: BoxDecoration(
           // UNCHANGED, and deliberately: the terminal renders its own background
           // inside this box, so a tile that stops matching the window colour
@@ -1200,19 +1207,20 @@ class _PaneCell extends StatelessWidget {
             terminalPaneBorder(focused: !_single && focused),
           ),
         ),
-        // Attention, drawn OVER the terminal and inside the border above, so a
-        // pane can carry both at once — this one is blocked AND focused is a
-        // normal state, not a conflict to resolve. It is amber and 2px against
-        // the border's 1px accent precisely so the two never read as each
-        // other. Unlike focus, it shows on a single pane too: with one tile
-        // there is nowhere else focus could be, but there is very much a
-        // question waiting.
-        foregroundDecoration: blocked
-            ? BoxDecoration(
-                border: Border.all(color: grid.AppPalette.warn, width: 2),
-                borderRadius: BorderRadius.circular(_paneRadius),
-              )
-            : null,
+        // A neutral gray veil lifts inactive backgrounds and softens their text
+        // without changing terminal colors. Paint attention above the veil so
+        // a waiting question keeps its full-strength amber rim. Keep this
+        // decoration present even when clear: inserting/removing it would
+        // reparent the terminal and lose its input, scroll and selection state.
+        foregroundDecoration: BoxDecoration(
+          color: dimmed
+              ? const Color(0xFF9D9D9D).withValues(alpha: .30)
+              : null,
+          border: blocked
+              ? Border.all(color: grid.AppPalette.warn, width: 2)
+              : null,
+          borderRadius: BorderRadius.circular(_paneRadius),
+        ),
         // Keeps a terminal's constant repainting inside its own layer instead
         // of dirtying the whole grid. No key: nothing reads this boundary, it
         // only has to exist.
@@ -1232,6 +1240,7 @@ class _PaneCell extends StatelessWidget {
             child: _FileDropZone(
               notifier: notifier,
               pane: pane,
+              visible: visible,
               child: _SwapZone(
                 notifier: notifier,
                 paneId: pane.id,
@@ -1314,6 +1323,7 @@ class _PaneContent extends StatelessWidget {
         notifier: notifier,
         pane: pane,
         title: viewerPaneName(owner, machine?.dsh.entries ?? const []),
+        visible: visible,
         ownerName: owner?.name ?? pane.ownerAgentId ?? 'Viewer',
         ownerEngine: owner?.identityEngine,
         ownerDisplayName: owner?.identityDisplayName,
@@ -1334,6 +1344,14 @@ class _PaneContent extends StatelessWidget {
     }
     final session = pane.session;
     final wantedAgentId = pane.agentId;
+    final activityMark = wantedAgentId == null
+        ? null
+        : HarnessActivityMark(
+            app: notifier,
+            machineId: pane.machineId,
+            agentId: wantedAgentId,
+            visible: visible,
+          );
     final agent = machine?.agents
         .where((agent) => agent.id == wantedAgentId)
         .firstOrNull;
@@ -1503,6 +1521,7 @@ class _PaneContent extends StatelessWidget {
       final waiting = !listFailed && !notifier.machineInventoryLoaded;
       final stale = notifier.machinesAreStale;
       return _PaneStatus(
+        activity: activityMark,
         title: wantedAgentId == null ? 'Machine' : kUntitledPane,
         icon: listFailed || stale ? Icons.cloud_off : Icons.link_off,
         message: listFailed
@@ -1520,6 +1539,7 @@ class _PaneContent extends StatelessWidget {
     }
     if (needsLink) {
       return _PaneStatus(
+        activity: activityMark,
         title: agentName ?? machine.machine.displayName,
         icon: Icons.link_off,
         message:
@@ -1540,6 +1560,7 @@ class _PaneContent extends StatelessWidget {
     }
     if (offline) {
       return _Guide(
+        activity: activityMark,
         single: single && !swarmMode,
         onClose: close,
         title: agentName ?? machine.machine.displayName,
@@ -1556,6 +1577,7 @@ class _PaneContent extends StatelessWidget {
     }
     if (wantedAgentId == null) {
       return _PaneStatus(
+        activity: activityMark,
         title: machine.machine.displayName,
         icon: Icons.check_circle_outline,
         message: 'This machine is ready. Drag an agent here to open it.',
@@ -1564,6 +1586,7 @@ class _PaneContent extends StatelessWidget {
     }
     if (agentName == null) {
       return _PaneStatus(
+        activity: activityMark,
         title: wantedAgentId,
         icon: Icons.help_outline,
         message: 'This agent is no longer on ${machine.machine.displayName}.',
@@ -1572,6 +1595,7 @@ class _PaneContent extends StatelessWidget {
     }
     if (agent != null && !agent.terminalAvailable) {
       return _PaneStatus(
+        activity: activityMark,
         title: agentName,
         icon: Icons.terminal,
         message:
@@ -1586,6 +1610,7 @@ class _PaneContent extends StatelessWidget {
     // would promise something that is never coming.
     if (!machine.terminalNoTakeoverAvailable) {
       return _PaneStatus(
+        activity: activityMark,
         title: agentName,
         icon: Icons.terminal,
         message:
@@ -1600,6 +1625,7 @@ class _PaneContent extends StatelessWidget {
       );
     }
     return _PaneStatus(
+      activity: activityMark,
       title: agentName,
       icon: Icons.hourglass_empty,
       message: 'Attaching…',
@@ -1627,11 +1653,13 @@ class _FileDropZone extends StatefulWidget {
   const _FileDropZone({
     required this.notifier,
     required this.pane,
+    required this.visible,
     required this.child,
   });
 
   final AppNotifier notifier;
   final TerminalPane pane;
+  final bool visible;
   final Widget child;
 
   @override
@@ -1641,10 +1669,21 @@ class _FileDropZone extends StatefulWidget {
 class _FileDropZoneState extends State<_FileDropZone> {
   bool _hovering = false;
 
+  bool get _active =>
+      mounted && widget.visible && widget.notifier.panes.contains(widget.pane);
+
+  bool _canDeliver(TerminalSession session, String streamId) =>
+      _active &&
+      identical(widget.pane.session, session) &&
+      session.streamId == streamId &&
+      session.acceptsInput;
+
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
     return DropTarget(
+      key: ValueKey('pane-file-drop-${widget.pane.id}'),
+      enable: widget.visible && (widget.pane.session?.acceptsInput ?? false),
       onDragEntered: (_) => setState(() => _hovering = true),
       onDragExited: (_) => setState(() => _hovering = false),
       onDragDone: (details) async {
@@ -1706,10 +1745,11 @@ class _FileDropZoneState extends State<_FileDropZone> {
   }
 
   Future<void> _handleDrop(List<DropItem> files) async {
-    if (files.isEmpty) return;
-    widget.notifier.focusPane(widget.pane.id);
+    if (files.isEmpty || !_active) return;
     final session = widget.pane.session;
-    if (session == null) return; // pane not attached to a live session yet
+    if (session == null || !session.acceptsInput) return;
+    final streamId = session.streamId!;
+    widget.notifier.focusPane(widget.pane.id);
     final machine = widget.notifier.stateOf(widget.pane.machineId);
 
     final images = <DropItem>[];
@@ -1735,7 +1775,7 @@ class _FileDropZoneState extends State<_FileDropZone> {
     // Only the first image: several back-to-back would race the same OS clipboard + single Ctrl+V
     // nudge on the daemon side — see pasteImage's own doc.
     if (images.isNotEmpty) {
-      await _dropImage(images.first, machine, session);
+      await _dropImage(images.first, machine, session, streamId);
       if (images.length > 1) {
         final ignored = images.length - 1;
         _toast(
@@ -1746,7 +1786,7 @@ class _FileDropZoneState extends State<_FileDropZone> {
 
     // Every non-image file, independently — no shared resource to race over.
     for (final item in others) {
-      await _dropFile(item, machine, session);
+      await _dropFile(item, machine, session, streamId);
     }
   }
 
@@ -1754,7 +1794,9 @@ class _FileDropZoneState extends State<_FileDropZone> {
     DropItem item,
     MachineState? machine,
     TerminalSession session,
+    String streamId,
   ) async {
+    if (!_canDeliver(session, streamId)) return;
     // Not "cannot receive a native image paste" — that's a real capability gap, this is just a
     // race between the drop landing and machine state loading. Conflating the two would send the
     // user to fix a machine that is perfectly fine.
@@ -1770,6 +1812,7 @@ class _FileDropZoneState extends State<_FileDropZone> {
       return;
     }
     final png = await ensurePngBytes(raw);
+    if (!_canDeliver(session, streamId)) return;
     if (png == null) {
       _toast('${item.name} is not a readable image');
       return;
@@ -1781,6 +1824,7 @@ class _FileDropZoneState extends State<_FileDropZone> {
     // the chunked-upload path, which is for a genuinely remote machine's DIFFERENT clipboard.
     if (machine.isLocalMachine) {
       final wrote = await NativeClipboard.writeImagePng(png);
+      if (!_canDeliver(session, streamId)) return;
       if (!wrote) {
         _toast('Could not set the clipboard on this machine');
         return;
@@ -1806,7 +1850,9 @@ class _FileDropZoneState extends State<_FileDropZone> {
     DropItem item,
     MachineState? machine,
     TerminalSession session,
+    String streamId,
   ) async {
+    if (!_canDeliver(session, streamId)) return;
     // Same reasoning as _dropImage: null here is a transient race, not "this machine can't do
     // this" — say so distinctly rather than falling through to the remote/upload branch below,
     // which would silently take the wire for what might actually be a local pane.
@@ -1835,6 +1881,7 @@ class _FileDropZoneState extends State<_FileDropZone> {
       _toast('Could not read ${item.name}');
       return;
     }
+    if (!_canDeliver(session, streamId)) return;
     if (bytes.length > terminalLocalPasteFileMaxPayloadBytes) {
       _toast(
         '${item.name} is larger than ${_mb(terminalLocalPasteFileMaxPayloadBytes)}',
@@ -1927,6 +1974,7 @@ class _Guide extends StatelessWidget {
     required this.single,
     required this.onClose,
     required this.title,
+    this.activity,
     required this.compactMessage,
     required this.compactIcon,
     required this.full,
@@ -1935,6 +1983,7 @@ class _Guide extends StatelessWidget {
   final bool single;
   final VoidCallback onClose;
   final String title;
+  final Widget? activity;
   final String compactMessage;
   final IconData compactIcon;
   final Widget full;
@@ -1951,12 +2000,13 @@ class _Guide extends StatelessWidget {
           if (single) return full;
           return Column(
             children: [
-              _PaneHeader(title: title, onClose: onClose),
+              _PaneHeader(title: title, onClose: onClose, activity: activity),
               Expanded(child: full),
             ],
           );
         }
         return _PaneStatus(
+          activity: activity,
           title: title,
           icon: compactIcon,
           message: compactMessage,
@@ -1970,9 +2020,10 @@ class _Guide extends StatelessWidget {
 /// The same 46pt strip TerminalPanel draws, for the tiles that have no terminal
 /// to draw one — so the close button never moves between states.
 class _PaneHeader extends StatelessWidget {
-  const _PaneHeader({required this.title, this.onClose});
+  const _PaneHeader({required this.title, this.onClose, this.activity});
 
   final String title;
+  final Widget? activity;
   final VoidCallback? onClose;
 
   @override
@@ -1989,13 +2040,20 @@ class _PaneHeader extends StatelessWidget {
             child: Row(
               children: [
                 Expanded(
-                  child: Text(
-                    title,
-                    overflow: TextOverflow.ellipsis,
-                    style: grid.AppType.monoLabel(
-                      color: AppColors.text,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          title,
+                          overflow: TextOverflow.ellipsis,
+                          style: grid.AppType.monoLabel(
+                            color: AppColors.text,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      ?activity,
+                    ],
                   ),
                 ),
                 if (onClose != null) PaneCloseButton(onPressed: onClose!),
@@ -2011,6 +2069,7 @@ class _PaneHeader extends StatelessWidget {
 class _PaneStatus extends StatelessWidget {
   const _PaneStatus({
     required this.title,
+    this.activity,
     required this.icon,
     required this.message,
     this.onClose,
@@ -2020,6 +2079,7 @@ class _PaneStatus extends StatelessWidget {
   });
 
   final String title;
+  final Widget? activity;
   final IconData icon;
   final String message;
   final VoidCallback? onClose;
@@ -2035,7 +2095,7 @@ class _PaneStatus extends StatelessWidget {
     grid.AppTheme.watch(context);
     return Column(
       children: [
-        _PaneHeader(title: title, onClose: onClose),
+        _PaneHeader(title: title, onClose: onClose, activity: activity),
         Divider(height: 1, color: AppColors.border),
         Expanded(
           child: Center(

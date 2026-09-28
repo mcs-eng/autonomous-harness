@@ -282,8 +282,10 @@ socket, about 0.4 s from another machine over the relay.
 
 ## Conversations Harness did not start
 
-⌘P also finds Claude Code and Codex conversations run in a terminal or in the engines' own apps, and
-Enter opens one as a harness resuming it (`lib/sessionSearch/external.ts`).
+⌘P also finds conversations run outside Harness, in a terminal, an editor or an engine's own app, for
+every engine that keeps them on this computer. Enter opens one as a harness resuming it
+(`lib/sessionSearch/external.ts`; one provider per engine in `externals/`, see
+[Every engine](#every-engine)). Claude Code and Codex came first and are described here.
 
 - **Found on disk.** Every local Codex session, whether from the terminal, the Codex app or a
   script, is a rollout under `~/.codex/sessions/YYYY/MM/DD/`. Its first line says who wrote it:
@@ -321,6 +323,12 @@ Enter opens one as a harness resuming it (`lib/sessionSearch/external.ts`).
   tidy away). An open one is refused with `SESSION_OPEN_IN_TERMINAL` or
   `SESSION_BUSY_IN_TERMINAL` until `takeOver` (`idle`, `now` or `wait`) says how to take it over,
   or with `SESSION_OPEN_ELSEWHERE` when an app has it.
+- **Only what was asked.** The Codex app and the editor extensions send a message with context
+  in front of it: the files attached (`# Files mentioned by the user:`), the page open in the app's
+  browser (`# In app browser:`), and the editor's open tabs (`# Context from my IDE setup:`). Each
+  block ends at a `## My request:` heading (`## My request for Codex:` in older versions). The index
+  drops those blocks, so asks, titles and snippets read as the person wrote them. This is schema 11,
+  and the index rebuilds once.
 - ChatGPT conversations and Codex cloud tasks are not on disk, so they cannot be found.
 - **The welcome page lists them too.** An empty tab shows up to nine rows beside its shortcuts,
   numbered like the terminal client's home: the harnesses you were just with and these
@@ -343,6 +351,79 @@ own terminals:
   the daemon stopped the Codex process within two seconds and the pane resumed it.
 - *Take Over Now* resumed with `continue`.
 - Each terminal got its cursor back.
+
+### Every engine
+
+Thirteen engines (`EXTERNAL_ENGINES`). Each provider reads only its engine's store. It never writes
+to it, never starts the engine, and never logs a process's arguments, which can carry a key.
+
+| Engine | Where its conversations are | Left out | Who has one open | Mid-turn |
+| --- | --- | --- | --- | --- |
+| Claude Code | `~/.claude/projects/<folder>/<id>.jsonl` | `sdk-cli` | `sessions/<pid>.json` | the record's `status` |
+| Codex | `~/.codex/sessions/…/rollout-*.jsonl` | `exec`, sub-agents | the rollout held open | last task event |
+| Cursor | `chats/<md5(folder)>/<id>/store.db` + `meta.json`; transcript under the data folder | sub-agents, empty chats, no `store.db` | `store.db` held open; else `--resume <id>` | the transcript |
+| OpenCode, Kilo | `opencode.db` / `kilo.db` (SQLite) | `parent_id`, archived, headless `run`, never used | `-s <id>` (not with `--fork`) | last message |
+| Hermes | `state.db` per home and profile | gateways, cron, delegation children; a compression chain is one conversation under its newest id | `runtime/active_sessions.json`; else `-r <id>` | compression lock, last message |
+| Devin | `sessions.db` | `hidden` | `session_locks/<id>.lock` with a live Devin pid; else `-r <id>` | last message node |
+| Pi | `sessions/--<folder>--/<time>_<id>.jsonl` (or the moved folder) | nothing: Pi's own picker lists every run | argv only | last message |
+| Command Code | `projects/<slug>/<id>.jsonl` + `.meta.json` | `entrypoint: 'print'`, files before the v3 header | argv only | unknown |
+| Muse | `sessions/YYYY/MM/DD/<id>/session.jsonl` | sub-agents, Muse's own reminder sessions | argv only | an open run |
+| Grok | `sessions/<folder>/<id>/` (`summary.json`, `updates.jsonl`) | headless, sub-agents | `active_sessions.json` with a live pid; a leader or server is an app | last update |
+| Antigravity | `brain/<id>/…/transcript_full.jsonl`, placed by `history.jsonl` | sub-agents, a conversation no file places | `presence/<id>.lock` held open | unknown |
+| Copilot | `session-state/<id>/` (`events.jsonl`, `workspace.yaml`) | cloud tasks, detached rem-agent runs, SDK programs | newest `inuse.<pid>.lock`; the SDK runtime is an app | the event stream |
+
+Amp is not one: its threads live on its server, and nothing on this computer holds what was said.
+
+**Only exact evidence stops a process.** A record, a lock whose pid is alive, is that engine, and
+started before the lock was written, or a file the process holds open: that session is `open` in
+`terminal` and can be taken over. When only a process's arguments name the session, it is `maybe`:
+the process started on that session and may have moved to another since (`/resume` in its TUI).
+Harness does not open it a second time, but never stops that process
+(`SESSION_OPEN_ELSEWHERE`, "It may be open in OpenCode in a terminal"). The same goes when Harness's
+own panes cannot be listed. A process with no terminal, or a shared server (a Grok leader,
+`kilo serve`, the Codex app server, Copilot's SDK runtime), is an `app`. One in a Harness pane is
+`harness`. An engine whose store cannot say whether a turn is running counts as busy, so the person
+is asked first.
+
+**Resuming** uses each engine's own flag (`LAUNCH_RESUME_FLAG`), in the session's folder: `--resume`
+(Claude, Cursor, Hermes with its profile's `-p`, Devin, Command Code, Grok, Copilot), `--session`
+(OpenCode, Kilo, Pi), `resume` (Codex, Muse) and `--conversation` (Antigravity). *Take Over Now* sends `continue` only to
+engines that take a first message on the command line (Claude, Codex, OpenCode). The others resume
+and wait for the person.
+
+**Edge cases handled** (each with a test; all new code at 100% statement, branch, function and line
+coverage, no ignores):
+- A pid reused after a crash: a record or lock older than its process's start is ignored. This fixes
+  a Claude Code bug in 0.3.13, where a stale `sessions/<pid>.json` could name an unrelated process.
+- Before stopping, the daemon checks again that the same process still has the session, and the Wait
+  watcher checks on every loop.
+- A store being written: a head that is not finished yet is read again when the file changes. An idle
+  SQLite WAL store is opened `immutable`, so reading never leaves `-wal` or `-shm` files behind.
+  A main-file change also invalidates its cached immutable handle, catching a writer that opens,
+  checkpoints and closes between scans.
+- Folder names that lose information (Cursor, Pi, Command Code slugs) are never read as the folder.
+  The folder comes from the store itself, or the conversation is left out.
+- One engine's store failing keeps its last good list. Harness's own data folder is never offered.
+
+**Checked on this machine** through a sandboxed daemon, read-only against the real stores:
+- 229 sessions indexed, 210 of them outside conversations from Claude Code, Codex, Grok, Hermes
+  (editor and terminal) and OpenCode, each previewed.
+- Stand-in engines confirmed the resume launches: OpenCode `--session`, Hermes `--resume` in its
+  folder, and Grok `--resume`.
+
+Take-over was checked with made-up stores and stand-in processes:
+- A Grok session busy in a terminal was refused as busy. *Take Over Now* stopped it and resumed it
+  without `continue`. *Wait* held until `turn_completed` landed, then did the same.
+- An OpenCode session named only by `-s` was refused both times, and its process was left running.
+- A stale `active_sessions.json` entry with a dead pid claimed nothing.
+
+**Found in Harness's own code, not changed here:**
+- Cursor's config and data folders are one `CURSOR_HOME` in `discovery.ts`, `subagent.ts` and
+  `oneshot.ts`. `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` split them.
+- Setting `OPENCODE_DATA_DIR` for a recap does not keep the recap out of the person's store.
+- The hook server and notifier treat a Hermes `tui` session as a sub-agent.
+- Command Code's slug in Harness does not match the one Command Code writes.
+- Pi and Command Code leave no process record. If they ever do, it becomes their owner evidence.
 
 ## Protocol
 

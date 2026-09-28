@@ -24,6 +24,8 @@ class _Connection extends WsConn {
         onEvent: (_) {},
         onStatus: (_) {},
       );
+  @override
+  bool get isReady => true;
   final OrchestratorRequest reply;
   @override
   Future<Map<String, dynamic>> request(
@@ -66,6 +68,7 @@ void main() {
     (tester) async {
       largeSurface(tester);
       final app = createApp(
+        connected: true,
         connectionForTest: (_) => _Connection((p) async {
           if (p['action'] == 'list') throw StateError('Saved projects offline');
           return {
@@ -113,6 +116,7 @@ void main() {
     (tester) async {
       largeSurface(tester);
       final app = createApp(
+        connected: true,
         connectionForTest: (_) => _Connection(
           (p) async => p['action'] == 'list'
               ? {'projects': []}
@@ -293,7 +297,10 @@ void main() {
                 'project': {...project(), 'prompt': p['prompt']},
               };
       });
-      final app = createApp(connectionForTest: (_) => connection);
+      final app = createApp(
+        connected: true,
+        connectionForTest: (_) => connection,
+      );
       app.machineStates['m']!.localOnly = true;
       addTearDown(app.dispose);
       await tester.pumpWidget(
@@ -362,6 +369,7 @@ void main() {
     largeSurface(tester);
     final requests = <String>[];
     final app = createApp(
+      connected: true,
       connectionForTest: (_) => _Connection((p) async {
         requests.add(p['action'] as String);
         return {
@@ -410,7 +418,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('orchestrator-start')));
       await tester.pump();
       expect(
-        find.text('Connect this computer’s Harness daemon first.'),
+        find.text('Connect a machine before starting a project.'),
         findsOneWidget,
       );
       await tester.pumpWidget(const SizedBox());

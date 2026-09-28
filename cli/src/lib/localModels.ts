@@ -194,23 +194,19 @@ export class LocalModels {
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
       throw new Error('The model catalog address is unavailable.')
     }
-    const all: any[] = []
-    for (let page = 1; page <= 100; page++) {
-      const response = await this.request(url, {
-        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ browse: true, page, page_size: 50, device: {
-          device_class: device.device_class, usable_bytes: device.usable_bytes, backend: device.backend,
-        } }), signal: AbortSignal.timeout(20_000), redirect: 'error',
-      })
-      if (!response.ok) throw new Error('Compatible models are unavailable. Try again.')
-      const body = obj(await response.json())
-      if (!Array.isArray(body.models)) throw new Error('Compatible models are unavailable. Try again.')
-      all.push(...body.models)
-      const totalPages = num(obj(body.pagination).total_pages) ?? 1
-      if (page >= totalPages || (num(body.runnable_total) !== undefined && all.filter(m => m.runnable === true).length >= body.runnable_total)) return { models: all }
-      if (!body.models.length || obj(body.pagination).page !== page) throw new Error('The model catalog is incomplete. Try again.')
-    }
-    throw new Error('The model catalog is incomplete. Try again.')
+    // Match `grid catalog`/`list` (cli/models.py `_fetch_pullable`): browse the
+    // catalog service's first page of ranked "popular" models for this device,
+    // not every compatible row across all pages — the picker shows one page.
+    const response = await this.request(url, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ browse: true, page: 1, page_size: 50, device: {
+        device_class: device.device_class, usable_bytes: device.usable_bytes, backend: device.backend,
+      } }), signal: AbortSignal.timeout(20_000), redirect: 'error',
+    })
+    if (!response.ok) throw new Error('Compatible models are unavailable. Try again.')
+    const body = obj(await response.json())
+    if (!Array.isArray(body.models)) throw new Error('Compatible models are unavailable. Try again.')
+    return { models: body.models }
   }
 
   private async loadCatalog(force = false): Promise<void> {

@@ -237,9 +237,12 @@ void main() {
 
     Future<void> finish(AppNotifier app) =>
         app.handleMachineEventForTest('m1', {
-          'type': 'turn_ended',
+          'type': 'turn_summary',
           'agentId': 'a1',
-          'payload': {'agentId': 'a1'},
+          'payload': {
+            'agentId': 'a1',
+            'notification': {'id': 'result-a1', 'kind': 'done'},
+          },
         });
 
     test('an agent that finishes while the window is behind something reaches the system', () async {

@@ -105,20 +105,18 @@ describe('local model discovery and lifecycle', () => {
     expect(JSON.stringify(snapshot)).not.toContain('test-only-token')
   })
 
-  it('paginates all compatible models and does not fetch incompatible trailing pages', async () => {
-    request.mockImplementation(async (_url, init) => {
-      const page = JSON.parse(String(init?.body)).page
-      return response({ models: [card(`org/Model${page}-GGUF`)], runnable_total: 2, pagination: { page, total_pages: 7 } })
-    })
+  it('fetches only the first ranked page of popular models, like grid catalog', async () => {
+    request.mockResolvedValue(response({ models: [card('org/Model1-GGUF'), card('org/Model2-GGUF')], pagination: { page: 1, total_pages: 7 } }))
     expect((await service.list('home')).models).toHaveLength(2)
-    expect(request).toHaveBeenCalledTimes(2)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ browse: true, page: 1, page_size: 50 })
   })
 
-  it('rejects catalog pagination that repeats a page', async () => {
+  it('returns the first page as-is without looping pages or a pagination notice', async () => {
     request.mockResolvedValue(response({ models: [card()], runnable_total: 100, pagination: { page: 1, total_pages: 7 } }))
-    // Fresh Response objects (bodies are single-consumption).
-    request.mockImplementation(async () => response({ models: [card()], runnable_total: 100, pagination: { page: 1, total_pages: 7 } }))
-    expect((await service.list('home')).notice).toContain('incomplete')
+    const snapshot = await service.list('home')
+    expect(snapshot.models).toHaveLength(1)
+    expect(snapshot.notice).toBeFalsy()
   })
 
   it('downloads, loads and verifies without another user step', async () => {
@@ -421,18 +419,14 @@ describe('local model discovery and lifecycle', () => {
     expect(String(request.mock.calls[0][0])).toBe(`${base ?? 'https://api-grid.autonomous.ai'}/v1/grid/catalog`)
   })
 
-  it.each(['http failure', 'missing rows', 'empty intermediate page', 'unbounded pages'])('handles a catalog %s without inventing compatibility', async scenario => {
-    request.mockImplementation(async (_url, init) => {
-      const page = JSON.parse(String(init?.body)).page
-      return scenario === 'http failure' ? new Response('private detail', { status: 401 })
-        : response(scenario === 'missing rows' ? { error: 'private detail' }
-          : { models: scenario === 'empty intermediate page' ? [] : [card()], pagination: { page, total_pages: 101 } })
-    })
+  it.each(['http failure', 'missing rows'])('handles a catalog %s without inventing compatibility', async scenario => {
+    request.mockImplementation(async () =>
+      scenario === 'http failure' ? new Response('private detail', { status: 401 })
+        : response({ error: 'private detail' }))
     const snapshot = await service.list('home')
     expect(snapshot.models).toEqual([])
     expect(snapshot.notice).toBeTruthy()
     expect(JSON.stringify(snapshot)).not.toContain('private detail')
-    expect(request.mock.calls.length).toBeLessThanOrEqual(100)
   })
 
   it('supports an unpaginated catalog, prefers a useful small download, and skips unfitted versions', async () => {

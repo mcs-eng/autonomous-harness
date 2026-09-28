@@ -38,6 +38,7 @@ import {
 import { randomUUID } from 'crypto'
 import { join, basename, dirname, relative } from 'path'
 import { hostname, uptime } from 'os'
+import { cursorDataDir } from '../engines/cursor/home.js'
 import { env } from '../config/env.js'
 import { readCodexRolloutMeta, resolveCodexRollout } from '../engines/codex/rollout.js'
 import { ENGINES, isTerminalEngine, type AgentEngine } from '../engines/types.js'
@@ -46,7 +47,7 @@ import { parseGridLaunchOverride, type GridLaunchOverride, type GridLaunchRecord
 import { commandcodeTranscriptPath } from '../engines/commandcode/transcript.js'
 import { agyTranscriptPath } from '../engines/agy/session.js'
 import { copilotTranscriptPath } from '../engines/copilot/session.js'
-import { lockOwnerAlive, processStartMarker } from './processLiveness.js'
+import { lockOwnerAlive, lockStartMarker, processLockIdentity } from './processLiveness.js'
 import { hardenPrivateStateFileIfPresent, readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { mergeTerminalRuntimes, processIdentityKey, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
 import type { HookTerminalHint, ProcessIdentity, TerminalRuntimeRef } from './terminalTypes.js'
@@ -216,7 +217,7 @@ export interface RegisteredSession {
   /** Authoritative backend-neutral terminal placements for this one process-owned agent. */
   runtimes: TerminalRuntimeRef[]
   primaryRuntimeKey: string
-  /** Additive rollback/wire projection. Empty in memory and omitted on disk for Herdr-only agents. */
+  /** Additive rollback/wire projection of the tmux runtime. */
   tmuxPane: string
   source: string | null
   title: string | null
@@ -232,6 +233,15 @@ export interface RegisteredSession {
   touchedAt: number
   lastHookAt: number
   lastTranscriptAt: number
+  /**
+   * When an app last OPENED this agent (ms epoch) — a desktop window focusing its tab, the phone
+   * landing on it — on any computer. Stamped by `markOpened` with THIS daemon's clock, never a
+   * client's: the agent's owner is the one place every app reads from, so it is the one clock they
+   * can all agree on, and "last used" comes out in the same order on every screen. Absent until the
+   * first open; persisted, carried through a hook bind, a stop and a resume like any other fact
+   * about the agent. A client sorts by the later of this and the frame's `updatedAt`.
+   */
+  lastOpenedAt?: number
 }
 
 /** A saved row's `touchedAt`, which rows saved before 2026-09-27 call `updatedAt`. */
@@ -326,6 +336,12 @@ function permissionModeName(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z]{1,24}$/.test(value)
 }
 
+/** A persisted `lastOpenedAt`, or undefined for anything that is not a real moment (a row from before
+ *  the field, or a hand-edited one) — undefined rather than 0, so "never opened" stays absent. */
+function normalizedOpenedAt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
 function normalizedAgentEngine(value: unknown): AgentEngine {
   return typeof value === 'string' && AGENT_ENGINES.has(value)
     ? value as AgentEngine
@@ -349,7 +365,7 @@ function removeRegistryLockOwnedBy(token: string): void {
 function withRegistryFileLock<T>(apply: () => T): T {
   secureStateDirectory(env.ADAPTER_DATA_DIR)
   const uid = typeof process.getuid === 'function' ? process.getuid() : null
-  const processMarker = processStartMarker(process.pid) ?? ''
+  const processIdentity = processLockIdentity(process.pid)
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
     const token = randomUUID()
     let created = false
@@ -359,7 +375,7 @@ function withRegistryFileLock<T>(apply: () => T): T {
       const owner = join(LOCK_DIR, 'owner.json')
       const fd = openSync(owner, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
       try {
-        writeFileSync(fd, JSON.stringify({ pid: process.pid, startMarker: processMarker, token }))
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, ...processIdentity, token }))
         fsyncSync(fd)
       } finally { closeSync(fd) }
       try {
@@ -381,10 +397,10 @@ function withRegistryFileLock<T>(apply: () => T): T {
         if (!ownerStat.isFile() || ownerStat.isSymbolicLink() || (uid !== null && ownerStat.uid !== uid)
           || (ownerStat.mode & 0o777) !== 0o600) throw new Error('registry lock owner has unsafe owner, mode, or type')
         const owner = JSON.parse(readFileSync(join(LOCK_DIR, 'owner.json'), 'utf8')) as {
-          pid?: unknown; startMarker?: unknown; token?: unknown
+          pid?: unknown; startMarker?: unknown; generationMarker?: unknown; token?: unknown
         }
         ownerPid = Number(owner.pid)
-        ownerStartMarker = typeof owner.startMarker === 'string' ? owner.startMarker : ''
+        ownerStartMarker = lockStartMarker(owner)
         ownerToken = typeof owner.token === 'string' ? owner.token : ''
       } catch (inspectionError) {
         if (inspectionError instanceof Error && inspectionError.message.startsWith('registry lock')) throw inspectionError
@@ -392,10 +408,10 @@ function withRegistryFileLock<T>(apply: () => T): T {
       if (ownerPid > 0 && ownerToken && !lockOwnerAlive(ownerPid, ownerStartMarker)) {
         try {
           const current = JSON.parse(readFileSync(join(LOCK_DIR, 'owner.json'), 'utf8')) as {
-            pid?: unknown; startMarker?: unknown; token?: unknown
+            pid?: unknown; startMarker?: unknown; generationMarker?: unknown; token?: unknown
           }
           if (Number(current.pid) === ownerPid
-            && current.startMarker === ownerStartMarker
+            && lockStartMarker(current) === ownerStartMarker
             && current.token === ownerToken
             && !lockOwnerAlive(ownerPid, ownerStartMarker)) {
             rmSync(LOCK_DIR, { recursive: true, force: true })
@@ -449,12 +465,46 @@ function boundedIdentityPart(value: unknown, max = 200): value is string {
 export function validTerminalRuntime(value: unknown): value is TerminalRuntimeRef {
   if (!value || typeof value !== 'object') return false
   const runtime = value as Partial<TerminalRuntimeRef>
-  if (runtime.backend === 'tmux') return typeof runtime.paneId === 'string' && PANE_RE.test(runtime.paneId)
-  return runtime.backend === 'herdr'
-    && boundedIdentityPart(runtime.endpointId)
-    && boundedIdentityPart(runtime.sessionName, 100)
-    && boundedIdentityPart(runtime.terminalId)
-    && boundedIdentityPart(runtime.paneId)
+  return runtime.backend === 'tmux' && typeof runtime.paneId === 'string' && PANE_RE.test(runtime.paneId)
+}
+
+function retiredRuntime(value: unknown): boolean {
+  return !!value && typeof value === 'object' && (value as { backend?: unknown }).backend === 'herdr'
+}
+
+/**
+ * Earlier builds could also place an agent in a Herdr pane. That backend is gone, so its runtimes are
+ * dropped on read — the rest of the row is untouched, and a primary that named one falls to the first
+ * remaining tmux route. Returns `null` for a row left with no terminal at all: nothing can reach it.
+ * A row without a retired runtime is returned as is.
+ */
+function withoutRetiredRuntimes(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const row = value as Record<string, unknown>
+  if (!Array.isArray(row.runtimes) || !row.runtimes.some(retiredRuntime)) return value
+  const runtimes = row.runtimes.filter((runtime) => !retiredRuntime(runtime))
+  const hasLegacyPane = typeof row.tmuxPane === 'string' && PANE_RE.test(row.tmuxPane)
+  if (!runtimes.length && !hasLegacyPane) return null
+  const { runtimes: _retired, ...rest } = row
+  const cleaned: Record<string, unknown> = runtimes.length ? { ...rest, runtimes } : rest
+  if (typeof row.primaryRuntimeKey === 'string' && row.primaryRuntimeKey.startsWith('herdr\u0000')) {
+    const first = runtimes.find(validTerminalRuntime)
+    cleaned.primaryRuntimeKey = first ? terminalRouteKey(first) : ''
+  }
+  // A v2 row always carries `runtimes`, even when only the legacy pane is left to fill it.
+  if (!runtimes.length && Object.hasOwn(row, 'schemaVersion')) {
+    const pane = { backend: 'tmux' as const, paneId: row.tmuxPane as string }
+    cleaned.runtimes = [pane]
+    cleaned.primaryRuntimeKey = terminalRouteKey(pane)
+  }
+  return cleaned
+}
+
+/** `withoutRetiredRuntimes` over a whole stored file, dropping the rows it empties. */
+function withoutRetiredRows(stored: readonly unknown[]): { rows: unknown[]; dropped: number; changed: boolean } {
+  const cleaned = stored.map(withoutRetiredRuntimes)
+  const rows = cleaned.filter((row, i) => row !== null || stored[i] === null)
+  return { rows, dropped: stored.length - rows.length, changed: cleaned.some((row, i) => row !== stored[i]) }
 }
 
 function normalizedRuntimes(raw: unknown, legacyTmuxPane?: unknown): TerminalRuntimeRef[] {
@@ -475,7 +525,8 @@ function persistedRow(entry: RegisteredSession): RegisteredSession | Omit<Regist
   return { ...row, runtimes: row.runtimes.map((runtime) => ({ ...runtime })) }
 }
 
-export function strictPersistedRow(value: unknown): RegisteredSession | null {
+export function strictPersistedRow(raw: unknown): RegisteredSession | null {
+  const value = withoutRetiredRuntimes(raw)
   if (!value || typeof value !== 'object') return null
   const row = value as Partial<RegisteredSession>
   const runtimes = normalizedRuntimes(row.runtimes, row.tmuxPane)
@@ -500,8 +551,12 @@ export function strictPersistedRow(value: unknown): RegisteredSession | null {
     || (row.processIdentity !== null && !validProcessIdentity(row.processIdentity))) return null
   const placements = runtimes.map(terminalPlacementKey)
   if (new Set(placements).size !== placements.length) return null
+  // Taken out of the spread and put back only when it is a real moment: the spread would otherwise
+  // carry a hand-edited string or a negative number straight into the frame's `toISOString()`.
+  const { lastOpenedAt: rawOpenedAt, ...rest } = row
+  const lastOpenedAt = normalizedOpenedAt(rawOpenedAt)
   return {
-    ...row,
+    ...rest,
     schemaVersion: 2,
     active,
     ...(launch ? { launch } : {}),
@@ -528,6 +583,7 @@ export function strictPersistedRow(value: unknown): RegisteredSession | null {
     touchedAt: savedTouchedAt(row) ?? Date.now(),
     lastHookAt: typeof row.lastHookAt === 'number' ? row.lastHookAt : Date.now(),
     lastTranscriptAt: typeof row.lastTranscriptAt === 'number' ? row.lastTranscriptAt : Date.now(),
+    ...(lastOpenedAt !== undefined ? { lastOpenedAt } : {}),
   }
 }
 
@@ -646,7 +702,7 @@ const TRANSCRIPT_ROOT: Readonly<Record<AgentEngine, ((codexHome?: string) => str
   grok: () => join(env.GROK_HOME, 'sessions'),
   agy: () => join(env.AGY_HOME, 'brain'),
   copilot: () => join(env.COPILOT_HOME, 'session-state'),
-  cursor: () => join(env.CURSOR_HOME, 'projects'),
+  cursor: () => join(cursorDataDir(), 'projects'),
   pi: () => join(env.PI_HOME, 'agent', 'sessions'),
   commandcode: () => join(env.COMMANDCODE_HOME, 'projects'),
   claude: () => env.CLAUDE_PROJECTS_DIR,
@@ -728,7 +784,7 @@ class Registry {
    *  `sessionId` (`cancel`, `question_response`, `compact`, `session_get`) while everything else
    *  addresses the agent. `resolve()` is the one lookup that accepts either. */
   private sessionIndex = new Map<string, string>()
-  /** backend-scoped route → agentId. Public Herdr pane ids are never indexed without endpointId. */
+  /** backend-scoped route → agentId. */
   private runtimeIndex = new Map<string, string>()
   /** engine + PID start marker → agentId. This is authoritative across nested multiplexers. */
   private processIndex = new Map<string, string>()
@@ -811,12 +867,14 @@ class Registry {
     const rebooted = bootChanged(savedBoot, bootId)
     writeBoot(bootId) // refresh the reference so a reboot is detected exactly once, even across same-boot restarts
     try {
-      const parsed = JSON.parse(readPrivateStateFile(FILE)) as unknown
-      if (!Array.isArray(parsed)) {
+      const stored = JSON.parse(readPrivateStateFile(FILE)) as unknown
+      if (!Array.isArray(stored)) {
         this.writeBlocked = true
         console.error('[registry] registry root is not an array; refusing to overwrite it')
         return
       }
+      const { rows: parsed, dropped, changed: strippedRetired } = withoutRetiredRows(stored)
+      if (dropped) console.log(`[registry] dropped ${dropped} agent(s) that lived only in a retired Herdr terminal`)
       if (parsed.some(hasUnknownRowSchema)) {
         this.writeBlocked = true
         console.error('[registry] registry contains an unknown row schema; refusing to overwrite it')
@@ -840,10 +898,11 @@ class Registry {
         const id = rowId(row)
         if (id) this.persistedBaseline.set(id, rowFingerprint(row))
       }
+      // The rollback copy is the file as found, retired runtimes and all — not the cleaned rows.
       if (arr.some((row) => row.schemaVersion !== 2)) {
-        atomicWriteJson(PRE_V2_BACKUP_FILE, arr, true)
+        atomicWriteJson(PRE_V2_BACKUP_FILE, stored, true)
       }
-      let changed = false
+      let changed = strippedRetired
       if (rebooted) {
         this.rebooted = true
         console.log(`[registry] machine rebooted since last run — ${arr.length} agent(s) kept with their process identity cleared (stale panes, restored on start)`)
@@ -956,6 +1015,9 @@ class Registry {
           touchedAt: savedTouchedAt(raw) ?? now,
           lastHookAt: typeof raw.lastHookAt === 'number' ? raw.lastHookAt : (savedTouchedAt(raw) ?? now),
           lastTranscriptAt: typeof raw.lastTranscriptAt === 'number' ? raw.lastTranscriptAt : (savedTouchedAt(raw) ?? now),
+          // Rehydrated explicitly for the reason the ⚠️ above gives. A reboot keeps it: it is when a
+          // person last looked, which no reboot changes.
+          ...(normalizedOpenedAt(raw.lastOpenedAt) !== undefined ? { lastOpenedAt: normalizedOpenedAt(raw.lastOpenedAt) } : {}),
         }
         if (
           raw.engine !== engine
@@ -1491,6 +1553,10 @@ class Registry {
       touchedAt: now,
       lastHookAt: now,
       lastTranscriptAt: existing?.lastTranscriptAt ?? now,
+      // ⚠️ Carried forward, for the reason the ⚠️ on `subscriptionModel` gives: without this line
+      // the first hook after an open — the next prompt, a `/clear` — erases it from memory, the next
+      // save writes that to disk, and every app's "last used" order forgets the open ever happened.
+      ...(existing?.lastOpenedAt ? { lastOpenedAt: existing.lastOpenedAt } : {}),
     }
     entry.tmuxPane = tmuxProjection(entry.runtimes)
     entry.primaryRuntimeKey = selectedRuntimeKey(entry.runtimes, input.primaryRuntimeKey || existing?.primaryRuntimeKey)
@@ -1845,6 +1911,24 @@ class Registry {
     return true
   }
 
+  /**
+   * An app opened this agent: stamp `lastOpenedAt` with THIS daemon's clock. Never takes a time from
+   * the caller — a phone and a laptop whose clocks disagree would otherwise order the same agents
+   * differently, which is the one thing this field exists to prevent.
+   *
+   * `updatedAt` is left alone on purpose. That is the row's bookkeeping (the webui's "when" column,
+   * `session_get`'s timestamp), and looking at an agent changes nothing about the agent. The save
+   * still happens: a row is written whenever its bytes differ from the last write, whichever field
+   * moved.
+   */
+  markOpened(agentId: string): RegisteredSession | null {
+    const session = this.agents.get(agentId)
+    if (!session) return null
+    session.lastOpenedAt = Date.now()
+    this.save()
+    return session
+  }
+
   touchTranscript(sessionId: string, at = Date.now()): boolean {
     const session = this.bySession(sessionId)
     if (!session) return false
@@ -1946,8 +2030,9 @@ class Registry {
         }))
         const latestValues: unknown[] = (() => {
           if (!existsSync(FILE)) return []
-          const parsed = JSON.parse(readPrivateStateFile(FILE)) as unknown
-          if (!Array.isArray(parsed)) throw new Error('registry root changed to a non-array value')
+          const stored = JSON.parse(readPrivateStateFile(FILE)) as unknown
+          if (!Array.isArray(stored)) throw new Error('registry root changed to a non-array value')
+          const parsed = withoutRetiredRows(stored).rows
           if (parsed.some(hasUnknownRowSchema)) {
             throw new Error('registry contains an unknown row schema')
           }

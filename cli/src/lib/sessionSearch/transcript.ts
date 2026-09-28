@@ -15,6 +15,7 @@ import { lineToEvents, newTurnState } from '../normalize.js'
 import { AgyNormalizer } from '../../engines/agy/normalizer.js'
 import { AmpNormalizer } from '../../engines/amp/normalizer.js'
 import { CodexNormalizer } from '../../engines/codex/normalizer.js'
+import { epochMs } from './externals/support.js'
 import { CommandCodeNormalizer } from '../../engines/commandcode/normalizer.js'
 import { CopilotNormalizer } from '../../engines/copilot/normalizer.js'
 import { CursorNormalizer } from '../../engines/cursor/normalizer.js'
@@ -48,11 +49,13 @@ export function lineNormalizer(engine: string, sessionId: string): LineNormalize
       const normalizer = new CursorNormalizer('live', sessionId)
       return (line) => normalizer.ingest(line)
     }
-    case 'muse': return ingestWith(new MuseNormalizer())
+    // A Muse session log mirrors its sub-agents' and reminders' streams: only its own is the conversation.
+    case 'muse': return kept(ingestWith(new MuseNormalizer()), (line) => museOwnStream(line, sessionId))
     case 'amp': return ingestWith(new AmpNormalizer())
     case 'grok': return ingestWith(new GrokNormalizer())
     case 'agy': return ingestWith(new AgyNormalizer())
-    case 'copilot': return ingestWith(new CopilotNormalizer())
+    // A Copilot session file holds its sub-agents' events too, and prompts nobody typed.
+    case 'copilot': return kept(ingestWith(new CopilotNormalizer()), copilotOwnLine)
     case 'pi': return ingestWith(new PiNormalizer('live'))
     case 'commandcode': return ingestWith(new CommandCodeNormalizer('live'))
     default: return null
@@ -105,6 +108,34 @@ function ingestWith(normalizer: { ingest(line: string): LiveEvent[] }): LineNorm
   return (line) => normalizer.ingest(line)
 }
 
+/** [normalize], for the lines [keep] accepts only. */
+function kept(normalize: LineNormalizer, keep: (line: string) => boolean): LineNormalizer {
+  return (line) => keep(line) ? normalize(line) : []
+}
+
+const MUSE_STREAM = /"stream"\s*:\s*\{[^{}]*"id"\s*:\s*"([^"]+)"/
+
+/** Whether a Muse record belongs to [sessionId]'s own stream (a record naming none is kept). */
+export function museOwnStream(line: string, sessionId: string): boolean {
+  const stream = MUSE_STREAM.exec(line)?.[1]
+  return !stream || stream === sessionId
+}
+
+/**
+ * Whether a Copilot event is the conversation's own: not a sub-agent's (those carry `agentId`), and not
+ * a prompt nobody typed (a skill's or another agent's, whose `source` is `skill-…` or `agent-…`, or
+ * an autopilot continuation).
+ */
+export function copilotOwnLine(line: string): boolean {
+  if (!line.includes('"agentId"') && !line.includes('"source"') && !line.includes('isAutopilotContinuation')) return true
+  let event: { agentId?: unknown; type?: unknown; data?: { source?: unknown; isAutopilotContinuation?: unknown } }
+  try { event = JSON.parse(line) } catch { return true }
+  if (typeof event.agentId === 'string' && event.agentId) return false
+  if (event.type !== 'user.message') return true
+  const source = typeof event.data?.source === 'string' ? event.data.source : ''
+  return !/^(?:skill|agent)-/.test(source) && event.data?.isAutopilotContinuation !== true
+}
+
 /**
  * Records that carry only tool output, reasoning or accounting, told apart by their opening bytes.
  * Skipping them is safe because the turn collector reads prompts, answer text and tool calls only;
@@ -128,13 +159,26 @@ export function skipPredicate(engine: string): ((head: string) => boolean) | nul
 }
 
 const TIMESTAMP = /"timestamp"\s*:\s*"([^"]{10,40})"/
+/** The fields other engines date their lines with: Grok's epoch seconds, Muse's microseconds,
+ *  Antigravity's ISO `created_at`. */
+const OTHER_TIMES = [
+  /"timestamp"\s*:\s*(\d{9,19}(?:\.\d+)?)[,}]/,
+  /"recorded_at"\s*:\s*(\d{9,19})[,}]/,
+  /"created_at"\s*:\s*"([^"]{10,40})"/,
+]
 
-/** When a transcript line was written, from its own `timestamp` field; null when it has none. */
+/** When a transcript line was written, from its own time field; null when it has none. */
 export function lineTime(line: string): number | null {
-  const match = TIMESTAMP.exec(line)
-  if (!match) return null
-  const at = Date.parse(match[1])
-  return Number.isFinite(at) ? at : null
+  const iso = TIMESTAMP.exec(line)
+  if (iso) {
+    const at = Date.parse(iso[1])
+    return Number.isFinite(at) ? at : null
+  }
+  for (const pattern of OTHER_TIMES) {
+    const match = pattern.exec(line)
+    if (match) return epochMs(match[1])
+  }
+  return null
 }
 
 export interface LineVisit {

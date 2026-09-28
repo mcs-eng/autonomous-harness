@@ -120,7 +120,7 @@ export async function waitForResumedAgent(saved: RegisteredSession, deps: Resume
     // the person could type in — with `active` cleared and the desk refusing to open it, the cost of
     // the strict rule was never the resume, it was the harness. A resume that reopened the WRONG
     // conversation is still caught, by `registry.register`'s mismatch guard, when the hook arrives.
-    if (process) return { ok: true, session: row, resumed: resumesConversation(saved.engine, saved.sessionId) }
+    if (process) return { ok: true, session: { ...row, processIdentity: process }, resumed: resumesConversation(saved.engine, saved.sessionId) }
     await deps.sleep(250)
   }
   return resumeUnconfirmed

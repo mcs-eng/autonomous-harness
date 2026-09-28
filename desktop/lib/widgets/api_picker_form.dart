@@ -45,6 +45,9 @@ class ApiPickerFormState extends State<ApiPickerForm> {
   ApiConnection? _editing;
   bool _advanced = false, _visible = false;
   String? _error;
+
+  /// The field [_error] is about, drawn under it; null for an error about the whole form.
+  String? _errorField;
   ApiConnectionsController get controller => widget.controller;
   bool get _existing => _editing?.id.isNotEmpty == true;
   bool get _enabled => controller.available && !controller.saving;
@@ -102,7 +105,7 @@ class ApiPickerFormState extends State<ApiPickerForm> {
     }
     _advanced = false;
     _visible = false;
-    _error = null;
+    _error = _errorField = null;
   }
 
   void _choose(ApiConnection connection) {
@@ -181,7 +184,7 @@ class ApiPickerFormState extends State<ApiPickerForm> {
             setState(() {
               _fields['key']?.clear();
               _editing = null;
-              _error = null;
+              _error = _errorField = null;
             });
             focus();
           },
@@ -226,6 +229,36 @@ class ApiPickerFormState extends State<ApiPickerForm> {
     }
   }
 
+  /// Tab walks the fields as any form does, then the buttons as one stop, then leaves for the
+  /// other pane; Shift-Tab walks back, leaving from the first field. With no fields (the provider
+  /// choices), Tab leaves at once — the picker's usual pane switch.
+  void _tab(bool forward) {
+    final fields = [for (final id in _visibleFields) _inputs[id]!];
+    final at = fields.indexWhere((node) => node.hasFocus);
+    final onButtons = _buttons.values.any((node) => node.hasFocus);
+    FocusNode? next;
+    if (forward && at >= 0) {
+      next = at < fields.length - 1
+          ? fields[at + 1]
+          : _actions
+                .where((action) => action.run != null)
+                .map((action) => _buttons[action.id])
+                .nonNulls
+                .firstOrNull;
+    } else if (!forward && at > 0) {
+      next = fields[at - 1];
+    } else if (!forward && onButtons) {
+      next = fields.lastOrNull;
+    }
+    if (next != null) {
+      next.requestFocus();
+    } else if (widget.onSwitchPane != null) {
+      widget.onSwitchPane!();
+    } else {
+      _move(forward);
+    }
+  }
+
   bool handle(String command) {
     if (_composing) return true;
     switch (command) {
@@ -234,9 +267,9 @@ class ApiPickerFormState extends State<ApiPickerForm> {
       case 'picker.accept':
         _scope.hasFocus ? _accept() : focus();
       case 'picker.complete':
-        widget.onSwitchPane != null ? widget.onSwitchPane!() : _move(true);
+        _tab(true);
       case 'picker.complete_back':
-        widget.onSwitchPane != null ? widget.onSwitchPane!() : _move(false);
+        _tab(false);
       case 'picker.next':
         if (!_scope.hasFocus) return false;
         _move(true);
@@ -263,32 +296,37 @@ class ApiPickerFormState extends State<ApiPickerForm> {
 
   Future<void> _save() async {
     if (!_enabled || _composing) return;
-    final url = Uri.tryParse(_fields['url']!.text.trim());
-    final invalid = _fields['name']!.text.trim().isEmpty
-        ? 'Enter a name.'
-        : url == null ||
-              !['http', 'https'].contains(url.scheme) ||
-              url.host.isEmpty ||
-              url.userInfo.isNotEmpty ||
-              url.hasQuery ||
-              url.hasFragment
-        ? 'Enter an API URL without credentials or query parameters.'
+    // The first field that is wrong: its sentence goes under it, and the cursor into it.
+    final urlProblem = apiUrlProblem(_fields['url']!.text);
+    final (String field, String problem)? invalid =
+        _fields['name']!.text.trim().isEmpty
+        ? ('name', 'Enter a name for this API.')
+        : urlProblem != null
+        ? ('url', urlProblem)
         : !_existing && _fields['key']!.text.trim().isEmpty
-        ? 'Enter an API key.'
+        ? ('key', 'Paste the API key.')
         : _fields['header']!.text.trim().isEmpty
-        ? 'Enter an authentication header.'
+        ? ('header', 'Enter an authentication header, such as Authorization.')
         : null;
-    if (invalid != null) {
-      setState(() => _error = invalid);
+    if (invalid case (final field, final problem)) {
+      final shown = _visibleFields.contains(field);
+      setState(() {
+        _error = problem;
+        _errorField = shown ? field : null;
+      });
+      if (shown) _inputs[field]!.requestFocus();
       return;
     }
     final editing = _editing!;
     if (_existing &&
         !controller.connections.any((row) => row.id == editing.id)) {
-      setState(() => _error = 'This API was removed. Return to the list.');
+      setState(() {
+        _error = 'This API was removed. Return to the list.';
+        _errorField = null;
+      });
       return;
     }
-    setState(() => _error = null);
+    setState(() => _error = _errorField = null);
     final name = _fields['name']!.text.trim();
     final saved = await controller.save({
       if (_existing) 'id': editing.id,
@@ -429,6 +467,8 @@ class ApiPickerFormState extends State<ApiPickerForm> {
                             : _editing?.name ?? 'Add API',
                         style: style,
                       ),
+                      if (controller.app.viewer != null)
+                        Text('Saved on ${controller.hostLabel}', style: muted),
                       SizedBox(height: cell.height),
                       if (_editing != null &&
                           !widget.removing &&
@@ -463,7 +503,7 @@ class ApiPickerFormState extends State<ApiPickerForm> {
                                 enabled: !controller.saving,
                                 onChanged: (_) {
                                   if (_error != null) {
-                                    setState(() => _error = null);
+                                    setState(() => _error = _errorField = null);
                                   }
                                 },
                                 child: TextField(
@@ -491,19 +531,34 @@ class ApiPickerFormState extends State<ApiPickerForm> {
                                   onEditingComplete: () {},
                                   onChanged: (_) {
                                     if (_error != null) {
-                                      setState(() => _error = null);
+                                      setState(
+                                        () => _error = _errorField = null,
+                                      );
                                     }
                                   },
                                 ),
                               ),
+                              if (_errorField == id && _error != null)
+                                Text(
+                                  _error!,
+                                  key: ValueKey('api-form-error:$id'),
+                                  style: terminalContentStyle(
+                                    color: theme.yellow,
+                                  ),
+                                ),
                             ],
                           ),
                         ),
                       if (_editing != null && !widget.removing) ...[
-                        Text('Stored on this computer.', style: muted),
+                        Text(
+                          'Stored on ${controller.hostLabel}.',
+                          style: muted,
+                        ),
                         SizedBox(height: cell.height),
                       ],
-                      if (_error ?? controller.error case final error?) ...[
+                      if ((_errorField == null ? _error : null) ??
+                              controller.error
+                          case final error?) ...[
                         Text(
                           error,
                           style: terminalContentStyle(color: theme.yellow),
@@ -555,7 +610,9 @@ class ApiPickerFormState extends State<ApiPickerForm> {
                       ),
                       (
                         'picker.complete',
-                        widget.onSwitchPane != null ? 'pane' : 'next',
+                        widget.onSwitchPane == null || _visibleFields.isNotEmpty
+                            ? 'next'
+                            : 'pane',
                       ),
                       ('picker.cancel', 'back'),
                     ])

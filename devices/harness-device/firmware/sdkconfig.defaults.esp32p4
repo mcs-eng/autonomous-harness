@@ -1,0 +1,75 @@
+# Harness Pro (WT01P4C5-S1: ESP32-P4 + ESP32-C5, 720x720 MIPI-DSI) — everything the dial does not share.
+#
+# Values taken from the vendor's HARDWARE.md, which was written off a board that runs. Not guessed from
+# the P4 datasheet: the PSRAM mode and speed in particular are module facts, and the wrong pair boots to
+# a blank screen rather than to an error.
+CONFIG_IDF_TARGET="esp32p4"
+
+# --- Silicon revision ---
+# This module is the v3.x part (N16R32X). A v1.x board needs CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y and
+# CONFIG_ESP32P4_REV_MIN_100=y instead — the image will not boot on the other revision.
+CONFIG_ESP32P4_REV_MIN_300=y
+
+# --- PSRAM (32 MB hex SPI at 200 MHz, executing in place) ---
+# 200 MHz is behind IDF_EXPERIMENTAL_FEATURES; without it the speed choice is not offered and the build
+# silently drops to 80 MHz, which is not enough to keep three 720x720 framebuffers fed.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_SPEED=200
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+# Small allocations stay in internal RAM, and 32 KiB of it is held back from the PSRAM-first allocator
+# so an interrupt path always has somewhere to allocate from.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# --- CPU ---
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+
+# --- MIPI-DSI ---
+# The panel is fed by DMA from PSRAM, so the DSI interrupt must not be parked behind a cache miss on the
+# very memory it is servicing: its handler is pinned in IRAM and its object in internal RAM.
+CONFIG_LCD_DSI_ISR_HANDLER_IN_IRAM=y
+CONFIG_LCD_DSI_OBJ_FORCE_INTERNAL=y
+
+# --- Drawing ---------------------------------------------------------------------------------------
+# PRO ONLY. None of this reaches the dial: the round face has its own defaults file, a different SoC and
+# no accelerator to turn on. It is also 170k pixels against this face's 518k, so it never needed any of
+# it — every switch below exists because the square costs three times as much to fill.
+#
+# The PPA is the P4's Pixel Processing Accelerator, and LVGL 9.5 already ships the draw unit for it
+# (src/draw/espressif/ppa). It was simply never enabled. It takes FILL and IMAGE off the CPU, which is
+# most of this UI by area: the desk is nine large rounded rectangles and nine marks, and the type — which
+# the PPA does not touch — covers a few percent of the glass.
+CONFIG_LV_USE_PPA=y
+CONFIG_LV_USE_PPA_IMG=y
+
+# A SECOND RASTERISING THREAD, on a chip with two 400 MHz cores and one of them idle while the other
+# draws. LVGL splits a refresh across draw units; it needs an OS binding to do it, and LV_OS_NONE is why
+# raising the count alone would have changed nothing.
+CONFIG_LV_OS_FREERTOS=y
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+
+# The engine marks are 20px assets drawn at 24/32/40 through lv_image_set_scale, and a scaled image is a
+# bilinear transform per destination pixel. With no cache that transform ran again on every redraw of
+# every tile. 256 KiB buys all of them, in PSRAM, where there are 26 MB free.
+CONFIG_LV_CACHE_DEF_SIZE=262144
+CONFIG_LV_IMAGE_HEADER_CACHE_DEF_CNT=16
+
+# 60 Hz rather than 30. The panel scans at 59.2 Hz and LVGL was refusing to look at the screen more than
+# every 33 ms, which put a whole extra frame of latency under every touch. Worth having only now that a
+# frame fits in the budget; before the switches above it would only have burned the CPU twice as often.
+CONFIG_LV_DEF_REFR_PERIOD=16
+
+# Asserts everywhere, in IDF and in LVGL, on a build that has been on real hardware for days. SILENT
+# keeps the abort (a failed invariant still stops) and drops the file/line strings and the formatting.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+
+# The PPA reads and writes through the L2 cache and refuses to build unless LVGL's buffer alignment
+# matches the cache line, because a draw buffer that straddles a line cannot be invalidated without
+# taking a neighbour with it. 64 here, 64 in CONFIG_CACHE_L2_CACHE_LINE_SIZE, and panel_pro.c allocates
+# on the same boundary — see the aligned_alloc there.
+CONFIG_LV_DRAW_BUF_ALIGN=64

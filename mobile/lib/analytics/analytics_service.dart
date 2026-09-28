@@ -169,7 +169,7 @@ class QueuedAnalytics implements Analytics {
       } on Object catch (error) {
         // The client's contract says it never throws; if it ever does, the
         // queue must not be left spinning on the same event forever.
-        _queue.removeFirst();
+        _queue.remove(queued);
         recorder.settled(
           queued.logId,
           AnalyticsEventStatus.dropped,
@@ -179,13 +179,17 @@ class QueuedAnalytics implements Analytics {
         continue;
       }
       switch (result) {
+        // ⚠️ `remove(queued)`, never `removeFirst()`: the send above is
+        // awaited, and a queue that filled up meanwhile has already trimmed
+        // this event off its head (see [_trim]). Removing whatever is first
+        // NOW would drop the next event unsent, and without a row saying so.
         case AnalyticsSendResult.sent:
-          _queue.removeFirst();
+          _queue.remove(queued);
           recorder.settled(queued.logId, AnalyticsEventStatus.sent);
           _retryDelay = AnalyticsLimits.retryDelay;
           _warnedFull = false;
         case AnalyticsSendResult.rejected:
-          _queue.removeFirst();
+          _queue.remove(queued);
           recorder.settled(
             queued.logId,
             AnalyticsEventStatus.refused,

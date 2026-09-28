@@ -111,6 +111,6 @@ direct_dependencies:
 - idf
 - lvgl/lvgl
 - waveshare/esp_lcd_touch_cst9217
-manifest_hash: ca9f548ea419ce355930a24f0f9efc14504d0a0f4ac0669b266c207edb51fde2
+manifest_hash: c5505980965e154c4fb454b57b0844f7af33e68edde118fa25735edf295328f4
 target: esp32s3
 version: 2.0.0

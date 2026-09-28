@@ -302,8 +302,8 @@ export interface LaunchCommandOptions {
  *
  * A leading token that does NOT start with `-` is a SUBCOMMAND (`resume`, `threads continue`) and must
  * be the first argv after the binary, ahead of any other flag — `buildEngineCommandArgv` branches on
- * this. `devin` has no known resume flag at all (not even for `RESUME_ARGS` parsing) and is
- * deliberately omitted, so no resume is ever attempted for it.
+ * this. `devin --resume <id>` is documented since Devin CLI 2026.4.17 (docs.devin.ai/cli, "Essential
+ * commands"); it must run in the session's own folder, or Devin asks which folder to use.
  */
 export const LAUNCH_RESUME_FLAG: Readonly<Partial<Record<AgentEngine, string[]>>> = {
   claude: ['--resume'],
@@ -319,6 +319,7 @@ export const LAUNCH_RESUME_FLAG: Readonly<Partial<Record<AgentEngine, string[]>>
   grok: ['--resume'],
   agy: ['--conversation'],
   copilot: ['--resume'],
+  devin: ['--resume'],
 }
 
 /**

@@ -1,4 +1,6 @@
-import 'dart:io';
+import 'package:flutter/foundation.dart';
+
+import 'runtime_platform.dart';
 
 /// Whether this build is a VIEWER: a window onto the user's machines and nothing more.
 ///
@@ -16,6 +18,7 @@ import 'dart:io';
 /// stance disabled the entire local-CLI subsystem here and every machine degraded to relay-only.
 /// A viewer-on-Windows remains available with `--dart-define=HARNESS_VIEWER_MODE=true`.
 final bool kViewerMode =
+    kIsWeb ||
     const bool.fromEnvironment('HARNESS_VIEWER_MODE') ||
-    Platform.isIOS ||
-    Platform.isAndroid;
+    RuntimePlatform.isIOS ||
+    RuntimePlatform.isAndroid;

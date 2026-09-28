@@ -735,10 +735,11 @@ void main() {
     expect(panel.width, greaterThan(1000));
     expect(find.byType(Dialog), findsNothing);
     expect(resourceSearch(tester).isModelMode, isTrue);
+    // The top-5 catalog model stays visible without pressing "Get models".
     expect(
       resourceSearch(tester).rows
           .any((row) => row.modelId == 'model:local:qwen'),
-      isFalse,
+      isTrue,
     );
     expect(
       resourceSearch(tester).rows

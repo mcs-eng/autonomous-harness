@@ -377,6 +377,13 @@ class _ApiEditorState extends State<_ApiEditor> {
                   ],
                 ),
                 const SizedBox(height: 12),
+                if (controller.app.viewer != null) ...[
+                  Text(
+                    'Saved on ${controller.hostLabel}',
+                    style: AppType.monoMeta(color: AppPalette.textSecondary),
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 if (custom || _advanced) ...[
                   _field(
                     _name,
@@ -388,17 +395,7 @@ class _ApiEditorState extends State<_ApiEditor> {
                     _url,
                     'Base URL',
                     hint: 'https://api.example.com/v1',
-                    validator: (value) {
-                      final url = Uri.tryParse(value?.trim() ?? '');
-                      return url == null ||
-                              !['https', 'http'].contains(url.scheme) ||
-                              url.host.isEmpty ||
-                              url.userInfo.isNotEmpty ||
-                              url.hasQuery ||
-                              url.hasFragment
-                          ? 'Enter an API URL without credentials or query parameters.'
-                          : null;
-                    },
+                    validator: (value) => apiUrlProblem(value ?? ''),
                   ),
                 ],
                 _field(
@@ -463,7 +460,7 @@ class _ApiEditorState extends State<_ApiEditor> {
                   children: [
                     Expanded(
                       child: Text(
-                        'Stored on this computer.',
+                        'Stored on ${controller.hostLabel}.',
                         style: AppType.monoMeta(
                           color: AppPalette.textSecondary,
                         ),

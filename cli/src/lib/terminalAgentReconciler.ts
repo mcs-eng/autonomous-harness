@@ -7,7 +7,7 @@ import {
   type TerminalAgentProbe,
 } from './terminalAgentDiscovery.js'
 import type { TerminalBackend } from './terminalBackend.js'
-import { mergeTerminalRuntimes, processIdentityKey, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
+import { mergeTerminalRuntimes, processIdentityKey, terminalInstanceId, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
 import type { TerminalRuntimeRef } from './terminalTypes.js'
 
 const MISS_LIMIT = 2
@@ -16,7 +16,6 @@ export interface TerminalAgentReconcilerDeps {
   current: () => RegisteredSession[]
   backends: readonly TerminalBackend[]
   backendOrder: readonly string[]
-  herdrSessionOrder: readonly string[]
   onDiscovered: (agent: DiscoveredTerminalAgent) => void | Promise<void>
   onObserved: (agent: DiscoveredTerminalAgent, current: RegisteredSession) => void | Promise<void>
   onDormant: (current: RegisteredSession, reason: string) => void | Promise<void>
@@ -24,8 +23,6 @@ export interface TerminalAgentReconcilerDeps {
   onTerminalAvailability?: (current: RegisteredSession, available: boolean) => void | Promise<void>
   onProbeStatus?: (status: { ready: true; error: string | null }) => void
   transaction?: <T>(apply: () => T | Promise<T>) => Promise<T>
-  /** Refresh configured backend instances before each immutable probe cycle. */
-  beforeProbe?: () => void | Promise<void>
   probe?: (hints: ReadonlyMap<string, AgentEngine>) => Promise<TerminalAgentProbe>
   daemonPid?: number
 }
@@ -217,7 +214,6 @@ export class TerminalAgentReconciler {
   }
 
   private async reconcileOnce(): Promise<void> {
-    await this.deps.beforeProbe?.()
     const hints = new Map(this.hints)
     const trustedGridBaseUrls = new Map<string, string>()
     for (const current of this.deps.current()) {
@@ -231,7 +227,6 @@ export class TerminalAgentReconciler {
       : probeTerminalAgents(
         this.deps.backends,
         this.deps.backendOrder,
-        this.deps.herdrSessionOrder,
         this.deps.daemonPid ?? process.pid,
         hints,
         trustedGridBaseUrls,
@@ -375,7 +370,7 @@ export class TerminalAgentReconciler {
             .filter((target) => target.result.state === 'available')
             .map((target) => target.instanceId))
           const unknownRuntimes = current.runtimes.filter((runtime) => !availableInstances.has(
-            runtime.backend === 'tmux' ? 'tmux:default' : `herdr:${runtime.endpointId}`,
+            terminalInstanceId(runtime),
           ))
           const merged: DiscoveredTerminalAgent = {
             ...observed,

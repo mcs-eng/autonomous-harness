@@ -842,7 +842,9 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                             // Every command wore the same ⌘: a column
                             // of identical marks says nothing. Its
                             // own key, at the right, says something.
-                            row.isCommand || row.pickerQuery != null
+                            row.isCommand ||
+                                    row.isNote ||
+                                    row.pickerQuery != null
                                 ? const SizedBox(width: 2)
                                 : row.isCreate
                                 ? const Icon(
@@ -986,8 +988,12 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                               ? 'No matching projects'
                               : search.isMachineMode
                               ? 'No matching machines'
-                              : search.adding && search.query.isEmpty
+                              : search.adding &&
+                                    search.query.isEmpty &&
+                                    search.capacity <= 0
                               ? 'This tab is full (${AppNotifier.maxPanes} panes). Open a new tab to add more.'
+                              : search.adding && search.query.isEmpty
+                              ? 'No harnesses yet. Start an agent or choose @ machines to connect a machine.'
                               : search.adding
                               ? 'No matching harnesses'
                               : 'No matching results',
@@ -1139,7 +1145,7 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   // The list is what is being read; the preview confirms it.
-                  Expanded(flex: 6, child: results),
+                  Expanded(flex: 5, child: results),
                   if (widget.terminal)
                     VerticalDivider(
                       width: 1,
@@ -1149,7 +1155,7 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                     )
                   else
                     const SizedBox(width: 8),
-                  Expanded(flex: 4, child: preview ?? const SizedBox()),
+                  Expanded(flex: 5, child: preview ?? const SizedBox()),
                 ],
               )
             : preview == null
@@ -1327,11 +1333,17 @@ class _SearchRowContentState extends State<_SearchRowContent> {
       final modelAction = row.isModel
           ? widget.search.modelRowAction(row)
           : null;
+      // A saved API heads its models: a marker says whether they are listed under it, and the end
+      // of its row how many there are. Its models sit one step in, under its name.
+      final apiRow = row.isModel ? widget.search.apiRowState(row) : null;
+      final underApi = row.isModel && widget.search.isApiModelRow(row);
       final style = terminalContentStyle(
-        color:
-            !widget.enabled ||
+        color: row.isNote
+            ? muted
+            : !widget.enabled ||
                 (row.isModel &&
                     !widget.search.isModelDownloadsRow(row) &&
+                    !widget.search.canExpandApi(row) &&
                     !widget.search.canSelectModel(row) &&
                     !widget.search.canGetModel(row))
             ? theme.foreground.withValues(alpha: .28)
@@ -1360,7 +1372,7 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                   '${modelAction == null ? '' : ', $modelAction'}'
                   '${widget.unavailableReason == null ? '' : ', ${widget.unavailableReason}'}'
                   '${row.shortcut == null ? '' : ', Shortcut ${row.shortcut}'}'
-                  '${widget.activityAge == null ? '' : ', Last active ${widget.activityAge} ago'}',
+                  '${widget.activityAge == null ? '' : ', Last used ${widget.activityAge} ago'}',
         excludeSemantics: true,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1375,6 +1387,21 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                   children: [
                     // Match Cmd-N's empty two-cell gutter.
                     SizedBox(width: cell.width * 2),
+                    if (apiRow != null)
+                      SizedBox(
+                        width: cell.width * 2,
+                        child: Text(
+                          apiRow.hint == 'Tools'
+                              ? ''
+                              : apiRow.open
+                              ? '▾'
+                              : '▸',
+                          key: ValueKey('api-row-marker:${row.id}'),
+                          style: style,
+                        ),
+                      )
+                    else if (underApi)
+                      SizedBox(width: cell.width * 4),
                     if (widget.singleLine && snippet != null) ...[
                       // One line per result: the name, then where the words
                       // were said, the way fzf shows the matching line.
@@ -1405,19 +1432,31 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                                 style: style,
                               ),
                       ),
-                    if (modelAction != null) ...[
+                    if (apiRow != null) ...[
                       SizedBox(width: cell.width * 2),
                       Text(
-                        modelAction,
-                        key: ValueKey('model-row-action:${row.id}'),
+                        apiRow.hint,
+                        key: ValueKey('api-row-hint:${row.id}'),
+                        maxLines: 1,
+                        style: terminalContentStyle(color: muted),
+                      ),
+                    ] else if (widget.search.modelRowStatus(row) case final status?) ...[
+                      SizedBox(width: cell.width * 2),
+                      Text(
+                        status,
+                        key: ValueKey('model-row-status:${row.id}'),
                         maxLines: 1,
                         style: terminalContentStyle(
-                          color: modelAction == 'Use'
+                          color: underApi
                               ? theme.foreground
+                              : widget.search.modelRowLive(row) ||
+                                    status == 'Suggested'
+                              ? const Color(0xFF86E6A3)
                               : muted,
                         ),
                       ),
-                    ] else if (widget.unavailableReason case final reason?) ...[
+                    ],
+                    if (widget.unavailableReason case final reason?) ...[
                       SizedBox(width: cell.width * 2),
                       ConstrainedBox(
                         constraints: BoxConstraints(

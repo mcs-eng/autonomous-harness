@@ -99,6 +99,36 @@ describe('SessionSearchIndex', () => {
     expect(await index.tail('unknown')).toBeNull()
   })
 
+  it("dates a conversation Harness did not start by its engine's time when its lines carry none, and indexes a database's under its title", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-search-external-times-'))
+    dirs.push(dir)
+    // Cursor's lines have no time.
+    const cursorFile = join(dir, 'c1.jsonl')
+    writeFileSync(cursorFile, JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: '<user_query>ship the dial</user_query>' }] } }) + '\n'
+      + JSON.stringify({ role: 'assistant', message: { content: [{ type: 'text', text: 'Shipped.' }] } }) + '\n')
+    const events: LiveEvent[] = [
+      { type: 'user_message', payload: { content: 'compare cohorts in the warehouse' } },
+      { type: 'text_delta', payload: { content: 'Day-7 is 35%.' } },
+    ]
+    const store = SessionSearchStore.open(':memory:')!
+    const sources: SearchSource[] = [
+      { agentId: '', sessionId: 'c1', engine: 'cursor', transcriptPath: cursorFile, header: '', changedAt: 1_790_000_000_000, external: { cwd: '/work/dial', origin: 'terminal', title: 'Dial release' } },
+      { agentId: '', sessionId: 'ses_1', engine: 'opencode', transcriptPath: null, header: '', changedAt: 1_790_000_100_000, readHistory: async () => events, external: { cwd: '/work/cohorts', origin: 'terminal', title: '' } },
+    ]
+    const index = new SessionSearchIndex({ store, sources: () => sources, agents: () => [] })
+    cleanups.push(() => { index.stop(); store.close() })
+    index.sweep()
+    await vi.waitFor(() => { expect((index as unknown as { running: boolean }).running).toBe(false) })
+    expect(store.session('c1')).toMatchObject({ lastAt: 1_790_000_000_000, title: 'Dial release', cwd: '/work/dial' })
+    // A database's conversation, titled by its first ask, with its folder and origin.
+    expect(store.session('ses_1')).toMatchObject({ title: 'compare cohorts in the warehouse', cwd: '/work/cohorts', origin: 'terminal', lastAt: 1_790_000_100_000 })
+    expect(index.search('warehouse').hits[0]).toMatchObject({ sessionId: 'ses_1', external: { title: 'compare cohorts in the warehouse' } })
+    // Read again unchanged: its heading is kept.
+    index.sweep()
+    await vi.waitFor(() => { expect((index as unknown as { running: boolean }).running).toBe(false) })
+    expect(store.session('ses_1')?.title).toBe('compare cohorts in the warehouse')
+  })
+
   it("indexes a conversation Harness did not start under its own title, says if it is open, and drops it with its file", async () => {
     const dir = mkdtempSync(join(tmpdir(), 'session-search-external-'))
     dirs.push(dir)

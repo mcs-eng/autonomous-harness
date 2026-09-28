@@ -164,8 +164,7 @@ void main() {
       section('loft', state: 'awake', wakeOutcome: 'nobody_serving'),
     ]);
 
-    const subtitle =
-        'Asleep · starts when you send a message (about 10–30 s) · list from 2 h ago';
+    const subtitle = 'Asleep 2h ago';
     expect(find.text(subtitle), findsOneWidget);
     expect(
       find.byTooltip(

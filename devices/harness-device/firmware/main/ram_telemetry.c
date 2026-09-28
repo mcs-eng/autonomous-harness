@@ -111,11 +111,13 @@ void ram_telemetry_checkpoint(const char *tag)
 {
     lv_mem_monitor_t lv = { 0 };
     bool have_lvgl = s_lvgl_ready;
+#ifndef DEVICE_HABITAT
     if (have_lvgl) {
         display_lock();
         lv_mem_monitor(&lv);
         display_unlock();
     }
+#endif
 
     uint32_t json_fallbacks = __atomic_load_n(&s_json_fallback_count, __ATOMIC_RELAXED);
     uint64_t json_fallback_bytes = __atomic_load_n(&s_json_fallback_bytes, __ATOMIC_RELAXED);

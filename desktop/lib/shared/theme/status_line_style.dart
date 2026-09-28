@@ -324,40 +324,30 @@ StatusLineParts statusLineParts({
   return StatusLineParts(style, parts);
 }
 
+/// The PR stays compact inside the last ribbon segment. Its icon is drawn from
+/// the shared Octicon asset, outside the text formatter.
 StatusLineParts pullRequestStatusLineParts({
   required int number,
   required String state,
   StatusLineStyle style = StatusLineStyle.standard,
-}) {
-  final tone = switch (state) {
-    'Open' => StatusLineTone.green,
-    'Merged' => StatusLineTone.magenta,
-    'Closed' => StatusLineTone.red,
-    _ => StatusLineTone.muted,
-  };
-  if (style.segmented) {
-    return StatusLineParts(style, [
-      StatusLineSegment(
-        '#$number $state',
-        foreground: state == 'Open' || state == 'Draft'
-            ? StatusLineTone.black
-            : StatusLineTone.white,
-        background: tone,
-      ),
-    ]);
-  }
-  return StatusLineParts(style, [
-    StatusLineSegment(
-      '#$number ',
-      foreground: switch (style) {
-        StatusLineStyle.robbyrussell => StatusLineTone.blue,
-        StatusLineStyle.pure => StatusLineTone.muted,
-        _ => tone,
-      },
-    ),
-    StatusLineSegment(state, foreground: tone),
-  ]);
-}
+}) => StatusLineParts(style, [
+  StatusLineSegment(
+    '#$number',
+    foreground: !style.segmented
+        ? StatusLineTone.foreground
+        : state == 'Open' || state == 'Draft'
+        ? StatusLineTone.black
+        : StatusLineTone.white,
+    background: !style.segmented
+        ? null
+        : switch (state) {
+            'Open' => StatusLineTone.green,
+            'Merged' => StatusLineTone.magenta,
+            'Closed' => StatusLineTone.red,
+            _ => StatusLineTone.muted,
+          },
+  ),
+]);
 
 /// Resolved once in Dart so the Flutter preview and native bar use identical
 /// ANSI colors. Backgrounds are static theme styling, not Git clean/dirty state.

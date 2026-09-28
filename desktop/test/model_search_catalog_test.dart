@@ -186,6 +186,7 @@ void main() {
           'Custom API',
           '[ Add ]',
           'ZZZ installed',
+          'AAA catalog',
           '[ Get models ]',
           'Shared Qwen · team.lan',
         ]);
@@ -193,6 +194,7 @@ void main() {
           ModelSearchSection.subscriptions,
           ModelSearchSection.apis,
           ModelSearchSection.apis,
+          ModelSearchSection.local,
           ModelSearchSection.local,
           ModelSearchSection.local,
           ModelSearchSection.shared,
@@ -207,8 +209,8 @@ void main() {
           'Custom API',
           '[ Add ]',
           'ZZZ installed',
-          '[ Hide catalog ]',
           'AAA catalog',
+          '[ Hide catalog ]',
           'Shared Qwen · team.lan',
         ]);
         expect(search.selected!.title, 'AAA catalog');
@@ -218,7 +220,8 @@ void main() {
         );
         search.submit();
         expect(search.modelDownloadsVisible, isFalse);
-        expect(search.rows.any((row) => row.title == 'AAA catalog'), isFalse);
+        // The top-5 catalog model stays visible even after hiding the catalog.
+        expect(search.rows.any((row) => row.title == 'AAA catalog'), isTrue);
         search.setQuery(':Local AI');
         expect(
           search.rows.where((row) => !row.isCreate).map((row) => row.title),

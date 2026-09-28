@@ -38,7 +38,13 @@ void main() {
     };
   }
 
-  late Set<String> core, machineRequests, unwrapped;
+  /// Pair-brain frames the phone sends that a CLI may not list in
+  /// `PAIR_REQUESTS` yet: the individual-art request, which the harnessd side
+  /// adds (daemons/README.md, "Individual art"). Tolerated only while missing
+  /// there; once the CLI lists it, it is checked like any other.
+  const awaitingCli = {'pair_plate_get'};
+
+  late Set<String> core, machineRequests, pairRequests, unwrapped;
   setUpAll(() {
     core = namesIn(
       cli('lib/e2ee/core.ts'),
@@ -46,7 +52,9 @@ void main() {
     );
     final frames = cli('lib/e2ee/applicationFrames.ts');
     machineRequests = namesIn(frames, 'MACHINE_REQUESTS = new Set([');
+    pairRequests = namesIn(frames, 'PAIR_REQUESTS = new Set([');
     unwrapped = {
+      ...pairRequests,
       ...core,
       ...machineRequests,
       ...namesIn(frames, 'FLEET_REQUESTS = new Set(['),
@@ -61,7 +69,18 @@ void main() {
   });
 
   test('nothing is sealed that the machine would not open', () {
-    expect(encryptedDownTypes.difference(unwrapped), isEmpty);
+    expect(
+      encryptedDownTypes.difference(unwrapped).difference(awaitingCli),
+      isEmpty,
+    );
+  });
+
+  test('a pair frame the phone sends is sealed', () {
+    expect(pairRequests, isNotEmpty);
+    for (final type in awaitingCli) {
+      expect(encryptedDownTypes, contains(type));
+      expect(type, startsWith('pair_'));
+    }
   });
 
   test('a machine request the phone sends is sealed', () {

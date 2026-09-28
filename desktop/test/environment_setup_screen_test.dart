@@ -13,6 +13,8 @@ import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/environment_setup_screen.dart';
 
+import 'support/guest_app.dart';
+
 const setupReview = EnvironmentReadiness(
   steps: {
     EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
@@ -54,28 +56,6 @@ class SetupAttempt {
     progress(state);
     result.complete(state);
   }
-}
-
-/// A window that never reaches for a real daemon.
-///
-/// A signed-out DESKTOP window (`viewer == null`) now lands on the guest desk
-/// past the daemon gate instead of stopping at a login wall — see
-/// `_continueAfterEnvironmentReady`. A unit test must not shell out to a real
-/// `harness` daemon to get there.
-class _GuestApp extends AppNotifier {
-  _GuestApp({
-    required super.config,
-    required super.authSession,
-    super.configStore,
-    super.cliLogin,
-    super.environmentProvisioner,
-  });
-
-  @override
-  Future<void> ensureCliDaemonReady() async {}
-
-  @override
-  Future<bool> refreshMachines() async => true;
 }
 
 class SetupProvisioner extends EnvironmentProvisioner {
@@ -123,11 +103,9 @@ Future<void> _mount(
       ),
       home: ListenableBuilder(
         listenable: app,
-        builder: (_, _) => app.status == AppStatus.preparingEnvironment
-            ? EnvironmentSetupScreen(notifier: app)
-            // Setup finishing moves a signed-out desktop straight to the guest
-            // desk (AppStatus.authenticated, isGuest), not a login wall.
-            : const Scaffold(body: Text('Guest desk reached')),
+        builder: (_, _) => app.status == AppStatus.authenticated
+            ? const Scaffold(body: Text('Guest workspace reached'))
+            : EnvironmentSetupScreen(notifier: app),
       ),
     ),
   );
@@ -135,7 +113,7 @@ Future<void> _mount(
 }
 
 AppNotifier _app(SetupProvisioner provisioner) =>
-    _GuestApp(
+    GuestTestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: null,
@@ -441,7 +419,7 @@ void main() {
   }
 
   testWidgets(
-    'Enter installs and retries once before reaching the guest desk',
+    'Enter installs and retries once before reaching the guest workspace',
     (tester) async {
       final provisioner = SetupProvisioner();
       final app = _app(provisioner);
@@ -480,11 +458,7 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      // A signed-out DESKTOP window lands on the guest desk (local mode),
-      // not a login wall.
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
-      expect(find.text('Guest desk reached'), findsOneWidget);
+      expect(find.text('Guest workspace reached'), findsOneWidget);
       expect(provisioner.attempts.map((attempt) => attempt.install), [
         true,
         true,

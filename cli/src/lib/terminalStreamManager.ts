@@ -101,6 +101,8 @@ interface PendingOutput {
 
 interface ActiveStream {
   connId: string
+  /** A local view can share its upstream connection with other independent terminal owners. */
+  ownerId: string
   /** What the client declared on open, or what `describeClient` could tell; absent when neither knew. */
   client?: TerminalClientDescriptor
   streamId: string
@@ -428,11 +430,16 @@ export class TerminalStreamManager {
     // it, and the client asks again, without the key, once a person actually lands there. Absent
     // (every older client) is the takeover it has always been.
     const takeover = payload.takeover !== false
+    // Older clients have one owner per connection. A pooled relay supplies a stable identity
+    // for each attached view; this partitions leases, not authentication or stream access.
+    const viewId = typeof payload.viewId === 'string' && payload.viewId.length > 0 && payload.viewId.length <= 128
+      ? payload.viewId : null
+    const ownerId = JSON.stringify([connId, viewId])
     // The fallback is read as strictly as a claim: a machine name the backend handed out is not
     // this module's to trust with the wire shape either.
     const client = clientDescriptorFrom(payload.client) ?? clientDescriptorFrom(this.deps.describeClient?.(connId))
     await this.withLeaseLock(reservedPlacement, async () => {
-      const incumbents = this.incumbentsFor(session.agentId, reservedPlacement, connId)
+      const incumbents = this.incumbentsFor(session.agentId, reservedPlacement, ownerId)
       // Inside the lock, so the answer cannot go stale against an open racing this one for the
       // same placement.
       //
@@ -449,9 +456,9 @@ export class TerminalStreamManager {
       // receives a targeted close notification; it must not be broadcast to other clients. The
       // notification names the winner when it can (`takenBy`), so the incumbent's banner can too.
       if (!this.deps.readOnly && !watching) {
-        await this.closeStreamsForTakeover(session.agentId, reservedPlacement, connId, client)
+        await this.closeStreamsForTakeover(session.agentId, reservedPlacement, ownerId, client)
       }
-      // Only THIS connection's stream for THIS terminal, not every stream it holds.
+      // Only THIS view's stream for THIS terminal, not every stream the connection holds.
       //
       // It used to be closeConnection(connId), i.e. "opening a terminal ends every other terminal
       // this client had". That was invisible while a client could only ever show one terminal at a
@@ -460,10 +467,10 @@ export class TerminalStreamManager {
       // after handing it its opening keyframe. The pane kept rendering that stale keyframe and
       // looked alive, but its session never reached `controlling`, so every keystroke into it was
       // dropped in silence.
-      await this.closeOwnStreamsFor(connId, session.agentId, reservedPlacement)
+      await this.closeOwnStreamsFor(ownerId, session.agentId, reservedPlacement)
       // A watcher never becomes the controller — that is the whole point of it.
-      if (!this.deps.readOnly && !watching) this.controllerByAgent.set(session.agentId, connId)
-      if (!this.deps.readOnly && !watching) this.controllerByPlacement.set(reservedPlacement, connId)
+      if (!this.deps.readOnly && !watching) this.controllerByAgent.set(session.agentId, ownerId)
+      if (!this.deps.readOnly && !watching) this.controllerByPlacement.set(reservedPlacement, ownerId)
       const streamId = randomUUID()
       const buffered: Buffer[] = []
       let state: ActiveStream | null = null
@@ -479,31 +486,31 @@ export class TerminalStreamManager {
           },
         }, this.deps.readOnly || watching)
       } catch {
-        if (this.controllerByAgent.get(session.agentId) === connId) this.controllerByAgent.delete(session.agentId)
-        if (this.controllerByPlacement.get(reservedPlacement) === connId) this.controllerByPlacement.delete(reservedPlacement)
+        if (this.controllerByAgent.get(session.agentId) === ownerId) this.controllerByAgent.delete(session.agentId)
+        if (this.controllerByPlacement.get(reservedPlacement) === ownerId) this.controllerByPlacement.delete(reservedPlacement)
         this.sendError(connId, 'TERMINAL_OPEN_FAILED', { requestId })
         return
       }
       if (opened.state !== 'succeeded') {
-        if (this.controllerByAgent.get(session.agentId) === connId) this.controllerByAgent.delete(session.agentId)
-        if (this.controllerByPlacement.get(reservedPlacement) === connId) this.controllerByPlacement.delete(reservedPlacement)
+        if (this.controllerByAgent.get(session.agentId) === ownerId) this.controllerByAgent.delete(session.agentId)
+        if (this.controllerByPlacement.get(reservedPlacement) === ownerId) this.controllerByPlacement.delete(reservedPlacement)
         this.sendError(connId, opened.reason, { requestId })
         return
       }
 
       const placementKey = terminalPlacementKey(opened.value.runtime)
       const actualController = this.controllerByPlacement.get(placementKey)
-      if (!this.deps.readOnly && !watching && actualController && actualController !== connId) {
-        if (this.controllerByAgent.get(session.agentId) === connId) this.controllerByAgent.delete(session.agentId)
-        if (this.controllerByPlacement.get(reservedPlacement) === connId) this.controllerByPlacement.delete(reservedPlacement)
+      if (!this.deps.readOnly && !watching && actualController && actualController !== ownerId) {
+        if (this.controllerByAgent.get(session.agentId) === ownerId) this.controllerByAgent.delete(session.agentId)
+        if (this.controllerByPlacement.get(reservedPlacement) === ownerId) this.controllerByPlacement.delete(reservedPlacement)
         await opened.value.close().catch(() => { /* best effort */ })
         this.sendError(connId, 'CONTROL_LEASE_HELD', { requestId })
         return
       }
-      if (reservedPlacement !== placementKey && this.controllerByPlacement.get(reservedPlacement) === connId) {
+      if (reservedPlacement !== placementKey && this.controllerByPlacement.get(reservedPlacement) === ownerId) {
         this.controllerByPlacement.delete(reservedPlacement)
       }
-      if (!this.deps.readOnly && !watching) this.controllerByPlacement.set(placementKey, connId)
+      if (!this.deps.readOnly && !watching) this.controllerByPlacement.set(placementKey, ownerId)
 
       const requestedCompression = Array.isArray(payload.compression) ? payload.compression : []
       // Never compress for the loopback desktop, whatever it asks for: the bytes cross 127.0.0.1,
@@ -515,6 +522,7 @@ export class TerminalStreamManager {
       const wantsZlib = requestedCompression.includes('zlib') && !loopback
       state = {
         connId,
+        ownerId,
         ...(client ? { client } : {}),
         streamId,
         watching,
@@ -826,6 +834,7 @@ export class TerminalStreamManager {
       this.deps.sendTarget(connId, 'terminal_chunked_upload_begin_result', {
         streamId: claimedStreamId,
         accepted: false,
+        code: 'TERMINAL_STREAM_NOT_FOUND',
         reason: 'no live terminal stream for this pane (reopen it and try again)',
       })
       return
@@ -1206,24 +1215,27 @@ export class TerminalStreamManager {
     })
   }
 
-  /// Replace this connection's own stream for the same terminal.
+  /// Replace this view's own stream for the same terminal.
   ///
   /// Reopening is routine — a resync, a relay that came back — and the old stream has to go or the
   /// agent would have two tmux clients on one window. Matched on agent AND placement so a client
-  /// holding several different terminals keeps the ones it did not ask about. No notification: the
-  /// client that asked for this is the one being replaced, and it already knows.
-  private async closeOwnStreamsFor(connId: string, agentId: string, placementKey: string): Promise<void> {
+  /// holding several different terminals keeps the ones it did not ask about. Notify even older
+  /// pooled clients that omit viewId: a different view may still be using the old stream. Omit
+  /// takenBy here, since older clients automatically watch a named taker using the same owner ID.
+  private async closeOwnStreamsFor(ownerId: string, agentId: string, placementKey: string): Promise<void> {
     const own = [...this.streams.values()].filter((state) =>
-      !state.closing && state.connId === connId
+      !state.closing && state.ownerId === ownerId
         && (state.agentId === agentId || state.placementKey === placementKey))
-    await Promise.all(own.map((state) => this.closeStream(state, 'replaced', false)))
+    await Promise.all(own.map((state) => this.closeStream(
+      state, 'terminal reopened in another view', true, 'TERMINAL_TAKEN_OVER',
+    )))
   }
 
-  /// The live streams OTHER connections hold on this terminal — exactly the ones a takeover would
+  /// The live streams OTHER views hold on this terminal — exactly the ones a takeover would
   /// close, which is what makes it the right question for an open that must not take over.
-  private incumbentsFor(agentId: string, placementKey: string, nextConnId: string): ActiveStream[] {
+  private incumbentsFor(agentId: string, placementKey: string, nextOwnerId: string): ActiveStream[] {
     return [...this.streams.values()].filter((state) =>
-      !state.closing && state.connId !== nextConnId
+      !state.closing && state.ownerId !== nextOwnerId
         && (state.agentId === agentId || state.placementKey === placementKey))
   }
 
@@ -1232,17 +1244,17 @@ export class TerminalStreamManager {
    *  "another app", as it always has. */
   private holderOf(incumbents: ActiveStream[], placementKey: string): TerminalClientDescriptor | undefined {
     const controller = this.controllerByPlacement.get(placementKey)
-    return (incumbents.find((state) => state.connId === controller && state.client)
+    return (incumbents.find((state) => state.ownerId === controller && state.client)
       ?? incumbents.find((state) => state.client))?.client
   }
 
   private async closeStreamsForTakeover(
     agentId: string,
     placementKey: string,
-    nextConnId: string,
+    nextOwnerId: string,
     takenBy?: TerminalClientDescriptor,
   ): Promise<void> {
-    const incumbents = this.incumbentsFor(agentId, placementKey, nextConnId)
+    const incumbents = this.incumbentsFor(agentId, placementKey, nextOwnerId)
     await Promise.all(incumbents.map((state) => this.closeStream(
       state,
       'another client connected',
@@ -1279,8 +1291,8 @@ export class TerminalStreamManager {
     state.flushTimer = null
     state.stallTimer = null
     this.streams.delete(state.streamId)
-    if (this.controllerByAgent.get(state.agentId) === state.connId) this.controllerByAgent.delete(state.agentId)
-    if (this.controllerByPlacement.get(state.placementKey) === state.connId) this.controllerByPlacement.delete(state.placementKey)
+    if (this.controllerByAgent.get(state.agentId) === state.ownerId) this.controllerByAgent.delete(state.agentId)
+    if (this.controllerByPlacement.get(state.placementKey) === state.ownerId) this.controllerByPlacement.delete(state.placementKey)
     if (state.outputPaused) await state.handle.resumeOutput().catch(() => { /* best effort */ })
     await state.handle.close().catch(() => { /* best effort */ })
     if (notify) this.deps.sendTarget(state.connId, 'terminal_closed', {

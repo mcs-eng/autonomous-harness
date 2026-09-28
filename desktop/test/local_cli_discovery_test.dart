@@ -1066,6 +1066,7 @@ void main() {
 
       await Future.delayed(const Duration(milliseconds: 300));
 
+      expect(spawnCount, greaterThan(0));
       expect(
         spawnCount,
         greaterThan(0),

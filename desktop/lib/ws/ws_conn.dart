@@ -88,6 +88,8 @@ class WsConn {
   /// Retained only for fixture constructor compatibility. Local transport ignores it.
   final String? localApiKey;
   final String? observerShareId;
+  final bool observerLink;
+  bool get _directObserver => !isLocal && observerShareId != null;
   final int localProtocolVersion;
 
   /// A flat delay between reconnect attempts instead of the exponential backoff (1s→30s). Set for
@@ -129,6 +131,7 @@ class WsConn {
   bool _ready = false;
   int _attempt = 0;
   Timer? _reconnectTimer;
+  Timer? _observerHandshakeTimer;
   String? _tokenUsed;
   bool _forceRelayReconnect = false;
   final _pending = <String, _PendingRpc>{};
@@ -192,6 +195,7 @@ class WsConn {
     this.localTransport,
     this.localApiKey,
     this.observerShareId,
+    this.observerLink = false,
     this.localProtocolVersion = 1,
     this.fixedReconnectDelay,
     this.relayCodecs,
@@ -244,17 +248,27 @@ class WsConn {
     );
     try {
       final token = isLocal ? null : await accessTokenProvider(false, null);
-      if (!isLocal && (token == null || token.isEmpty)) {
+      if (!isLocal &&
+          !(_directObserver && observerLink) &&
+          (token == null || token.isEmpty)) {
         throw StateError('WebSocket credential is missing');
       }
       if (_closing) return;
       _tokenUsed = token;
       final codecs = isLocal ? null : relayCodecs;
+      if (_directObserver && codecs == null) {
+        _refusePeer('Shared harnesses require a verified owner identity.');
+        return;
+      }
       if (codecs != null) {
         final codec = await codecs(machineId);
         if (_closing) return;
         if (codec == null) {
-          _refusePeer('NO_PEER_LINK');
+          _refusePeer(
+            _directObserver
+                ? 'This invitation has no owner identity. Ask the owner to share it again.'
+                : 'NO_PEER_LINK',
+          );
           return;
         }
         _codec = codec;
@@ -272,17 +286,24 @@ class WsConn {
         }
         uri = local;
       } else {
-        final base = Uri.parse('$wsBaseUrl/api/web-ws');
+        final base = Uri.parse(
+          '$wsBaseUrl/api/${_directObserver ? 'observer-ws' : 'web-ws'}',
+        );
         uri = base.replace(
           queryParameters: {
             ...base.queryParameters,
             'autonomousEnv': autonomousEnv,
+            if (_directObserver)
+              (observerLink ? 'link' : 'share'): observerShareId!,
           },
         );
       }
       final socket = isLocal ? _localSocket() : null;
       final channel = !isLocal
-          ? WebSocketChannel.connect(uri, protocols: [token!])
+          ? WebSocketChannel.connect(
+              uri,
+              protocols: token == null || token.isEmpty ? null : [token],
+            )
           : socket != null
           ? await _connectLocalSocket(uri, socket) ??
                 WebSocketChannel.connect(uri)
@@ -292,7 +313,20 @@ class WsConn {
         return;
       }
       _channel = channel;
-      await channel.ready;
+      if (_directObserver) {
+        _observerHandshakeTimer?.cancel();
+        _observerHandshakeTimer = Timer(const Duration(seconds: 15), () {
+          if (!_closing && !_ready && identical(_channel, channel)) {
+            unawaited(channel.sink.close());
+            _onDone(channel);
+          }
+        });
+      }
+      if (_directObserver) {
+        await channel.ready.timeout(const Duration(seconds: 15));
+      } else {
+        await channel.ready;
+      }
       if (_closing || !identical(_channel, channel)) {
         await channel.sink.close();
         return;
@@ -304,16 +338,19 @@ class WsConn {
       );
       final forceRelayReconnect = _forceRelayReconnect;
       _forceRelayReconnect = false;
-      await sendFrame({
-        'type': 'machine_select',
-        'payload': {
-          'machineId': machineId,
-          if (observerShareId != null) 'shareId': observerShareId,
-          if (isLocal) 'localProtocolVersion': localProtocolVersion,
-          if (isLocal && forceRelayReconnect) 'forceReconnect': true,
-        },
-      });
+      if (!_directObserver) {
+        await sendFrame({
+          'type': 'machine_select',
+          'payload': {
+            'machineId': machineId,
+            if (observerShareId != null) 'shareId': observerShareId,
+            if (isLocal) 'localProtocolVersion': localProtocolVersion,
+            if (isLocal && forceRelayReconnect) 'forceReconnect': true,
+          },
+        });
+      }
     } catch (_) {
+      _observerHandshakeTimer?.cancel();
       if (!_closing) _scheduleReconnect();
     } finally {
       _connecting = false;
@@ -375,6 +412,7 @@ class WsConn {
   }
 
   void _markReady() {
+    _observerHandshakeTimer?.cancel();
     _ready = true;
     _attempt = 0;
     onStatus(ConnectionStatus.connected);
@@ -389,9 +427,32 @@ class WsConn {
     RelayCodec codec,
     Map<String, dynamic> message,
   ) async {
+    if (_closing || !identical(_codec, codec)) return;
     final payload = (message['payload'] as Map<String, dynamic>?) ?? {};
     switch (message['type']) {
+      case 'observer_connected':
+        if (_directObserver) _channel?.sink.add(jsonEncode(codec.helloFrame()));
+        return;
+      case 'observer_welcome':
+        if (!_directObserver) return;
+        final verified = await codec.handleWelcome(payload);
+        if (_closing || !identical(_codec, codec)) return;
+        if (verified) {
+          _markReady();
+        } else {
+          _refusePeer('The shared harness identity could not be verified.');
+        }
+        return;
+      case 'observer_closed':
+        if (!_directObserver) return;
+        if (payload['retry'] == true) {
+          unawaited(_channel?.sink.close());
+        } else {
+          _refusePeer(payload['reason'] as String? ?? 'Sharing ended.');
+        }
+        return;
       case 'connected':
+        if (_directObserver) return;
         // The socket's first `connected` answers the socket itself (it names the user, not a
         // machine); only the select's own ack starts the handshake.
         if (payload['machineId'] == machineId) {
@@ -402,7 +463,10 @@ class WsConn {
         }
         return;
       case 'e2e_welcome':
-        if (await codec.handleWelcome(payload)) {
+        if (_directObserver) return;
+        final verified = await codec.handleWelcome(payload);
+        if (_closing || !identical(_codec, codec)) return;
+        if (verified) {
           _markReady();
           _plugin?.onSessionReady();
         } else {
@@ -417,7 +481,17 @@ class WsConn {
         return;
     }
     final clear = codec.decodeFrame(message);
-    if (clear == null) return;
+    if (clear == null) {
+      if (_directObserver && message['type'] == 'observer_frame') {
+        _refusePeer('Shared harness verification failed.');
+      }
+      return;
+    }
+    if (_directObserver && clear['type'] == 'observer_binary') {
+      final bytes = (clear['payload'] as Map?)?['bytes'];
+      if (bytes is String) await onBinaryFrame?.call(base64Decode(bytes));
+      return;
+    }
     final plain = <String, dynamic>{
       ...clear,
       'payload': (clear['payload'] as Map<String, dynamic>?) ?? {},
@@ -445,6 +519,8 @@ class WsConn {
   void _refusePeer(String reason) {
     _closing = true;
     _ready = false;
+    _observerHandshakeTimer?.cancel();
+    _rejectPending(reason);
     _disposePlugin();
     // needsLink first: AppNotifier's onStatus handler reads machine.needsLink to decide whether a
     // disconnect should be treated as the node going offline — it has to see it flipped before
@@ -510,11 +586,26 @@ class WsConn {
     'terminal_sync',
     'dial_scroll',
     'dial_focus',
+    'dial_selection',
+    'app_selection_result',
+    'dial_visit',
+    'app_visit_result',
+    'dial_form',
+    'app_form_result',
     'ping',
     'pong',
   };
 
-  static bool _worthLogging(String type) => !_unlogged.contains(type);
+  static bool _worthLogging(String type) =>
+      !_unlogged.contains(type) &&
+      !type.startsWith('phone_pair') &&
+      !type.startsWith('viewer_surface') &&
+      !type.startsWith('api_connections') &&
+      !type.startsWith('orchestrator') &&
+      !type.startsWith('command_bar') &&
+      !type.startsWith('route_') &&
+      !type.startsWith('harness_share_') &&
+      !type.startsWith('observer_');
 
   Future<Map<String, dynamic>> request(
     String type, {
@@ -737,6 +828,7 @@ class WsConn {
 
   void _onDone(WebSocketChannel channel) {
     if (!identical(_channel, channel)) return;
+    _observerHandshakeTimer?.cancel();
     _channel = null;
     _sub = null;
     _codec = null;
@@ -778,6 +870,10 @@ class WsConn {
     if (code == 4403) {
       _closing = true;
       onStatus(ConnectionStatus.disconnected);
+      if (_directObserver) {
+        onLocalFailure?.call(4403, 'Sharing ended or invitation expired.');
+        return;
+      }
       onAuthFailure('SSO environment does not match this backend');
       return;
     }
@@ -822,6 +918,7 @@ class WsConn {
 
   Future<void> close() async {
     _closing = true;
+    _observerHandshakeTimer?.cancel();
     _ready = false;
     _codec = null;
     _disposePlugin();
@@ -854,6 +951,7 @@ class WsConn {
     // A viewer's relay connection holds that session itself, so for it this is simply a fresh dial
     // — and with it a fresh session.
     if (_closing || (!isLocal && relayCodecs == null)) return;
+    _observerHandshakeTimer?.cancel();
     _forceRelayReconnect = true;
     _reconnectTimer?.cancel();
     _ready = false;

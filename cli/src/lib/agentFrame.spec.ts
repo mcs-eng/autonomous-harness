@@ -109,6 +109,19 @@ describe('agentFrame', () => {
     expect(frame).not.toHaveProperty('agent')
   })
 
+  // The global "last used" order. Null — never an absent key — until an app opens the agent: a push
+  // without the key would erase an open an earlier frame reported, and a client reads "absent" as a
+  // daemon too old to keep the stamp.
+  it('always carries lastOpenedAt: null until an app opens the agent, then the stamp', async () => {
+    const context = { selectedModel: null, terminalAvailable: true }
+    expect(await agentFrame(session(null), context)).toHaveProperty('lastOpenedAt', null)
+    const opened = { ...session(null), lastOpenedAt: Date.UTC(2026, 8, 26, 9, 30) }
+    const frame = await agentFrame(opened, context)
+    expect(frame.lastOpenedAt).toBe('2026-09-26T09:30:00.000Z')
+    // Its own field: opening an agent is not activity, and activity is not an open.
+    expect(frame.updatedAt).toBe(new Date(1).toISOString())
+  })
+
   it('reports launch state and defaults legacy agents to ready', async () => {
     const legacy = session(null)
     expect(await agentFrame(legacy, { selectedModel: null, terminalAvailable: true }))

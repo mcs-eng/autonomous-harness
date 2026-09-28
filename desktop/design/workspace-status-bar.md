@@ -1,11 +1,18 @@
 # Workspace status bar
 
-One shared status line, using compact monospace text and measured character cells.
+A navigation row above the panes and a 37.5 pt status row below them, using compact
+monospace text and measured character cells.
 Follow the [terminal workspace design system](terminal-workspace.md).
 
 ```text
-1:api  2:web  3:blender  +          M2  autonomous-harness  (main)
+1:api ?  2:web ⠹  3:blender ✓  +                   Search  Bell  (✿ Harness Store)
+
+                                 panes
+
+M2 > openharness > branch-name > #439                          GPT-6 Astra · Max
 ```
+
+![Top navigation and bottom context, rendered with synthetic data](images/workspace-bottom-bar.png)
 
 ## Tabs on the left
 
@@ -24,8 +31,12 @@ is code, and uses machine names for the same project on different computers.
 Tabs with identical contents can still share a name; their numbers distinguish
 them. Preserve the full name for inspection when its visible label is truncated.
 
-Center the text with one cell of padding on each side. Cap long labels at 24
-cells and scroll overflow, revealing the selected tab on keyboard navigation.
+Center the text with one cell of padding on each side. Size each tab to its label
+and activity mark, capped at 24 cells. Keep the remaining space after `+` empty
+for dragging the window; adding tabs fills that space one by one. Tabs never
+stretch to fill the row. Scroll overflow when needed, revealing the selected
+tab on keyboard navigation. An exceptionally narrow viewport may show a smaller
+tab, preserving activity marks before truncating names.
 There is no close button or reserved close-button space. Cmd-W closes the active
 tab; preserve remapped shortcuts, native menu access, and middle-click closing.
 Preserve reorder, rename, keyboard focus, and terminal sessions. Cmd-T opens a
@@ -54,6 +65,60 @@ The new-tab `+` uses a plain-text control: no resting
 box, with bold text on hover or keyboard
 focus. Keep its New Tab tooltip and shortcut hint.
 
+### Harness activity
+
+Use hn's activity states in two existing places: after the tab name
+(`2:web ⠹`), and after the title in a pane header (`[engine] Session name ⠹`).
+Idle has no visible mark. Viewer headers show their owner's state. Shells, unknown agents, and
+utility tabs have no harness activity mark. Keep the existing engine icon.
+The mark replaces the native tab's old orange attention indicator; it adds no
+new bar, counter, badge, or permanent legend. Hover and accessibility descriptions
+explain each symbol.
+
+![Activity marks in existing tabs and pane headers, rendered with synthetic state at 640 px](images/workspace-activity.png)
+
+| Mark | Meaning | Terminal color |
+| --- | --- | --- |
+| `?` | Needs your input | Yellow |
+| `✗` | Last turn or launch failed | Red |
+| `✓` | Finished and unread | Green |
+| `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` | Working, one frame per 100 ms | Cyan |
+| `◌` | Starting | Yellow |
+| None | Idle | — |
+| `\|\|` | Paused | Muted foreground |
+| `⊘` | Offline | Muted foreground |
+
+A tab shows its most urgent member in the order above, counting a harness and
+its viewers once. For an individual harness, offline/paused/launch state takes
+precedence; a current question takes precedence over working. A new turn masks
+old results. Seeing a completion clears its unread check, but viewing a failed
+turn does not clear the failure. A pane hidden by zoom or an inactive/utility
+tab is not seen. Existing unread storage remains an in-memory, bounded list;
+these marks are not a durable event history.
+
+Reserve one measured cell for the mark and one for the gap, including when idle
+is blank, so state changes never move the names or adjacent tabs. Paused uses
+two ASCII pipes at 65% font size with quarter-cell negative letter spacing:
+short, thin strokes centered in the same cell. Keep native and Flutter metrics
+in sync. The question mark stays plain yellow. Animate only the
+mark, never the label, width, terminal, or method-channel payload. Long tabs
+shorten their names and scroll; preserve room for the number and mark. SF Mono
+does not contain Braille, so Flutter explicitly falls back to the platform's
+symbol font inside that fixed cell. Native text uses CoreText fallback.
+
+Flutter shares one clock; AppKit has one local clock. Both derive the same frame
+from Unix time. No visible working mark means no timer. Hidden panes and
+offscreen tabs do not animate; background/inactive apps and Reduce Motion stop
+the clock. Reduce Motion keeps the first Braille frame with its Working label.
+Colors follow the terminal palette and the Color preference.
+
+State rules live in `lib/state/harness_activity.dart`, with the Flutter mark in
+`lib/widgets/harness_activity_mark.dart`. `harness_activity_test.dart`,
+`workspace_activity_test.dart`, and the native titlebar checks cover state,
+acknowledgement, fixed geometry, visibility, and animation. Set
+`HARNESS_ACTIVITY_CAPTURE_DIR` when running the workspace activity test to
+capture synthetic Flutter screenshots and the native tab payload.
+
 Tab labels, status text, pane titles, and model selectors use **13 pt SF Mono,
 regular weight at rest** on macOS. Linux uses its platform monospace stack at the same
 size. Use `workspaceBarTextStyle()` and `workspaceBarCellSizeOf(context)` from
@@ -67,8 +132,8 @@ and size.
 
 ## Pane controls
 
-The shared bar shows the focused harness's model selector before machine and
-project. Pane headers keep the harness title and a hover-only ASCII `x` at their
+The bottom bar shows the focused harness's model selector at the right, with
+machine, project, branch and PR at the left. Pane headers keep the harness title and a hover-only ASCII `x` at their
 far right. The `x` closes that pane view, keeps its harness running, and uses the
 shared bold hover treatment. Its tooltip names Close Pane and the current shortcut.
 Reserve its width so revealing it does not move the title.
@@ -77,6 +142,10 @@ For the model label, prefer
 its local model ID or the daemon's observed subscription model (`selectedModel`),
 such as `GPT-6 Astra`, `Fable`, or `Opus`. Keep versions when reported; never infer
 a version from a family alias. Older daemons fall back to the provider name.
+Append the reported effort in the same control, for example `GPT-6 Astra · Max`.
+Model and effort come from the same validated runtime profile and follow pane
+focus together. Missing effort stays absent; never infer it from a model or
+carry subscription effort onto a local model. Effort-only updates repaint too.
 Keep this label visible without requiring hover, including while disconnected;
 disable switching when the pane is read-only. Use a hand cursor, bold text on hover
 and keyboard focus, and a tooltip explaining subscription/local switching.
@@ -95,14 +164,82 @@ Pane edges have no floating split buttons. Split Right and Split Down remain
 keyboard commands (Cmd-R and Cmd-D by default), with File menu and command-search
 access. Keep the resize gaps available for resizing.
 
-Restart Harness and Share Harness belong in File. Fork remains available in
+Settings → Experimental → Share button is off by default on desktop and web.
+The choice persists locally and updates the bar immediately; when off, no button
+or space is reserved. [Settings reference](images/share-experimental.png).
+When enabled, Share sits in the bottom bar before the model selector, with a
+flat accent fill, white text, and the same fixed font and control height as the
+other bar actions. Reserve its width before allocating context. Web keeps
+Download app as a secondary text action in the same footer.
+Clicking Share or pressing Cmd-Shift-S (Alt-Shift-S on web) opens the existing
+public/private link dialog for the focused agent. The tooltip and accessibility
+label name that agent; the shortcut hint follows remaps. A dependent viewer
+shares its owner. Empty tabs and view-only shared agents keep a disabled button.
+Opening Share alone does not create a link or change access. Native macOS and
+Flutter use the same command, labels, resolved colors, and availability.
+
+![The Share action at the right edge, rendered with synthetic data](images/workspace-share-button.png)
+
+Restart Harness and Share Harness also belong in File. Fork remains available in
 command search. Viewer and message-composer toggles belong in View and command
 search. These actions apply to the focused pane; sharing and viewer visibility
 follow a dependent viewer's owner.
 
-## Focused context on the right
+## Notifications
 
-Show the focused model, then `machine  project`, then `(branch)` when known.
+A small bell sits in the top row between the search icon and the Harness Store button. Reserve four bar cells on both native macOS and Flutter; counts
+never move the other controls. Put the count at the bell's upper-right corner,
+hide it at zero, show `99+` above 99, and keep the exact count in accessibility text.
+The bell has no background or button well, including on hover and keyboard
+focus; emphasize the glyph itself.
+
+Clicking the bell opens a flat, terminal-themed list below the right edge of the
+toolbar. The first line is the session name with a status glyph on the right:
+yellow `?` for needs input, red `✗` for failed, or green `✓` for finished.
+The second line shows `machine  repo  branch`, aligned with the name, using the
+same project and branch context as the workspace. Omit missing fields.
+Keep full status descriptions in tooltips and accessibility text.
+The list starts newest first, keeps rows still while open, and appends arrivals. Up/Down selects,
+Enter opens, and Escape or an outside click closes. There is no automatic tour
+or advance to another session.
+
+Opening the list does not acknowledge anything. Opening a result reuses its
+existing pane when possible and acknowledges it after successful navigation.
+Questions remain until answered. Unavailable sessions keep their place with an
+`⊘` glyph and the reason in its tooltip and accessibility text; starting or
+failed launches use their existing `◌` or `✗` marks.
+The existing Needs input shortcut stays available.
+
+This reuses the in-memory unread marks, one per harness, and live questions from
+known harnesses. It is not a durable event history. Desktop retains up to 256
+unread harnesses; the dial still receives its newest eight.
+
+Notification eligibility belongs to the daemon's shared `AgentNotifications`
+policy, fed by `CommanderMirror` and `QuestionWatcher`. Desktop consumes the
+notification attached to `turn_summary`; raw turn endings, errors, tools and
+commentary do not create inbox entries. The same decision controls whether the
+device's recap rings or updates silently. Questions stay until the matching
+request is answered. Replays, cancelled turns, subagents, empty results and
+duplicate completions stay silent. Without a device, the daemon derives the
+result locally and does not start a paid summary call. Existing device live
+cards and streaming are unchanged. Completion alerts require the updated daemon;
+older daemons still supply questions but lack the verified completion marker.
+
+![Notification list rendered with synthetic data](images/workspace-notifications.png)
+
+## Focused context in the bottom bar
+
+Center the 28 pt controls within the full space from the pane's bottom edge to
+the window bottom. The former 9.5 pt pane gutter is part of the status row,
+rather than extra padding only above it. Native and Flutter reserve 37.5 pt and
+keep the same pane height, with equal space above and below the footer content.
+
+Show `machine  project`, then `(branch)` and PR when known at the left. Put the
+focused model at the far right. The status row has one-cell outer gutters and no background fill or divider;
+its controls sit directly on the workspace surface. Both sides follow
+the focused pane; changing placement preserves each field's existing action.
+The optional companion and Share control sit before the model. At narrow widths,
+truncate labels inside their allocated space rather than overlap controls.
 The model is a separate plain text control so switching themes preserves its
 click target. A focus change closes its picker; stale native actions and delayed
 model selections cannot retarget a different harness.
@@ -121,20 +258,57 @@ empty tab.
 Each field is independently clickable, with the same bold hover/keyboard-focus
 text and hand cursor as the status symbols. Machine opens the shared picker scoped by machine
 identity; project opens its harnesses across matching remote checkouts; branch
-opens that project filtered by its exact branch. Escape returns
-from branch to project, then to project search. Names never establish identity.
-Branch navigation does not check out or create a branch.
+opens the focused session's branches and PRs when the daemon supplies `gitContext`.
+When recent successful work identifies one Git branch, show its name followed
+by the count of other checked-out branches, for example `ship-hn +3`. The
+tooltip explains that this is recent confirmed work and gives its observation
+time. Git remains the source of branch names for every engine. When several
+branches have equal recent evidence, show the count instead of selecting one.
+
+Details use two plain tabs: **Pull requests** and **Branches**. The heading is
+the session name and shared repository; do not append “Work” or “Recent work.”
+Pull requests is the default, with one row per PR regardless of branch reuse.
+Put the title on the left and the state on the right. Below it, show the PR number,
+head/base branches and GitHub date. Use terminal green for Open, magenta for
+Merged, red for Closed and muted text for Draft/Unknown. State text remains
+readable without relying on color. Keep selection to the title line.
+
+Open/draft PRs come first; merged and closed PRs stay visible in the same list.
+Order them by actual GitHub update/merge/close time, never lookup time. The
+Branches tab contains the branch inventory, with checked-out branches labeled.
+Both lists retain their scroll positions. Left/Right on the tab controls switches
+views. Narrow windows use the shorter “PRs” tab label and wrap the tabs without
+shrinking text. Size the dialog to its contents with bounded scrolling. Escape
+returns focus to the terminal.
+Older daemons keep exact-branch project search, with Escape returning through its
+scopes. Names never establish identity. Branch navigation does not check out or
+create a branch. Unknown/multiple/unavailable work uses plain muted context text,
+without a Git branch symbol when no single branch is displayed; the same action
+remains inspectable.
+
+![Pull requests with synthetic data](images/session-pull-requests.png)
+
+![Branches in a separate tab](images/session-branches.png)
+
+![Merged PRs remain visible](images/session-branches-completed.png)
+
+Render these fixtures with `HARNESS_GIT_CONTEXT_CAPTURE_DIR=/tmp/work-dialog
+flutter test test/session_work_dialog_test.dart`. Local macOS captures load the
+system SF Mono face at 18 pt; the dialog itself follows the selected terminal
+font, size and palette. The same suite checks narrow windows, enlarged text,
+alternate palettes, and retained keyboard focus when appearance changes.
 
 Customize Harness → Status offers twelve saved themes, grouped into Minimal
 and Powerline, with a preview of the same sample pane beneath each choice.
 Selection covers only the name row. Tab and Shift-Tab move between choices;
 Enter or Space selects, scrolls the choice into view, and saves it. The selected
-theme also previews PR status. Previews inherit the terminal font and cell size;
-the workspace bar uses the fixed 13 pt bar font. Controls keep the plain terminal design.
+theme also previews PR status. The individual examples inherit the terminal font
+and cell size; the combined bar preview uses the actual fixed 13 pt workspace
+font. Controls keep the plain terminal design.
 
 | Theme | Treatment |
 | --- | --- |
-| Plain (default) | Monochrome `machine  project  (branch)`, including the PR |
+| Plain (default) | Monochrome `machine  project  (branch)` with a colored PR state icon |
 | Robbyrussell | Green arrow, cyan project, blue `git:(` with red branch |
 | Pure | Blue project, muted machine/branch, magenta prompt mark |
 | Powerlevel10k Lean | Unboxed yellow machine, blue project, green branch symbol and ASCII `>` |
@@ -173,16 +347,28 @@ ink from the named palette (or black/white where necessary) so small text on
 these filled segments has at least 4.5:1 contrast. Preserve the terminal font,
 the existing bold-only hover cue, and stable field widths.
 
-The rightmost PR label belongs to the focused harness, including when its viewer
-has focus. Display `#298 Merged` (or Draft/Open/Closed), with a separate link
-to that PR. Plain themes leave one text cell before the label. Segmented themes
-connect it directly to the preceding arrow, making one continuous bar while
-retaining the PR click target. The selected-theme preview
-shows that same joined line. State colors come from the selected status palette:
-muted for Draft, green for Open, magenta for Merged, and red for Closed. Turning
-Color off applies a monochrome treatment to context and PR together. Plain always
-uses the terminal foreground even when Color is enabled. Existing `standard`
+The rightmost PR link belongs to the focused harness, including when its viewer
+has focus. Display the original GitHub Octicon and `#298`: green pull request
+for Open, purple merge for Merged, red closed pull request for Closed, and gray
+draft pull request for Draft. Use the shared SVG assets in `assets/octicons`,
+with light/dark state colors resolved in Dart for both Flutter and AppKit.
+In Plain and shell layouts, the number stays in ordinary foreground, with one
+cell before the compact link. In Powerline layouts, the PR continues the branch
+ribbon without a gap: its state color fills the final block, and the icon and
+number use contrasting ink. Keep the outer cap and internal joins consistent
+with the selected preset. The full state and link action remain available on
+hover and through accessibility. The selected-theme preview shows the same control.
+Color off makes both context and PR monochrome; the four shapes remain distinct.
+Existing `standard`
 settings resolve to Plain; existing `powerlevel10k` settings resolve to Lean.
+
+Tabs take the available space after a compact context budget, instead of being
+limited to 45% of the bar. Context reserves its measured width up to 40% of the
+remaining space or 52 cells; unused tab space returns to context. With the
+companion enabled, keep room for its message line. Shorten long branch names
+in the middle before squeezing machine/project, retaining the full name in
+the tooltip and navigation action. Tab labels measure the name, status gap,
+and status cell separately so short names never acquire a false ellipsis.
 
 References: [Oh My Zsh themes](https://github.com/ohmyzsh/ohmyzsh/wiki/Themes),
 [Pure](https://github.com/sindresorhus/pure),
@@ -211,10 +397,13 @@ References: [Zsh prompt parameters](https://zsh.sourceforge.io/Doc/Release/Param
 [Powerlevel10k](https://github.com/romkatv/powerlevel10k).
 
 Pane headers keep task identity and the hover-only close action. The top bar
-contains tabs, New Tab, and focused model/machine/project/branch/PR context.
-Do not add a standalone Search label or category icons at the right edge.
-Context links open the corresponding scope in the unified picker. Global
-search remains available through Cmd-P and the app menu.
+contains tabs, New Tab, a plain search icon, the bell, and the Harness Store button.
+Search opens the existing unified picker; Store opens the existing Store tab.
+The Store restores its earlier rounded pill, colorful polymath mark, and quiet
+tinted fill. Its label is `Harness Store`, without brackets. Keep the full name
+in accessibility and truncate the visible text at narrow widths.
+Both retain their keyboard commands and resolved shortcut hints. Context links
+in the bottom row open the corresponding scope in the unified picker.
 
 The picker's empty preview contains clickable `@ machines`, `# projects`,
 `: models`, `* store`, and `> commands` hints. Each inserts its editable prefix
@@ -223,12 +412,39 @@ including API forms, stays inside the right pane. Store results open their
 Store page. Cmd-O, Cmd-M, Cmd-I, and Cmd-Shift-P remain shortcuts into the same
 picker; focused context links keep their scope.
 
-Leave a window drag area between tabs and context and prevent overlap in
+Leave a window drag area between tabs and the top actions and prevent overlap in
 narrow windows. Native menus and commands remain available.
 
+Only while daemons are on (the account's `GET /api/zoo` answered 200, or a
+person enabled Settings → Experimental → Focus-bar creature), the daemon sits
+in the footer before the optional Share control and focused model. Off, or before that is known, nothing is
+reserved for it and the bar is exactly the one described above; when it turns
+on, the slot waits for a quiet moment (no button held, the pointer off the
+footer) so controls never move under a click. On:
+the paired daemon's sprite, or the nest while the first egg incubates
+(`\_(  )_/` `\_(/\)_/` `\_(*')_/` `\_(oo)_/`). Its one-cell inner gutters provide separation from neighboring controls. Use the same 13 pt workspace font as
+the status line with ligatures off, and reserve eight character cells plus
+one-cell gutters, the sprite centred on its version's base sprite, so moods,
+work frames and a nap's `z` never move nearby text. It draws in the status
+line's own text colour, never its daemon colour (those fail contrast on a
+status bar). A shiny daemon's `*` sits in the left gutter. Show only the egg
+or creature in this fixed slot: no completed-turn count, egg count, or label
+beside it. Additional eggs, progress, and activity details belong in the panel.
+The slot keeps the same width while work finishes, eggs arrive, and the pointer
+enters or leaves, so neither the creature nor its neighbors move.
+Its name and progress belong in the tooltip and panel, never beside the
+sprite. Clicking a ready egg hatches it; otherwise a click boops the daemon and
+opens its panel. When something needs you or failed, its one line replaces the
+left context and PR in the terminal's yellow for 5.2 s, like tmux's message
+line. The model stays available; a reply to a click is dim. Mood and frame updates repaint only the slot.
+The contract is [daemons/README.md](../../daemons/README.md); the desktop's
+choices are in [Daemons on the desktop](daemons.md).
+
 Data rules live in `lib/state/workspace_status.dart`; prompt formatting lives in
-`lib/shared/theme/status_line_style.dart`. Flutter draws the fallback bar in
-`SwarmScreen`; macOS draws `SwarmTabStrip` in `macos/Runner/SwarmTitlebar.swift`.
+`lib/shared/theme/status_line_style.dart`. Flutter draws both rows in `SwarmScreen`. On macOS, `SwarmTabStrip` keeps native
+tabs/actions in the titlebar and its native footer attaches to the content
+bottom; Flutter reserves matching footer height. See
+`macos/Runner/SwarmTitlebar.swift`.
 Both use the same names, formatted context, resolved text/color segments, and
 preferences. `WorkspacePullRequest` owns focused PR state; the native and Flutter
 bars receive the same validated label and URL. Checks live in

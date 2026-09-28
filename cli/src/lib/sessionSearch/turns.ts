@@ -72,6 +72,19 @@ const PASTE_TAGS = /<\/?(?:pasted_content|agent-message)\b[^>]*>/g
 const AGENT_NOTES = /^Another \w+ session sent a message:[^\S\n]*|That "other \w+ session" is an agent working inside this same session[\s\S]*?permission laundering\.?/gm
 
 /**
+ * What the person typed, when the Codex app or an editor sent it with context in front: the files
+ * they attached (`# Files mentioned by the user:`), the page open in the app's browser (`# In app
+ * browser:`), the editor's open tabs (`# Context from my IDE setup:`). Each block ends at a
+ * `## My request:` heading (`## My request for Codex:` in older versions), and what follows is the
+ * request. The blocks were not said, so they are not the ask; a message can carry more than one.
+ */
+const CODEX_CONTEXT = /^# (?:Files mentioned by the user|In app browser|Context from my IDE setup):[\s\S]*?^#{1,2} My request(?: for Codex)?:[^\S\n]*\n?/gm
+
+export function personAsk(text: string): string {
+  return text.replace(CODEX_CONTEXT, '')
+}
+
+/**
  * Text as it is stored and searched: wrappers out, secrets blanked, bounded. Line breaks and each
  * line's indentation stay, so a preview can show it as it was written; any other run of spaces is
  * one space, and blank lines are at most one.
@@ -238,7 +251,7 @@ export class TurnCollector {
     this.draft = {
       opener: ask,
       turn: this.nextTurn++, offset, at,
-      ask: kind === 'person' ? searchableText(ask, ASK_MAX) : '',
+      ask: kind === 'person' ? searchableText(personAsk(ask), ASK_MAX) : '',
       answer: kind === 'agent' ? [ask] : [],
       answerLength: kind === 'agent' ? ask.length : 0,
       tools: [], toolsLength: 0,

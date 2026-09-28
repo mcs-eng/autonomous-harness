@@ -46,6 +46,7 @@ Agent _agent(String id, String name, Duration ago) => Agent(
   engine: 'claude',
   terminalAvailable: true,
   lastActivityAt: _now.subtract(ago),
+  lastOpenedAt: _now.subtract(ago),
 );
 
 /// A machine with three harnesses and, on its disk, three conversations
@@ -76,6 +77,136 @@ Agent _agent(String id, String name, Duration ago) => Agent(
 }
 
 void main() {
+  test(
+    'discovered sessions never opened by the user stay out of recents',
+    () async {
+      final (:sessions, connection: _) = _setup();
+      sessions.app.machineStates['m']!.agents.addAll([
+        Agent(
+          id: 'probe',
+          name: 'Temporary engine test',
+          engine: 'grok',
+          terminalAvailable: true,
+          lastActivityAt: _now,
+        ),
+        Agent(
+          id: 'helper',
+          name: 'Background helper',
+          engine: 'codex',
+          terminalAvailable: true,
+          lastActivityAt: _now,
+        ),
+      ]);
+
+      await sessions.load();
+
+      expect(
+        sessions.rows.map((row) => row.external?.sessionId ?? row.agentId),
+        ['a1', 'e-nfc', 'a2', 'e-old'],
+      );
+    },
+  );
+
+  test(
+    'a background conversation update does not count as a recent visit',
+    () async {
+      final (:sessions, connection: _) = _setup();
+      sessions.app.machineStates['m']!.agents = [
+        Agent(
+          id: 'old',
+          name: 'Last visited four days ago',
+          engine: 'codex',
+          terminalAvailable: true,
+          lastOpenedAt: _now.subtract(const Duration(days: 4)),
+          lastActivityAt: _now,
+        ),
+        _agent(
+          'recent',
+          'Last visited five minutes ago',
+          const Duration(minutes: 5),
+        ),
+      ];
+
+      await sessions.load();
+
+      expect(
+        sessions.rows.map((row) => row.external?.sessionId ?? row.agentId),
+        ['recent', 'e-nfc', 'old', 'e-old'],
+      );
+    },
+  );
+
+  test('discovery alone does not block visit history arriving later', () async {
+    final connection = SearchConnection({'': []});
+    final app = createApp(
+      connected: true,
+      connectionForTest: (_) => connection,
+    );
+    addTearDown(app.dispose);
+    final machine = app.machineStates['m']!;
+    machine.agents = [
+      Agent(
+        id: 'probe',
+        name: 'Unopened probe',
+        terminalAvailable: true,
+        lastActivityAt: _now,
+      ),
+    ];
+    final sessions = WelcomeSessions(app, now: () => _now);
+    addTearDown(sessions.dispose);
+    await sessions.load();
+    expect(sessions.rows, isEmpty);
+
+    machine.agents = [
+      ...machine.agents,
+      _agent('visited', 'Previously visited', const Duration(minutes: 5)),
+    ];
+    sessions.appChanged();
+    await pumpEventQueue();
+    expect(sessions.rows.map((row) => row.agentId), ['visited']);
+  });
+
+  testWidgets('the welcome age shows the visit, never background activity', (
+    tester,
+  ) async {
+    final connection = SearchConnection({'': []});
+    final app = createApp(
+      connected: true,
+      connectionForTest: (_) => connection,
+    );
+    addTearDown(app.dispose);
+    final now = DateTime.now();
+    app.machineStates['m']!.agents = [
+      Agent(
+        id: 'old',
+        name: 'Old conversation with new background activity',
+        engine: 'codex',
+        terminalAvailable: true,
+        lastOpenedAt: now.subtract(const Duration(days: 4)),
+        lastActivityAt: now,
+      ),
+      Agent(
+        id: 'legacy',
+        name: 'Previously opened on an older daemon',
+        engine: 'claude',
+        terminalAvailable: true,
+        lastActivityAt: now,
+      ),
+    ];
+    app.rememberOpenedHarness('m', 'legacy');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkspaceWelcome(onCommand: (_) {}, app: app, onOpen: (_) {}),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(find.text('4d'), findsOneWidget);
+    expect(find.text('Previously opened on an older daemon'), findsOneWidget);
+    expect(find.text('now'), findsNothing);
+  });
+
   test('offers harnesses and conversations Harness did not start, latest first, never one open elsewhere', () async {
     final (:connection, :sessions) = _setup();
     final loading = sessions.load();
@@ -348,5 +479,11 @@ void main() {
     sessions.appChanged();
     await pumpEventQueue();
     expect(connection.asked, ['']);
+    expect(
+      sessions.lastUsedAt(sessions.rows.first),
+      _now.subtract(const Duration(minutes: 5)),
+      reason:
+          'the displayed age stays with the same visit snapshot as the order',
+    );
   });
 }

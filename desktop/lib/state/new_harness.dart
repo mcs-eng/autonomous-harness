@@ -8,6 +8,7 @@ import 'package:collection/collection.dart' show compareNatural;
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 
+import '../core/runtime_platform.dart';
 import '../analytics/analytics.dart';
 import '../core/codex_profiles.dart';
 import '../core/dsh_catalog.dart';
@@ -37,7 +38,8 @@ final p = path.posix;
 /// The app, including Store Open/Try, uses the box with inline advanced options.
 /// Legacy form tests leave this off; dock
 /// journeys enable it explicitly.
-bool newHarnessOpensInBox = !kUnderTest;
+bool newHarnessOpensInBox =
+    !kUnderTest || const bool.fromEnvironment('HARNESS_CURRENT_WORKSPACE');
 
 /// A launch command with inherited arguments. Arrows select a launch argument;
 /// a focused prompt edits one argument at a time. Enter
@@ -420,7 +422,7 @@ class NewHarnessController extends ChangeNotifier {
        _machineId = draft?.machineId ?? machineId,
        _autoProject = autoProject || draft?.project.generated != null,
        _now = now ?? DateTime.now,
-       _home = home ?? Platform.environment['HOME'] {
+       _home = home ?? RuntimePlatform.environment['HOME'] {
     final explicitSelection =
         draft != null || engine != null || harnessId != null;
     _rememberedAgent = !explicitSelection;

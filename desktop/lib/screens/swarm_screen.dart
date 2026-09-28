@@ -1,22 +1,27 @@
 import 'dart:math' as math;
 import 'dart:async';
+
 import 'dart:convert';
-import 'dart:io' show Platform;
 
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, kIsWeb, listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:xterm/xterm.dart' show TerminalTheme;
 
+import '../core/runtime_platform.dart';
 import '../analytics/analytics.dart';
+import '../api/api_client.dart';
 import '../core/desktop_window.dart';
 import '../core/harness_file_store.dart';
 import '../core/project_folder.dart';
 import '../core/test_run.dart';
 import '../logging/debug_surface.dart';
+import '../models/api_connections_controller.dart' show agentOnApiModel;
 import '../models/models_panel.dart';
 import '../models/model_search_catalog.dart';
 import '../widgets/resting_section.dart' show confirmSwitchAnyway;
@@ -27,6 +32,7 @@ import '../shared/theme/workspace_bar_style.dart';
 import '../sharing/share_harness_dialog.dart';
 import '../shared/theme/appearance_prefs_store.dart';
 import '../shared/theme/status_line_style.dart';
+import '../shared/theme/pull_request_icon.dart';
 import '../shortcuts/app_shortcuts.dart';
 import '../core/models.dart';
 import '../shortcuts/app_keymap.dart';
@@ -36,9 +42,15 @@ import '../shortcuts/keymap_host.dart';
 import '../shortcuts/keymap_native.dart';
 import '../shortcuts/keymap_settings.dart';
 import '../state/app_state.dart';
+import '../state/notification_inbox.dart';
+import '../widgets/notification_inbox.dart';
+import '../widgets/workspace_notifications_button.dart';
 import '../state/harness_sessions.dart';
+import '../state/harness_activity.dart';
 import '../state/harness_placement.dart';
 import '../state/new_harness.dart';
+import '../state/device_form.dart';
+import '../state/device_finder.dart';
 import '../state/pane_arrangement.dart';
 import '../terminal/terminal_viewport.dart';
 import '../terminal/terminal_text.dart';
@@ -54,17 +66,22 @@ import '../state/workspace_status.dart';
 import '../state/workspace_pull_request.dart';
 import '../state/terminal_pane.dart';
 import '../widgets/transient_menus.dart';
+import '../widgets/add_phone_dialog.dart';
 import '../widgets/layout_palette.dart';
 import '../widgets/move_pane_palette.dart';
 import '../widgets/engine_identity.dart';
-import '../widgets/status_line.dart';
+import '../widgets/harness_activity_mark.dart';
 import '../widgets/workspace_status_line.dart';
+import '../widgets/workspace_pull_request_label.dart';
 import '../widgets/workspace_bar_control.dart';
+import '../widgets/session_work_dialog.dart';
+import '../widgets/web_download_button.dart';
+import '../widgets/workspace_share_button.dart';
+import '../widgets/workspace_store_button.dart';
 import '../widgets/grid_model_picker.dart';
 import '../store/store_mark.dart';
 import '../store/store_screen.dart';
 import '../widgets/harness_start_page.dart';
-import '../widgets/machines_panel.dart';
 import '../widgets/harness_session_manager.dart';
 import '../widgets/onboarding_card.dart';
 import '../state/toolbar_notices.dart';
@@ -98,13 +115,26 @@ import '../state/command_bar_catalog.dart';
 import '../widgets/harness_command_bar.dart';
 import '../orchestrator/orchestrator_launcher.dart';
 import '../orchestrator/orchestrator_workspace.dart';
+import '../teams/team_workspace.dart';
 import '../state/workspace_learning.dart';
 import '../state/workspace_onboarding.dart';
+import '../daemons/daemon_brain.dart';
+import '../daemons/daemon_face.dart';
+import '../daemons/daemon_plate_client.dart';
+import '../daemons/daemon_habits.dart';
+import '../daemons/daemon_settings.dart';
+import '../daemons/pair_rules_file.dart';
+import '../daemons/zoo.dart';
+import '../daemons/zoo_controller.dart';
+import '../widgets/daemon_hatch.dart';
+import '../widgets/daemon_panel.dart';
+import '../widgets/daemon_slot.dart';
 import '../widgets/workspace_quick_start.dart';
 import '../widgets/workspace_start_guide.dart';
 import '../widgets/workspace_welcome.dart';
 import '../shortcuts/keyboard_practice.dart';
 import '../widgets/agent_alert_banners.dart';
+import '../settings/experimental_features.dart';
 
 class SwarmScreen extends StatefulWidget {
   const SwarmScreen({
@@ -120,6 +150,11 @@ class SwarmScreen extends StatefulWidget {
     this.commandResolver,
     this.learning,
     this.onboarding,
+    this.zoo,
+    this.zooTransport,
+    this.daemonClock,
+    this.daemonsPreview,
+    this.experimentalFeatures,
   });
   final AppNotifier notifier;
   final bool? nativeTabs;
@@ -129,6 +164,21 @@ class SwarmScreen extends StatefulWidget {
   final CommandResolver? commandResolver;
   final WorkspaceLearning? learning;
   final WorkspaceOnboarding? onboarding;
+
+  /// The account's zoo (daemons/README.md); tests pass their own.
+  final ZooController? zoo;
+
+  /// How an account's zoo is reached; tests fake it. Unset under test, an
+  /// account has no daemons (as when `GET /api/zoo` answers 404).
+  final ZooTransport? zooTransport;
+
+  /// The daemon's clock (tests pass the fake one).
+  final DateTime Function()? daemonClock;
+
+  /// Test seam for the guest's durable local zoo. The app's experimental preview
+  /// uses a separate, window-only collection and never seeds an account.
+  final ValueListenable<bool>? daemonsPreview;
+  final ExperimentalFeaturesStore? experimentalFeatures;
   @override
   State<SwarmScreen> createState() => _SwarmScreenState();
 }
@@ -159,15 +209,23 @@ class _SwarmScreenState extends State<SwarmScreen> {
   /// tab closes nothing. Null between presses.
   String? _middleDownTab;
   late final bool _native =
-      widget.nativeTabs ?? (Platform.isMacOS && !kUnderTest);
+      widget.nativeTabs ?? (RuntimePlatform.isMacOS && !kUnderTest);
   late final SwarmProjectStore _projects =
       widget.projectStore ??
       SwarmProjectStore(storage: kUnderTest ? null : HarnessFileStore.shared);
   StreamSubscription<SpokenTaskRequest>? _spokenTasks;
   StreamSubscription<void>? _modelsRequests;
   final _shellFocus = FocusNode(debugLabel: 'Swarm shell');
+
+  /// Where the keyboard waits after the active tab closes
+  /// ([AppNotifier.tabStripFocused]): the strip drawn here, or the native one
+  /// in the title bar, which draws its selected tab as focused.
+  final _tabStripFocus = FocusNode(
+    debugLabel: 'Tab strip',
+    skipTraversal: true,
+  );
+  late int _tabStripRequest;
   final _focusedModelController = GridModelPickerController();
-  MachinesPanelHandle? _machinesPanel;
   OverlayEntry? _modelsOverlay;
   VoidCallback? _unregisterModels;
   OverlayEntry? _harnessesOverlay;
@@ -177,12 +235,100 @@ class _SwarmScreenState extends State<SwarmScreen> {
   late final _onboarding =
       widget.onboarding ??
       WorkspaceOnboarding(storage: kUnderTest ? null : HarnessFileStore.shared);
+  late final _zoo =
+      widget.zoo ??
+      ZooController(
+        storage: kUnderTest ? null : HarnessFileStore.shared,
+        now: widget.daemonClock,
+      );
+  ApiClient? _zooApi;
+  ZooTransport? _apiZooTransport;
+  ZooTransport? get _zooTransport {
+    if (widget.zooTransport != null) return widget.zooTransport;
+    if (kUnderTest) return null;
+    if (!identical(_zooApi, app.api)) {
+      _zooApi = app.api;
+      _apiZooTransport = ApiZooTransport(app.api);
+    }
+    return _apiZooTransport;
+  }
+
+  late final _daemonSettings = DaemonSettings(
+    storage: kUnderTest ? null : HarnessFileStore.shared,
+    canPersist: () => !_zoo.isPreview,
+  );
+  late final _face = DaemonFace(
+    _zoo,
+    now: widget.daemonClock,
+    settings: _daemonSettings,
+  );
+  late final ValueListenable<bool>? _daemonsPreview = widget.daemonsPreview;
+
+  late final _experimentalFeatures =
+      widget.experimentalFeatures ?? app.experimentalFeatures;
+
+  bool get _showShareButton =>
+      _experimentalFeatures.enabled(ExperimentalFeature.shareButton);
+
+  late bool _creatureEnabled = _creatureChoice;
+  bool get _creatureChoice =>
+      ExperimentalFeature.focusBarCreature.available &&
+      app.viewer == null &&
+      _experimentalFeatures.enabled(ExperimentalFeature.focusBarCreature);
+  late final _brain = DaemonBrain(
+    send: _sendDaemonFrame,
+    storage: kUnderTest ? null : HarnessFileStore.shared,
+    now: widget.daemonClock,
+  );
+
+  /// Individuals' own plates, drawn by this computer's harnessd and asked
+  /// for over its local socket (`daemon_plate_get`).
+  late final _plates = DaemonPlateClient(
+    send: _sendDaemonFrame,
+    roster: _zoo.roster,
+    now: widget.daemonClock,
+  );
+  final _brainSubscriptions = <StreamSubscription<Object?>>[];
+  DateTime? _awaySince;
+  String? _presencePair;
+  String? _presenceAutonomy;
+  bool? _presenceConsent;
+  String? _presenceFocus;
+  DaemonBrief? _lastBrief;
+  StreamSubscription<int?>? _zooPushes;
+  OverlayEntry? _daemonOverlay;
+  OverlayEntry? _hatchOverlay;
+  OverlayEntry? _daemonHintOverlay;
+  Timer? _daemonHintTimer;
+  bool _daemonHintPending = false;
+  VoidCallback? _unregisterDaemon;
+  VoidCallback? _unregisterHatch;
+  bool _reduceMotion = false;
+  bool? _backendWasOnline;
+
+  /// Something was opened from Cmd-O in this window: the `find` habit.
+  bool _foundSomething = false;
+  String? _lastDaemonPayload;
+
+  /// The status slot has taken its place in the bar. It waits for the first
+  /// quiet moment after daemons turn on (no button held, the pointer off the
+  /// bar, no input for [_slotSettle]) so tabs never move under a click.
+  bool _slotShown = false;
+  Timer? _slotTimer;
+  DateTime? _lastWindowInput;
+  bool _pointerHeld = false;
+  bool _pointerOverBar = false;
+  static const _slotSettle = Duration(milliseconds: 800);
+
+  /// What [daemonCommandsActive] was last set to by this window.
+  bool _daemonCommandsOn = false;
+  bool _daemonSettingsLoaded = false;
   final _startSearchFocus = FocusNode(debugLabel: 'Start page search');
   final _commandFocus = FocusNode(debugLabel: 'Ask Harness');
   bool _commandBarOpen = false;
   bool _commandActionInFlight = false;
   FocusNode? _commandReturnFocus;
-  bool get _hasCommandBar => widget.commandBarEnabled && app.viewer == null;
+  bool get _hasCommandBar => widget.commandBarEnabled;
   late final _commandBar = CommandBarController(
     catalog: () => buildCommandBarCatalog(
       app,
@@ -195,7 +341,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     resolve:
         widget.commandResolver ??
         (request, cancel) =>
-            app.api.resolveCommandBar(request, cancelToken: cancel),
+            app.resolveCommandBar(request, cancelToken: cancel),
   )..addListener(_commandChanged);
   final _canvasFocus = FocusNode(
     debugLabel: 'Swarm canvas',
@@ -217,11 +363,15 @@ class _SwarmScreenState extends State<SwarmScreen> {
   bool _tabRevealScheduled = false;
   SwarmSearchController? _search;
   OverlayEntry? _searchOverlay;
+  DeviceFinder? _searchDevice;
   final _resourcePreviewKey = GlobalKey();
 
   /// New Harness, open in the box. Never open beside the search: they are two
   /// modes of one surface, and opening either closes the other.
   NewHarnessController? _newHarness;
+  DeviceFormPort? _newHarnessDevicePort, _deviceFormPort;
+  String? _deviceFormId, _deviceFormMachine;
+  String _deviceFormSurface = 'new';
   OverlayEntry? _newHarnessOverlay;
 
   /// Escape keeps unfinished work with the machine/project/agent it started
@@ -245,6 +395,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
   bool _newHarnessHidden = false;
   bool _routeIsCurrent = true;
   String? _linkDialogMachineId;
+  bool _browserMachineSetupHandled = false;
   String? _nativeState;
   List<Object?>? _machinesPresentation;
   ModelsMenuController? _modelsMenu;
@@ -403,6 +554,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
   @override
   void initState() {
     super.initState();
+    app.deviceNavigationAllowed = _allowDeviceNavigation;
+    app.deviceFormCommand = _deviceFormCommand;
     _pullRequest = WorkspacePullRequest(app)..addListener(_statusPrefsChanged);
     _keymap.addListener(_keymapChanged);
     app.hasNavigationRail = false;
@@ -445,9 +598,58 @@ class _SwarmScreenState extends State<SwarmScreen> {
         // The window came forward, which is most of what a click asked for.
       }
     };
+    app.foreground.addListener(_daemonEnvironmentChanged);
     app.addListener(_syncToolbarNotices);
     _toolbarNotices.addListener(_toolbarNoticesChanged);
     _onboarding.addListener(_onboardingChanged);
+    _zoo.addListener(_zooChanged);
+    _face.addListener(_faceChanged);
+    // A line with keys is acknowledged once it, and what its keys would do,
+    // are on screen (`daemon_shown`); its keys arm a moment later.
+    _face.voiceLine.addListener(_voiceChanged);
+    _daemonsPreview?.addListener(_syncDaemon);
+    _experimentalFeatures.addListener(_experimentalFeaturesChanged);
+    app.agentPulse.addListener(_face.pulse);
+    _face.dialogOpen = () =>
+        _dialogOpen ||
+        _spokenPaletteOpen ||
+        !_routeIsCurrent ||
+        _pickerModalDepth > 0 ||
+        _hatchOverlay != null;
+    _zooPushes = app.zooPushes.listen(_zoo.pushed);
+    // The pair brain, when this computer's harnessd has one.
+    _brain.addListener(_brainChanged);
+    // A look at the finished-turn count clears the brain's count too.
+    _face.onSeen = () => unawaited(_brain.doneSeen());
+    _face.plates = _plates;
+    _brainSubscriptions.addAll([
+      app.daemonFrames.listen((f) {
+        if (_zoo.isPreview || !_zoo.loaded) return;
+        if (f.type == 'daemon_plate') {
+          _plates.receive(f.type, f.payload);
+          return;
+        }
+        _brain.receive(f.type, f.payload);
+      }),
+      // Heard, but nothing of it shows until daemons are on here.
+      _brain.said.listen((say) {
+        if (_zoo.loaded) _face.sayFromBrain(say);
+      }),
+      _brain.unsaid.listen(_face.unsay),
+      _brain.errors.listen((line) {
+        if (_zoo.loaded) _face.sayNote(line);
+      }),
+      // [g]: the brain says which harness; opening it is the window's.
+      _brain.opens.listen((about) {
+        if (_zoo.loaded) _openHarness(about);
+      }),
+      // harnessd answered DAEMONS_OFF: all of it goes.
+      _brain.switchedOff.listen((_) => _zoo.switchOff()),
+    ]);
+    // Idle at the window is away too: harnessd hears it (a night egg's away
+    // turns, and the brief on return).
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_notePointer);
+    HardwareKeyboard.instance.addHandler(_noteKey);
     _syncToolbarNotices();
     unawaited(
       _learning.load().then((_) {
@@ -484,11 +686,20 @@ class _SwarmScreenState extends State<SwarmScreen> {
       app.addListener(_syncNative);
       _syncNative();
     }
+    _tabStripRequest = app.tabStripFocusRequest;
+    _tabStripFocus.addListener(_tabStripFocusChanged);
+    app.addListener(_followTabStripFocus);
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    // Only the one flag: depending on all of MediaQuery rebuilt the workspace
+    // on every resize.
+    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    final motionChanged = reduceMotion != _reduceMotion;
+    _reduceMotion = reduceMotion;
+    _daemonEnvironmentChanged();
     final keymap = KeymapTheme.of(context);
     if (keymap != _providedKeymap) {
       _keymap.removeListener(_keymapChanged);
@@ -497,11 +708,16 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     _syncKeymap();
     final current = ModalRoute.isCurrentOf(context) ?? true;
-    if (_routeIsCurrent == current) return;
+    if (_routeIsCurrent == current) {
+      if (motionChanged && _native) _syncNative();
+      return;
+    }
     _routeIsCurrent = current;
     if (!current &&
         (_search != null ||
             _commandBarOpen ||
+            _daemonOverlay != null ||
+            _hatchOverlay != null ||
             _harnessesVisible ||
             _modelsVisible)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -510,6 +726,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
           _closeCommandBar(restoreFocus: false);
           _closeModelsControls(restoreFocus: false);
           _closeHarnessControls(restoreFocus: false);
+          _closeDaemon(restoreFocus: false);
+          _closeHatch(restoreFocus: false);
         }
       });
     }
@@ -518,10 +736,45 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   @override
   void dispose() {
+    _closeDaemonHint();
+    app.foreground.removeListener(_daemonEnvironmentChanged);
+    if (app.deviceNavigationAllowed == _allowDeviceNavigation) {
+      app.deviceNavigationAllowed = null;
+    }
+    if (app.deviceFormCommand == _deviceFormCommand) {
+      app.deviceFormCommand = null;
+    }
     app.removeListener(_syncToolbarNotices);
     _toolbarNotices.removeListener(_toolbarNoticesChanged);
     _toolbarNotices.dispose();
-    _machinesPanel?.close(restoreFocus: false);
+    HardwareKeyboard.instance.removeHandler(_noteKey);
+    _daemonsPreview?.removeListener(_syncDaemon);
+    _experimentalFeatures.removeListener(_experimentalFeaturesChanged);
+    _slotTimer?.cancel();
+    if (_daemonCommandsOn) daemonCommandsActive.value = false;
+    unawaited(_zooPushes?.cancel());
+    for (final subscription in _brainSubscriptions) {
+      unawaited(subscription.cancel());
+    }
+    _brain.removeListener(_brainChanged);
+    _brain.dispose();
+    _plates.dispose();
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_notePointer);
+    _idleTimer?.cancel();
+    app.agentPulse.removeListener(_face.pulse);
+    _face.voiceLine.removeListener(_voiceChanged);
+    _face.removeListener(_faceChanged);
+    _face.dispose();
+    _daemonSettings.dispose();
+    _zoo.removeListener(_zooChanged);
+    if (widget.zoo == null) _zoo.dispose();
+    _unregisterDaemon?.call();
+    _daemonOverlay?.remove();
+    _daemonOverlay?.dispose();
+    _unregisterHatch?.call();
+    _hatchOverlay?.remove();
+    _hatchOverlay?.dispose();
+    _dismissMachinePrompt();
     _unregisterModels?.call();
     _modelsOverlay?.remove();
     _modelsOverlay?.dispose();
@@ -543,6 +796,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
     terminalFontStore.removeListener(_fontChanged);
     app.removeListener(_recordNavigation);
     app.removeListener(_observeLearning);
+    app.removeListener(_followTabStripFocus);
+    _tabStripFocus.removeListener(_tabStripFocusChanged);
+    _tabStripFocus.dispose();
     app.agentUnread.removeListener(_unreadChanged);
     _lifecycle?.dispose();
     if (widget.learning == null) _learning.dispose();
@@ -550,6 +806,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     FocusManager.instance.removeListener(_syncKeyContext);
     _searchOverlay?.remove();
     _searchOverlay?.dispose();
+    _searchDevice?.close();
     _search?.dispose();
     _pickerModels?.dispose();
     _focusedModelController.dispose();
@@ -582,13 +839,17 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   AppKeymap? _sentKeymap;
   int? _sentKeymapVersion;
+  bool? _sentDaemonCommands;
   void _syncKeymap() {
     if (!_native ||
-        (_sentKeymap == _keymap && _sentKeymapVersion == _keymap.version)) {
+        (_sentKeymap == _keymap &&
+            _sentKeymapVersion == _keymap.version &&
+            _sentDaemonCommands == daemonCommandsActive.value)) {
       return;
     }
     _sentKeymap = _keymap;
     _sentKeymapVersion = _keymap.version;
+    _sentDaemonCommands = daemonCommandsActive.value;
     unawaited(
       _channel.invokeMethod<void>(
         'keymapState',
@@ -604,6 +865,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   void _keymapChanged() {
     _syncKeymap();
+    if (_native) _syncNative();
     if (mounted) setState(() {});
     _search?.refreshCommands();
   }
@@ -623,16 +885,106 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   bool get _modelsVisible =>
       _modelsOverlay != null || _search?.isModelMode == true;
-  bool get _machinesVisible =>
-      _machinesPanel != null || _search?.isMachineMode == true;
+  bool get _machinesVisible => _search?.isMachineMode == true;
   bool get _harnessesVisible =>
       _harnessesOverlay != null || _search?.scopePrefix.isEmpty == true;
 
   bool get _shortcutsEnabled =>
       mounted && _routeIsCurrent && !_dialogOpen && !_spokenPaletteOpen;
 
+  bool _allowDeviceNavigation() =>
+      _shortcutsEnabled &&
+      ModalRoute.of(context)?.isCurrent != false &&
+      _search == null &&
+      !_commandBarOpen &&
+      _newHarnessOverlay == null &&
+      !_modelsVisible &&
+      !_machinesVisible &&
+      !_harnessesVisible;
+
+  Future<Map<String, dynamic>> _deviceFormCommand(
+    String machineId,
+    Map<String, dynamic> command,
+  ) async {
+    final id = command['formId'] as String;
+    final op = command['op'] as String;
+    final surface =
+        command['surface'] as String? ??
+        (op == 'open' ? 'new' : _deviceFormSurface);
+    final finding = surface == 'find';
+    Map<String, dynamic> fail(String error) => {
+      'ok': false,
+      'active': false,
+      'error': error,
+    };
+    if (!_shortcutsEnabled ||
+        ModalRoute.of(context)?.isCurrent == false ||
+        _newHarnessHidden ||
+        _pickingFolder ||
+        _pickerModalDepth > 0 ||
+        _commandBarOpen ||
+        (finding
+            ? _newHarness != null ||
+                  _modelsOverlay != null ||
+                  _harnessesOverlay != null
+            : _search != null ||
+                  _modelsVisible ||
+                  _machinesVisible ||
+                  _harnessesVisible)) {
+      return fail('Return to the active picker on desktop.');
+    }
+    if (op == 'open' && _deviceFormId != id) {
+      final tab = app.activeSwarmId;
+      if (finding) {
+        if (_search == null) _openSearch();
+        if (_searchDevice?.supported != true) {
+          return fail('Open harness search on desktop first.');
+        }
+      } else if (_newHarness == null) {
+        await _newAgent(
+          stillCurrent: () =>
+              app.inForeground &&
+              _allowDeviceNavigation() &&
+              app.activeSwarmId == tab &&
+              DateTime.now().millisecondsSinceEpoch <
+                  (command['expiresAt'] as int),
+        );
+      }
+      // Opening loads remembered choices asynchronously. Never attach this
+      // remote to a form someone else opened while that load was in flight.
+      if (!mounted ||
+          app.activeSwarmId != tab ||
+          (finding ? _searchDevice == null : _newHarnessDevicePort == null) ||
+          DateTime.now().millisecondsSinceEpoch >=
+              (command['expiresAt'] as int)) {
+        return fail('Open the picker again.');
+      }
+      _deviceFormId = id;
+      _deviceFormMachine = machineId;
+      _deviceFormSurface = surface;
+      _deviceFormPort = finding ? _searchDevice!.port : _newHarnessDevicePort;
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    final port = _deviceFormPort;
+    if (id != _deviceFormId ||
+        machineId != _deviceFormMachine ||
+        surface != _deviceFormSurface ||
+        port == null) {
+      return fail('This picker has ended. Open it again.');
+    }
+    if (op == 'open') return port.snapshot();
+    return port.command(
+      op,
+      command['revision'] as int? ?? 0,
+      command['delta'] as int? ?? 0,
+      queryId: command['queryId'] as String?,
+      text: command['text'] as String?,
+    );
+  }
+
   void _runShortcut(String id) {
-    _machinesPanel?.close(restoreFocus: false);
+    _closeDaemonHint();
+    _closeDaemon(restoreFocus: false);
     _closeModelsControls(restoreFocus: false);
     _closeHarnessControls(restoreFocus: false);
     if (id != 'navigation.command_bar') _closeCommandBar();
@@ -663,6 +1015,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
         id != 'models.list' &&
         id != 'machines.list' &&
         id != 'machine.link' &&
+        id != 'machines.connections' &&
         id != 'navigation.needs_input' &&
         id != 'swarm.new' &&
         id != 'agent.add' &&
@@ -769,17 +1122,20 @@ class _SwarmScreenState extends State<SwarmScreen> {
   Future<void> _practiceKeyboard() =>
       _dialog(() => showKeyboardPractice(context, keymap: _keymap));
 
-  int get _attention =>
-      harnessSessions(app).where((row) => row.needsInput).length;
+  int get _attention => _sessions.where((row) => row.needsInput).length;
 
-  /// Agents carrying news nobody has looked at.
-  ///
-  /// This is what the icon's badge counts now, and it is a wider question than
-  /// [_attention]: a harness that FINISHED is also something to go and see, and
-  /// the badge that only counted blocked ones said nothing at all about the
-  /// work that was actually done while you were away. The panel behind the icon
-  /// still separates the two — its "Needs input" tab is exactly [_attention].
-  int get _unread => app.agentUnread.count;
+  /// The bell and its list count the same current questions and unread results.
+  int get _unread => notificationInbox(app).length;
+
+  /// Whose window this is, or null while a signed-in window still waits for
+  /// its profile. Syncing earlier keyed the first reads by a temporary scope
+  /// and flashed another account's progress at boot.
+  String? get _accountScope {
+    if (app.isGuest) return 'guest';
+    final profile = app.currentUser;
+    if (profile == null) return null;
+    return 'account:${profile.id ?? profile.email}';
+  }
 
   void _syncOnboarding() {
     final profile = app.currentUser;
@@ -835,15 +1191,180 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   void _onboardingChanged() {
     if (!mounted) return;
-    _machinesPanel?.rebuild();
     _modelsOverlay?.markNeedsBuild();
     _harnessesOverlay?.markNeedsBuild();
     if (_native) _syncNative();
     setState(() {});
   }
 
+  List<HarnessSession>? _sessionsThisTick;
+
+  /// The session rows, built once per tick: the toolbar, the daemon, the
+  /// attention badge and the native payload all read the same list.
+  List<HarnessSession> get _sessions {
+    final cached = _sessionsThisTick;
+    if (cached != null) return cached;
+    final rows = harnessSessions(app);
+    _sessionsThisTick = rows;
+    scheduleMicrotask(() => _sessionsThisTick = null);
+    return rows;
+  }
+
+  void _syncDaemon() {
+    _zoo.bind(
+      _accountScope,
+      remote: app.isGuest ? null : _zooTransport,
+      enabled: app.isGuest ? _daemonsPreview?.value == true : _creatureEnabled,
+    );
+    _zoo.recheckIfDue();
+    final backendOnline = app.backendOnline;
+    // A reconnect asks again, on or off.
+    if (backendOnline == true && _backendWasOnline == false) _zoo.refresh();
+    _backendWasOnline = backendOnline;
+    if (!_zoo.loaded) return;
+    final sessions = _sessions;
+    final brain = _brain.state;
+    String who(String engine, String machine) =>
+        '${engine.isEmpty ? 'harness' : engine}@$machine';
+    DaemonSubject subjectOf(HarnessSession s, {String? q}) => DaemonSubject(
+      '${s.machineId}/${s.agent.id}',
+      who: who(s.agent.engine ?? '', s.machine.machine.displayName),
+      q: q,
+      since: s.question?.since,
+    );
+    final byKey = {for (final s in sessions) '${s.machineId}/${s.agent.id}': s};
+    final focusedPane = app.focusedPane;
+    final focus = focusedPane?.agentId == null
+        ? null
+        : '${focusedPane!.machineId}/${focusedPane.agentId}';
+    if (focus != _presenceFocus && _brain.active) {
+      // The pane in front changed: the brain never speaks about it.
+      _presenceFocus = focus;
+      unawaited(
+        _brain.focus(
+          machineId: focusedPane?.machineId,
+          agentId: focusedPane?.agentId,
+        ),
+      );
+    }
+    // What the window sees itself, merged with what the brain sees on every
+    // machine (the same ids, so a question counts once).
+    final needs = <String, DaemonSubject>{
+      for (final s in sessions)
+        if (s.online && s.needsInput)
+          '${s.machineId}/${s.agent.id}#${s.question!.requestId}': subjectOf(
+            s,
+            q: s.question!.prompt,
+          ),
+      for (final need in brain?.needs ?? const <DaemonNeed>[])
+        need.key: DaemonSubject(
+          need.harness,
+          who: need.machine.isEmpty ? null : who(need.engine, need.machine),
+          q: need.question,
+          since: need.since,
+        ),
+    };
+    // A failure is a harness you have open that failed to start or whose last
+    // turn failed. A machine asleep or out of reach is not one: it is shown
+    // calmly in the panel and the face stays as it was.
+    final failed = [
+      for (final s in sessions)
+        if (s.open &&
+            s.online &&
+            (s.agent.launchState == 'failed' ||
+                s.machine.failedTurnAgents.contains(s.agent.id)))
+          subjectOf(s),
+    ];
+    // Machines not there, calmly: the brain's word for each (asleep, out of
+    // reach, unlinked, ...) over what the window alone can tell (offline).
+    final awayByName = <String, DaemonMachine>{
+      for (final s in sessions)
+        if (s.open && !s.online)
+          s.machine.machine.displayName: DaemonMachine(
+            name: s.machine.machine.displayName,
+            machineId: s.machineId,
+            status: 'offline',
+          ),
+      for (final machine in brain?.machines ?? const <DaemonMachine>[])
+        if (machine.away && !machine.local) machine.name: machine,
+    };
+    final away = awayByName.values.toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    final working = sessions.where((s) => s.online && s.working).length;
+    final paired = _brain.paired;
+    _face.sync(
+      DaemonWatch(
+        working: working > 0 || brain?.working == true,
+        workingCount: working,
+        needIds: needs.keys.toSet(),
+        needs: needs,
+        failing: failed.isNotEmpty || (brain?.failing.isNotEmpty ?? false),
+        failed: failed,
+        turns: {
+          for (final machine in app.machineStates.values)
+            machine.machine.machineId: machine.completedHarnessTurns,
+        },
+        fails: {
+          for (final machine in app.machineStates.values)
+            machine.machine.machineId: machine.failedHarnessTurns,
+        },
+        ended: {
+          for (final machine in app.machineStates.values)
+            machine.machine.machineId: [
+              for (final end in machine.recentTurnEnds)
+                DaemonTurnEnd(
+                  byKey['${machine.machine.machineId}/${end.agentId}'] == null
+                      ? DaemonSubject(
+                          '${machine.machine.machineId}/${end.agentId}',
+                        )
+                      : subjectOf(
+                          byKey['${machine.machine.machineId}/${end.agentId}']!,
+                        ),
+                  failed: end.failed,
+                ),
+            ],
+        },
+        idleCount: sessions
+            .where((s) => s.open && s.running && !s.working && !s.needsInput)
+            .length,
+        focus: focus,
+        away: away,
+        // A proposal or a setting waiting for your yes: it asks you
+        // something.
+        asks: (paired ? brain!.asks.length : 0) + (brain?.confirms.length ?? 0),
+        autonomy: brain?.autonomy,
+        autonomyRequested: brain?.autonomyRequested,
+        doneCount: paired ? brain!.doneCount : null,
+        doneLast: [
+          if (paired)
+            for (final done in brain!.doneLast) done.line,
+        ],
+      ),
+    );
+    for (final key in observedHabits(app, found: _foundSomething)) {
+      _zoo.habit(key);
+    }
+    if (app.inForeground) _zoo.noteDay();
+    // A guest's turns earn eggs in its local zoo. Signed in, harnessd reports
+    // them to the account; sending them here too would count them twice.
+    if (app.isGuest || _zoo.isPreview) {
+      for (final machine in app.machineStates.values) {
+        final id = machine.machine.machineId;
+        final seen = _zooTurnsSeen[id] ?? 0;
+        _zooTurnsSeen[id] = machine.zooTurns;
+        if (machine.zooTurns > seen) {
+          final n = machine.zooTurns - seen;
+          _zoo.recordTurns(n, machineId: id, away: _awayForNight ? n : 0);
+        }
+      }
+    }
+  }
+
+  final _zooTurnsSeen = <String, int>{};
+
   void _syncToolbarNotices() {
     _syncOnboarding();
+    _syncDaemon();
     final local = app.localMachineState?.machine.machineId;
     final models = app.modelManager;
     final profile = app.currentUser;
@@ -892,6 +1413,61 @@ class _SwarmScreenState extends State<SwarmScreen> {
     // mark that only called setState redrew a tab strip the native window does
     // not use, and the badge a person can actually see never moved.
     if (_native) _syncNative();
+  }
+
+  /// A closed tab left the keyboard on the tab strip. Flutter's focus moves
+  /// there now, before the next frame: a key typed in between must reach
+  /// neither the closed tab's terminal nor the one beside it.
+  void _followTabStripFocus() {
+    if (!mounted || !app.tabStripFocused) return;
+    final request = app.tabStripFocusRequest;
+    if (request == _tabStripRequest) return;
+    _tabStripRequest = request;
+    if (ModalRoute.of(context)?.isCurrent == false) return;
+    _tabStripFocus.requestFocus();
+    FocusManager.instance.applyFocusChangesIfNeeded();
+  }
+
+  void _tabStripFocusChanged() {
+    if (!mounted) return;
+    setState(() {});
+    if (_native) _syncNative();
+  }
+
+  /// ⏎ on the strip goes into the selected tab. Chords are left to the keymap,
+  /// so shortcuts still work here. Anything else typed — letters, arrows, Tab —
+  /// was meant for the tab that closed and goes nowhere: not into the tab
+  /// beside it, and not into a pane by focus traversal.
+  KeyEventResult _onTabStripKey(FocusNode node, KeyEvent event) {
+    if (!node.hasPrimaryFocus) return KeyEventResult.ignored;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isMetaPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isAltPressed) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    // A held ⏎ enters once; its repeats are not typed into the terminal.
+    if (event is KeyDownEvent &&
+        (key == LogicalKeyboardKey.enter ||
+            key == LogicalKeyboardKey.numpadEnter)) {
+      if (app.tabStripFocused) {
+        app.focusFromTabStrip();
+      } else {
+        _focusWorkspaceInput();
+      }
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// The keyboard back to the workspace after a picker or dialog closes: the
+  /// tab strip while a closed tab left it there, else the focused pane.
+  bool _focusWorkspaceInput() {
+    if (app.tabStripFocused) {
+      _tabStripFocus.requestFocus();
+      return true;
+    }
+    return app.focusedPane?.session?.focusInput() == true;
   }
 
   void _restoreEmptyFocus() {
@@ -968,7 +1544,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
       ),
     if (focused.branch != null && focused.project != null)
       StatusLineField.branch: (
-        label: 'Find harnesses on ${focused.branch} in ${focused.projectName}',
+        label: focused.agent?.gitContext == null
+            ? 'Find harnesses on ${focused.branch} in ${focused.projectName}'
+            : 'Branches and pull requests · ${focused.branch}\n${focused.detail}',
         onPressed: _shortcutsEnabled
             ? () =>
                   _openContextResource(StatusLineField.branch, focused.pane.id)
@@ -981,6 +1559,10 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final focused = WorkspacePaneContext.focused(app);
     if (focused == null || focused.pane.id != expectedPaneId) return;
     if (field == StatusLineField.branch && focused.branch == null) return;
+    if (field == StatusLineField.branch && focused.agent?.gitContext != null) {
+      unawaited(_showSessionWork(focused));
+      return;
+    }
     if (app.stateOf(focused.pane.machineId) == null) return;
     final group = field == StatusLineField.machine
         ? 'machine:${focused.pane.machineId}'
@@ -1001,6 +1583,22 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _focusSearch();
   }
 
+  Future<void> _showSessionWork(WorkspacePaneContext focused) =>
+      _dialog(() async {
+        final agent = focused.agent;
+        if (agent == null) return;
+        final machineId = focused.pane.machineId;
+        await showDialog<void>(
+          context: context,
+          builder: (_) => SessionWorkDialog(
+            agent: agent,
+            online: app.stateOf(machineId)?.isOffline == false,
+            read: (offset) =>
+                app.readAgentGitHistory(machineId, agent.id, offset: offset),
+          ),
+        );
+      });
+
   Future<void> _openFocusedPullRequest(String? expectedUrl) async {
     final pr = _pullRequest.value;
     if (pr == null || expectedUrl != pr.url.toString()) return;
@@ -1018,7 +1616,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
   }
 
   void _paletteChanged() {
-    _machinesPanel?.rebuild();
     _modelsOverlay?.markNeedsBuild();
     _harnessesOverlay?.markNeedsBuild();
     _searchOverlay?.markNeedsBuild();
@@ -1065,7 +1662,16 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final barStyle = workspaceBarTextStyle();
     final payload = {
       'enabled': _routeIsCurrent && !_dialogOpen && !_spokenPaletteOpen,
+      'reduceMotion': _reduceMotion,
       'activeId': app.activeSwarmId,
+      'searchTooltip':
+          'Search harnesses ${_keymap.hint('harnesses.list') ?? ''}',
+      'storeTooltip': 'Harness Store ${_keymap.hint('app.store') ?? ''}',
+      // The selected tab is drawn with keyboard focus: ⏎ goes into it.
+      'tabsFocused': app.tabStripFocused && _tabStripFocus.hasPrimaryFocus,
+      // Only once the slot is shown: until then (and whenever daemons are
+      // off) native lays out the bar it had before daemons existed.
+      if (_slotShown) 'daemon': _daemonPayload,
       'palette': grid.AppTheme.palette.value.nativeColors,
       'barStyle': {
         'family': barStyle.fontFamily,
@@ -1077,10 +1683,10 @@ class _SwarmScreenState extends State<SwarmScreen> {
       'focusedModel': focused == null || !modelPickerSupports(focused.engine)
           ? null
           : {
-              'text': focused.provider,
+              'text': focused.modelLabel,
               'segments': [
                 {
-                  'text': focused.provider,
+                  'text': focused.modelLabel,
                   'foreground': terminalTheme.foreground.toARGB32(),
                 },
               ],
@@ -1129,14 +1735,36 @@ class _SwarmScreenState extends State<SwarmScreen> {
                 terminalTheme,
                 segmentOffset: parts?.segments.length ?? 0,
               ),
+              'label': _pullRequest.value!.label,
+              'iconAsset': pullRequestIconAsset(_pullRequest.value!.state),
+              'iconColor': pullRequestIconColor(
+                _pullRequest.value!.state,
+                terminalTheme,
+                color: prefs.color,
+              ).toARGB32(),
               'url': _pullRequest.value!.url.toString(),
-              'detail':
-                  'Open pull request #${_pullRequest.value!.number} on GitHub',
+              'detail': '${_pullRequest.value!.label} — Open on GitHub',
               'interactive': true,
             },
       'canReopen': app.canReopenLastClosed,
       'canFind': _canFindTerminal,
       'canClosePane': app.focusedPane != null,
+      if (_showShareButton)
+        'shareAction': {
+          'text': WorkspaceShareButton.text,
+          'label': _shareLabel(focused),
+          'tooltip': _shareTooltip(focused),
+          'enabled': _canExecuteCommand('agent.share'),
+          'paneId': focused?.pane.id,
+          'machineId': focused?.pane.machineId,
+          'agentId': focused?.agentId,
+          'background': WorkspaceShareButton.backgroundFor(
+            _canExecuteCommand('agent.share'),
+          ).toARGB32(),
+          'foreground': WorkspaceShareButton.foregroundFor(
+            _canExecuteCommand('agent.share'),
+          ).toARGB32(),
+        },
       'paneActions': {
         'restartAgent': _canExecuteCommand('agent.restart'),
         'shareAgent': _canExecuteCommand('agent.share'),
@@ -1163,12 +1791,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           },
       ],
       'attention': _attention,
-      // The badge the NATIVE titlebar draws. It is a wider question than
-      // `attention`, which counts only harnesses that are blocked: a harness
-      // that FINISHED is also something to go and see. Sent beside the old key
-      // rather than replacing it, because the native side still words its
-      // accessibility value from "needs input" and an older Runner ignores a
-      // key it does not know.
+      // The native bell uses the same inbox count as its Flutter counterpart.
       'unread': _unread,
       'sessionsOpen': _harnessesVisible,
       'machinesOpen': _machinesVisible,
@@ -1180,9 +1803,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           : null,
       'modelsOpen': _modelsVisible,
       'localModelReady': app.modelManager.readyModel != null,
-      'runningSessions': harnessSessions(app)
-          .where((row) => row.running)
-          .length,
+      'runningSessions': _sessions.where((row) => row.running).length,
       'history': [
         for (final entry in _navigation.menuDestinations(app))
           {
@@ -1219,6 +1840,17 @@ class _SwarmScreenState extends State<SwarmScreen> {
                       app.questionFor(p.machineId, p.agentId!) != null,
                 )
                 .length,
+            if (tabActivity(app, swarm) case final activity?)
+              'activity': {
+                'mark': activity.mark,
+                'label': activity.label,
+                'working': activity == HarnessActivity.working,
+                'color': activityColor(
+                  activity,
+                  terminalTheme,
+                  color: prefs.color,
+                ).toARGB32(),
+              },
           },
       ],
     };
@@ -1352,6 +1984,16 @@ class _SwarmScreenState extends State<SwarmScreen> {
       return;
     }
     final args = call.arguments is Map ? call.arguments as Map : const {};
+    if (call.method == 'shareAgent' && args.containsKey('paneId')) {
+      if (!_showShareButton) return;
+      final focused = WorkspacePaneContext.focused(app);
+      if (focused == null ||
+          focused.pane.id != args['paneId'] ||
+          focused.pane.machineId != args['machineId'] ||
+          focused.agentId != args['agentId']) {
+        return;
+      }
+    }
     if (call.method == 'focusedModel') {
       if (args['paneId'] is int) {
         final expectedPane = args['paneId'];
@@ -1382,7 +2024,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       return;
     }
     if (call.method == 'machineControls') {
-      unawaited(_showMachinesControls());
+      unawaited(_openMachines());
       await WidgetsBinding.instance.endOfFrame;
       return;
     }
@@ -1391,8 +2033,26 @@ class _SwarmScreenState extends State<SwarmScreen> {
       await WidgetsBinding.instance.endOfFrame;
       return;
     }
+    if (call.method == 'daemon') {
+      if (_zoo.loaded) _activateDaemon();
+      await WidgetsBinding.instance.endOfFrame;
+      return;
+    }
+    if (call.method == 'daemonLook') {
+      if (!_zoo.loaded) return;
+      _face.look();
+      _face.seen();
+      return;
+    }
+    if (call.method == 'daemonAnswer') {
+      final key = (call.arguments as Map?)?['key'];
+      if (key is String && _shortcutsEnabled && _zoo.loaded) {
+        _answerDaemon(key);
+      }
+      return;
+    }
     if (call.method == 'linkMachine') {
-      unawaited(_showMachinesControls());
+      unawaited(_openMachines());
       await WidgetsBinding.instance.endOfFrame;
       return;
     }
@@ -1639,8 +2299,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
         app.focusedPane?.session?.find(TerminalFindAction.previous);
       case 'notifications':
         unawaited(_notifications());
+      case 'notificationInbox':
+        unawaited(_showNotificationInbox());
       case 'settings':
         await _settings();
+      case 'addPhone':
+        await _addPhone();
       case 'customize':
         await _customize();
     }
@@ -1653,6 +2317,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           'renameActive',
           'commands',
           'notifications',
+          'notificationInbox',
           'addAgent',
           'newAgent',
           'newTerminal',
@@ -1699,7 +2364,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
         _canvasFocus.descendantsAreFocusable = _search == null;
         if (_search == null &&
             ModalRoute.of(context)?.isCurrent != false &&
-            app.focusedPane?.session?.focusInput() != true) {
+            !_focusWorkspaceInput()) {
           _shellFocus.requestFocus();
         }
         if (_native) _syncNative();
@@ -1817,6 +2482,20 @@ class _SwarmScreenState extends State<SwarmScreen> {
     );
   });
 
+  String _shareLabel(WorkspacePaneContext? focused) =>
+      focused?.agent == null ? 'Share' : 'Share ${focused!.agent!.displayName}';
+
+  String _shareTooltip(WorkspacePaneContext? focused) {
+    if (focused?.agent == null) return 'Focus an agent to share it';
+    if (app.stateOf(focused!.pane.machineId)?.machine.isShared != false) {
+      return 'Only the owner can share this agent';
+    }
+    return [
+      _shareLabel(focused),
+      _keymap.hint('agent.share'),
+    ].whereType<String>().join(' · ');
+  }
+
   void _toggleFocusedViewer() {
     final focused = WorkspacePaneContext.focused(app);
     if (focused?.agentId case final id?) {
@@ -1831,7 +2510,19 @@ class _SwarmScreenState extends State<SwarmScreen> {
       context,
       app,
       initialSection: section,
+      experimentalFeatures: _experimentalFeatures,
       source: 'swarm',
+    ),
+  );
+
+  /// Harness ▸ Add Phone… and `> add phone`: the QR a phone scans to sign in
+  /// and pair with this computer. See `widgets/add_phone_dialog.dart`.
+  Future<void> _addPhone() => _dialog(
+    () => showAddPhoneDialog(
+      context,
+      app,
+      keymap: _keymap,
+      onConnectMachine: () => unawaited(_openMachines()),
     ),
   );
 
@@ -1852,66 +2543,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
   }
 
-  Future<void> _showMachinesControls({String? initialMachineId}) async {
-    if (_machinesPanel case final panel?) {
-      panel.close();
-      return;
-    }
-    if (!_shortcutsEnabled || _newHarness?.requestDismiss() == false) return;
-    _closeNewHarness(restoreFocus: false);
-    _closeSearch(restoreFocus: false);
-    _closeCommandBar(restoreFocus: false);
-    dismissTransientMenus();
-    _preparePaneFocus();
-    _onboarding.acknowledge(OnboardingStep.machines);
-    final panel = openMachinesPanel(
-      context,
-      app,
-      keymap: _keymap,
-      initialMachineId: initialMachineId,
-      onboarding: _onboarding,
-      toolbarHeight: _native ? 0 : _tabBarHeight,
-    );
-    _machinesPanel = panel;
-    _syncToolbarNotices();
-    if (_native) _syncNative();
-    setState(() {});
-    final destination = await panel.closed;
-    if (!mounted || !identical(_machinesPanel, panel)) return;
-    _machinesPanel = null;
-    _syncToolbarNotices();
-    if (_native) _syncNative();
-    setState(() {});
-    // Let the removed panel release its focus before opening work.
-    await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return;
-    final machine = destination == null ? null : app.stateOf(destination);
-    if (machine != null) {
-      if (machine.agents.isEmpty && !machine.machine.isShared) {
-        await _newAgent(
-          machineId: destination,
-          placement: HarnessPlacement.currentTab,
-        );
-      } else {
-        _openSearch(
-          adding: true,
-          query: '@',
-          placement: HarnessPlacement.currentTab,
-        );
-        final machineRow = _search?.rows
-            .where((row) => row.isMachine && row.machineId == destination)
-            .firstOrNull;
-        if (machineRow != null) _search!.submit(machineRow);
-      }
-    } else if (panel.restoreFocus && _shortcutsEnabled) {
-      _shellFocus.requestFocus();
-      final pane = app.focusedPane;
-      if (pane != null) app.focusPane(pane.id, reveal: true);
-      await _ensureEmptyEntry();
-    }
-  }
-
   Future<void> _openMachines({String? initialMachineId}) async {
+    _browserMachineSetupHandled = true;
     _onboarding.acknowledge(OnboardingStep.machines);
     _openResourcePicker('@');
     if (initialMachineId != null && _search?.isMachineMode == true) {
@@ -1955,6 +2588,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     String? task,
     HarnessPlacement? placement,
     _NewHarnessSource source = _NewHarnessSource.workspace,
+    bool Function()? stillCurrent,
   }) async {
     final search = source == _NewHarnessSource.workspace ? _search : null;
     // A pane never lands in the store tab: New Harness from there goes to
@@ -1995,11 +2629,15 @@ class _SwarmScreenState extends State<SwarmScreen> {
         ? null
         : machine?.projectOf(agent);
     if (id == null) {
-      await _showMachinesControls();
+      await _openMachines();
       return;
     }
     await Future.wait([app.agentPreference.load(), app.projectHistory.load()]);
-    if (!mounted || app.activeSwarmId != target) return;
+    if (!mounted ||
+        app.activeSwarmId != target ||
+        stillCurrent?.call() == false) {
+      return;
+    }
     final initialFolder =
         folder ??
         paneProject?.cwd ??
@@ -2206,6 +2844,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     );
     final content = NewHarnessForm(
       controller: box,
+      devicePort: _newHarnessDevicePort = DeviceFormPort(),
       onCreated: () {
         _closeNewHarness(restoreFocus: false, keepDraft: false);
         unawaited(_focusCreatedPane());
@@ -2445,6 +3084,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _newHarnessOverlay?.dispose();
     _newHarnessOverlay = null;
     _newHarness = null;
+    _newHarnessDevicePort?.detach();
+    _newHarnessDevicePort = null;
     if (keepDraft && _newHarnessContext != null) {
       _rememberNewHarnessDraft(_newHarnessContext!, box.draft);
     }
@@ -2460,7 +3101,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           previous.context?.mounted == true &&
           previous.canRequestFocus) {
         previous.requestFocus();
-      } else if (app.focusedPane?.session?.focusInput() != true) {
+      } else if (!_focusWorkspaceInput()) {
         _shellFocus.requestFocus();
       }
     }
@@ -2515,7 +3156,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
               app.machineStates.values.firstOrNull
         : app.stateOf(focused.machineId);
     if (machine == null) {
-      await _showMachinesControls();
+      await _openMachines();
       return;
     }
     final machineId = machine.machine.machineId;
@@ -2700,6 +3341,919 @@ class _SwarmScreenState extends State<SwarmScreen> {
   void _modelManagerChanged() {
     _syncToolbarNotices();
     if (_native && mounted) _syncNative();
+  }
+
+  // ── the daemon (daemons/README.md) ─────────────────────────────────────────
+
+  /// A `daemon_*` or `pair` frame to this computer's harnessd, only while
+  /// daemons are on here: off (or not decided yet), nothing is sent.
+  bool _sendDaemonFrame(String type, Map<String, dynamic> payload) =>
+      !_zoo.isPreview && _zoo.loaded && app.sendDaemonFrame(type, payload);
+
+  void _experimentalFeaturesChanged() {
+    setState(() {});
+    if (_native) _syncNative();
+    final choice = _creatureChoice;
+    if (_creatureEnabled == choice) return;
+    final hadOverlay = _daemonOverlay != null || _hatchOverlay != null;
+    _creatureEnabled = choice;
+    _closeDaemonHint();
+    _closeDaemon(restoreFocus: false);
+    _closeHatch(restoreFocus: false);
+    _face.dismissVoice();
+    _brain.reset();
+    _plates.reset();
+    _syncDaemon();
+    // A setting change must leave keyboard focus in Settings.
+    if (hadOverlay && _routeIsCurrent && !_dialogOpen) _returnFocusToPane();
+  }
+
+  Map<String, Object?> get _daemonPayload {
+    final theme = terminalThemeFor(
+      grid.AppTheme.palette.value,
+      terminalThemeStore.value,
+    );
+    return {
+      'visible': _slotShown,
+      'glyph': _face.glyph,
+      // The ten cells as drawn (centred on the base sprite, a shiny `*` in
+      // the gutter). Counts and progress stay out of the focus bar.
+      'cell': _face.cell,
+      'foreground': daemonSlotInk(_face, theme).withValues(alpha: 1).toARGB32(),
+      'patch': daemonSlotPatch(_face, theme)?.toARGB32(),
+      'open': _daemonOverlay != null,
+      'busy': _face.revealing || _zoo.hatchingEgg != null,
+      'label': _face.label,
+      'detail': _face.detail,
+      'tooltip': _daemonTooltip,
+      // Exactly as sent, keys first: native makes the offered keys buttons,
+      // once the line is armed (drawn, with its detail, a moment ago).
+      'voice': _nativeVoice,
+      'voiceActions': [
+        for (final action in _face.voiceActions)
+          {'key': action.key, 'label': action.label},
+      ],
+      'voiceArmed': _voiceArmed,
+      'voiceColor': (_face.voiceAlert ? theme.yellow : daemonDimInk(theme))
+          .toARGB32(),
+    };
+  }
+
+  /// The spoken line for native: as the face shows it, with a brain line's
+  /// keys first even if an older brain put them elsewhere, and the pair
+  /// harness's `<nick>` before its own words.
+  String? get _nativeVoice {
+    final voice = _face.voice;
+    if (voice == null) return null;
+    final nick = _face.voiceFromPair ? daemonPairNick(_face.name) : '';
+    final actions = _face.voiceActions;
+    if (actions.isEmpty) return '$nick$voice';
+    final split = splitDaemonKeys(voice, actions);
+    return split.keys.isEmpty
+        ? '$nick$voice'
+        : '[${split.keys.join('/')}] $nick${split.rest}';
+  }
+
+  String get _daemonTooltip {
+    if (!_zoo.isPreview) return _face.tooltip;
+    return '${_face.tooltip}\nLocal preview · Settings → Experimental';
+  }
+
+  /// Whether a key on the spoken line counts yet.
+  bool get _voiceArmed {
+    final id = _face.voiceSayId;
+    return id == null || _brain.armed(id);
+  }
+
+  String? _voiceShownFor;
+  String? _detailOverlayFor;
+
+  /// A brain line began or ended. One with keys is acknowledged to harnessd
+  /// once it is on screen, and, when it carries a `detail`, once that is on
+  /// screen too, in full, in a disclosure under the status line.
+  void _voiceChanged() {
+    final id = _face.voiceSayId;
+    if (_face.voice == null || id == null) {
+      _voiceShownFor = null;
+      if (_detailOverlayFor != null) _closeDaemonHint();
+      return;
+    }
+    if (id == _voiceShownFor) return;
+    _voiceShownFor = id;
+    if (_detailOverlayFor != null && _detailOverlayFor != id) {
+      _closeDaemonHint();
+    }
+    final keyed = _face.voiceActions.any((a) => a.key != 'g');
+    if (!keyed) return;
+    final detail = _face.voiceDetail;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _face.voiceSayId != id) return;
+      if (detail == null || detail.isEmpty) {
+        // The line is everything its keys act on.
+        _brain.shown(id);
+        return;
+      }
+      _showVoiceDetail(id, detail);
+    });
+  }
+
+  void _showVoiceDetail(String id, String detail) {
+    final harness = _face.voiceHarness;
+    final title = [
+      if (_face.voiceFromPair) '${daemonPairNick(_face.name).trim()} asks',
+      ?harness?.label,
+      _face.voiceConfirm != null
+          ? 'what a yes turns on'
+          : id.startsWith('lesson:')
+          ? 'the lesson, in full'
+          : 'exactly what a key does',
+    ].join(' · ');
+    final shown = _showDaemonOverlay(
+      key: ValueKey('daemon-detail-$id'),
+      interactive: true,
+      showFor: DaemonFace.voiceFor,
+      child: Builder(
+        builder: (context) => ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: workspaceBarCellSizeOf(context).width * 84,
+          ),
+          child: DaemonDetailNotice(
+            title: title,
+            detail: detail,
+            actions: _face.voiceActions,
+            onShown: () {
+              if (_face.voiceSayId == id) _brain.shown(id);
+            },
+          ),
+        ),
+      ),
+    );
+    if (shown) _detailOverlayFor = id;
+  }
+
+  void _faceChanged() {
+    // Two lines can read the same (the same command asked twice): the line's
+    // id, not its words, decides whether it is new.
+    if (mounted && _zoo.loaded) _voiceChanged();
+    if (!mounted || !_native) return;
+    _sendDaemonState();
+  }
+
+  /// Faces and frames repaint only the native slot; tabs and terminals stay
+  /// put. Native hears nothing until the slot is shown, and one `visible:
+  /// false` when it goes.
+  void _sendDaemonState() {
+    if (!_slotShown) {
+      if (_lastDaemonPayload == null) return;
+      _lastDaemonPayload = null;
+      unawaited(_channel.invokeMethod<void>('daemonState', {'visible': false}));
+      return;
+    }
+    final payload = _daemonPayload;
+    final key = jsonEncode(payload);
+    if (key == _lastDaemonPayload) return;
+    _lastDaemonPayload = key;
+    unawaited(_channel.invokeMethod<void>('daemonState', payload));
+  }
+
+  /// Opened from Cmd-O: the daemon's `find` habit.
+  void _noteFound() {
+    if (_foundSomething || !_zoo.loaded) return;
+    _foundSomething = true;
+    _syncDaemon();
+  }
+
+  bool _noteKey(KeyEvent event) {
+    // Off, this is not here at all: every key goes where it went before.
+    if (event is! KeyDownEvent || _zoo.daemons == DaemonsSwitch.off) {
+      return false;
+    }
+    _noteWindowInput();
+    if (!_zoo.loaded) return false;
+    _noteInput();
+    // ⌘⌥ plus an offered key answers the daemon's line: `[y]` is ⌘⌥Y.
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isMetaPressed &&
+        keyboard.isAltPressed &&
+        !keyboard.isControlPressed &&
+        _face.voiceActions.isNotEmpty) {
+      final label = event.logicalKey.keyLabel.toLowerCase();
+      // Only a line that is armed: drawn, with what its keys do, a moment
+      // ago. `[g]` opens at any time.
+      if (_face.voiceActions.any((a) => a.key == label) &&
+          (label == 'g' || _voiceArmed)) {
+        _answerDaemon(label);
+        return true;
+      }
+    }
+    _face.noteKey(
+      enter:
+          event.logicalKey == LogicalKeyboardKey.enter ||
+          event.logicalKey == LogicalKeyboardKey.numpadEnter,
+    );
+    return false;
+  }
+
+  /// Answer the daemon's spoken line with one of its offered keys: only once
+  /// it is armed (`[g]` opens at any time).
+  void _answerDaemon(String key) {
+    final sayId = _face.voiceSayId;
+    final action = _face.voiceActions.where((a) => a.key == key).firstOrNull;
+    if (sayId == null || action == null) return;
+    final opens = key == 'g' && _face.voiceTarget?.key != null;
+    if (!opens && !_brain.armed(sayId)) return;
+    _answerLine(sayId, action, _face.voiceTarget);
+    _face.answered();
+  }
+
+  /// A key on a line the brain wrote (the status line's, an ask, a brief
+  /// item, a confirmation): `[g]` opens the harness, which is the window's to
+  /// do; a confirmation's y or n is `daemon_confirm`; any other key goes to
+  /// the brain as `daemon_act`. The brain sends nothing for a line that is
+  /// not armed yet.
+  void _answerLine(String id, DaemonAction action, DaemonAbout? about) {
+    if (action.key == 'g' && about?.key != null) {
+      _openHarness(about!);
+      return;
+    }
+    if (id.isEmpty) return;
+    if (id.startsWith('confirm:')) {
+      final rest = id.substring('confirm:'.length);
+      final colon = rest.indexOf(':');
+      if (colon <= 0) return;
+      _brain.confirm(
+        rest.substring(0, colon),
+        rest.substring(colon + 1),
+        accept: action.key == 'y',
+      );
+      return;
+    }
+    _brain.act(id, action.choice);
+  }
+
+  /// Show a harness the daemon named, wherever it is.
+  void _openHarness(DaemonAbout about) {
+    if (!mounted) return;
+    _closeDaemon(restoreFocus: false);
+    _closeDaemonHint();
+    unawaited(
+      app.revealAgentFromAlert(about.machineId, about.agentId).catchError((
+        Object _,
+      ) {
+        // Gone since, or on a machine this window cannot reach.
+        _face.sayNote('that harness is not here any more.');
+      }),
+    );
+  }
+
+  /// The pair harness on this computer (`autonomous/pair`), when known: the
+  /// one a talk reached, else the one this machine lists.
+  ({String machineId, String agentId})? get _pairHarness {
+    final local = app.localMachineState;
+    if (local == null) return null;
+    final machineId = local.machine.machineId;
+    final agentId =
+        _brain.pairAgentId ??
+        local.agents.where((a) => a.dsh == 'autonomous/pair').firstOrNull?.id;
+    return agentId == null ? null : (machineId: machineId, agentId: agentId);
+  }
+
+  /// The whole conversation: the pair harness's own pane.
+  void _openConversation() {
+    final pair = _pairHarness;
+    if (pair == null) return;
+    _openHarness(DaemonAbout(pair.machineId, pair.agentId));
+  }
+
+  /// `~/.config/harness/pair.jsonc`, written with no rules when it is not
+  /// there yet, opened in the editor `.jsonc` files open in.
+  Future<void> _openPairRules() async {
+    try {
+      final file = await ensurePairRules();
+      if (!await launchUrl(file.uri)) {
+        throw StateError('No editor opens .jsonc files. Open ${file.path}.');
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text('Couldn’t open pair.jsonc. $error')),
+        );
+      }
+    }
+  }
+
+  /// "Talk to daemon": the panel, with the talk box ready.
+  void _talkToDaemon() {
+    if (!_zoo.loaded) return;
+    if (_daemonOverlay != null) _closeDaemon(restoreFocus: false);
+    if (!_brain.paired) {
+      _face.sayNote(
+        _brain.active
+            ? 'pair a daemon first: its panel has [ pair ].'
+            : 'harnessd here cannot talk yet. update it.',
+      );
+    }
+    _toggleDaemon(talk: true);
+  }
+
+  // ── idle: away at the window ───────────────────────────────────────────────
+
+  /// No key or pointer this long, with the window in front, is away:
+  /// harnessd hears `daemon_presence { active: false, awayMs }`.
+  static const _idleAfter = Duration(minutes: 5);
+  DateTime? _lastInput;
+  DateTime? _idleSince;
+  Timer? _idleTimer;
+
+  void _notePointer(PointerEvent event) {
+    // Off, this is not here at all.
+    if (_zoo.daemons == DaemonsSwitch.off) return;
+    if (!_slotShown) {
+      // Until the slot has its place: whether a button is held and whether
+      // the pointer is on the bar, so it never arrives under a click.
+      _pointerHeld = event.down;
+      final workspace = context.findRenderObject();
+      _pointerOverBar =
+          !_native &&
+          event is! PointerRemovedEvent &&
+          workspace is RenderBox &&
+          workspace.globalToLocal(event.position).dy >=
+              workspace.size.height - _statusBarHeight;
+      _noteWindowInput();
+    }
+    if (!_zoo.loaded) return;
+    if (event is PointerDownEvent ||
+        event is PointerScrollEvent ||
+        event is PointerHoverEvent) {
+      _noteInput();
+    }
+  }
+
+  /// A key or the pointer, anywhere in the window: the slot's quiet moment
+  /// starts again.
+  void _noteWindowInput() {
+    if (_slotShown) return;
+    _lastWindowInput = (widget.daemonClock ?? DateTime.now)();
+    if (_zoo.loaded && _slotTimer == null) {
+      _slotTimer = Timer(_slotSettle, _checkSlot);
+    }
+  }
+
+  /// Show the slot once daemons are on and the window is quiet: no button
+  /// held, the pointer off the bar, and no input for [_slotSettle] (at once
+  /// when nothing has been touched yet). Tabs never shift under a click.
+  void _checkSlot() {
+    _slotTimer?.cancel();
+    _slotTimer = null;
+    if (!mounted || _slotShown || !_zoo.loaded) return;
+    final last = _lastWindowInput;
+    final quiet = last == null
+        ? _slotSettle
+        : (widget.daemonClock ?? DateTime.now)().difference(last);
+    if (_pointerHeld || _pointerOverBar || quiet < _slotSettle) {
+      _slotTimer = Timer(
+        quiet < _slotSettle ? _slotSettle - quiet : _slotSettle,
+        _checkSlot,
+      );
+      return;
+    }
+    _slotShown = true;
+    if (_native) _syncNative();
+    setState(() {});
+  }
+
+  /// Daemons came on or went off in this window.
+  void _daemonsSwitched(bool on) {
+    if (_daemonCommandsOn != on) {
+      _daemonCommandsOn = on;
+      daemonCommandsActive.value = on;
+      _syncKeymap();
+      _search?.refreshCommands();
+    }
+    if (on) {
+      if (!_daemonSettingsLoaded && !_zoo.isPreview) {
+        _daemonSettingsLoaded = true;
+        unawaited(_daemonSettings.load());
+      }
+      _face.brainActive = _brain.active;
+      if (_brain.active) unawaited(_sendPresence());
+      _checkSlot();
+    } else {
+      // All of it goes: the slot, its line, the panel, a reveal, what the
+      // brain said. The bar is the one it was before daemons existed.
+      _slotTimer?.cancel();
+      _slotTimer = null;
+      _slotShown = false;
+      _pointerHeld = false;
+      _pointerOverBar = false;
+      _lastWindowInput = null;
+      _closeHatch(restoreFocus: false);
+      _face.dismissVoice();
+      _brain.reset();
+      _plates.reset();
+      if (_native) _sendDaemonState();
+    }
+    if (_native) _syncNative();
+  }
+
+  void _noteInput() {
+    final now = (widget.daemonClock ?? DateTime.now)();
+    _lastInput = now;
+    if (_idleSince case final since?) {
+      // Back from idle: a return, with how long.
+      _idleSince = null;
+      if (app.inForeground) {
+        unawaited(_sendPresence(away: now.difference(since)));
+      }
+    }
+    _idleTimer ??= Timer(_idleAfter, _checkIdle);
+  }
+
+  void _checkIdle() {
+    _idleTimer = null;
+    final last = _lastInput;
+    if (!mounted || last == null || _idleSince != null) return;
+    final now = (widget.daemonClock ?? DateTime.now)();
+    final quiet = now.difference(last);
+    if (quiet < _idleAfter) {
+      _idleTimer = Timer(_idleAfter - quiet, _checkIdle);
+      return;
+    }
+    // Only in front: a window behind others already said it is away.
+    if (!app.inForeground || !_zoo.loaded || !_brain.active) return;
+    _idleSince = last;
+    unawaited(_sendPresence(idle: quiet));
+  }
+
+  /// A guest's turns that finish now finished while the person was away if
+  /// the window has not been in use for `earn.night.awayMinutes`.
+  bool get _awayForNight {
+    final minutes = _zoo.roster.rules.earn.awayMinutes;
+    final now = (widget.daemonClock ?? DateTime.now)();
+    final since = _awaySince ?? _idleSince ?? _lastInput;
+    return since != null &&
+        (_awaySince != null || _idleSince != null) &&
+        now.difference(since) >= Duration(minutes: minutes);
+  }
+
+  void _brainChanged() {
+    // Heard while daemons are off (or not decided yet): nothing shows.
+    if (!mounted || !_zoo.loaded) return;
+    final firstHeard = !_face.brainActive && _brain.active;
+    _face.brainActive = _brain.active;
+    if (firstHeard) unawaited(_sendPresence());
+    final brief = _brain.brief;
+    if (brief != null && !identical(brief, _lastBrief)) {
+      _lastBrief = brief;
+      _showBrief(brief);
+    }
+    _daemonOverlay?.markNeedsBuild();
+    _syncDaemon();
+    // A line arming changes what native may click.
+    _faceChanged();
+    // The brain's state changing is news from agents too.
+    if (_brain.state?.working == true) _face.pulse();
+  }
+
+  /// `daemon_presence`: whether you are at this window, how long you were
+  /// away, and (for a guest, whose zoo is local) which daemon it pairs with.
+  Future<void> _sendPresence({Duration? away, Duration? idle}) async {
+    if (!_zoo.loaded || !_brain.active) return;
+    // harnessd knows the pair by its species.
+    final pair = app.isGuest ? _zoo.zoo.byUid(_zoo.zoo.pair)?.id : null;
+    _presencePair = pair;
+    final pane = app.focusedPane;
+    final agentId = pane?.agentId;
+    _presenceFocus = agentId == null ? null : '${pane!.machineId}/$agentId';
+    _presenceAutonomy = app.isGuest ? _zoo.zoo.autonomy : null;
+    _presenceConsent = app.isGuest ? _zoo.zoo.watching : null;
+    await _brain.presence(
+      // Idle in front of the window is away, with how long it has been.
+      active: app.inForeground && idle == null,
+      away: idle ?? away,
+      pair: pair,
+      autonomy: _presenceAutonomy,
+      consent: _presenceConsent,
+      focusMachineId: agentId == null ? null : pane!.machineId,
+      focusAgentId: agentId,
+    );
+  }
+
+  /// The brief on return: a short list under the status line, each item as
+  /// sent, keys first. It stays up while its keys work (a minute) when an
+  /// item has any, else 10 s; it is in the panel until the next one.
+  void _showBrief(DaemonBrief brief) {
+    if (!app.inForeground || (brief.line.isEmpty && brief.items.isEmpty)) {
+      return;
+    }
+    final keyed = brief.items.any(
+      (item) => item.actions.any((a) => a.key != 'g'),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _showDaemonOverlay(
+        key: const ValueKey('daemon-brief'),
+        interactive: true,
+        showFor: keyed ? DaemonBrief.keysFor : const Duration(seconds: 10),
+        child: DaemonBriefNotice(
+          name: _face.name,
+          brief: brief,
+          live: brief.keysLive(_brain.now()),
+          armed: _brain.armed,
+          arming: _brain,
+          onShown: _brain.shown,
+          onAnswer: (id, action, about) {
+            final opens = action.key == 'g' && about?.key != null;
+            if (!opens && !_brain.armed(id)) return;
+            _closeDaemonHint();
+            _answerLine(id, action, about);
+          },
+        ),
+      );
+    });
+  }
+
+  String? _lastZooScope;
+  int? _lastHabits;
+  String? _lastEggId;
+  bool _zooWasLoaded = false;
+
+  void _zooChanged() {
+    if (!mounted) return;
+    if (!_zoo.loaded || _lastZooScope != _zoo.scope) {
+      _closeDaemonHint();
+      _closeDaemon(restoreFocus: false);
+      _lastHabits = null;
+      _lastEggId = null;
+      _lastZooScope = _zoo.scope;
+    }
+    if (_zoo.loaded) {
+      final habits = _zoo.habitsCounted;
+      final egg = _zoo.readyEgg;
+      final beforeHatch = _zoo.zoo.daemons.isEmpty;
+      if (beforeHatch &&
+          _lastHabits != null &&
+          (habits > _lastHabits! || (egg != null && _lastEggId == null))) {
+        final scope = _zoo.scope;
+        final left = _zoo.habitsNeeded - habits;
+        final ready = egg != null;
+        // One short, and what is left is the habit it cannot come without.
+        final required = _zoo.habitsRequiredLeft.firstOrNull;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _zoo.scope != scope || _face.revealing) return;
+          _showDaemonNotice(
+            ready
+                ? 'Your egg is ready.'
+                : left <= 0
+                ? 'The egg is on its way.'
+                : left == 1 && required != null
+                ? '${required.label}, and it hatches.'
+                : left == 1
+                ? 'One habit left. Something stirs.'
+                : 'One step closer. $left to go.',
+            action: ready ? 'hatch' : 'view',
+            onAction: _activateDaemon,
+            key: const ValueKey('daemon-habit-notice'),
+          );
+        });
+      }
+      _lastHabits = habits;
+      _lastEggId = egg?.id;
+    }
+    // A guest's pair, dial and consent live in its local zoo; the brain
+    // hears of a change.
+    if (app.isGuest &&
+        _brain.active &&
+        (_zoo.zoo.byUid(_zoo.zoo.pair)?.id != _presencePair ||
+            _zoo.zoo.autonomy != _presenceAutonomy ||
+            _zoo.zoo.watching != _presenceConsent)) {
+      _presencePair = _zoo.zoo.byUid(_zoo.zoo.pair)?.id;
+      _presenceAutonomy = _zoo.zoo.autonomy;
+      _presenceConsent = _zoo.zoo.watching;
+      unawaited(
+        _brain.guest(
+          pair: _presencePair,
+          autonomy: _presenceAutonomy,
+          consent: _presenceConsent,
+        ),
+      );
+    }
+    if (_zoo.loaded != _zooWasLoaded) {
+      _zooWasLoaded = _zoo.loaded;
+      _daemonsSwitched(_zoo.loaded);
+      setState(() {});
+    }
+    _maybeShowDaemonHint();
+  }
+
+  void _daemonEnvironmentChanged() {
+    final wasForeground = _awaySince == null;
+    _face.setEnvironment(
+      foreground: app.inForeground,
+      reduceMotion: _reduceMotion,
+    );
+    if (app.inForeground) {
+      _maybeShowDaemonHint();
+      if (!wasForeground) {
+        final away = (widget.daemonClock ?? DateTime.now)().difference(
+          _awaySince!,
+        );
+        _awaySince = null;
+        unawaited(_sendPresence(away: away));
+      }
+    } else {
+      _closeDaemonHint();
+      if (wasForeground) {
+        _awaySince = (widget.daemonClock ?? DateTime.now)();
+        unawaited(_sendPresence());
+      }
+    }
+  }
+
+  void _closeDaemonHint() {
+    _detailOverlayFor = null;
+    _daemonHintTimer?.cancel();
+    _daemonHintTimer = null;
+    _daemonHintOverlay?.remove();
+    _daemonHintOverlay?.dispose();
+    _daemonHintOverlay = null;
+  }
+
+  /// "A daemon is inside." once per account, beside the nest, never taking
+  /// focus. Scheduled from state changes, never from build().
+  void _maybeShowDaemonHint() {
+    if (!mounted || _daemonHintPending || !_zoo.needsHint) return;
+    _daemonHintPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _daemonHintPending = false;
+      if (!mounted || !_daemonNoticeAllowed || !_zoo.needsHint) return;
+      if (Overlay.maybeOf(context) == null || !_zoo.acknowledgeHint()) return;
+      _showDaemonNotice(
+        'A daemon is inside.',
+        key: const ValueKey('daemon-arrival-hint'),
+      );
+    });
+  }
+
+  bool get _daemonNoticeAllowed =>
+      _shortcutsEnabled &&
+      app.inForeground &&
+      _daemonOverlay == null &&
+      _hatchOverlay == null &&
+      _search == null &&
+      _newHarness == null &&
+      !_commandBarOpen &&
+      !_machinesVisible &&
+      !_modelsVisible &&
+      !_harnessesVisible;
+
+  void _showDaemonNotice(
+    String message, {
+    required Key key,
+    String? action,
+    VoidCallback? onAction,
+    Duration showFor = const Duration(seconds: 6),
+  }) => _showDaemonOverlay(
+    key: key,
+    interactive: onAction != null,
+    showFor: showFor,
+    child: DaemonNotice(message: message, action: action, onAction: onAction),
+  );
+
+  /// A note beside the slot: it never takes focus on arrival, and takes
+  /// clicks only when it has something to click.
+  bool _showDaemonOverlay({
+    required Key key,
+    required Widget child,
+    required bool interactive,
+    Duration showFor = const Duration(seconds: 6),
+  }) {
+    if (!mounted || !_daemonNoticeAllowed) return false;
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) return false;
+    _closeDaemonHint();
+    _daemonHintOverlay = OverlayEntry(
+      builder: (context) {
+        final cell = workspaceBarCellSizeOf(context);
+        return Positioned(
+          top: (_native ? 0.0 : _tabBarHeight) + cell.width,
+          right: cell.width,
+          child: IgnorePointer(
+            ignoring: !interactive,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: math.max(
+                  0,
+                  MediaQuery.sizeOf(context).width - cell.width * 2,
+                ),
+              ),
+              child: KeyedSubtree(key: key, child: child),
+            ),
+          ),
+        );
+      },
+    );
+    overlay.insert(_daemonHintOverlay!);
+    _daemonHintTimer = Timer(showFor, _closeDaemonHint);
+    return true;
+  }
+
+  /// A click on the status slot: a ready egg hatches; otherwise the daemon is
+  /// booped and its panel opens (or closes).
+  void _activateDaemon() {
+    _closeDaemonHint();
+    if (!_shortcutsEnabled ||
+        _hatchOverlay != null ||
+        _face.revealing ||
+        !_zoo.loaded) {
+      return;
+    }
+    final egg = _zoo.readyEgg;
+    if (_face.def == null && egg != null) {
+      _hatch(egg);
+      return;
+    }
+    if (_daemonOverlay == null) _face.boop();
+    _toggleDaemon();
+  }
+
+  void _toggleDaemon({bool talk = false}) {
+    _closeDaemonHint();
+    if (_daemonOverlay != null) {
+      _closeDaemon();
+      return;
+    }
+    if (!_zoo.loaded ||
+        _hatchOverlay != null ||
+        _newHarness?.requestDismiss() == false) {
+      return;
+    }
+    _closeNewHarness(restoreFocus: false);
+    _closeSearch(restoreFocus: false);
+    _closeCommandBar(restoreFocus: false);
+    dismissTransientMenus();
+    _preparePaneFocus();
+    _daemonOverlay = OverlayEntry(
+      builder: (context) => _anchoredBesideSlot(
+        onBarrierTap: _closeDaemon,
+        child: DaemonPanel(
+          key: ValueKey(_zoo.scope),
+          face: _face,
+          brain: _brain.active ? _brain : null,
+          onAnswer: _answerLine,
+          onOpenConversation: _zoo.isPreview || _pairHarness == null
+              ? null
+              : _openConversation,
+          onOpenRules: _zoo.isPreview
+              ? null
+              : () => unawaited(_openPairRules()),
+          talkShortcut: _keymap.hint('app.daemon_talk'),
+          focusTalk: talk,
+          onClose: _closeDaemon,
+          onHatch: _hatch,
+          shortcut: (command) => _keymap.hint(command),
+          onCommand: (command) {
+            _closeDaemon(restoreFocus: false);
+            _runShortcut(command);
+          },
+        ),
+      ),
+    );
+    Overlay.of(context).insert(_daemonOverlay!);
+    _unregisterDaemon = registerTransientMenu(
+      () => _closeDaemon(restoreFocus: false),
+    );
+    _face.look();
+    _face.seen();
+    if (_native) _syncNative();
+    setState(() {});
+  }
+
+  /// The panel and the hatch reveal float above the status slot, at the bottom
+  /// right, with a barrier that closes them: [cells] terminal cells wide at
+  /// most (the reveal is wider, for a plate's 56 columns).
+  Widget _anchoredBesideSlot({
+    required Widget child,
+    required VoidCallback onBarrierTap,
+    int cells = 46,
+  }) => LayoutBuilder(
+    builder: (context, constraints) {
+      final top = _native ? 0.0 : _tabBarHeight;
+      final bottom = _statusBarHeight;
+      return Stack(
+        children: [
+          Positioned.fill(
+            top: top,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onBarrierTap,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            bottom: bottom + 8,
+            right: 10,
+            width: (constraints.maxWidth - 20).clamp(
+              0,
+              terminalCellSizeOf(context).width * cells,
+            ),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: (constraints.maxHeight - top - bottom - 20).clamp(
+                  0,
+                  720,
+                ),
+              ),
+              child: KeymapProvider(keymap: _keymap, child: child),
+            ),
+          ),
+        ],
+      );
+    },
+  );
+
+  void _closeDaemon({bool restoreFocus = true}) {
+    if (_daemonOverlay == null) return;
+    _unregisterDaemon?.call();
+    _unregisterDaemon = null;
+    _daemonOverlay?.remove();
+    _daemonOverlay?.dispose();
+    _daemonOverlay = null;
+    if (!mounted) return;
+    if (_native) _syncNative();
+    setState(() {});
+    if (restoreFocus) _returnFocusToPane();
+  }
+
+  void _returnFocusToPane() {
+    _shellFocus.requestFocus();
+    if (app.focusedPane case final pane?) {
+      app.focusPane(pane.id, reveal: true);
+    }
+  }
+
+  /// Open an egg. The slot keeps showing the egg, and native hears nothing of
+  /// the hatchling, until the reveal has finished.
+  void _hatch(ZooEgg egg) {
+    if (_hatchOverlay != null || _zoo.hatchingEgg != null || !mounted) return;
+    _closeDaemon(restoreFocus: false);
+    _closeDaemonHint();
+    _closeSearch(restoreFocus: false);
+    _closeCommandBar(restoreFocus: false);
+    dismissTransientMenus();
+    // After the person's third hatch, any key skips to the card.
+    final skippable = _zoo.zoo.daemons.length >= 3;
+    // A duplicate's level-up is told against the zoo before the hatch.
+    final before = _zoo.zoo;
+    _face.beginReveal(kind: egg.kind);
+    final result = _zoo.hatch(egg.id);
+    _preparePaneFocus();
+    _hatchOverlay = OverlayEntry(
+      builder: (context) => _anchoredBesideSlot(
+        onBarrierTap: _closeHatch,
+        cells: daemonRevealCells,
+        child: DaemonHatchReveal(
+          roster: _zoo.roster,
+          egg: egg,
+          result: result,
+          zoo: () => _zoo.zoo,
+          reduceMotion: _reduceMotion,
+          skippable: skippable,
+          before: before,
+          // Nobody has said yet whether it may watch: after the card, the
+          // first-day screen (README, "What your daemon sees").
+          needsConsent: !_zoo.isPreview && before.consent == null,
+          onConsent: (watching) => _zoo.consent(watching: watching),
+          onSuggest: () => _zoo.autonomy('suggest'),
+          plates: _plates,
+          // The name it is given at the hatch (`zoo.nickname { uid, name }`).
+          onName: _zoo.nickname,
+          onStage: _face.revealAt,
+          onRevealed: _face.endReveal,
+          onClose: _closeHatch,
+        ),
+      ),
+    );
+    Overlay.of(context).insert(_hatchOverlay!);
+    _unregisterHatch = registerTransientMenu(
+      () => _closeHatch(restoreFocus: false),
+    );
+    if (_native) _syncNative();
+    setState(() {});
+  }
+
+  void _closeHatch({bool restoreFocus = true}) {
+    if (_hatchOverlay == null) return;
+    _unregisterHatch?.call();
+    _unregisterHatch = null;
+    _hatchOverlay?.remove();
+    _hatchOverlay?.dispose();
+    _hatchOverlay = null;
+    _face.endReveal();
+    if (!mounted) return;
+    if (_native) _syncNative();
+    setState(() {});
+    if (restoreFocus) _returnFocusToPane();
   }
 
   Future<void> _openModelManager() async {
@@ -3069,6 +4623,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       selectOnEmptyQuery: split != null,
       // Results read downward from the input.
       resultsFromBottom: false,
+      noteFor: _easterNote,
       split: split,
       placement:
           placement ??
@@ -3079,6 +4634,37 @@ class _SwarmScreenState extends State<SwarmScreen> {
               : null),
       catalog: _searchCatalog,
     )..setQuery(query);
+    final deviceSearch = _search!;
+    _searchDevice = DeviceFinder(
+      deviceSearch,
+      isComposing: () =>
+          _searchText.value.composing.isValid &&
+          !_searchText.value.composing.isCollapsed,
+      dismiss: _dismissSearch,
+      choose: (choice) async {
+        if (!identical(_search, deviceSearch)) return false;
+        final target = deviceSearch.targetId;
+        _closeSearch(restoreFocus: false);
+        final destination = choice.destination;
+        _preparePaneFocus();
+        if (destination.hasView ||
+            app.paneOfAgent(destination.machineId!, destination.agentId!) !=
+                null) {
+          return app.revealAgentViewFromDevice(
+            destination.machineId!,
+            destination.agentId!,
+            swarmId: destination.swarmId,
+            paneId: destination.paneId,
+          );
+        }
+        // A missing view follows the desktop's explicit Open/Resume path.
+        await _activateSearch(SwarmSearchSelection(choice.destination), target);
+        final pane = app.focusedPane;
+        return mounted &&
+            pane?.machineId == choice.destination.machineId &&
+            pane?.agentId == choice.destination.agentId;
+      },
+    );
     _search!.addListener(_syncSearch);
     _searchOverlay = OverlayEntry(builder: _buildSearchOverlay);
     Overlay.of(context).insert(_searchOverlay!);
@@ -3162,9 +4748,21 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
   }
 
+  /// The one easter word the window knows by heart: the box answers as the
+  /// old adventure did. Any easter word (the roster holds only their hashes)
+  /// is sent to the zoo once.
+  String? _easterNote(String query) =>
+      _zoo.loaded && query.trim().toLowerCase() == classicEasterWord
+      ? 'Nothing happens.'
+      : null;
+
   void _syncSearch() {
     final search = _search;
     if (search == null) return;
+    if (_zoo.loaded) {
+      final word = search.query.trim().toLowerCase();
+      if (word.length >= 3 && _zoo.isEasterWord(word)) _zoo.easter(word);
+    }
     if (_machineSearchVisible != search.isMachineMode) {
       _machineSearchVisible = search.isMachineMode;
       if (_machineSearchVisible) unawaited(search.refreshMachineResources());
@@ -3227,9 +4825,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _searchOverlay?.remove();
     _searchOverlay?.dispose();
     _searchOverlay = null;
+    _searchDevice?.close();
+    _searchDevice = null;
     _search!.removeListener(_syncSearch);
     _search!.dispose();
     _search = null;
+    _dismissMachinePrompt();
     _modelSelectionTarget = null;
     _modelSearchVisible = false;
     app.modelManager.setPanelVisible(false);
@@ -3244,7 +4845,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     if (restoreFocus) {
       if (previous?.context?.mounted == true && previous!.canRequestFocus) {
         previous.requestFocus();
-      } else if (app.focusedPane?.session?.focusInput() != true) {
+      } else if (!_focusWorkspaceInput()) {
         _shellFocus.requestFocus();
       }
     }
@@ -3294,6 +4895,24 @@ class _SwarmScreenState extends State<SwarmScreen> {
       }
 
       if (!current()) return;
+      // A saved API's model. Decided first: the rest of this branch reads "no grid model" as the
+      // pane's own login, and would move the agent there.
+      if (search.selectableApiModel(choice.destination) case (
+        :final api,
+        :final model,
+      )) {
+        final now = WorkspacePaneContext.focused(app)!;
+        _closeSearch();
+        if (!agentOnApiModel(now.agent, api, model.id)) {
+          await app.retargetAgentToApiModel(
+            now.pane.machineId,
+            now.agentId!,
+            connectionId: api.id,
+            modelId: model.id,
+          );
+        }
+        return;
+      }
       var selected = search.selectableGridModel(choice.destination);
       if (selected == null && search.canStartModelForUse(choice.destination)) {
         selected = await search.startModelForUse(
@@ -3349,6 +4968,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     if (choice.destination.storeId case final storeId?) {
       _closeSearch(restoreFocus: false);
+      _noteFound();
       app.openStore(harness: storeId);
       return;
     }
@@ -3375,6 +4995,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       return;
     }
     _closeSearch(restoreFocus: choice.destination.isCommand);
+    if (!choice.destination.isCommand) _noteFound();
     // A blank tab already supplies the destination. Pin
     // selection to that tab, including while an exact resume is still pending.
     final targetTab = app.swarms.where((tab) => tab.id == target).firstOrNull;
@@ -3722,6 +5343,33 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _toggleSessions(filter: SessionFilter.needsInput);
   }
 
+  Future<void> _showNotificationInbox() => _dialog(() async {
+    await showNotificationInbox(
+      context,
+      app: app,
+      topInset: _native ? 0 : _tabBarHeight,
+      onOpen: (row) async {
+        final destination = swarmDestinations(app)
+            .where(
+              (item) =>
+                  item.machineId == row.machineId &&
+                  item.agentId == row.agentId,
+            )
+            .firstOrNull;
+        if (destination == null) return false;
+        final opened = await activateSwarmDestination(
+          app,
+          destination,
+          destinationSwarmId: app.activeSwarmId,
+        );
+        // Only successful navigation acknowledges a result. Questions remain
+        // pending until the daemon confirms they have been answered.
+        if (opened) app.markAgentSeen(row.machineId, row.agentId);
+        return opened;
+      },
+    );
+  });
+
   Future<void> _openSpokenTask(SpokenTaskRequest request) async {
     final spoken = SpokenTask(
       voiceId: request.voiceId,
@@ -3757,7 +5405,13 @@ class _SwarmScreenState extends State<SwarmScreen> {
   }
 
   void _maybeLink() {
-    final machine = app.stateOf(app.selectedMachineId ?? '');
+    if (kIsWeb && app.requestedMachineLink == null) {
+      _maybeInitialBrowserMachines();
+      return;
+    }
+    final machine = app.stateOf(
+      app.requestedMachineLink ?? app.selectedMachineId ?? '',
+    );
     if (machine == null ||
         !machine.needsLink ||
         machine.isLocalMachine ||
@@ -3772,12 +5426,77 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _linkDialogMachineId = machine.machine.machineId;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
-        await _showMachinesControls(
-          initialMachineId: machine.machine.machineId,
-        );
+        app.acknowledgeMachineLinkRequest(machine.machine.machineId);
+        await _openMachines(initialMachineId: machine.machine.machineId);
       }
-      _linkDialogMachineId = null;
+      // Keep the prompt's identity until the picker closes. Otherwise Escape
+      // would immediately reopen it on the next workspace update.
+      if (_search?.isMachineMode != true) _linkDialogMachineId = null;
     });
+  }
+
+  bool get _hasConnectedBrowserMachine => app.machineStates.values.any(
+    (machine) =>
+        !machine.machine.isShared &&
+        !machine.needsLink &&
+        machine.nodeOnline != false &&
+        machine.connectionStatus == ConnectionStatus.connected,
+  );
+
+  bool get _browserMachineSetupReady =>
+      app.machineInventoryLoaded &&
+      !app.machinesLoading &&
+      !app.machinesAreStale &&
+      app.machineListError == null &&
+      !app.machineStates.values.any(
+        (machine) =>
+            !machine.machine.isShared &&
+            !machine.needsLink &&
+            machine.nodeOnline != false &&
+            (machine.connectionStatus == ConnectionStatus.connecting ||
+                machine.connectionStatus == ConnectionStatus.reconnecting),
+      ) &&
+      !_dialogOpen &&
+      !_commandBarOpen &&
+      !_spokenPaletteOpen &&
+      _newHarness == null &&
+      _search == null &&
+      _routeIsCurrent;
+
+  void _maybeInitialBrowserMachines() {
+    if (_browserMachineSetupHandled) return;
+    if (_hasConnectedBrowserMachine) {
+      _browserMachineSetupHandled = true;
+      return;
+    }
+    // Discovery and saved links restore asynchronously. An unlinked row must
+    // not cover the workspace while another machine is still reconnecting.
+    if (!_browserMachineSetupReady) return;
+    _browserMachineSetupHandled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // A connection or a deliberate user action may have won this frame.
+      if (!mounted ||
+          _hasConnectedBrowserMachine ||
+          !_browserMachineSetupReady) {
+        return;
+      }
+      final selected = app.stateOf(app.selectedMachineId ?? '');
+      unawaited(
+        _openMachines(
+          initialMachineId: selected?.needsLink == true
+              ? selected!.machine.machineId
+              : null,
+        ),
+      );
+    });
+  }
+
+  void _dismissMachinePrompt() {
+    final id = _linkDialogMachineId;
+    _linkDialogMachineId = null;
+    if (id != null && app.stateOf(id)?.needsLink == true) {
+      app.dismissLinkPrompt(id);
+    }
   }
 
   // Keyboard actions and search commands execute the same callbacks.
@@ -3819,10 +5538,13 @@ class _SwarmScreenState extends State<SwarmScreen> {
     ShortcutAction.newTerminal: _newTerminal,
     ShortcutAction.cloneAgent: _cloneAgent,
     ShortcutAction.restartAgent: _restartAgent,
+    ShortcutAction.shareAgent: _shareAgent,
     ShortcutAction.routeTask: () =>
         _dialog(() => showTaskPalette(context, app)),
     ShortcutAction.orchestrate: () =>
         _dialog(() => showOrchestratorLauncher(context, app)),
+    ShortcutAction.team: () =>
+        _dialog(() => showChannelWorkspace(context, app)),
     ShortcutAction.reload: app.retryMachines,
     ShortcutAction.showLayout: () =>
         _dialog(() => showLayoutPalette(context, app)),
@@ -3842,6 +5564,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
         app,
         source: 'shortcut',
         initialSection: SettingsSection.debug,
+        experimentalFeatures: _experimentalFeatures,
       ),
     ),
   };
@@ -3857,26 +5580,32 @@ class _SwarmScreenState extends State<SwarmScreen> {
       'pane.focus_$i': () => app.focusPaneByIndex(i - 1),
     'navigation.commands': _showSearchCommands,
     'app.customize': () => unawaited(_customize()),
+    'app.add_phone': () => unawaited(_addPhone()),
     'app.store': _openStore,
+    'app.daemon': _toggleDaemon,
+    'app.daemon_talk': _talkToDaemon,
     'agent.add': _addAgent,
     if (kDebugSurfaceEnabled) 'app.onboarding_review': _newTab,
     'agent.rename': () => _editAgent(),
+    'agent.work': () async {
+      final focused = WorkspacePaneContext.focused(app);
+      if (focused != null) await _showSessionWork(focused);
+    },
     'agent.stop': () => _editAgent(stop: true),
     'agent.fork': _forkAgent,
-    'agent.share': _shareAgent,
     'pane.toggle_viewer': _toggleFocusedViewer,
     'pane.toggle_composer': () {
       if (app.focusedPaneId case final id?) app.toggleComposer(id);
     },
     // `agent.restart` and `agent.clone` come from `_actionHandlers` above:
     // both carry a ShortcutAction, so the loop already binds them.
-    'machine.link': _showMachinesControls,
+    'machine.link': _openMachines,
     'machines.manage': _manageMachines,
     'machines.list': _openMachines,
     'models.list': _togglePaneModels,
     'harnesses.list': _toggleSessions,
     'harnesses.manage': _toggleHarnessControls,
-    'machines.connections': _showMachinesControls,
+    'machines.connections': _openMachines,
     'models.manage': _toggleModelsControls,
     'project.add': _addProject,
     'keyboard.open_config': () => openKeyboardConfig(context),
@@ -3891,12 +5620,16 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   bool _canExecuteCommand(String id) {
     if (!_commands.containsKey(id) ||
+        !harnessCommandActive(id) ||
         !_routeIsCurrent ||
         _dialogOpen ||
         _spokenPaletteOpen) {
       return false;
     }
     if (id == 'keyboard.open_config') return _keymap.store != null;
+    if (id == 'agent.work') {
+      return WorkspacePaneContext.focused(app)?.agent != null;
+    }
     if (id == 'keyboard.pause_guide') return _learning.active;
     if (id == 'agent.share' || id == 'pane.toggle_viewer') {
       final focused = WorkspacePaneContext.focused(app);
@@ -3917,9 +5650,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           !machine.machine.isShared &&
           !isTerminalEngine(pane!.session!.engineId);
     }
-    if (id == 'keyboard.quick_start' ||
-        id == 'keyboard.practice' ||
-        id == 'app.onboarding_review') {
+    if (id == 'app.onboarding_review') {
       return app.viewer == null;
     }
     if (id == 'agent.rename' ||
@@ -4036,6 +5767,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
       ),
       ?mode('agent.new', 'New Harness', 'agent · machine · project'),
       ?mode('app.store', 'Harness Store', 'Browse and install harnesses'),
+      ?mode('app.daemon', 'Daemon', 'Your zoo · hatch · pair · nap'),
+      ?mode('app.daemon_talk', 'Talk to daemon', 'Ask your paired daemon'),
       ?mode(
         'harnesses.list',
         'Harnesses',
@@ -4137,7 +5870,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     if (restoreFocus) {
       if (previous?.context != null && previous!.canRequestFocus) {
         previous.requestFocus();
-      } else if (app.focusedPane?.session?.focusInput() != true) {
+      } else if (!_focusWorkspaceInput()) {
         _shellFocus.requestFocus();
       }
       FocusManager.instance.applyFocusChangesIfNeeded();
@@ -4220,7 +5953,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
   );
 
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
+  Widget build(BuildContext context) => _buildWorkspace(context);
+
+  Widget _buildWorkspace(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([app, _projects, _learning]),
     builder: (context, _) {
       grid.AppTheme.watch(context);
@@ -4267,19 +6002,19 @@ class _SwarmScreenState extends State<SwarmScreen> {
                 backgroundColor: grid.AppPalette.swarmField,
                 body: Column(
                   children: [
-                    if (!_native)
-                      MediaQuery.withNoTextScaling(child: _tabStrip()),
+                    Focus(
+                      focusNode: _tabStripFocus,
+                      onKeyEvent: _onTabStripKey,
+                      child: _native
+                          ? const SizedBox.shrink()
+                          : MediaQuery.withNoTextScaling(child: _tabStrip()),
+                    ),
                     if (_native)
                       Align(
                         alignment: Alignment.centerLeft,
                         child: _sidebarButton(),
                       ),
-                    if (_native)
-                      _focusedModelPicker(
-                        WorkspacePaneContext.focused(app),
-                        menuOnly: true,
-                      ),
-                    if (_learning.active && app.viewer == null)
+                    if (_learning.active)
                       WorkspaceQuickStart(
                         learning: _learning,
                         onCommand: _runShortcut,
@@ -4387,7 +6122,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                 child: Padding(
                                   padding: app.panes.isEmpty
                                       ? EdgeInsets.zero
-                                      : const EdgeInsets.all(kWorkspaceInset),
+                                      : const EdgeInsets.fromLTRB(
+                                          kWorkspaceInset,
+                                          kWorkspaceInset,
+                                          kWorkspaceInset,
+                                          0,
+                                        ),
                                   child: Focus.withExternalFocusNode(
                                     focusNode: _canvasFocus,
                                     includeSemantics: false,
@@ -4447,15 +6187,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                                           onCommands:
                                                               _showSearchCommands,
                                                           onQuickStart:
-                                                              _learning.offer &&
-                                                                  app.viewer ==
-                                                                      null
+                                                              _learning.offer
                                                               ? _startQuickStart
                                                               : null,
                                                           onPractice:
-                                                              app.viewer == null
-                                                              ? _practiceKeyboard
-                                                              : null,
+                                                              _practiceKeyboard,
                                                           onNew: () => _newAgent(
                                                             placement:
                                                                 HarnessPlacement
@@ -4470,7 +6206,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                                                     HarnessPlacement
                                                                         .currentTab,
                                                               ),
-                                                          resume: _resumeWork(),
                                                           onStore: _openStore,
                                                           onResourceSearch:
                                                               (
@@ -4517,6 +6252,18 @@ class _SwarmScreenState extends State<SwarmScreen> {
                           ],
                         ),
                       ),
+                    ),
+                    MediaQuery.withNoTextScaling(
+                      child: _native
+                          ? SizedBox(
+                              key: const ValueKey('workspace-status-bar'),
+                              height: _statusBarHeight,
+                              child: _focusedModelPicker(
+                                WorkspacePaneContext.focused(app),
+                                menuOnly: true,
+                              ),
+                            )
+                          : _statusBar(),
                     ),
                   ],
                 ),
@@ -4640,6 +6387,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       currentModel: focused.agent?.gridModel,
       currentTargetId: focused.agent?.gridTargetId,
       subscriptionModel: focused.agent?.modelName,
+      subscriptionEffort: focused.agent?.modelEffort,
       webSearch: focused.agent?.gridWebSearch,
       engineLabel: focused.engine,
       onOpen: () {
@@ -4675,6 +6423,161 @@ class _SwarmScreenState extends State<SwarmScreen> {
     );
   }
 
+  // Include the pane's former bottom gutter in this row, so its controls sit
+  // halfway between the pane edge and window bottom. Pane height is unchanged.
+  double get _statusBarHeight =>
+      workspaceBarControlHeight(context) + kWorkspaceInset;
+
+  Widget _statusBar() => LayoutBuilder(
+    builder: (context, constraints) {
+      final cell = workspaceBarCellSizeOf(context);
+      final focused = WorkspacePaneContext.focused(app);
+      final prefs = appearancePrefsStore.value.prompt;
+      final parts = focused?.format(prefs);
+      final pr = _pullRequest.value;
+      final theme = terminalThemeFor(
+        grid.AppTheme.palette.value,
+        terminalThemeStore.value,
+      );
+      final joined =
+          prefs.statusStyle.segmented &&
+          parts != null &&
+          parts.segments.isNotEmpty &&
+          pr != null;
+      final prBackground = !joined
+          ? null
+          : statusLinePaintSegments(
+              pullRequestStatusLineParts(
+                number: pr.number,
+                state: pr.state,
+                style: prefs.statusStyle,
+              ),
+              theme,
+              color: prefs.color,
+              segmentOffset: parts.segments.length,
+            ).single.background;
+      final available = math.max(0.0, constraints.maxWidth - cell.width * 2);
+      final daemonWidth = _slotShown
+          ? math.min(
+              cell.width * (_face.roster.rules.statusCells + 2),
+              available * .5,
+            )
+          : 0.0;
+      final shareWidth = _showShareButton
+          ? math.min(WorkspaceShareButton.widthOf(context), available * .3)
+          : 0.0;
+      final downloadWidth = kIsWeb ? available * .16 : 0.0;
+      final modelWidth =
+          math.max(
+            0.0,
+            available -
+                daemonWidth -
+                shareWidth -
+                downloadWidth -
+                cell.width * 5,
+          ) *
+          .4;
+      final paneContext = Row(
+        children: [
+          if (focused != null)
+            Flexible(
+              child: WorkspaceStatusLine(
+                key: const ValueKey('workspace-pane-context'),
+                parts: parts!,
+                links: _contextLinks(focused),
+                color: prefs.color,
+                nextBackground: prBackground,
+              ),
+            ),
+          if (pr != null) ...[
+            if (!joined) SizedBox(width: cell.width),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: constraints.maxWidth * .2),
+              child: WorkspaceBarControl(
+                key: const ValueKey('workspace-pull-request'),
+                label: '${pr.label} — Open on GitHub',
+                tooltip: '${pr.label} — Open on GitHub',
+                onPressed: _shortcutsEnabled
+                    ? () => _openFocusedPullRequest(pr.url.toString())
+                    : null,
+                builder: (context, emphasized) => WorkspacePullRequestLabel(
+                  number: pr.number,
+                  state: pr.state,
+                  emphasized: emphasized,
+                  color: prefs.color,
+                  style: prefs.statusStyle,
+                  segmentOffset: parts?.segments.length ?? 0,
+                ),
+              ),
+            ),
+          ],
+        ],
+      );
+      return Material(
+        key: const ValueKey('workspace-status-bar'),
+        type: MaterialType.transparency,
+        child: SizedBox(
+          height: _statusBarHeight,
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: cell.width),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _zoo.loaded
+                      ? DaemonVoiceLine(
+                          face: _face,
+                          brain: _brain,
+                          onAnswer: _shortcutsEnabled ? _answerDaemon : null,
+                          fallback: paneContext,
+                        )
+                      : paneContext,
+                ),
+                if (kIsWeb) ...[
+                  SizedBox(width: cell.width),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: downloadWidth),
+                    child: const WebDownloadButton(),
+                  ),
+                ],
+                if (_slotShown)
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: daemonWidth),
+                    child: DaemonSlotButton(
+                      face: _face,
+                      tooltip: () => _daemonTooltip,
+                      selected: _daemonOverlay != null,
+                      onPressed: _activateDaemon,
+                    ),
+                  ),
+                if (_showShareButton) ...[
+                  SizedBox(width: cell.width),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: shareWidth),
+                    child: WorkspaceShareButton(
+                      key: const ValueKey('workspace-share-button'),
+                      label: _shareLabel(focused),
+                      tooltip: _shareTooltip(focused),
+                      onPressed: _canExecuteCommand('agent.share')
+                          ? () => _runShortcut('agent.share')
+                          : null,
+                    ),
+                  ),
+                ],
+                if (focused != null && modelPickerSupports(focused.engine)) ...[
+                  SizedBox(width: cell.width * 2),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: modelWidth),
+                    child: _focusedModelPicker(focused),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  );
+
   Widget _tabStrip() => LayoutBuilder(
     builder: (context, constraints) {
       final cell = workspaceBarCellSizeOf(context);
@@ -4683,52 +6586,46 @@ class _SwarmScreenState extends State<SwarmScreen> {
         terminalThemeStore.value,
       );
       final names = workspaceTabNames(app);
+      final activities = [for (final tab in app.swarms) tabActivity(app, tab)];
       final labels = [
         for (var index = 0; index < app.swarms.length; index++)
           '${index + 1}:${names[app.swarms[index].id]}',
       ];
       final toolHeight = workspaceBarControlHeight(context);
-      final contentWidth = math.max(
-        0.0,
-        constraints.maxWidth - cell.width * 7 - 48,
+      final prefs = appearancePrefsStore.value.prompt;
+      final storeWidth = math.min(
+        WorkspaceStoreButton.widthOf(context),
+        math.max(0.0, constraints.maxWidth - cell.width * 14),
       );
-      final tabBudget = contentWidth * .45;
+      final tabBudget = math.max(
+        0.0,
+        constraints.maxWidth -
+            cell.width * 6 -
+            storeWidth -
+            cell.width * 8 -
+            48,
+      );
       _tabWidths = [
-        for (final label in labels)
-          math.min(
-            math.min(label.characters.length + 2, 24) * cell.width,
-            tabBudget,
+        for (var i = 0; i < labels.length; i++)
+          math.max(
+            activities[i] == null ? 0 : ('${i + 1}:'.length + 4) * cell.width,
+            math.min(
+              math.min(
+                    labels[i].characters.length +
+                        2 +
+                        (activities[i] == null ? 0 : 2),
+                    24,
+                  ) *
+                  cell.width,
+              tabBudget,
+            ),
           ),
       ];
       final total = _tabWidths.fold(0.0, (sum, width) => sum + width);
       final tabsWidth = math.min(total, tabBudget);
-      final focused = WorkspacePaneContext.focused(app);
-      final prefs = appearancePrefsStore.value.prompt;
-      final parts = focused?.format(prefs);
-      final pr = _pullRequest.value;
-      final prParts = pr == null
-          ? null
-          : pullRequestStatusLineParts(
-              number: pr.number,
-              state: pr.state,
-              style: prefs.statusStyle,
-            );
-      final joined =
-          prefs.statusStyle.segmented &&
-          parts != null &&
-          parts.segments.isNotEmpty &&
-          prParts != null;
-      final prBackground = joined
-          ? statusLinePaintSegments(
-              prParts,
-              theme,
-              color: prefs.color,
-              segmentOffset: parts.segments.length,
-            ).first.background
-          : null;
       _revealSelectedTab(tabsWidth);
       return Material(
-        key: const ValueKey('workspace-status-bar'),
+        key: const ValueKey('workspace-tab-bar'),
         color: grid.AppPalette.swarmTabBar,
         child: SizedBox(
           height: math.max(_tabBarHeight, cell.height * 2),
@@ -4750,6 +6647,19 @@ class _SwarmScreenState extends State<SwarmScreen> {
                   itemBuilder: (context, index) {
                     final swarm = app.swarms[index];
                     final selected = app.activeSwarmId == swarm.id;
+                    final activity = activities[index];
+                    final nameHint = workspaceTabTooltip(
+                      labels[index],
+                      swarm.name,
+                      clipped:
+                          workspaceBarTextSizeOf(context, labels[index]).width +
+                              (activity == null ? 0 : cell.width * 2) >
+                          _tabWidths[index] - cell.width * 2,
+                    );
+                    final tabHint = [
+                      ?nameHint,
+                      if (activity != null) activity.label,
+                    ].join('\n');
                     return ReorderableDragStartListener(
                       key: ValueKey(swarm.id),
                       index: index,
@@ -4770,19 +6680,15 @@ class _SwarmScreenState extends State<SwarmScreen> {
                           onDoubleTap: () => _rename(swarm.id),
                           child: Center(
                             child: WorkspaceBarControl(
-                              label: '${labels[index]}: ${swarm.name}',
-                              tooltip: workspaceTabTooltip(
-                                labels[index],
-                                swarm.name,
-                                clipped:
-                                    workspaceBarTextSizeOf(
-                                      context,
-                                      labels[index],
-                                    ).width >
-                                    _tabWidths[index] - cell.width * 2,
-                              ),
+                              label:
+                                  '${labels[index]}: ${swarm.name}${activity == null ? '' : ', ${activity.label}'}',
+                              tooltip: tabHint.isEmpty ? null : tabHint,
                               selectedBackground: grid.AppPalette.swarmWelcome,
                               selected: selected,
+                              highlighted:
+                                  selected &&
+                                  app.tabStripFocused &&
+                                  _tabStripFocus.hasPrimaryFocus,
                               onPressed: _shortcutsEnabled
                                   ? () => app.selectSwarm(swarm.id)
                                   : null,
@@ -4793,16 +6699,76 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                     horizontal: cell.width,
                                   ),
                                   child: Center(
-                                    child: Text(
-                                      labels[index],
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      textAlign: TextAlign.center,
-                                      style: workspaceBarTextStyle(
-                                        color: theme.foreground,
-                                        emphasized: emphasized,
-                                      ),
-                                    ),
+                                    child: activity == null
+                                        ? Text(
+                                            labels[index],
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            textAlign: TextAlign.center,
+                                            style: workspaceBarTextStyle(
+                                              color: theme.foreground,
+                                              emphasized: emphasized,
+                                            ),
+                                          )
+                                        : Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                '${index + 1}:',
+                                                style: workspaceBarTextStyle(
+                                                  color: theme.foreground,
+                                                  emphasized: emphasized,
+                                                ),
+                                              ),
+                                              Flexible(
+                                                child: Text(
+                                                  names[swarm.id]!,
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: workspaceBarTextStyle(
+                                                    color: theme.foreground,
+                                                    emphasized: emphasized,
+                                                  ),
+                                                ),
+                                              ),
+                                              SizedBox(width: cell.width),
+                                              ListenableBuilder(
+                                                listenable: _tabScroll,
+                                                builder: (context, _) {
+                                                  final left = _tabWidths
+                                                      .take(index)
+                                                      .fold(
+                                                        0.0,
+                                                        (a, b) => a + b,
+                                                      );
+                                                  final offset =
+                                                      _tabScroll.hasClients
+                                                      ? _tabScroll.offset
+                                                      : 0.0;
+                                                  return ActivityMark(
+                                                    key: ValueKey(
+                                                      'tab-activity:${swarm.id}',
+                                                    ),
+                                                    activity: activity,
+                                                    color: activityColor(
+                                                      activity,
+                                                      theme,
+                                                      color: prefs.color,
+                                                    ),
+                                                    emphasized: emphasized,
+                                                    tooltip: false,
+                                                    visible:
+                                                        left <
+                                                            offset +
+                                                                tabsWidth &&
+                                                        left + _tabWidths[index] >
+                                                            offset,
+                                                  );
+                                                },
+                                              ),
+                                            ],
+                                          ),
                                   ),
                                 ),
                               ),
@@ -4823,71 +6789,41 @@ class _SwarmScreenState extends State<SwarmScreen> {
                 theme,
                 tooltip: 'New Tab ${_keymap.hint('swarm.new') ?? ''}',
               ),
-              SizedBox(width: cell.width * 2),
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: SizedBox(
-                    child: SizedBox(
-                      key: const ValueKey('workspace-pane-context'),
-                      child: focused == null
-                          ? const SizedBox.shrink()
-                          : LayoutBuilder(
-                              builder: (context, constraints) => Row(
-                                mainAxisSize: MainAxisSize.min,
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  if (modelPickerSupports(focused.engine)) ...[
-                                    ConstrainedBox(
-                                      constraints: BoxConstraints(
-                                        maxWidth: constraints.maxWidth * .35,
-                                      ),
-                                      child: _focusedModelPicker(focused),
-                                    ),
-                                    SizedBox(width: cell.width),
-                                  ],
-                                  Flexible(
-                                    child: WorkspaceStatusLine(
-                                      parts: parts!,
-                                      links: _contextLinks(focused),
-                                      color: prefs.color,
-                                      nextBackground: prBackground,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
+              const Spacer(),
+              WorkspaceBarControl(
+                key: const ValueKey('swarm-search-button'),
+                label: 'Search harnesses',
+                tooltip:
+                    'Search harnesses ${_keymap.hint('harnesses.list') ?? ''}',
+                onPressed: _shortcutsEnabled ? _toggleSessions : null,
+                builder: (context, emphasized) => SizedBox(
+                  width: cell.width * 4,
+                  height: toolHeight,
+                  child: Icon(
+                    LucideIcons.search,
+                    size: 17,
+                    color: theme.foreground.withValues(
+                      alpha: !_shortcutsEnabled
+                          ? .28
+                          : emphasized
+                          ? 1
+                          : .75,
                     ),
                   ),
                 ),
               ),
-              if (pr != null) ...[
-                if (!joined) SizedBox(width: cell.width),
-                ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: contentWidth * .28),
-                  child: WorkspaceBarControl(
-                    key: const ValueKey('workspace-pull-request'),
-                    label: '${pr.label} — Open on GitHub',
-                    tooltip: 'Open pull request #${pr.number} on GitHub',
-                    onPressed: _shortcutsEnabled
-                        ? () => _openFocusedPullRequest(pr.url.toString())
-                        : null,
-                    builder: (context, emphasized) => SizedBox(
-                      height: toolHeight,
-                      child: Center(
-                        widthFactor: 1,
-                        child: StatusLine(
-                          parts: prParts!,
-                          workspaceBar: true,
-                          emphasized: emphasized,
-                          color: prefs.color,
-                          segmentOffset: parts?.segments.length ?? 0,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              WorkspaceNotificationsButton(
+                key: const ValueKey('workspace-notifications-button'),
+                count: _unread,
+                foreground: theme.foreground,
+                onPressed: _shortcutsEnabled ? _showNotificationInbox : null,
+              ),
+              WorkspaceStoreButton(
+                key: const ValueKey('swarm-store-button'),
+                width: storeWidth,
+                tooltip: 'Harness Store ${_keymap.hint('app.store') ?? ''}',
+                onPressed: _shortcutsEnabled ? _openStore : null,
+              ),
               SizedBox(width: cell.width),
             ],
           ),

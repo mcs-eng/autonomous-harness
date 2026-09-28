@@ -4,6 +4,24 @@ import 'package:xterm/xterm.dart';
 import '../shared/theme/color_palette.dart';
 import 'terminal_theme_store.dart';
 
+/// Semantic colours for terminal-styled chrome, derived from the scheme's own
+/// foreground rather than a hardcoded white. The terminal-dialogs design system
+/// says to derive muted text from the foreground, so these are the foreground
+/// blended toward the background at increasing strength. They are additive
+/// getters, so they never change how an existing theme resolves.
+extension TerminalThemeSemantics on TerminalTheme {
+  /// Low-importance text: meta, labels, timestamps, hints, secondary lines.
+  Color get muted => foreground.withValues(alpha: .54);
+
+  /// Lower still: disabled or strongly receding text. Kept separate from
+  /// [muted] so a real hierarchy has more than two levels on the same size.
+  Color get faded => foreground.withValues(alpha: .40);
+
+  /// The scheme's interactive accent — the cursor colour, which the match-app
+  /// theme sets to the app palette's accent.
+  Color get accent => cursor;
+}
+
 /// The colours a terminal pane draws itself in.
 ///
 /// ⚠️ Returns a CACHED (or `const`) instance, never a fresh one. The vendored

@@ -3,6 +3,7 @@
 // shape worth guarding is the one no test build has. `settingsGroupsFor` takes the gate as an
 // argument for exactly this.
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import 'package:harness/logging/debug_surface.dart';
 import 'package:harness/settings/settings_section.dart';
@@ -34,7 +35,8 @@ void main() {
       SettingsSection.usage,
       SettingsSection.customize,
       SettingsSection.notifications,
-      SettingsSection.devices,
+      SettingsSection.experimental,
+      if (!kIsWeb) SettingsSection.devices,
       SettingsSection.account,
       SettingsSection.shortcuts,
       SettingsSection.about,

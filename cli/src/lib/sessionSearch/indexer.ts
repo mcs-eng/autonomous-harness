@@ -103,7 +103,7 @@ export interface SessionSearchIndexOptions {
    * Which sessions are open in a running process right now (external.ts `OpenSessions`), so a
    * conversation Harness did not start says whether a terminal still has it. `known` never waits.
    */
-  openSessions?: { known(): ReadonlyMap<string, 'terminal' | 'app'>; fresh(): Promise<ReadonlyMap<string, 'terminal' | 'app'>> }
+  openSessions?: { known(): ReadonlyMap<string, 'terminal' | 'app' | 'harness' | 'maybe'>; fresh(): Promise<ReadonlyMap<string, 'terminal' | 'app' | 'harness' | 'maybe'>> }
   /** Looks again for conversations Harness did not start, before each sweep lists its sources. */
   discover?: () => Promise<unknown>
   /** Between full sweeps. */
@@ -371,7 +371,9 @@ export class SessionSearchIndex {
       size: file.size, mtime,
       resumeOffset: open ? open.offset : end,
       resumeTurn: open ? open.turn : collector.next,
-      lastAt: lastAt ?? (resume ? existing.lastAt : null) ?? mtime,
+      // Lines with no time of their own (Cursor's) date the session by when its conversation last
+      // moved, as its engine says, before the file's own time.
+      lastAt: lastAt ?? (resume ? existing.lastAt : null) ?? (source.external && source.changedAt ? source.changedAt : mtime),
       turns: 0,
       ...externalFields(source, title),
     }
@@ -403,9 +405,12 @@ export class SessionSearchIndex {
   private async historyPass(source: SearchSource, existing: IndexedSession | undefined, dirty: boolean): Promise<void> {
     const store = this.opts.store
     const stamp = source.changedAt
+    // A conversation Harness did not start is headed by its own title and folder, as a transcript's is.
+    const headed = (title: string) => ({ header: headerFor(source, title), ...externalFields(source, title) })
     if (existing && !dirty && existing.mtime === stamp) {
-      if (existing.header !== source.header || existing.agentId !== source.agentId) {
-        store.writeSession({ ...existing, header: source.header, agentId: source.agentId }, NO_TURN_DELETE, [])
+      const again = source.external ? headed(existing.title ?? '') : { header: source.header }
+      if (existing.header !== again.header || existing.agentId !== source.agentId) {
+        store.writeSession({ ...existing, ...again, agentId: source.agentId }, NO_TURN_DELETE, [])
       }
       return
     }
@@ -418,14 +423,16 @@ export class SessionSearchIndex {
     }
     const { closed, open } = collector.finish()
     const turns = open ? [...closed, open] : closed
+    const title = source.external ? titleLine(source.external.title || turns.find((turn) => turn.ask)?.ask || '') : ''
+    const head = source.external ? headed(title) : { header: source.header }
     // The size field holds the fingerprint: how much conversation there was when last read.
     const fingerprint = turns.reduce((sum, turn) => sum + turn.ask.length + turn.answer.length + turn.tools.length + 1, 0)
     if (existing && existing.size === fingerprint && existing.mtime === stamp
-      && existing.header === source.header && existing.agentId === source.agentId) return
+      && existing.header === head.header && existing.agentId === source.agentId) return
     const changed = !existing || existing.size !== fingerprint
     store.writeSession({
       sessionId: source.sessionId, agentId: source.agentId, engine: source.engine, path: '',
-      header: source.header, size: fingerprint, mtime: stamp, resumeOffset: 0, resumeTurn: 0,
+      ...head, size: fingerprint, mtime: stamp, resumeOffset: 0, resumeTurn: 0,
       // Its turns carry no time: the session's is its activity stamp, or now for a turn just seen.
       lastAt: !changed ? existing!.lastAt : dirty ? Math.max(Date.now(), stamp) : stamp || null,
       turns: 0,

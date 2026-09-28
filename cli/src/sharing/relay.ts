@@ -83,7 +83,7 @@ export class HarnessShareRelay {
         // The owner repeats this check after decrypting. Restrict here too so a local client cannot
         // accidentally send terminal responses, resize events or pasted data into an observer stream.
         if (!['terminal_capabilities', 'terminal_open', 'terminal_alive', 'terminal_ack', 'terminal_resync',
-          'terminal_close', 'observer_viewer'].includes(String(frame.type))) {
+          'terminal_close', 'observer_viewer', 'observer_comments', 'observer_comment_post', 'observer_comment_remove'].includes(String(frame.type))) {
           sink.sendFrame({ type: `${String(frame.type)}_result`, payload: {
             requestId: (frame.payload as { requestId?: unknown })?.requestId, error: 'VIEW_ONLY',
           } }); return

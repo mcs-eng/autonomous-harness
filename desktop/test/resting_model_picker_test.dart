@@ -125,8 +125,7 @@ void main() {
         ),
       ]);
       await open(tester);
-      const subtitle =
-          'Asleep · starts when you send a message (about 10–30 s) · list from 9 h ago';
+      const subtitle = 'Asleep 9h ago';
       expect(find.text(subtitle), findsOneWidget);
       expect(
         find.byTooltip(

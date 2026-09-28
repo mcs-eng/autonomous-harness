@@ -34,6 +34,7 @@ class AgentAlert {
   /// What the banner says under the agent's name.
   String get sentence => switch (kind) {
     AlertKind.done => 'Finished',
+    AlertKind.failed => 'Failed',
     AlertKind.needsYou => 'Waiting on you',
   };
 }
@@ -151,13 +152,10 @@ class AgentAlerts extends ChangeNotifier {
 /// until somebody goes looking. Somebody who turned the noisy halves off still
 /// wants the window to be able to say which agent moved while they were away.
 class AgentUnread extends ChangeNotifier {
-  /// As many agents as the dial's drawer holds rows (`NOTIF_MAX`), and dropped
-  /// the same way: oldest first.
-  ///
-  /// A window with no ceiling and a dial with one are two different numbers the
-  /// moment a ninth agent has news, whatever else agrees. Dart's map keeps
-  /// insertion order, and [mark] re-inserts, so the first key is the oldest.
-  static const capacity = 8;
+  /// Bound the desktop inbox independently of the dial's eight visible rows.
+  /// A ninth notification must not silently replace the first on desktop.
+  /// Entries remain per harness and in memory, with oldest-first eviction.
+  static const capacity = 256;
 
   final _unread = <String, AlertKind>{};
 

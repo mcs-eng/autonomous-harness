@@ -118,7 +118,8 @@ describe('CLI login/start command contract', () => {
       cwd: CLI_ROOT,
       detached: true,
       env: envFor(root, {
-        PORT: String(20_000 + Math.floor(Math.random() * 20_000)),
+        // The kernel reserves a free port atomically; a random choice can hit another test.
+        PORT: '0',
         DISABLE_HOOK_INSTALL: 'true', CABLE_DISABLE: 'true', DISABLE_GRID_INSTALL: 'true',
         // Startup's sign-in contract does not need a runtime download or the developer's Grid.
         HARNESS_GRID_BIN: join(root, 'grid-unavailable'),

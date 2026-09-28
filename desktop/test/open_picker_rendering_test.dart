@@ -296,91 +296,101 @@ void main() {
     },
   );
 
-  testWidgets('Open Harness builds a small window and ArrowDown reaches later rows', (
-    tester,
-  ) async {
-    final app = createApp();
-    app.machineStates['m']!.nodeOnline = true;
-    app.adoptSessionForTest(terminal('a0', []));
-    final map = MemoryKeymap();
-    await mount(tester, app, map);
-    await openHarnessPicker(tester);
-    final results = find.byType(SwarmSearchResults);
-    final search = tester.widget<SwarmSearchResults>(results).search;
-    final rowIds = search.rows.map((row) => row.id).toSet();
-    final rows = find.descendant(
-      of: results,
-      matching: find.byWidgetPredicate(
-        (widget) =>
-            widget is InkWell &&
-            widget.key is ValueKey<String> &&
-            rowIds.contains((widget.key! as ValueKey<String>).value),
-      ),
-    );
-    final input = find.byKey(const ValueKey('swarm-search-input'));
-    final cell = terminalCellSizeOf(tester.element(input));
-    for (final row in rows.evaluate()) {
-      final id = (row.widget.key! as ValueKey<String>).value;
-      final line = find.byKey(ValueKey('swarm-search-line:$id'));
-      expect(
-        tester.getSize(line).height,
-        closeTo(cell.height, .01),
-        reason: 'Selection occupies exactly one terminal line.',
+  testWidgets(
+    'Open Harness builds a small window and arrow keys reach later rows',
+    (tester) async {
+      final app = createApp();
+      app.machineStates['m']!.nodeOnline = true;
+      app.adoptSessionForTest(terminal('a0', []));
+      final map = MemoryKeymap();
+      await mount(tester, app, map);
+      await openHarnessPicker(tester);
+      final results = find.byType(SwarmSearchResults);
+      final search = tester.widget<SwarmSearchResults>(results).search;
+      final rowIds = search.rows.map((row) => row.id).toSet();
+      final rows = find.descendant(
+        of: results,
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is InkWell &&
+              widget.key is ValueKey<String> &&
+              rowIds.contains((widget.key! as ValueKey<String>).value),
+        ),
       );
-      expect(
-        tester.getSize(find.byKey(ValueKey(id))).height,
-        closeTo(cell.height, .01),
-        reason: 'The entire result occupies one line, with no spacer row.',
-      );
-      final title = find
-          .descendant(of: line, matching: find.byType(Text))
-          .first;
-      expect(
-        tester.getTopLeft(title).dx,
-        closeTo(tester.getTopLeft(input).dx, .01),
-      );
-    }
-    final first = find.byKey(ValueKey(search.rows[0].id));
-    final second = find.byKey(ValueKey(search.rows[1].id));
-    expect(
-      tester.getTopLeft(second).dy - tester.getTopLeft(first).dy,
-      closeTo(cell.height, .01),
-    );
-    for (final type in [ListTile, Icon, Image, EngineMark, PromptContextView]) {
-      expect(
-        find.descendant(of: results, matching: find.byType(type)),
-        findsNothing,
-      );
-    }
-    expect(search.rows.length, greaterThan(50));
-    final list = find.byKey(const ValueKey('swarm-search-result-list'));
-    final capacity = (tester.getSize(list).height / cell.height).ceil();
-    expect(rows.evaluate().length, lessThanOrEqualTo(capacity + 2));
-    expect(rows.evaluate().length, lessThan(search.rows.length));
-    final visited = <String>{};
-    for (var step = 0; step < 35; step++) {
-      await key(tester, LogicalKeyboardKey.arrowDown);
-      await tester.pumpAndSettle();
-      final selected = search.selected;
-      if (selected != null) {
-        visited.add(selected.id);
-        expect(find.byKey(ValueKey(selected.id)).hitTestable(), findsOneWidget);
+      final input = find.byKey(const ValueKey('swarm-search-input'));
+      final cell = terminalCellSizeOf(tester.element(input));
+      for (final row in rows.evaluate()) {
+        final id = (row.widget.key! as ValueKey<String>).value;
+        final line = find.byKey(ValueKey('swarm-search-line:$id'));
         expect(
-          tester
-              .widget<TextField>(
-                find.byKey(const ValueKey('swarm-search-input')),
-              )
-              .focusNode!
-              .hasFocus,
-          isTrue,
+          tester.getSize(line).height,
+          closeTo(cell.height, .01),
+          reason: 'Selection occupies exactly one terminal line.',
+        );
+        expect(
+          tester.getSize(find.byKey(ValueKey(id))).height,
+          closeTo(cell.height, .01),
+          reason: 'The entire result occupies one line, with no spacer row.',
+        );
+        final title = find
+            .descendant(of: line, matching: find.byType(Text))
+            .first;
+        expect(
+          tester.getTopLeft(title).dx,
+          closeTo(tester.getTopLeft(input).dx, .01),
         );
       }
-    }
-    // Focus crosses the initial viewport repeatedly as new rows are built.
-    expect(visited.length, greaterThan(15));
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
-    app.dispose();
-    map.dispose();
-  });
+      final first = find.byKey(ValueKey(search.rows[0].id));
+      final second = find.byKey(ValueKey(search.rows[1].id));
+      expect(
+        tester.getTopLeft(second).dy - tester.getTopLeft(first).dy,
+        closeTo(cell.height, .01),
+      );
+      for (final type in [
+        ListTile,
+        Icon,
+        Image,
+        EngineMark,
+        PromptContextView,
+      ]) {
+        expect(
+          find.descendant(of: results, matching: find.byType(type)),
+          findsNothing,
+        );
+      }
+      expect(search.rows.length, greaterThan(50));
+      final list = find.byKey(const ValueKey('swarm-search-result-list'));
+      final capacity = (tester.getSize(list).height / cell.height).ceil();
+      expect(rows.evaluate().length, lessThanOrEqualTo(capacity + 2));
+      expect(rows.evaluate().length, lessThan(search.rows.length));
+      final visited = <String>{};
+      for (var step = 0; step < 35; step++) {
+        await key(tester, LogicalKeyboardKey.arrowDown);
+        await tester.pumpAndSettle();
+        final selected = search.selected;
+        if (selected != null) {
+          visited.add(selected.id);
+          expect(
+            find.byKey(ValueKey(selected.id)).hitTestable(),
+            findsOneWidget,
+          );
+          expect(
+            tester
+                .widget<TextField>(
+                  find.byKey(const ValueKey('swarm-search-input')),
+                )
+                .focusNode!
+                .hasFocus,
+            isTrue,
+          );
+        }
+      }
+      // Focus crosses the initial viewport repeatedly as new rows are built.
+      expect(visited.length, greaterThan(15));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+      map.dispose();
+    },
+  );
 }

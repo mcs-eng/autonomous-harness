@@ -295,16 +295,22 @@ class _TaskPaletteState extends State<_TaskPalette> {
     if (answer == null) {
       setState(() {
         _stage = _Stage.empty;
-        _note = widget.notifier.localMachineState == null
-            ? 'No local machine is connected yet.'
-            : 'Could not reach the router on this computer.';
+        _note = widget.notifier.ownedActionMachine == null
+            ? (widget.notifier.viewer == null
+                  ? 'No local machine is connected yet.'
+                  : 'Connect a machine first.')
+            : (widget.notifier.viewer == null
+                  ? 'Could not reach the router on this computer.'
+                  : 'Could not reach the router on the connected machine.');
       });
       return;
     }
     if (answer.isEmpty) {
       setState(() {
         _stage = _Stage.empty;
-        _note = 'There is no agent on this computer to send that to.';
+        _note = widget.notifier.viewer == null
+            ? 'There is no agent on this computer to send that to.'
+            : 'There is no agent on the connected machine to send that to.';
       });
       return;
     }

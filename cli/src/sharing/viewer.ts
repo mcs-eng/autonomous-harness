@@ -103,7 +103,7 @@ export class ViewerCapture {
     this.loaded = null
   }
   private loaded: (() => void) | null = null
-  private call(method: string, params: Payload = {}): Promise<Payload> {
+  protected call(method: string, params: Payload = {}): Promise<Payload> {
     return new Promise((resolve, reject) => {
       if (this.closed || this.ws?.readyState !== WebSocket.OPEN) { reject(new Error('The viewer renderer disconnected.')); return }
       const id = ++this.id

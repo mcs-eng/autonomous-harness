@@ -52,12 +52,6 @@ extension AnalyticsEvents on Analytics {
   /// The user signed out.
   void signedOut() => track('signed_out');
 
-  /// First-run provisioning finished. [ready] is false when a required step
-  /// could not be completed — which says how much of a fresh Mac this app can
-  /// actually set up on its own, otherwise only visible in a support thread.
-  void environmentPrepared({required bool ready}) =>
-      track('environment_prepared', params: {'ready': ready});
-
   // --- Agents -------------------------------------------------------------
   //
   // How many people open the New agent dialog, how many of those finish it,

@@ -8,6 +8,7 @@
 #include <stddef.h>   // size_t (ui_project_id_at)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"   // TaskHandle_t — ui_set_reload_waiter
+#include "ui_metrics.h"   // UI_DESK_GRID — which face this build is for, and so which of these exist
 #include "config_store.h"
 #include "../cable_machines.h"   // cable_machine_t — the wheel's row, already parsed and diffed
 #include "../cable_client.h"     // cable_swarm_t — one of the window's tabs, as the wire carries it
@@ -149,6 +150,13 @@ bool ui_scroll_reportable(void);
 // "Home" gesture (touch.c): a swipe-up that STARTED at the bottom edge → jump to the Overview tile from
 // any screen (closes the notif drawer / leaves the reader/wifi/picker, then centers ring 0).
 void ui_home_overview(void);
+
+// The desk grid: the tab's agents drawn in the arrangement the Mac has them in, one tile each, tap to
+// open. Present only on a face with room for a recognisable shape (UI_DESK_GRID in ui_metrics.h); on the
+// round dial these are no-ops and the carousel remains home.
+void ui_desk_open(void);
+void ui_desk_close(void);
+bool ui_desk_is_open(void);
 // Voice-state queries for the gesture layer: is_recording = actively capturing (a tap stops it);
 // is_active = recording OR the clip still uploading (blocks a new start).
 bool ui_voice_is_recording(void);
@@ -178,6 +186,12 @@ bool ui_notif_is_open(void);
 // button that lives inside that band can be pressed — a tap on the bell reaches LVGL and opens the
 // drawer; a pull that starts anywhere else in the band opens it too.
 bool ui_notif_pill_hit(uint16_t x, uint16_t y);
+/* First y the notification pull-down may start on: the bottom of the fixed tab line, which owns the top
+ * of the Pro's face. Declared only where UI_DESK_GRID — the round face has no line and no floor, and its
+ * touch path must compile to exactly what it did before. */
+#if UI_DESK_GRID
+int ui_notif_band_top_px(void);
+#endif
 // A swipe-up inside the open drawer → close it, but only if the list is already scrolled to the top
 // (otherwise the gesture is just scrolling the list).
 void ui_notif_swipe_up(void);
@@ -235,6 +249,14 @@ void ui_machines_refresh(void);
 // Replace the whole list from one `swarms` frame. `selected` names the one the window has on screen; it
 // is what every tile's swarm line draws. count 0 hides the line. Safe from the reader task.
 void ui_swarms_replace(const cable_swarm_t *rows, int count, const char *selected);
+/* The grid of the tab named by `swarm_id`, as the window laid it out.
+ *
+ * THE ID IS NOT DECORATION. These rectangles describe the APP's active tab, and this device can be
+ * looking at a different one — it lights a tab the moment you press it and only learns whether the
+ * window agreed a beat later. A shape drawn under the wrong tab puts agents in seats that belong to
+ * another tab's panes, which is what "3 agents, 2 tiles" was. `count` 0, or an id that is not the tab
+ * on screen, both mean the same thing: fall back to deriving a shape from what this tab holds. */
+void ui_tiles_replace(const cable_tile_t *tiles, int count, const char *swarm_id);
 
 // Whether the selected machine is the computer at the other end of this cable. Everything that acts on
 // "this desk" — the focus report, the scroll report — asks this first.
@@ -291,6 +313,15 @@ void ui_voice_route_abort(void);
 // One short line from the cabled Mac (a routing refusal, a send that did not land). Releases the routing
 // overlay first, then shows the message for ~2s over whatever is on screen.
 void ui_cable_toast(const char *msg);
+void ui_selection_state(const struct cJSON *payload);
+void ui_draft_state(const struct cJSON *p);
+void ui_voice_draft(const struct cJSON *p);
+void ui_voice_question(const struct cJSON *p);
+void ui_voice_form(const struct cJSON *p);
+void ui_form_state(const struct cJSON *payload);
+void ui_carry_state(const struct cJSON *payload);
+void ui_visit_state(const struct cJSON *payload);
+void ui_voice_error(const char *msg);
 // Backend daily voice quota. Status caps the current recording to the remaining allowance; exceeded
 // stops capture, restores the previous screen and shows a short non-fatal toast.
 void ui_voice_quota_status(int remaining_seconds);
@@ -385,3 +416,10 @@ bool ui_lock_active(void);
 // One line on the log whenever what covers the face changes (screen, overlay, drawer, lock, sleep).
 // Called from the LVGL task every loop; cheap when nothing changed.
 void ui_log_state_if_changed(void);
+
+void ui_question_state(const struct cJSON *payload);
+void ui_answer_receipt(const struct cJSON *payload);
+
+void ui_voice_search(const struct cJSON *p);
+
+void ui_workspace_applied(const char *tab, uint32_t generation);

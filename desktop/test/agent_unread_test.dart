@@ -74,13 +74,16 @@ void main() {
     expect(rebuilds, 1);
   });
 
-  // ── Parity with the dial ───────────────────────────────────────────────────
-  // The badge here and the pill there count the same finished turns, so this
-  // store holds as many agents as the dial's drawer holds rows, and lets go of
-  // them the same way.
+  group('bounded desktop inbox', () {
+    test('retains nine notifications without the dial drawer evicting one', () {
+      for (var i = 0; i < 9; i++) {
+        unread.mark('m1', 'a$i', AlertKind.done);
+      }
+      expect(unread.count, 9);
+      expect(unread.kindFor('m1', 'a0'), AlertKind.done);
+    });
 
-  group('as many as the dial holds', () {
-    test('at most as many agents as the dial has rows', () {
+    test('evicts the oldest entry only at the desktop capacity', () {
       for (var i = 0; i < AgentUnread.capacity + 3; i++) {
         unread.mark('m1', 'a$i', AlertKind.done);
       }
