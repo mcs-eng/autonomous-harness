@@ -12,8 +12,6 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_layout_store.dart';
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/terminal/terminal_session.dart';
-import 'package:harness/viewer/viewer_key_store.dart';
-import 'package:harness/viewer/viewer_services.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 import 'package:harness/viewer/viewer_services.dart';
 import 'package:harness/viewer/viewer_key_store.dart';
@@ -70,12 +68,6 @@ class _Api extends ApiClient {
   }
 }
 
-/// Fork: a VIEWER, explicitly. These are the flows where a sign-out or an
-/// expired session ends on the login screen, which in upstream's current model
-/// only a viewer has: a desktop window stays on its desk as a guest (the fork's
-/// local mode; see local_mode_test.dart). Upstream runs this file as a viewer
-/// on Windows implicitly (its `kViewerMode` includes Windows); this fork's
-/// Windows build is a desktop, so the viewer is named here.
 class WorkspaceAccountFixture extends AppNotifier {
   WorkspaceAccountFixture(MemoryStore storage, this.cli)
     : super(
@@ -91,22 +83,17 @@ class WorkspaceAccountFixture extends AppNotifier {
           keys: ViewerKeyStore(storage: MemoryStore()),
         ),
         paneLayoutStore: PaneLayoutStore(storage: storage),
-        viewer: ViewerServices(
-          config: AppConfig.dev,
-          session: AuthSession(storage: MemoryStore()),
-          keys: ViewerKeyStore(storage: MemoryStore()),
-        ),
       ) {
     api = _Api();
     status = AppStatus.authenticated;
   }
   final WorkspaceAccountLogin cli;
   int get inventoryRequests => (api as _Api).inventoryRequests;
+  @override
+  Future<void> ensureCliDaemonReady() async {}
 
   Future<void> expire() async {
-    // Fork: a viewer probes no daemon, so the session ends the way a viewer
-    // meets it, at runtime, rather than through `ensureCliDaemonReady`.
-    signedOutAtRuntimeForTest();
+    handleAuthFailureForTest('You were signed out. Sign in again.');
   }
 }
 
@@ -221,10 +208,7 @@ void main() {
       expect(app.machineStates, isEmpty);
       expect(app.machinesAreStale, isFalse);
       expect(app.closedHistory, isEmpty);
-      expect(
-        app.lastError,
-        matches(RegExp('sign in again', caseSensitive: false)),
-      );
+      expect(app.lastError, contains('Sign in again'));
     },
   );
 

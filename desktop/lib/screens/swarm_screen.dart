@@ -439,11 +439,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
     onOpenAgent: _openProjectSession,
     onShowMachines: () {
       _scaffold.currentState?.closeDrawer();
-      unawaited(_showMachinesControls());
+      unawaited(_openMachines());
     },
     onSignIn: () {
       _scaffold.currentState?.closeDrawer();
-      unawaited(_showMachinesControls());
+      unawaited(_openMachines());
     },
   );
 
