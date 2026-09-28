@@ -348,3 +348,16 @@ Named projects and Git worktrees use the existing Windows exclusive directory
 reservation instead of requiring a `mkdir` executable. Files explicitly selected
 by `.worktreeinclude` copy with native file operations on Windows. These are
 source compatibility changes; they do not update an installed desktop or daemon.
+
+## September 28 source refresh
+
+This source snapshot incorporates upstream `805d3deb` (223 commits since
+`0a7d3cd`) and fork main `bc3efc8`. Upstream retired its Herdr terminal backend;
+tmux inside WSL remains the only backend here. Upstream split several desktop
+files into native and web variants; the fork's Windows fixes moved with them,
+including reading the OpenCode usage folder when Windows reports it missing and
+refusing a damaged saved WSL account choice on load; only an explicit Save
+replaces it, and the damaged file is kept.
+The Windows and WSL paths, local mode, the projects sidebar, and the account
+screen remain. This is a source change; it does not update an installed desktop
+or daemon.
