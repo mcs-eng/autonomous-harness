@@ -6596,7 +6596,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
       final prefs = appearancePrefsStore.value.prompt;
       final storeWidth = math.min(
         WorkspaceStoreButton.widthOf(context),
-        math.max(0.0, constraints.maxWidth - cell.width * 14),
+        // 48: the fork's projects toggle at the start of this row.
+        math.max(0.0, constraints.maxWidth - cell.width * 14 - 48),
       );
       final tabBudget = math.max(
         0.0,
