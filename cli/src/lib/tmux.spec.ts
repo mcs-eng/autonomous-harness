@@ -180,7 +180,7 @@ describe('tmux process primitives', () => {
   it('scores a WSL-interop engine relayed through /init', () => {
     const psRow = parseProcessRow(
       ' 1037  1036 node.exe Thu Sep 17 08:20:11 2026 /init C:\\Program Files\\nodejs\\node.exe node.exe'
-        + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js')
+        + ' C:\\Users\\ana\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js')
     // parseProcessRow alone cannot expose the engine: interpreter is `node.exe`, entrypoint `/init`.
     expect(engineProcessMatchScore(psRow!, 'codex')).toBe(0)
 
@@ -188,7 +188,7 @@ describe('tmux process primitives', () => {
     // title-rewrite token removed, space-bearing paths double-quoted) — the same shape
     // engineProcessMatch is scored on here.
     const repairedArgs = '"C:\\Program Files\\nodejs\\node.exe"'
-      + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
+      + ' C:\\Users\\ana\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
     expect(engineProcessMatchScore({ executable: 'node.exe', args: repairedArgs }, 'codex')).toBe(2)
   })
 
@@ -245,12 +245,12 @@ describe('tmux process primitives', () => {
     const NUL = String.fromCharCode(0)
 
     const windowsArgv = '/init\0C:\\Program Files\\nodejs\\node.exe\0node.exe'
-      + '\0C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
+      + '\0C:\\Users\\ana\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
 
     it('drops the interpreter-title duplicate behind a WINDOWS interpreter path', () => {
       expect(repairInteropRowFromCmdline(windowsArgv, 'node.exe')).toEqual({
         args: '"C:\\\\Program Files\\\\nodejs\\\\node.exe"'
-          + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js',
+          + ' C:\\Users\\ana\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js',
         executable: 'node.exe',
       })
     })
@@ -740,7 +740,7 @@ describe('tmux process primitives', () => {
     const promptArg = 'Explain " --dangerously-bypass-approvals-and-sandbox " please'
     // quote()'s exact output shape for an element carrying spaces and double quotes.
     const relayedArgs = '"C:\\Program Files\\nodejs\\node.exe"'
-      + ' C:\\Users\\mcspd\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
+      + ' C:\\Users\\ana\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js'
       + ` "${promptArg.replace(/"/g, '\\"')}"`
     expect(bypassPermissionActive('codex', relayedArgs)).toBe(false)
   })
