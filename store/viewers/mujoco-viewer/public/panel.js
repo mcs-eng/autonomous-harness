@@ -32,7 +32,7 @@ export class Panel {
   constructor(root, handlers) {
     this.root = root
     this.h = handlers
-    this.tabs = { controls: root.querySelector('#tab-controls'), model: root.querySelector('#tab-model'), sensors: root.querySelector('#tab-sensors') }
+    this.tabs = Object.fromEntries(['controls', 'model', 'sensors', 'experiment'].map((name) => [name, root.querySelector(`#tab-${name}`)]))
     this.info = null
     this.rows = { actuators: [], joints: [], sensors: [], bodies: new Map(), cameras: [], keys: [] }
     this.tab = 'controls'
@@ -42,9 +42,11 @@ export class Panel {
   }
 
   showTab(tab) {
+    if (!this.tabs[tab]) return
     this.tab = tab
     this.root.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab))
     for (const [name, node] of Object.entries(this.tabs)) node.classList.toggle('on', name === tab)
+    this.root.querySelector('#plot').hidden = tab === 'experiment'
     this.h.onTab?.(tab)
     this.lastUpdate = 0
   }
@@ -77,6 +79,7 @@ export class Panel {
       const val = el('span', 'val', '0')
       const slider = document.createElement('input')
       slider.type = 'range'
+      slider.setAttribute('aria-label', `Control ${a.name}`)
       const [lo, hi] = a.range ?? [-1, 1]
       slider.min = String(lo); slider.max = String(hi); slider.step = String((hi - lo) / 1000)
       slider.addEventListener('input', () => this.h.onCtrl(a.id, Number(slider.value)))
@@ -105,6 +108,7 @@ export class Panel {
       if (j.type === 'hinge' || j.type === 'slide') {
         slider = document.createElement('input')
         slider.type = 'range'
+        slider.setAttribute('aria-label', `Pose ${j.name}`)
         const [lo, hi] = j.range ?? (j.type === 'hinge' ? [-Math.PI, Math.PI] : [-1, 1])
         slider.min = String(lo); slider.max = String(hi); slider.step = String((hi - lo) / 1000)
         slider.addEventListener('input', () => this.h.onJoint(j.id, Number(slider.value)))

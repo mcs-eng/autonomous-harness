@@ -1,6 +1,7 @@
 import { isWrapped } from '../e2ee/core.js'
 import type { E2eeManager } from '../e2ee/manager.js'
-import { AUTONOMOUS_DEVICE_CAPABILITIES, type AutonomousDeviceService, type AutonomousDeviceFrame } from './service.js'
+import { deviceDump } from './dump.js'
+import { type AutonomousDeviceService, type AutonomousDeviceFrame } from './service.js'
 
 type Frame = Record<string, unknown>
 /** Application RPC over the existing relay E2EE session. No socket, identity, PAKE or trust of its own. */
@@ -14,23 +15,25 @@ export class AutonomousDeviceRelay {
   connected(): boolean { return this.count() > 0 }
   private sendTo(connId: string, identity: string, type: string, payload: Frame): void {
     if (this.crypto.sessionIdentity(connId) !== identity || this.crypto.sessionRole(connId) !== 'device') return
+    deviceDump.record('out', 'rpc', connId, { type, payload })
     const wrapped = this.crypto.wrapTarget(connId, type, payload)
     if (wrapped) this.send(connId, wrapped)
   }
   async handle(connId: string, frame: Frame): Promise<void> {
-    for (const [id, client] of this.clients) if (this.crypto.sessionIdentity(id) !== client.identity) this.clients.delete(id)
+    for (const [id, client] of this.clients) if (this.crypto.sessionIdentity(id) !== client.identity) this.drop(id)
     const identity = this.crypto.sessionIdentity(connId)
     if (!identity || this.crypto.sessionRole(connId) !== 'device' || !isWrapped(frame.payload) || frame.dbSessionId !== undefined) return
     const opened = this.crypto.unwrapDown(connId, frame)
     const req = opened?.payload as Frame | undefined
     if (!req || typeof req !== 'object' || Array.isArray(req)) return
+    deviceDump.record('in', 'rpc', connId, { type: frame.type, payload: req })
     const reply = (payload: Frame) => this.sendTo(connId, identity, 'autonomous_device_result', payload)
     if (req.type === 'hello') {
       if (req.proto !== 1 || typeof req.requestId !== 'string') { reply({ type: 'hello_result', requestId: req.requestId, error: { code: 'PROTO_UNSUPPORTED', message: 'Protocol 1 required' } }); return }
       const current = this.clients.get(connId)
       this.clients.set(connId, current?.identity === identity ? current : { identity, tokens: 20, at: Date.now(), active: 0 })
       const resume = req.resume as { serverInstanceId?: unknown; cursor?: unknown } | undefined
-      reply({ type: 'hello_result', requestId: req.requestId, proto: 1, machineId: this.machineId, serverInstanceId: this.service.serverInstanceId, capabilities: AUTONOMOUS_DEVICE_CAPABILITIES, ...this.service.resume(resume) })
+      reply({ type: 'hello_result', requestId: req.requestId, proto: 1, machineId: this.machineId, serverInstanceId: this.service.serverInstanceId, capabilities: this.service.capabilities, ...this.service.resume(resume) })
       this.service.replay(resume, event => this.sendEvent(connId, identity, event))
       this.onReady?.()
       return
@@ -57,6 +60,10 @@ export class AutonomousDeviceRelay {
   }
   private sendEvent(connId: string, identity: string, event: AutonomousDeviceFrame): void {
     const p = event.payload as Frame | undefined
+    if (event.kind === 'turn.summary' && p?.resultId !== undefined) {
+      if (this.service.canSendResult(identity, event)) this.sendTo(connId, identity, 'autonomous_device_event', event)
+      return
+    }
     if (typeof p?.idempotencyKey === 'string') {
       const own = this.service.receipt(identity, p.idempotencyKey)
       const receipt = p.receipt as Frame | undefined
@@ -64,8 +71,15 @@ export class AutonomousDeviceRelay {
     }
     this.sendTo(connId, identity, 'autonomous_device_event', event)
   }
-  emit(event: AutonomousDeviceFrame): void { for (const [connId, client] of this.clients) this.sendEvent(connId, client.identity, event) }
-  drop(connId: string): void { this.clients.delete(connId) }
+  /** `deviceId` set: an agent stream frame, sent to that identity's links and no other. */
+  emit(event: AutonomousDeviceFrame, deviceId?: string): void {
+    for (const [connId, client] of this.clients) if (!deviceId || client.identity === deviceId) this.sendEvent(connId, client.identity, event)
+  }
+  drop(connId: string): void {
+    const client = this.clients.get(connId)
+    this.clients.delete(connId)
+    if (client && ![...this.clients.values()].some(c => c.identity === client.identity)) this.service.deviceOffline(client.identity)
+  }
   /** App-side revoke: tell the device while its authenticated session still exists (the E2eeManager drops
    *  the session right after), so it clears its own pin instead of showing "paired / disconnected" forever.
    *  Best-effort: a device that is offline learns it on reconnect, when its e2e_hello gets e2e_denied. */

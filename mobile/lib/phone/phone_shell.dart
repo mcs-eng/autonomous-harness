@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'package:harness_mobile/state/app_state.dart';
@@ -60,11 +62,17 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    final notices = widget.notifier.agentNotices.system;
+    notices.opened.addListener(_openNoticedAgent);
+    // Signed in is the first moment a notice could be worth anything, so it is
+    // the moment to ask. The OS keeps the answer; every later ask is a no-op.
+    unawaited(notices.requestPermission());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.notifier.agentNotices.system.opened.removeListener(_openNoticedAgent);
     _linkedMachineId.dispose();
     _openAgentRequest.dispose();
     for (final controller in _heroControllers.values) {
@@ -138,6 +146,16 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
     });
   }
 
+  /// A tapped "agent finished" notice: that agent, as the home screen — the
+  /// dial's drawer row opening its agent.
+  void _openNoticedAgent() {
+    final opened = widget.notifier.agentNotices.system.opened;
+    final agent = opened.value;
+    if (agent == null) return;
+    opened.value = null;
+    _openAgentAtHome(agent.machineId, agent.agentId);
+  }
+
   /// Back in the foreground: a p2p retry waiting out its delay fires now, and so does every machine
   /// socket the phone lost while it was away. Going to the background needs nothing — the OS
   /// suspends the socket, and the redial tears the old wire down and negotiates a fresh one.
@@ -148,6 +166,13 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
   /// who was looking straight at it, with a network that would have answered at once.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      // The other half of the resume below: work that only makes sense in
+      // front of somebody stops here. The sockets are not touched — the OS
+      // suspends them, and the redial on the way back is what recovers them.
+      widget.notifier.handleAppPaused();
+      return;
+    }
     if (state != AppLifecycleState.resumed) return;
     phoneTerminalP2p.kickRetry();
     widget.notifier.handleAppResumed();

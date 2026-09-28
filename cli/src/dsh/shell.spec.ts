@@ -1,20 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
 
 // Two switches, both off by default: `sh` makes commands run under plain `/bin/sh -c` (as when no user
 // shell is known) so output is exactly the command's; `fakeChild` hands runDshCommand a scripted child.
-const seams = vi.hoisted(() => ({ sh: false, fakeChild: null as null | (() => ChildProcess) }))
+const seams = vi.hoisted(() => ({ sh: false, shell: null as null | { path: string; args: string[] }, fakeChild: null as null | ((...args: unknown[]) => ChildProcess) }))
 vi.mock('../lib/engineLaunch.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/engineLaunch.js')>()
-  return { ...actual, interactiveEngineShell: (shell?: string) => (seams.sh ? null : actual.interactiveEngineShell(shell)) }
+  return { ...actual, interactiveEngineShell: (shell?: string) => (seams.shell ?? (seams.sh ? null : actual.interactiveEngineShell(shell))) }
 })
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
-  const spawn = ((...args: Parameters<typeof actual.spawn>) => (seams.fakeChild ? seams.fakeChild() : actual.spawn(...args))) as typeof actual.spawn
+  const spawn = ((...args: Parameters<typeof actual.spawn>) => (seams.fakeChild ? seams.fakeChild(...args) : actual.spawn(...args))) as typeof actual.spawn
   return { ...actual, spawn, default: { ...actual, spawn } }
 })
 
@@ -144,7 +144,9 @@ describe('runDshCommand', () => {
   })
   afterEach(() => {
     seams.sh = false
+    seams.shell = null
     seams.fakeChild = null
+    vi.unstubAllEnvs()
     vi.useRealTimers()
     rmSync(dir, { recursive: true, force: true })
   })
@@ -190,6 +192,50 @@ describe('runDshCommand', () => {
     expect(invalid).toMatchObject({ code: 127, signal: null, timedOut: false })
     expect(invalid.lines).toEqual([expect.stringMatching(/^could not start: /)])
     expect(seen).toEqual(invalid.lines)
+  })
+
+  it.runIf(existsSync('/bin/bash'))('does not begin the body when the deadline expires inside shell startup', async () => {
+    const cancellationRoot = join(dir, "cancel ' quoted & space")
+    mkdirSync(cancellationRoot)
+    vi.stubEnv('TMPDIR', cancellationRoot)
+    const rc = join(dir, 'slow-rc')
+    writeFileSync(rc, "trap '' TERM\necho rc-started\n/bin/sleep 1\n")
+    seams.shell = { path: '/bin/bash', args: ['--noprofile', '--rcfile', rc, '-i', '-c'] }
+    const result = await runDshCommand('echo body-ran', { cwd: dir, timeoutMs: 300 })
+    expect(result.timedOut).toBe(true)
+    expect(result.lines).toContain('rc-started')
+    expect(result.lines).not.toContain('body-ran')
+    expect(result.code).toBe(143)
+    expect(readdirSync(cancellationRoot)).toEqual([])
+  })
+
+  it('force-stops rather than entering the body if writing the cancellation marker fails', async () => {
+    vi.useFakeTimers()
+    const child = Object.assign(new EventEmitter(), { pid: 876543, stdout: new EventEmitter(), stderr: new EventEmitter() }) as unknown as ChildProcess
+    let ownedDir = ''
+    seams.fakeChild = (_path, args) => {
+      const script = (args as string[]).at(-1)!
+      const marker = /\[ -e '([^']+)' \]/.exec(script)![1]!
+      ownedDir = dirname(marker)
+      mkdirSync(marker) // EISDIR makes the cancellation write fail.
+      return child
+    }
+    const signals = vi.spyOn(process, 'kill').mockReturnValue(true)
+    try {
+      const pending = runDshCommand('echo body-ran', { cwd: dir, timeoutMs: 100 })
+      await vi.advanceTimersByTimeAsync(100)
+      expect(signals.mock.calls).toEqual([[-876543, 'SIGKILL'], [876543, 'SIGKILL']])
+      child.emit('exit', null, 'SIGKILL')
+      expect(await pending).toMatchObject({ timedOut: true, signal: 'SIGKILL' })
+      expect(existsSync(ownedDir)).toBe(false)
+    } finally { signals.mockRestore() }
+  })
+
+  it.runIf(process.platform !== 'win32')('reports cancellation setup failure without starting or rejecting', async () => {
+    vi.stubEnv('TMPDIR', join(dir, 'absent'))
+    const result = await runDshCommand('echo body-ran', { cwd: dir, timeoutMs: 100 })
+    expect(result.code).toBe(127)
+    expect(result.lines).toEqual([expect.stringMatching(/^could not start: /)])
   })
 
   it('settles once when a child reports an error and an exit both, as Node warns it may', async () => {

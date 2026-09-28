@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:harness_mobile/state/app_state.dart';
 
@@ -28,13 +29,30 @@ Future<void> confirmDeleteAgent(
   String agentId,
   String agentName,
 ) async {
+  // Where it runs, under the title — "machine · folder", the line the rename dialog carries — read
+  // off the notifier as it stands now. An agent already gone from the list names the machine alone.
+  final machine = notifier.stateOf(machineId);
+  final agent = machine?.agents.where((a) => a.id == agentId).firstOrNull;
   final confirmed = await confirmPhoneAction(
     context,
-    title: 'Delete $agentName?',
+    // The Stop row's own icon — see [confirmPhoneAction].
+    icon: LucideIcons.trash2300,
+    title: 'Stop $agentName?',
+    detail: [
+      ?machine?.machine.displayName,
+      ?agent?.project?.label,
+    ].where((part) => part.isNotEmpty).join(' · '),
+    // ⚠️ **The desktop's own sentence, word for word**, because it is the same
+    // `agent_delete` on the wire (`AppNotifier.deleteAgent`, and desktop's
+    // `widgets/delete_agent_dialog.dart`) — and the two used to describe it
+    // differently. This phone said the unfinished work went with it; the
+    // desktop says the files and the conversation stay. One call cannot be both,
+    // and the desktop's is the one that matches what the daemon does: the
+    // harness and its terminal session end, the folder on the machine does not.
     message:
-        'The agent and its terminal session are removed from the machine, '
-        "along with any work it has not finished. This can't be undone.",
-    confirmLabel: 'Delete',
+        'Stop this harness? Project files and saved conversation history are '
+        'kept.',
+    confirmLabel: 'Stop',
   );
   if (!confirmed || !context.mounted) return;
   final error = await notifier.deleteAgent(machineId, agentId);

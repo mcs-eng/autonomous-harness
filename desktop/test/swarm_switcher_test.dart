@@ -1,3 +1,5 @@
+import 'support/open_harness.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -30,8 +32,7 @@ void main() {
             null,
           ),
         );
-        final app = createApp();
-        app.machineStates['m']!.nodeOnline = true;
+        final app = createApp(connected: true);
         final frames = <TerminalBinaryFrame>[];
         final pane = app.adoptSessionForTest(terminal('a0', frames));
         final original = app.activeSwarm;
@@ -41,7 +42,7 @@ void main() {
           harnessCommandById.containsKey('navigation.quick_open'),
           isFalse,
         );
-        await chord(tester, LogicalKeyboardKey.keyP);
+        await openHarnessPicker(tester);
         expect(jumpField, findsOneWidget);
         expect(app.swarms, [original]);
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
@@ -64,6 +65,8 @@ void main() {
         expect(original.panes, [pane]);
         expect(find.byType(AlertDialog), findsNothing);
         final field = find.byKey(const ValueKey('swarm-search-input'));
+        expect(field, findsNothing);
+        await openHarnessPicker(tester);
         expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
         await tester.enterText(field, 'Agent 0');
         await tester.pump();
@@ -106,7 +109,12 @@ void main() {
         find.byKey(const ValueKey('swarm-navigation-locations')),
         findsNothing,
       );
-      expect(find.byKey(const ValueKey('swarm-search-preview')), findsNothing);
+      final preview = find.byKey(const ValueKey('swarm-search-preview'));
+      expect(preview, findsOneWidget);
+      expect(
+        find.descendant(of: preview, matching: find.byType(Text)),
+        search.selected == null ? findsNothing : findsWidgets,
+      );
     }
     await tester.enterText(field, '');
     await tester.pump();
@@ -121,6 +129,7 @@ void main() {
       isTrue,
     );
     expect(harnessCommandById['agent.new']!.label, 'New Harness');
+    await chord(tester, LogicalKeyboardKey.keyP, shift: true);
     await tester.enterText(field, '> new');
     await tester.pump();
     await tester.tap(find.byKey(const ValueKey('command:swarm.new')));
@@ -129,12 +138,15 @@ void main() {
     expect(app.panes, isEmpty);
     expect(app.swarms, hasLength(2));
     expect(app.allPanes, contains(pane));
+    expect(jumpField, findsNothing);
+    await openHarnessPicker(tester);
     expect(jumpField, findsOneWidget);
     final search = tester
         .widget<SwarmSearchResults>(find.byType(SwarmSearchResults))
         .search;
     expect(search.isCommandMode, isFalse);
-    expect(search.selected!.isCreate, isTrue);
+    expect(search.selected, isNull);
+    expect(search.rows.any((row) => row.isCreate), isFalse);
     expect(frames, isEmpty);
     await tester.pumpWidget(const SizedBox());
     app.dispose();

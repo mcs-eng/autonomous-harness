@@ -7,6 +7,7 @@ import '../shared/theme/harness_background.dart';
 import '../state/swarm_navigation.dart';
 import '../state/swarm_search.dart';
 import 'box_chrome.dart';
+import 'terminal_text_action.dart';
 import 'harness_customize_pane.dart';
 import 'swarm_search_input.dart';
 import 'swarm_switcher.dart';
@@ -28,6 +29,7 @@ class HarnessStartPage extends StatefulWidget {
     required this.onChoose,
     this.onStore,
     this.resume,
+    this.onResourceSearch,
   });
   final FocusNode focusNode;
   final SwarmSearchController Function() createSearch;
@@ -46,6 +48,7 @@ class HarnessStartPage extends StatefulWidget {
 
   /// This fork's Continue working list, shown under the entry buttons.
   final Widget? resume;
+  final ValueChanged<String>? onResourceSearch;
   @override
   State<HarnessStartPage> createState() => _HarnessStartPageState();
 }
@@ -79,13 +82,36 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
     // Reveal results for the visible text, including on keyboard-only entry.
     if (_search == null) {
       final search = widget.createSearch();
+      search.addListener(_resourceModeChanged);
       if (_draft case final draft?) search.restoreDraft(draft);
       search.setQuery(_query.text);
       setState(() => _search = search);
+      _resourceModeChanged();
     } else {
       _search!.setQuery(_query.text);
     }
     _focus.requestFocus();
+  }
+
+  void _resourceModeChanged() {
+    final search = _search;
+    if (widget.onResourceSearch == null ||
+        search == null ||
+        (!search.isModelMode && !search.isStoreMode)) {
+      return;
+    }
+    // The full picker owns model actions and Store previews. Keep the legacy
+    // start-page harness search as an entry point to that same surface.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !identical(_search, search) ||
+          (!search.isModelMode && !search.isStoreMode)) {
+        return;
+      }
+      final query = search.query;
+      _close();
+      widget.onResourceSearch!(query);
+    });
   }
 
   void _close() {
@@ -93,6 +119,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
     if (search != null) {
       _draft = search.draft;
       setState(() => _search = null);
+      search.removeListener(_resourceModeChanged);
       search.dispose();
     }
     _pickerFocus.unfocus();
@@ -240,7 +267,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
               fit: StackFit.expand,
               children: [
                 Image.asset(
-                  'assets/harness_store_card.png',
+                  'assets/harness_store_card.jpg',
                   fit: BoxFit.cover,
                   excludeFromSemantics: true,
                 ),
@@ -259,10 +286,8 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                           padding: const EdgeInsets.only(left: 18, right: 8),
                           child: Text(
                             'Browse the\nHarness Store',
-                            style: TextStyle(
-                              fontSize: 16,
+                            style: grid.AppType.heading(
                               height: 1.3,
-                              fontWeight: FontWeight.w500,
                               color: Colors.white.withValues(alpha: .94),
                             ),
                           ),
@@ -295,7 +320,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
               fit: StackFit.expand,
               children: [
                 Image.asset(
-                  'assets/harness_device_studio.png',
+                  'assets/harness_device_studio.jpg',
                   fit: BoxFit.cover,
                   excludeFromSemantics: true,
                 ),
@@ -314,10 +339,8 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                           padding: const EdgeInsets.only(left: 18, right: 8),
                           child: Text(
                             'Meet the\nHarness device',
-                            style: TextStyle(
-                              fontSize: 16,
+                            style: grid.AppType.heading(
                               height: 1.3,
-                              fontWeight: FontWeight.w500,
                               color: Colors.white.withValues(alpha: .94),
                             ),
                           ),
@@ -371,33 +394,13 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                         final onPressed = _customizing
                             ? _closeCustomization
                             : _customize;
-                        if (prefs.background != HarnessBackground.plain) {
-                          return IconButton.filled(
-                            key: const ValueKey('harness-customize-button'),
-                            focusNode: _customizeButtonFocus,
-                            onPressed: onPressed,
-                            tooltip: 'Customize Harness',
-                            icon: const Icon(Icons.edit_outlined, size: 18),
-                            style: IconButton.styleFrom(
-                              backgroundColor: grid.AppPalette.swarmAccent,
-                              foregroundColor: grid.AppPalette.swarmTabBar,
-                              fixedSize: const Size.square(40),
-                              shape: const CircleBorder(),
-                            ),
-                          );
-                        }
-                        return FilledButton.icon(
+                        return TerminalTextAction(
                           key: const ValueKey('harness-customize-button'),
                           focusNode: _customizeButtonFocus,
                           onPressed: onPressed,
-                          icon: const Icon(Icons.edit_outlined, size: 16),
-                          label: const Text('Customize Harness'),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: grid.AppPalette.swarmAccent,
-                            foregroundColor: grid.AppPalette.swarmTabBar,
-                            minimumSize: const Size(0, 36),
-                            shape: const StadiumBorder(),
-                          ),
+                          label: 'Customize Harness',
+                          overArtwork:
+                              prefs.background != HarnessBackground.plain,
                         );
                       },
                     ),
@@ -499,7 +502,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                         onPressed: widget.onQuickStart,
                                         child: Text(
                                           'Quick start · 4 steps',
-                                          style: boxMonoStyle(size: 12),
+                                          style: boxMonoStyle(),
                                         ),
                                       ),
                                     if (widget.onPractice != null)
@@ -510,7 +513,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                         onPressed: widget.onPractice,
                                         child: Text(
                                           'Keyboard practice',
-                                          style: boxMonoStyle(size: 12),
+                                          style: boxMonoStyle(),
                                         ),
                                       ),
                                   ],

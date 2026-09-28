@@ -3,8 +3,11 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket } from 'ws'
 import type { Frame, LocalClientSink } from './backendSocket.js'
-import { attachLocalWsServer, type LocalWsBackend, type LocalWsServer } from './localWsServer.js'
+import { attachLocalWsServer, type LocalWsBackend, type LocalWsServer, type LocalWsServerOptions } from './localWsServer.js'
 import { encodeTerminalLocal, TerminalBinaryKind, type TerminalBinaryClear } from './lib/terminalBinary.js'
+import { listenLocalSocket } from './lib/localSocket.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 
 const machineId = 'machine-123'
 const streamId = '00112233-4455-6677-8899-aabbccddeeff'
@@ -15,6 +18,7 @@ class FakeBackend implements LocalWsBackend {
   frames: Frame[] = []
   binaries: TerminalBinaryClear[] = []
   unregisters: string[] = []
+  focuses: Array<[string, string | null]> = []
 
   registerLocalClient(connId: string, sink: LocalClientSink): boolean {
     this.connId = connId
@@ -29,6 +33,9 @@ class FakeBackend implements LocalWsBackend {
   }
   async handleLocalBinary(_connId: string, frame: TerminalBinaryClear): Promise<void> {
     this.binaries.push(frame)
+  }
+  setLocalTerminalFocus(connId: string, agentId: string | null): void {
+    this.focuses.push([connId, agentId])
   }
 }
 
@@ -59,14 +66,63 @@ describe('local CLI WebSocket', () => {
     server = null
   })
 
-  async function start(backend: FakeBackend): Promise<string> {
+  async function start(backend: FakeBackend, extra: Partial<LocalWsServerOptions> = {}): Promise<string> {
     server = http.createServer((_req, res) => { res.statusCode = 404; res.end() })
-    local = attachLocalWsServer(server, { machineId, backend })
+    local = attachLocalWsServer(server, { machineId, backend, ...extra })
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as AddressInfo).port
     return `ws://127.0.0.1:${port}/api/local-ws`
   }
 
+  it('serves the same endpoint over the daemon socket, with no Host to name and no Origin allowed', async () => {
+    const dir = mkdtempSync('/tmp/hsock-')
+    const socketPath = join(dir, 'daemon.sock')
+    const backend = new FakeBackend()
+    const unix = await listenLocalSocket((_req, res) => { res.statusCode = 404; res.end() }, socketPath)
+    await start(backend, { localSocketServer: unix.server })
+    const url = `ws+unix://${socketPath}:/api/local-ws`
+    try {
+      // No port, no loopback Host — refused on TCP, served here.
+      const ws = new WebSocket(url, { headers: { host: 'rebind.evil.example' } })
+      await onceOpen(ws)
+      const connected = onceMessage(ws)
+      ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId, localProtocolVersion: 1 } }))
+      expect(await connected).toMatchObject({ type: 'connected', payload: { machineId, transport: 'local' } })
+      expect(backend.connId).toMatch(/^local:/)
+      ws.close()
+
+      // A browser still has no business here, whichever way it arrived.
+      const browser = new WebSocket(url, { headers: { origin: 'http://localhost' } })
+      const status = await new Promise<number>((resolve) => browser.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0)))
+      expect(status).toBe(403)
+    } finally {
+      await local?.close()
+      local = null
+      await unix.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses an upgrade whose Host is not a loopback name for this port', async () => {
+    const url = await start(new FakeBackend())
+    const ws = new WebSocket(url, { headers: { host: 'rebind.evil.example:' + new URL(url).port } })
+    const status = await new Promise<number>((resolve) => ws.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0)))
+    expect(status).toBe(403)
+  })
+
+  it('consumes validated preparation UI acknowledgements locally', async () => {
+    const backend = new FakeBackend(), opened = vi.fn()
+    const ws = new WebSocket(await start(backend, { onDevicePrepareOpened: opened }))
+    await onceOpen(ws)
+    const connected = onceMessage(ws)
+    ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId, localProtocolVersion: 1 } }))
+    await connected
+    ws.send(JSON.stringify({ type: 'device_prepare_opened', payload: { operationId: 'invalid', agentId: 'a' } }))
+    ws.send(JSON.stringify({ type: 'device_prepare_opened', payload: { operationId: 'a'.repeat(64), agentId: 'agent1' } }))
+    await vi.waitFor(() => expect(opened).toHaveBeenCalledExactlyOnceWith('a'.repeat(64), 'agent1'))
+    expect(backend.frames).toEqual([])
+    ws.close()
+  })
   it('accepts loopback, selects the exact machine, and routes JSON plus HTRL binary', async () => {
     const backend = new FakeBackend()
     const url = await start(backend)
@@ -172,6 +228,40 @@ describe('local CLI WebSocket', () => {
     // A window that went away has no tiles open. Left standing, the roster would go on silencing the
     // dial for agents nobody can see any more — backwards, and permanently.
     await vi.waitFor(() => expect(rosters).toEqual([['a1', 'a2'], []]))
+  })
+
+  it('says whether the window those tiles belong to is actually in front', async () => {
+    // The roster alone cannot answer it: every pane keeps its place on the tab
+    // while the window sits behind a browser. Without this the dial stayed quiet
+    // about work nobody could see, which is the one case it exists for.
+    const backend = new FakeBackend()
+    const seen: Array<{ ids: string[]; foreground: boolean }> = []
+    server = http.createServer((_req, res) => { res.statusCode = 404; res.end() })
+    local = attachLocalWsServer(server, {
+      machineId,
+      backend,
+      onAppPanes: (ids, foreground) => seen.push({ ids, foreground }),
+    })
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
+    const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/local-ws`
+
+    const ws = new WebSocket(url)
+    await onceOpen(ws)
+    const connected = onceMessage(ws)
+    ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId, localProtocolVersion: 1 } }))
+    await connected
+
+    ws.send(JSON.stringify({ type: 'app_panes', payload: { agentIds: ['a1'], foreground: true } }))
+    ws.send(JSON.stringify({ type: 'app_panes', payload: { agentIds: ['a1'], foreground: false } }))
+    // A window that predates the field only ever sent this list while it was up,
+    // so absence reads as in front — the behaviour it has today.
+    ws.send(JSON.stringify({ type: 'app_panes', payload: { agentIds: ['a1'] } }))
+    await vi.waitFor(() => expect(seen).toHaveLength(3))
+    expect(seen.map((row) => row.foreground)).toEqual([true, false, true])
+
+    ws.close()
+    // No window at all is not a window in front.
+    await vi.waitFor(() => expect(seen[3]).toEqual({ ids: [], foreground: false }))
   })
 
   it('takes the window\'s swarms, drops what is not a swarm, and forgets them on close', async () => {
@@ -298,6 +388,54 @@ describe('local CLI WebSocket', () => {
     expect(focus).toHaveBeenCalledWith(machineId, 'first', expect.any(String), 'old:0')
     expect(dial).not.toHaveBeenCalled()
     expect(backend.frames).toHaveLength(0)
+    ws.close()
+  })
+
+  it('tells this daemon\'s terminals which one is focused, even when the dial refuses the move', async () => {
+    const backend = new FakeBackend()
+    server = http.createServer((_req, res) => { res.statusCode = 404; res.end() })
+    // A stale revision keeps the dial where it is; it says nothing about the terminal in front of the person.
+    local = attachLocalWsServer(server, { machineId, backend, onAppFocusState: () => false })
+    await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+    const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/local-ws`)
+    await onceOpen(ws)
+    const connected = onceMessage(ws)
+    ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId, localProtocolVersion: 1 } }))
+    await connected
+    ws.send(JSON.stringify({ type: 'app_focus', payload: { agentId: 'focused', focusRevision: 'old:0' } }))
+    ws.send(JSON.stringify({ type: 'app_focus', payload: { agentId: '' } }))   // malformed: ignored
+    ws.send(JSON.stringify({ type: 'app_focus', payload: { agentId: null } }))
+    await vi.waitFor(() => expect(backend.focuses).toHaveLength(2))
+    expect(backend.focuses).toEqual([[backend.connId, 'focused'], [backend.connId, null]])
+    ws.close()
+  })
+
+  it('never hands a relayed machine\'s focus to this daemon\'s terminals', async () => {
+    const backend = new FakeBackend()
+    const relayPool = {
+      acquire: async (_machineId: string, _env: string, _select: Frame, sink: LocalClientSink) => {
+        sink.sendFrame({ type: 'connected', payload: { machineId: 'other-machine', e2ee: false } })
+        return { send: async () => {}, sendBinary: async () => {}, detach: () => {} }
+      },
+      acquireIsolated: async () => { throw new Error('unused') },
+      invalidate: () => {},
+    }
+    const states: Array<string | null> = []
+    server = http.createServer((_req, res) => { res.statusCode = 404; res.end() })
+    local = attachLocalWsServer(server, {
+      machineId, backend, autonomousEnv: 'test',
+      relayPool: relayPool as unknown as NonNullable<Parameters<typeof attachLocalWsServer>[1]['relayPool']>,
+      onAppFocusState: (_machine, agent) => { states.push(agent) },
+    })
+    await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+    const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/local-ws`)
+    await onceOpen(ws)
+    const connected = onceMessage(ws)
+    ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId: 'other-machine', localProtocolVersion: 1 } }))
+    await connected
+    ws.send(JSON.stringify({ type: 'app_focus', payload: { agentId: 'remote-agent' } }))
+    await vi.waitFor(() => expect(states).toEqual(['remote-agent']))
+    expect(backend.focuses).toEqual([])
     ws.close()
   })
 

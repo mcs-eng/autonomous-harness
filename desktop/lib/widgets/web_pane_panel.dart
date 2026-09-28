@@ -9,11 +9,12 @@ import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import '../core/models.dart' show AgentVerdict;
 import '../core/test_run.dart';
 import '../shared/theme/app_theme.dart' as grid;
+import '../shared/theme/workspace_bar_style.dart';
 import '../state/app_state.dart';
 import '../state/terminal_pane.dart';
 import '../theme/app_theme.dart';
 import 'engine_identity.dart';
-import 'pane_header_actions.dart';
+import '../terminal/terminal_text.dart';
 import 'verdict_marks.dart';
 import 'windows_web_viewer.dart';
 
@@ -287,91 +288,81 @@ class _WebPanePanelState extends State<WebPanePanel> {
     );
   }
 
-  Widget _header(BuildContext context) {
+  Widget _header(BuildContext context) =>
+      MediaQuery.withNoTextScaling(child: Builder(builder: _buildHeader));
+
+  Widget _buildHeader(BuildContext context) {
+    TerminalFontScope.watch(context);
     final compact = widget.compactHeader;
-    return PaneHeaderHover(
-      child: SizedBox(
-        height: compact ? 38 : 46,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          child: Row(
-            children: [
-              EngineMark(
-                engine: widget.ownerEngine,
-                displayName: widget.ownerDisplayName,
-                size: 17,
-              ),
-              const SizedBox(width: 10),
-              // The name, and one status after it — ready, or what stands in
-              // the way, or where the work is — in the place a "Viewer" label
-              // would only repeat what the pane shows. A status, not a history.
-              Expanded(
-                child: Tooltip(
-                  message: [widget.ownerName, ?widget.pane.url].join('\n'),
-                  waitDuration: const Duration(milliseconds: 700),
-                  child: Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          widget.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: AppColors.text,
-                            fontFamily: AppFonts.sans,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                          ),
+    return SizedBox(
+      height: compact ? 38 : 46,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        child: Row(
+          children: [
+            EngineMark(
+              engine: widget.ownerEngine,
+              displayName: widget.ownerDisplayName,
+              size: 17,
+            ),
+            const SizedBox(width: 10),
+            // The name, and one status after it — ready, or what stands in
+            // the way, or where the work is — in the place a "Viewer" label
+            // would only repeat what the pane shows. A status, not a history.
+            Expanded(
+              child: Tooltip(
+                message: [widget.ownerName, ?widget.pane.url].join('\n'),
+                waitDuration: const Duration(milliseconds: 700),
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        widget.title,
+                        key: const ValueKey('viewer-pane-title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: workspaceBarTextStyle(color: AppColors.text),
+                      ),
+                    ),
+                    if (widget.verdict case final verdict?) ...[
+                      Text(
+                        '  ·  ',
+                        style: grid.AppType.monoLabel(
+                          color: AppColors.mutedStrong,
                         ),
                       ),
-                      if (widget.verdict case final verdict?) ...[
-                        Text(
-                          '  ·  ',
-                          style: TextStyle(
-                            color: AppColors.mutedStrong,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                          ),
+                      Flexible(
+                        child: VerdictStatus(
+                          verdict: verdict,
+                          working: widget.working,
                         ),
-                        Flexible(
-                          child: VerdictStatus(
-                            verdict: verdict,
-                            working: widget.working,
-                          ),
-                        ),
-                      ],
+                      ),
                     ],
-                  ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 8),
-              // coverage:ignore-start
-              // Only a real webview's navigation sets _loading; none under test.
-              if (_loading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 6),
-                  child: SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 1.5),
-                  ),
+            ),
+            const SizedBox(width: 8),
+            // coverage:ignore-start
+            // Only a real webview's navigation sets _loading; none under test.
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
                 ),
-              // coverage:ignore-end
-              _ViewerActions(
-                zoomed: widget.zoomed,
-                onReload:
-                    _controller == null &&
-                        !(_windowsViewer && _browserUri() != null)
-                    ? null
-                    : _reload,
-                onBrowser: _browserUri() == null || _openingBrowser
-                    ? null
-                    : _openBrowser,
-                onZoom: widget.onToggleZoom,
-                onClose: widget.onClose,
               ),
-            ],
-          ),
+            // coverage:ignore-end
+            _ViewerActions(
+              zoomed: widget.zoomed,
+              onReload: _controller == null && !(_windowsViewer && _browserUri() != null) ? null : _reload,
+              onBrowser: _browserUri() == null || _openingBrowser ? null : _openBrowser,
+              onZoom: widget.onToggleZoom,
+              onClose: widget.onClose,
+            ),
+          ],
         ),
       ),
     );
@@ -456,9 +447,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
   }
 }
 
-/// Reload, zoom, close — the terminal header's controls, minus the one that
-/// ends an agent, because a viewer has no agent to end. Same 28px buttons,
-/// same hover reveal ([PaneHeaderHover]), so the two headers read as one kind.
+/// Viewer navigation never stops the harness that owns it.
 class _ViewerActions extends StatelessWidget {
   const _ViewerActions({
     required this.zoomed,
@@ -533,40 +522,35 @@ class _Notice extends StatelessWidget {
   final Widget? action;
 
   @override
-  Widget build(BuildContext context) => Center(
-    child: SingleChildScrollView(
-      primary: false,
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 26, color: AppColors.mutedStrong),
-          const SizedBox(height: 10),
-          Text(
-            title,
-            style: TextStyle(
-              color: AppColors.text,
-              fontFamily: AppFonts.sans,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        primary: false,
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 26, color: AppColors.mutedStrong),
+            const SizedBox(height: 10),
+            Text(
+              title,
+              style: grid.AppType.label(
+                color: AppColors.text,
+                fontWeight: FontWeight.w600,
+              ),
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            detail,
-            textAlign: TextAlign.center,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: AppColors.mutedStrong,
-              fontFamily: AppFonts.mono,
-              fontFamilyFallback: AppFonts.monoFallback,
-              fontSize: 11,
+            const SizedBox(height: 4),
+            Text(
+              detail,
+              textAlign: TextAlign.center,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: grid.AppType.body(color: AppColors.mutedStrong),
             ),
-          ),
-          if (action != null) ...[const SizedBox(height: 8), action!],
-        ],
+            if (action != null) ...[const SizedBox(height: 8), action!],
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }

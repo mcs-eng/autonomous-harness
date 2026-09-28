@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness_mobile/core/viewer_mode.dart';
 
 import 'agent_pager_fixture.dart';
 
@@ -37,7 +38,7 @@ void main() {
   });
 
   test('a phone tells no machine which agent it is looking at', () async {
-    for (final viewer in [false, true]) {
+    for (final viewer in [if (!kViewerMode) false, true]) {
       final app = pagerApp(PagerConn(), viewer: viewer);
       addTearDown(app.dispose);
       final announced = <String?>[];

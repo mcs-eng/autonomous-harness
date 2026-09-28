@@ -1,3 +1,5 @@
+import 'support/open_harness.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,9 +30,13 @@ void main() {
         }
         await tester.pump();
         await chord(tester, LogicalKeyboardKey.keyP, shift: true);
-        expect(tester.widget<TextField>(_input).controller!.text, '> ');
+        expect(tester.widget<TextField>(_input).controller!.text, '>');
         expect(
           find.textContaining('run command', findRichText: true),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('swarm-search-preview')),
           findsOneWidget,
         );
         // This fork's Continue working rows stay on the page under the
@@ -48,7 +54,7 @@ void main() {
         );
         expect(
           tester.widget<TextField>(_input).decoration!.hintText,
-          'Search commands…',
+          'Search commands',
         );
         expect(_results, findsOneWidget);
         await tester.enterText(_input, '> rename');
@@ -171,6 +177,8 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('harness-start-new-pane')));
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      expect(find.byType(AlertDialog), findsNothing);
+      await chord(tester, LogicalKeyboardKey.keyN);
       await tester.pump(const Duration(milliseconds: 200));
       expect(find.byType(AlertDialog), findsOneWidget);
       expect(
@@ -195,7 +203,7 @@ void main() {
 
     for (final dismissal in ['outside', 'escape']) {
       testWidgets(
-        'New Tab discards its empty draft after $dismissal (native=$native)',
+        'New Tab stays open after dismissing its picker with $dismissal (native=$native)',
         (tester) async {
           final app = createApp();
           final frames = <TerminalBinaryFrame>[];
@@ -206,6 +214,9 @@ void main() {
           await tester.pump();
           expect(app.activeSwarmId, isNot(original));
           expect(app.activeSwarm.isNewTabPage, isTrue);
+          final created = app.activeSwarmId;
+          expect(_results, findsNothing);
+          await openHarnessPicker(tester);
           expect(_results, findsOneWidget);
           expect(_startInput, findsNothing);
           if (dismissal == 'outside') {
@@ -215,9 +226,11 @@ void main() {
           }
           await tester.pump();
           expect(_results, findsNothing);
-          expect(app.activeSwarmId, original);
-          expect(app.swarms, hasLength(1));
+          expect(app.activeSwarmId, created);
+          expect(app.swarms, hasLength(2));
           expect(app.closedHistory, isEmpty);
+          app.selectSwarm(original);
+          await tester.pump();
           expect(app.focusedPane, same(pane));
           await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
           await tester.pump();
@@ -234,7 +247,7 @@ void main() {
     (tester) async {
       final app = createApp();
       await mount(tester, app);
-      await chord(tester, LogicalKeyboardKey.keyP);
+      await openHarnessPicker(tester);
       await tester.enterText(_input, 'Agent 12');
       await tester.pump();
       final text = tester.widget<TextField>(_input).controller!;
@@ -256,10 +269,10 @@ void main() {
       expect(_startInput, findsOneWidget);
       expect(tester.widget<TextField>(_startInput).focusNode!.hasFocus, isTrue);
       await chord(tester, LogicalKeyboardKey.keyP, shift: true);
-      expect(tester.widget<TextField>(_input).controller!.text, '> ');
+      expect(tester.widget<TextField>(_input).controller!.text, '>');
       expect(
         tester.widget<TextField>(_input).decoration!.hintText,
-        'Search commands…',
+        'Search commands',
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();
@@ -269,15 +282,14 @@ void main() {
   testWidgets('Open reuses a session and hands the terminal its next key', (
     tester,
   ) async {
-    final app = createApp();
-    app.machineStates['m']!.nodeOnline = true;
+    final app = createApp(connected: true);
     final frames = <TerminalBinaryFrame>[];
     final pane = app.adoptSessionForTest(terminal('a0', frames));
     final original = app.activeSwarm;
     app.newSwarm();
     final destination = app.activeSwarmId;
     await mount(tester, app);
-    await chord(tester, LogicalKeyboardKey.keyP);
+    await openHarnessPicker(tester);
     await tester.enterText(_input, 'Agent 0');
     await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);

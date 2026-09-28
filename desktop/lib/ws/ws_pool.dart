@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'local_daemon_transport.dart';
 import 'relay_codec.dart';
 import 'terminal_transport_plugin.dart';
 
@@ -27,7 +28,12 @@ class WsPool {
 
   final Map<String, WsConn> _conns = {};
 
+  /// How local connections reach the daemon — its socket or the loopback
+  /// port. Null keeps the port.
+  final LocalDaemonTransport? localTransport;
+
   WsPool({
+    this.localTransport,
     required this.wsBaseUrl,
     required this.autonomousEnv,
     this.relayCodecs,
@@ -91,6 +97,7 @@ class WsPool {
       },
       transportKind: transportKind,
       localWsUri: localWsUri,
+      localTransport: localTransport,
       localApiKey: localApiKey,
       localProtocolVersion: localProtocolVersion,
       fixedReconnectDelay: fixedReconnectDelay,
@@ -101,6 +108,10 @@ class WsPool {
   }
 
   WsConn? operator [](String machineId) => _conns[machineId];
+
+  /// The machines this pool holds a socket for. A snapshot, so a caller can send
+  /// on each without a concurrent connect mutating what it is walking.
+  List<String> get machineIds => _conns.keys.toList(growable: false);
   bool has(String machineId) => _conns.containsKey(machineId);
 
   Future<void> closeMachine(String machineId) async {

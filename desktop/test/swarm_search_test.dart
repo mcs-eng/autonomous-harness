@@ -1,3 +1,5 @@
+import 'support/open_harness.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -27,7 +29,7 @@ void main() {
       await mount(tester, app);
       final input = find.byKey(const ValueKey('swarm-search-input'));
       expect(input, findsNothing);
-      await chord(tester, LogicalKeyboardKey.keyP);
+      await openHarnessPicker(tester);
       await tester.pump();
       final originalController = tester.widget<TextField>(input).controller;
       await tester.enterText(input, 'a query only');
@@ -307,12 +309,12 @@ void main() {
   testWidgets(
     'machine names filter harnesses without adding the whole machine',
     (tester) async {
-      final app = createApp();
+      final app = createApp(connected: true);
       app.machineStates['m']!.agents = app.machineStates['m']!.agents
           .take(3)
           .toList();
       await mount(tester, app);
-      await chord(tester, LogicalKeyboardKey.keyP);
+      await openHarnessPicker(tester);
       await tester.pump();
       await tester.enterText(jumpField, 'Test host');
       await tester.pump();
@@ -331,8 +333,7 @@ void main() {
   testWidgets('Add keeps a shared view here and the first key reaches it', (
     tester,
   ) async {
-    final app = createApp();
-    app.machineStates['m']!.nodeOnline = true;
+    final app = createApp(connected: true);
     final firstInputs = <TerminalBinaryFrame>[];
     final secondInputs = <TerminalBinaryFrame>[];
     final firstSession = terminal('a0', firstInputs);
@@ -342,15 +343,12 @@ void main() {
     app.adoptSessionForTest(terminal('a1', secondInputs));
     final target = app.activeSwarm;
     await mount(tester, app);
-    await chord(tester, LogicalKeyboardKey.keyP);
+    await openHarnessPicker(tester);
     await tester.pump();
     await tester.enterText(jumpField, 'Agent 0');
     await tester.pump();
-    expect(find.byKey(const ValueKey('swarm-row-action')), findsOneWidget);
-    expect(
-      find.textContaining('enter  open', findRichText: true),
-      findsOneWidget,
-    );
+    expect(find.byKey(const ValueKey('swarm-search-count')), findsNothing);
+    expect(find.byKey(const ValueKey('swarm-search-hints')), findsNothing);
     await chord(tester, LogicalKeyboardKey.enter);
     expect(find.byType(Dialog), findsNothing);
     expect(app.activeSwarm, same(target));
@@ -375,7 +373,7 @@ void main() {
     testWidgets(
       'Return waits for composing text in ${adding ? 'Add' : 'New Harness'}',
       (tester) async {
-        final app = createApp();
+        final app = createApp(connected: true);
         app.adoptSessionForTest(terminal('a0', []));
         final original = app.activeSwarm;
         app.newSwarm();
@@ -385,7 +383,7 @@ void main() {
           ValueKey(adding ? 'swarm-search-input' : 'harness-start-search'),
         );
         if (adding) {
-          await chord(tester, LogicalKeyboardKey.keyP);
+          await openHarnessPicker(tester);
           await tester.pump();
         } else {
           await tester.tap(field);

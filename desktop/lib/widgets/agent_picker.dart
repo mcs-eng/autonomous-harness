@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:harness/terminal/terminal_text.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../shortcuts/app_keymap.dart';
@@ -78,6 +79,7 @@ class AgentPicker extends StatefulWidget {
     this.height = 64,
     this.width,
     this.terminalStyle = false,
+    this.label = 'Agent',
   });
 
   final String value;
@@ -111,6 +113,7 @@ class AgentPicker extends StatefulWidget {
   /// dialog, and Flutter orders Tab by when a focus node attached.
   final double? width;
   final bool terminalStyle;
+  final String label;
 
   /// What the search input says before anything is typed.
   static const hint = 'Choose an agent for what you’d like to make';
@@ -129,6 +132,8 @@ class AgentPicker extends StatefulWidget {
 }
 
 class _AgentPickerState extends State<AgentPicker> {
+  String get _hint =>
+      widget.label == 'Agent' ? AgentPicker.hint : 'Search harnesses';
   final _portal = OverlayPortalController();
   final _query = TextEditingController();
   final _inputFocus = FocusNode(debugLabel: 'Agent search input');
@@ -320,7 +325,12 @@ class _AgentPickerState extends State<AgentPicker> {
   }
 
   double _rowHeight(TextScaler scaler) => widget.terminalStyle
-      ? math.max(46, scaler.scale(13) * 1.35 + scaler.scale(12) * 1.35 + 12)
+      ? math.max(
+          46,
+          scaler.scale(grid.AppType.monoSize) * 1.35 +
+              scaler.scale(grid.AppType.monoSize) * 1.35 +
+              12,
+        )
       : swarmSearchRowHeight(scaler, commands: false);
 
   /// The closed bar opens on the keys that start a search: Return, Space,
@@ -357,16 +367,14 @@ class _AgentPickerState extends State<AgentPicker> {
   /// section's line above it says what the box is for (owner, 2026-09-17:
   /// "in the search box, just the agent name").
   Widget _chosen(AgentChoice? choice) => KeyedSubtree(
-    key: const Key('new-agent-agent-choice'),
+    key: Key('new-agent-${widget.label.toLowerCase()}-choice'),
     child: Text(
       choice?.label ?? 'Choose an agent',
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: widget.terminalStyle
           ? boxMonoStyle()
-          : TextStyle(
-              fontSize: _fontSize,
-              fontWeight: FontWeight.w500,
+          : grid.AppType.monoLabel(
               color: choice == null ? Colors.white60 : Colors.white,
             ),
     ),
@@ -381,11 +389,11 @@ class _AgentPickerState extends State<AgentPicker> {
       child: Semantics(
         button: true,
         label: choice == null
-            ? AgentPicker.hint
-            : 'Agent: ${choice.label}. Search agents',
+            ? _hint
+            : '${widget.label}: ${choice.label}. Search ${widget.label.toLowerCase()}s',
         excludeSemantics: true,
         child: Material(
-          key: const Key('new-agent-agent-field'),
+          key: Key('new-agent-${widget.label.toLowerCase()}-field'),
           color: grid.AppPalette.swarmSearchSurface,
           surfaceTintColor: Colors.transparent,
           elevation: 2,
@@ -468,6 +476,8 @@ class _AgentPickerState extends State<AgentPicker> {
           'picker.cancel': () => run(_close),
           if (widget.terminalStyle)
             'picker.toggle_preview': () => run(_togglePreview),
+          'picker.page_down': () => run(() => _page(1)),
+          'picker.page_up': () => run(() => _page(-1)),
           'picker.preview_page_down': () => run(() => _page(1)),
           'picker.preview_page_up': () => run(() => _page(-1)),
           // Tab is a picker command now (the box completes paths with it); a
@@ -583,7 +593,7 @@ class _AgentPickerState extends State<AgentPicker> {
     final sideBySide = showPreview && width >= 760;
     final preview = showPreview
         ? _AgentPreview(
-            key: const ValueKey('new-agent-agent-preview'),
+            key: ValueKey('new-agent-${widget.label.toLowerCase()}-preview'),
             choice: highlighted,
             status: widget.statusOf?.call(highlighted.id),
             current: highlighted.id == widget.value,
@@ -593,14 +603,16 @@ class _AgentPickerState extends State<AgentPicker> {
         : null;
     final results = ExcludeFocus(
       child: ListView.builder(
-        key: const ValueKey('new-agent-agent-list'),
+        key: ValueKey('new-agent-${widget.label.toLowerCase()}-list'),
         controller: _scroll,
         padding: const EdgeInsets.all(8),
         itemExtent: rowHeight,
         itemCount: lines,
         itemBuilder: (context, index) => empty
             ? Padding(
-                key: const Key('new-agent-agent-search-empty'),
+                key: Key(
+                  'new-agent-${widget.label.toLowerCase()}-search-empty',
+                ),
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 child: Align(
                   alignment: Alignment.centerLeft,
@@ -608,7 +620,10 @@ class _AgentPickerState extends State<AgentPicker> {
                     'No agents match “${_query.text.trim()}”.',
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 14, color: Colors.white60),
+                    style: grid.AppType.monoLabel(
+                      fontWeight: FontWeight.w400,
+                      color: Colors.white60,
+                    ),
                   ),
                 ),
               )
@@ -620,7 +635,7 @@ class _AgentPickerState extends State<AgentPicker> {
       child: TextFieldTapRegion(
         groupId: _tapGroup,
         child: Material(
-          key: const Key('new-agent-agent-panel'),
+          key: Key('new-agent-${widget.label.toLowerCase()}-panel'),
           color: grid.AppPalette.swarmSearchSurface,
           surfaceTintColor: Colors.transparent,
           // Lifted off the dialog it covers, lightly: on the dialog's dark
@@ -640,12 +655,14 @@ class _AgentPickerState extends State<AgentPicker> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Semantics(
-                    label: 'Search agents',
+                    label: 'Search ${widget.label.toLowerCase()}s',
                     child: ReadlineKeys(
                       controller: _query,
                       onChanged: _queryChanged,
                       child: SwarmSearchInput(
-                        inputKey: const Key('new-agent-agent-search'),
+                        inputKey: Key(
+                          'new-agent-${widget.label.toLowerCase()}-search',
+                        ),
                         controller: _query,
                         focusNode: _inputFocus,
                         groupId: _tapGroup,
@@ -654,12 +671,11 @@ class _AgentPickerState extends State<AgentPicker> {
                         onChanged: _queryChanged,
                         autofocus: false,
                         showClose: !widget.terminalStyle,
-                        hintText: AgentPicker.hint,
+                        hintText: _hint,
                         rounded: !widget.terminalStyle,
                         prominent: !widget.terminalStyle,
                         prompt: widget.terminalStyle ? '>' : null,
                         height: widget.height,
-                        fontSize: _fontSize,
                       ),
                     ),
                   ),
@@ -752,13 +768,13 @@ class _AgentPickerState extends State<AgentPicker> {
       if (needle.isEmpty || text == null) return const [];
       final field = text.toLowerCase();
       return field.contains(needle)
-          ? [(field: field, term: needle, title: title)]
+          ? [(field: field, term: needle, title: title, strict: false)]
           : const [];
     }
 
     final compactAction =
         (panelWidth >= 760 ? panelWidth / 2 : panelWidth) <
-        380 * scaler.scale(14) / 14;
+        380 * scaler.scale(grid.AppType.monoSize) / grid.AppType.monoSize;
     return MouseRegion(
       onHover: (event) {
         if (_pointer.moved(event) && _cursor != index) {
@@ -766,7 +782,9 @@ class _AgentPickerState extends State<AgentPicker> {
         }
       },
       child: ListTile(
-        key: ValueKey('new-agent-agent-row-${choice.id}'),
+        key: ValueKey(
+          'new-agent-${widget.label.toLowerCase()}-row-${choice.id}',
+        ),
         minTileHeight: rowHeight,
         selected: highlighted,
         textColor: Colors.white,
@@ -801,8 +819,7 @@ class _AgentPickerState extends State<AgentPicker> {
                 matches: matches(choice.label, title: true),
                 style: widget.terminalStyle
                     ? boxMonoStyle()
-                    : const TextStyle(
-                        fontSize: 14,
+                    : grid.AppType.monoLabel(
                         fontWeight: FontWeight.w600,
                         color: Colors.white,
                       ),
@@ -813,12 +830,14 @@ class _AgentPickerState extends State<AgentPicker> {
               Flexible(
                 child: Text(
                   'by $creator',
-                  key: ValueKey('new-agent-agent-row-by-${choice.id}'),
+                  key: ValueKey(
+                    'new-agent-${widget.label.toLowerCase()}-row-by-${choice.id}',
+                  ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: widget.terminalStyle
-                      ? boxMonoStyle(size: 12, color: kBoxFaint)
-                      : const TextStyle(fontSize: 13, color: Colors.white54),
+                      ? boxMonoStyle(color: kBoxFaint)
+                      : grid.AppType.monoMeta(color: Colors.white54),
                 ),
               ),
             ],
@@ -830,18 +849,23 @@ class _AgentPickerState extends State<AgentPicker> {
                 detail,
                 matches: matches(detail, title: false),
                 style: widget.terminalStyle
-                    ? boxMonoStyle(size: 12, color: Colors.white60)
-                    : const TextStyle(fontSize: 12, color: Colors.white60),
+                    ? boxMonoStyle(color: Colors.white60)
+                    : grid.AppType.monoMeta(color: Colors.white60),
               ),
         trailing: widget.terminalStyle && highlighted
             ? Text('↵', style: boxMonoStyle(color: kBoxFaint))
             : highlighted
             ? ConstrainedBox(
                 constraints: BoxConstraints(
-                  maxWidth: 170 * scaler.scale(11) / 11,
+                  maxWidth:
+                      170 *
+                      scaler.scale(grid.AppType.bodySize) /
+                      grid.AppType.bodySize,
                 ),
                 child: TextButton(
-                  key: const ValueKey('new-agent-agent-row-action'),
+                  key: ValueKey(
+                    'new-agent-${widget.label.toLowerCase()}-row-action',
+                  ),
                   onPressed: () => _choose(choice),
                   style: TextButton.styleFrom(foregroundColor: Colors.white),
                   child: SwarmSearchActionLabel(
@@ -889,7 +913,7 @@ class _AgentPickerState extends State<AgentPicker> {
             // nothing else: the sections under the panel are not the target.
             Positioned.fill(
               child: GestureDetector(
-                key: const Key('new-agent-agent-barrier'),
+                key: Key('new-agent-${widget.label.toLowerCase()}-barrier'),
                 behavior: HitTestBehavior.opaque,
                 onTap: _close,
               ),
@@ -931,19 +955,17 @@ class _AgentPreview extends StatelessWidget {
   final ScrollController? controller;
   final bool terminalStyle;
 
-  static const _muted = TextStyle(
-    fontSize: 12,
-    height: 1.5,
-    color: Colors.white54,
-  );
-  static const _body = TextStyle(
-    fontSize: 14,
+  static TextStyle get _muted =>
+      grid.AppType.monoMeta(height: 1.5, color: Colors.white54);
+  static TextStyle get _body => grid.AppType.monoLabel(
+    fontWeight: FontWeight.w400,
     height: 1.6,
     color: Color(0xffe1e1e4),
   );
 
   @override
   Widget build(BuildContext context) {
+    TerminalFontScope.watch(context);
     final description = choice.description;
     final chips = [if (current) 'Chosen', ?status];
     return Semantics(
@@ -971,8 +993,7 @@ class _AgentPreview extends StatelessWidget {
                           text: choice.label,
                           style: terminalStyle
                               ? boxMonoStyle()
-                              : const TextStyle(
-                                  fontSize: 20,
+                              : grid.AppType.monoLabel(
                                   fontWeight: FontWeight.w600,
                                   color: Colors.white,
                                 ),
@@ -981,11 +1002,8 @@ class _AgentPreview extends StatelessWidget {
                           TextSpan(
                             text: '  by $creator',
                             style: terminalStyle
-                                ? boxMonoStyle(size: 12, color: kBoxFaint)
-                                : const TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.white54,
-                                  ),
+                                ? boxMonoStyle(color: kBoxFaint)
+                                : grid.AppType.monoMeta(color: Colors.white54),
                           ),
                       ],
                     ),
@@ -1000,9 +1018,9 @@ class _AgentPreview extends StatelessWidget {
               Text(
                 detail,
                 style: terminalStyle
-                    ? boxMonoStyle(size: 12, color: Colors.white70)
-                    : const TextStyle(
-                        fontSize: 14,
+                    ? boxMonoStyle(color: Colors.white70)
+                    : grid.AppType.monoLabel(
+                        fontWeight: FontWeight.w400,
                         height: 1.4,
                         color: Colors.white70,
                       ),
@@ -1011,10 +1029,7 @@ class _AgentPreview extends StatelessWidget {
             if (chips.isNotEmpty) ...[
               const SizedBox(height: 12),
               if (terminalStyle)
-                Text(
-                  chips.join(' · '),
-                  style: boxMonoStyle(size: 12, color: kBoxFaint),
-                )
+                Text(chips.join(' · '), style: boxMonoStyle(color: kBoxFaint))
               else
                 Wrap(
                   spacing: 8,
@@ -1033,10 +1048,7 @@ class _AgentPreview extends StatelessWidget {
                           ),
                           child: Text(
                             chip,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Colors.white70,
-                            ),
+                            style: grid.AppType.monoMeta(color: Colors.white70),
                           ),
                         ),
                       ),
@@ -1047,9 +1059,7 @@ class _AgentPreview extends StatelessWidget {
               SizedBox(height: terminalStyle ? 16 : 24),
               Text(
                 'About',
-                style: terminalStyle
-                    ? boxMonoStyle(size: 12, color: kBoxFaint)
-                    : _muted,
+                style: terminalStyle ? boxMonoStyle(color: kBoxFaint) : _muted,
               ),
               const SizedBox(height: 6),
               Text(

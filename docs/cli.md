@@ -13,13 +13,12 @@ works the same on a headless Linux server; the app is not required on a machine,
 | Command | What it does |
 |---|---|
 | `harness login [--force] [--json]` | Browser SSO; save this computer's session. `--force` signs in as a different account. `--json` emits NDJSON for GUI clients. |
-| `harness start [-f] [--repair]` | Start the daemon from the saved session. `-f` runs in the foreground for a supervisor. `--repair` re-verifies the managed Node runtime. |
-| `harness stop` · `harness logout` · `harness reset` | Stop the daemon · stop and clear the SSO session · stop and clear all local state. |
+| `harness start [-f] [--repair]` | Start the daemon from the saved session, or signed out for this computer only. `-f` runs in the foreground for a supervisor. `--repair` re-verifies the managed Node runtime. |
+| `harness stop` · `harness logout` · `harness reset` | Stop the daemon · clear the SSO session; a running daemon restarts signed out, for this computer only · stop and clear all local state. |
 | `harness status` · `harness version` · `harness update [--force]` | Running, pid, machine id, session count · version · update now. |
 | `harness dsh list` · `harness dsh update <owner/name>` | Installed harness package versions and available updates · update one package while preserving its workspaces. |
 | `harness machines [list] [--json]` · `harness machines delete <id>` | This account's machines · remove another machine (never this one). |
 | `harness pair <code>` · `harness pairings` · `harness unpair <#\|fp\|--all>` | Pair a browser with the code the web client shows; list; unpair. |
-| `harness browser-link` | Print a reusable seven-day setup link for browsers. |
 | `harness remote-password set\|status\|clear` | This machine's persistent password for machine-to-machine links. |
 | `harness link connect <id> [--name=<label>]` · `harness link list` · `harness link unlink <id>` | Let this machine reach another of yours, terminating E2EE here; list; unlink. |
 | `harness remote` | From a Harness terminal tile: choose another of your machines (linking it on the spot if needed), open a terminal there and move this tile to it. |

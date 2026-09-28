@@ -9,6 +9,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../analytics/analytics.dart';
 import '../state/pane_arrangement.dart';
+import '../core/desktop_window.dart';
 import '../core/engine_availability.dart';
 import '../core/codex_profiles.dart';
 import '../core/dsh_catalog.dart';
@@ -233,7 +234,11 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
   bool get _confirmationPending => _creation?.awaitingConfirmation == true;
   bool get _choicesLocked => _submitting || _confirmationPending;
   late String _engine = allEngines.first.id;
+  String? _harnessId;
+  final _harnessSearchFocus = FocusNode(debugLabel: 'Harness search');
   bool _engineChosenByUser = false;
+  bool _selectionTouched = false;
+  bool _advancedTouched = false;
   late String _machineId = widget.machineId;
   int _machineRevision = 0;
   late String? _folder = widget.initialFolder;
@@ -270,6 +275,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
     _task.dispose();
     _folderFocus.dispose();
     _agentSearchFocus.dispose();
+    _harnessSearchFocus.dispose();
     _actionFocus.dispose();
     _choicesScroll.dispose();
     super.dispose();
@@ -279,22 +285,26 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
   void initState() {
     super.initState();
     _task.addListener(_onTaskChanged);
-    final remembered = widget.notifier.agentPreference.value;
+    final prefs = widget.notifier.agentPreference;
     final asked = widget.initialEngine;
-    if (asked != null &&
-        (isHarnessId(asked) ||
-            isTerminalEngine(asked) ||
-            allEngines.any((identity) => identity.id == asked))) {
-      // Chosen before the dialog opened: counts as the person's choice, so no
-      // probe or remembered preference moves it.
-      _engine = asked;
-      _engineChosenByUser = true;
-    } else if (_knownChoice(remembered)) {
-      _engine = remembered!;
-      _engineChosenByUser = true;
-    } else {
-      _engine = _preferredInstalledEngine();
-    }
+    _harnessId =
+        widget.initialDraft?.harnessId ??
+        (isHarnessId(asked)
+            ? asked
+            : asked == null
+            ? prefs.harness
+            : null);
+    final requested = isHarnessId(asked) ? null : asked;
+    _engine = widget.initialDraft?.engine ?? _compatibleEngine(requested);
+    _engineChosenByUser =
+        widget.initialDraft != null ||
+        (asked != null && !isHarnessId(asked)) ||
+        prefs.engineFor(_harnessId) != null ||
+        prefs.value != null;
+    if (!_engineChosenByUser) _engine = _preferredInstalledEngine();
+    _advancedOpen =
+        widget.initialDraft?.advancedOpen ??
+        (widget.initiallyAdvanced || prefs.advancedOpen);
     // Which engines this machine actually has. Asked here rather than at
     // connect because the answer costs the far side one interactive shell per
     // engine and is only ever read on this screen. Deferred a frame so the
@@ -313,7 +323,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
         // actionable control once the route and its focus tree are mounted:
         // the agent search, so the dialog opens ready to type — or the
         // project, when the agent was chosen before it opened (the Store).
-        (widget.initialEngine == null ? _agentSearchFocus : _folderFocus)
+        (widget.initialEngine == null ? _harnessSearchFocus : _folderFocus)
             .requestFocus();
         unawaited(_probeEngines(initialProbe: widget.initialEngineProbe));
         // And the harnesses, whatever is selected: what the machine has
@@ -324,22 +334,28 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
     });
   }
 
-  /// Whether [id] is something this dialog can offer: an engine, or a harness
-  /// this build ships a face for, or one the machine has named.
-  bool _knownChoice(String? id) =>
-      id != null &&
-      (isTerminalEngine(id) ||
-          allEngines.any((identity) => identity.id == id) ||
-          knownHarnesses.any((identity) => identity.id == id) ||
-          _harness(id) != null);
-
-  /// Which harnesses this machine has or could install — asked when a harness
-  /// is chosen, not on open: most creates never involve one, and the answer
-  /// costs the machine a request. Forced, for the reason `_probeEngines`
-  /// gives: an install this very dialog starts is what makes a stored answer
-  /// stale.
-  Future<void> _probeHarnesses() =>
-      widget.notifier.probeDsh(_machineId, force: true);
+  /// Refresh compatibility without replacing an explicit engine choice.
+  Future<void> _probeHarnesses() async {
+    final revision = _machineRevision;
+    await widget.notifier.probeDsh(_machineId, force: true);
+    if (!mounted ||
+        _choicesLocked ||
+        revision != _machineRevision ||
+        _selectionTouched ||
+        widget.initialDraft != null ||
+        _harnessId == null ||
+        (widget.initialEngine != null && !isHarnessId(widget.initialEngine))) {
+      return;
+    }
+    final preferred = _compatibleEngine(null);
+    if (_engine == preferred) return;
+    setState(() {
+      _engine = preferred;
+      _codexProfile = null;
+      _codexProfileChosen = false;
+      _codexProfilesBusy = true;
+    });
+  }
 
   /// The machine's row for harness [id], or null while it has not answered
   /// (or does not know the request). Null is "unknown", never "absent".
@@ -349,7 +365,50 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
     return harnessForOperation(machine.dsh.entries, id);
   }
 
-  bool get _engineIsHarness => isHarnessId(_engine);
+  bool get _engineIsHarness => _harnessId != null;
+  List<String> get _compatibleEngines => _harnessId == null
+      ? [for (final engine in allEngines) engine.id, kTerminalEngine]
+      : _harness(_harnessId!)?.supportedEngines ?? [_baseEngine(_harnessId!)];
+  String _compatibleEngine(String? requested) {
+    final prefs = widget.notifier.agentPreference;
+    for (final candidate in [
+      requested,
+      prefs.engineFor(_harnessId),
+      prefs.value,
+      if (_harnessId != null) _baseEngine(_harnessId!),
+    ]) {
+      if (candidate != null && _compatibleEngines.contains(candidate)) {
+        return candidate;
+      }
+    }
+    return _compatibleEngines.first;
+  }
+
+  void _chooseHarness(String id) {
+    if (_choicesLocked) return;
+    setState(() {
+      _engineChosenByUser = true;
+      _selectionTouched = true;
+      _harnessId = id == NewHarnessController.codingId ? null : id;
+      final previous = _engine;
+      _engine = _compatibleEngine(
+        widget.notifier.agentPreference.engineFor(_harnessId) ?? _engine,
+      );
+      if (previous != _engine) {
+        _codexProfile = null;
+        _codexProfileChosen = false;
+        _codexProfilesBusy = true;
+      }
+      if (_generatedProject != null) {
+        _generatedProject = ProjectFolderRequest.generated(
+          label: _labelOf(_harnessId ?? _engine),
+          at: DateTime.now(),
+        );
+        _projectName = _generatedProject!.name;
+      }
+      _error = null;
+    });
+  }
 
   /// A shell rather than an agent: nothing to install, no task, no permission
   /// mode, and a folder is a place to open in, not a project to prepare.
@@ -428,28 +487,42 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
   /// flight, or the one that just failed (kept on screen so its verdict and
   /// the fix it names stay readable under the Retry). Null otherwise.
   DshInstallRun? get _installRun {
-    final run = widget.notifier.stateOf(_machineId)?.dsh.runs[_engine];
+    final run = widget.notifier.stateOf(_machineId)?.dsh.runs[_harnessId];
     if (run == null) return null;
     if (_installing) return run;
-    if (run.failed && _willInstallHarness(_engine)) return run;
+    if (run.failed && _harnessId != null && _willInstallHarness(_harnessId!)) {
+      return run;
+    }
     return null;
   }
 
   Future<void> _loadAgentPreference() async {
     await widget.notifier.agentPreference.load();
-    if (!mounted || _choicesLocked || _engineChosenByUser) return;
-    final remembered = widget.notifier.agentPreference.value;
-    if (_knownChoice(remembered)) {
-      setState(() {
-        _engineChosenByUser = true;
-        if (_engine != remembered) {
-          _engine = remembered!;
-          _codexProfile = null;
-          _codexProfileChosen = false;
-          _codexProfilesBusy = true;
-        }
-      });
+    if (!mounted || _choicesLocked) return;
+    final prefs = widget.notifier.agentPreference;
+    if (!_advancedTouched && widget.initialDraft == null) {
+      setState(
+        () => _advancedOpen = widget.initiallyAdvanced || prefs.advancedOpen,
+      );
     }
+    if (_engineChosenByUser) return;
+    if (prefs.value == null &&
+        prefs.harness == null &&
+        prefs.engineFor(_harnessId) == null) {
+      return;
+    }
+    setState(() {
+      if (widget.initialEngine == null) {
+        _harnessId = widget.notifier.agentPreference.harness;
+      }
+      final remembered = _compatibleEngine(null);
+      if (_engine != remembered) {
+        _engine = remembered;
+        _codexProfile = null;
+        _codexProfileChosen = false;
+        _codexProfilesBusy = true;
+      }
+    });
   }
 
   String _preferredInstalledEngine() {
@@ -537,6 +610,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
   /// that can launch into one, so a click cannot land before the choice does.
   bool get _waitingForCodexProfile =>
       _baseEngine(_engine) == 'codex' &&
+      widget.initialDraft?.model == null &&
       _availability('codex')?.supportsCodexHome == true &&
       _codexProfilesBusy;
 
@@ -552,7 +626,9 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
     final revision = _machineRevision;
     try {
       final picked = _machineIsThisComputer
-          ? await getDirectoryPath(initialDirectory: _folder)
+          ? await whileNativePicker(
+              () => getDirectoryPath(initialDirectory: _folder),
+            )
           : await showRemoteFolderPicker(
               context,
               notifier: widget.notifier,
@@ -589,7 +665,9 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       return;
     }
     final choice = _engine;
-    final harness = _engineIsHarness ? (_harness(choice)?.id ?? choice) : null;
+    var harness = _harnessId == null
+        ? null
+        : (_harness(_harnessId!)?.id ?? _harnessId);
     final engine = _baseEngine(choice);
     final profile = _codexProfile;
     final hasModes = permissionModesOf(engine).isNotEmpty;
@@ -623,7 +701,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
           _submitting = false;
           _error =
               'Update Harness CLI on $_machineName to create a '
-              '${_labelOf(harness)} harness.';
+              '${_labelOf(harness!)} harness.';
         });
         return;
       }
@@ -646,6 +724,21 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
         return;
       }
     }
+    if (harness != null && !_confirmationPending) {
+      await _probeHarnesses();
+      if (!mounted) return;
+      harness = _harness(harness)?.id ?? harness;
+      if (!(_harness(harness)?.supportedEngines ?? _compatibleEngines).contains(
+        engine,
+      )) {
+        setState(() {
+          _submitting = false;
+          _error =
+              '${_labelOf(harness!)} does not support ${_labelOf(engine)} on $_machineName. Choose a compatible agent.';
+        });
+        return;
+      }
+    }
     final error = await widget.notifier.createAgent(
       _machineId,
       engine: engine,
@@ -658,7 +751,10 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       permissionMode: permissionMode,
       // Keep the explicit choice even if machine discovery changes mid-submit.
       // The notifier must reject a now-remote target, never use its default login.
-      codexHome: engine == 'codex' ? profile?.path : null,
+      codexHome: engine == 'codex' && widget.initialDraft?.model == null
+          ? profile?.path
+          : null,
+      model: terminal ? null : widget.initialDraft?.model,
       dsh: harness,
       prompt: _firstPrompt,
       attempt: _creation,
@@ -688,21 +784,33 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       permissionMode: permissionMode,
     );
     // What New Harness lists first next time, before anything is typed.
-    unawaited(widget.notifier.agentPreference.remember(choice));
+    unawaited(
+      widget.notifier.agentPreference.remember(choice, harnessId: _harnessId),
+    );
     Navigator.of(context).pop(NewAgentDialogResult.created);
   }
+
+  bool get _sameGitProject =>
+      _machineId == widget.initialDraft?.machineId &&
+      _folder == widget.initialDraft?.project.folder &&
+      _preparedFolder == null;
 
   ProjectFolderRequest? get _projectFolder => switch (_folderSource) {
     _FolderSource.newProject =>
       _generatedProject ?? ProjectFolderRequest.newProject(name: _projectName),
-    _FolderSource.local => null,
+    _FolderSource.local =>
+      _sameGitProject ? widget.initialDraft?.projectFolderRequest : null,
     _FolderSource.remote => switch (_repository) {
       final repository? => ProjectFolderRequest.remote(repository),
       null => null,
     },
   };
 
-  void _toggleAdvanced() => setState(() => _advancedOpen = !_advancedOpen);
+  void _toggleAdvanced() {
+    _advancedTouched = true;
+    setState(() => _advancedOpen = !_advancedOpen);
+    unawaited(widget.notifier.agentPreference.setAdvanced(_advancedOpen));
+  }
 
   NewHarnessDraft get _draft {
     final folder =
@@ -711,6 +819,9 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
     return NewHarnessDraft(
       machineId: _machineId,
       engine: _engine,
+      harnessId: _harnessId,
+      model: _engineIsTerminal ? null : widget.initialDraft?.model,
+      advancedOpen: _advancedOpen,
       project: folder != null
           ? NewHarnessProject.folder(folder)
           : _folderSource == _FolderSource.remote && _repository != null
@@ -720,6 +831,15 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
           : NewHarnessProject.fresh(_projectName),
       task: _task.text,
       permissionMode: _permissionMode,
+      worktree: _preparedFolder != null
+          ? false
+          : _sameGitProject
+          ? widget.initialDraft?.worktree
+          : null,
+      branchRef: _sameGitProject ? widget.initialDraft?.branchRef : null,
+      branchName: _sameGitProject ? widget.initialDraft?.branchName : null,
+      placeholder: _sameGitProject ? widget.initialDraft?.placeholder : null,
+      gitProject: _sameGitProject ? widget.initialDraft?.gitProject : null,
       profile: _codexProfile,
       profileChosen: _codexProfileChosen,
       attempt: _creation,
@@ -794,7 +914,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
           side: BorderSide(color: Colors.white.withValues(alpha: .24)),
         ),
         title: Text(_title),
-        titleTextStyle: boxMonoStyle(size: 12, color: kBoxFaint),
+        titleTextStyle: boxMonoStyle(color: kBoxFaint),
         contentTextStyle: boxMonoStyle(),
         titlePadding: EdgeInsets.fromLTRB(edgePadding, 12, edgePadding, 0),
         contentPadding: EdgeInsets.fromLTRB(edgePadding, 16, edgePadding, 16),
@@ -879,7 +999,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                         child: DshInstallPanel(
                           key: const Key('new-agent-install-status'),
                           run: _installRun!,
-                          harnessName: _labelOf(_engine),
+                          harnessName: _labelOf(_harnessId ?? _engine),
                           machineName: _machineName,
                         ),
                       ),
@@ -998,7 +1118,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                                                 _preparedFolder == null
                                           ? 'Cloning and starting…'
                                           : _installing
-                                          ? 'Installing ${_labelOf(_engine)}…'
+                                          ? 'Installing ${_labelOf(_harnessId ?? _engine)}…'
                                           : _engineIsTerminal
                                           ? 'Opening terminal…'
                                           : 'Starting harness…',
@@ -1017,7 +1137,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                     ),
                   ],
                 );
-                final scale = MediaQuery.textScalerOf(context).scale(13) / 13;
+                final scale = grid.appTextScaleOf(context);
                 final stacked =
                     (_advancedOpen || _confirmationPending) &&
                     constraints.maxWidth < 740 * math.min(1.4, scale);
@@ -1105,11 +1225,11 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                 TextSpan(text: ' $prompt'),
               ],
             ),
-            style: boxMonoStyle(size: 12, color: grid.AppPalette.textSecondary),
+            style: boxMonoStyle(color: grid.AppPalette.textSecondary),
           ),
         ),
         if (helpTopic != null)
-          HarnessHelpLink(topic: helpTopic, textStyle: boxMonoStyle(size: 12)),
+          HarnessHelpLink(topic: helpTopic, textStyle: boxMonoStyle()),
       ],
     ),
   );
@@ -1118,7 +1238,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
   /// but never on its width — so the task field, laid out outside the tiles'
   /// LayoutBuilder, can be the same height as they are.
   static double _tileHeight(TextScaler scaler, {required bool compactHeight}) {
-    return math.max(32, scaler.scale(13) * 1.35 + 14);
+    return math.max(32, scaler.scale(grid.AppType.monoSize) * 1.35 + 14);
   }
 
   Widget _choices() => LayoutBuilder(
@@ -1136,66 +1256,30 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // The section's line, like Machine's and Project's but with no help
-          // link (owner, 2026-09-17), and the search box under it naming the
-          // chosen agent.
           _sectionHeader(
-            'Agent',
-            'Choose who you’ll work with.',
+            'Harness',
+            'Choose the workspace and tools.',
             null,
             compactHeight: compactHeight,
           ),
           AgentPicker(
+            key: const Key('new-agent-harness-picker'),
+            label: 'Harness',
             terminalStyle: true,
-            key: const Key('new-agent-agent-picker'),
-            focusNode: _agentSearchFocus,
-            // A tile's height, so the bar is in proportion with the rows of
-            // tiles under it.
             height: tileSize.height,
             width: constraints.maxWidth,
-            value: _engine,
-            recent: () => _recentAgents,
-            installed: _installedIds,
-            statusOf: (id) => switch (id) {
-              'deepseek-web' => 'Runs locally in a WSL distribution',
-              'zcode-desktop' => 'Opens the official app on this PC',
-              _ => _agentStatus(id),
-            },
+            focusNode: _harnessSearchFocus,
+            value: _harnessId ?? NewHarnessController.codingId,
+            recent: () => widget.notifier.agentPreference.recentHarnesses,
+            installed: {..._installedIds, NewHarnessController.codingId},
+            statusOf: _agentStatus,
             choices: [
-              if (Platform.isWindows &&
-                  widget.notifier.stateOf(_machineId)?.isLocalMachine ==
-                      true) ...[
-                AgentChoice(
-                  id: 'deepseek-web',
-                  actionLabel: 'Open browser workspace',
-                  label: 'DeepSeek Harness',
-                  detail: 'Browser workspace on this PC',
-                  creator: 'DeepSeek',
-                  description: 'Launch the official browser UI in WSL. Separate from Harness terminal panes and task routing.',
-                  mark: (size) => Icon(Icons.open_in_browser, size: size),
-                ),
-                AgentChoice(
-                  id: 'zcode-desktop',
-                  actionLabel: 'Open desktop app',
-                  label: 'ZCode',
-                  detail: 'Desktop app on this PC',
-                  creator: 'Z.ai',
-                  description: 'Open the installed official desktop app. Choose your project and sign in there.',
-                  mark: (size) => Icon(Icons.desktop_windows, size: size),
-                ),
-              ],
-              for (final identity in allEngines)
-                AgentChoice(
-                  id: identity.id,
-                  label: _labelOf(identity.id),
-                  detail: identity.tagline ?? identity.category,
-                  creator: identity.creator,
-                  keywords: identity.category,
-                  description: identity.blurb,
-                  mark: (size) => EngineMark(engine: identity.id, size: size),
-                ),
-              // The domain harnesses, after the engines they run on. What the
-              // machine named when it has answered, else this build's own.
+              AgentChoice(
+                id: NewHarnessController.codingId,
+                label: 'Coding',
+                detail: 'Work in any code project',
+                mark: (size) => Icon(LucideIcons.code, size: size),
+              ),
               for (final harness in _harnessOptions)
                 AgentChoice(
                   id: _harness(harness.id)?.id ?? harness.id,
@@ -1221,18 +1305,88 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                     size: size,
                   ),
                 ),
+            ],
+            onChanged: _chooseHarness,
+          ),
+          TextButton(
+            onPressed: _choicesLocked
+                ? null
+                : () {
+                    Navigator.of(context).pop();
+                    widget.notifier.openStore();
+                  },
+            child: const Text('Browse Harness Store…'),
+          ),
+          SizedBox(height: sectionGap),
+          // The section's line, like Machine's and Project's but with no help
+          // link (owner, 2026-09-17), and the search box under it naming the
+          // chosen agent.
+          _sectionHeader(
+            'Agent',
+            'Choose who you’ll work with.',
+            null,
+            compactHeight: compactHeight,
+          ),
+          AgentPicker(
+            terminalStyle: true,
+            key: const Key('new-agent-agent-picker'),
+            focusNode: _agentSearchFocus,
+            // A tile's height, so the bar is in proportion with the rows of
+            // tiles under it.
+            height: tileSize.height,
+            width: constraints.maxWidth,
+            value: _engine,
+            recent: () => _recentAgents,
+            installed: _installedIds,
+            statusOf: _agentStatus,
+            choices: [
+              if (Platform.isWindows &&
+                  widget.notifier.stateOf(_machineId)?.isLocalMachine ==
+                      true) ...[
+                AgentChoice(
+                  id: 'deepseek-web',
+                  actionLabel: 'Open browser workspace',
+                  label: 'DeepSeek Harness',
+                  detail: 'Browser workspace on this PC',
+                  creator: 'DeepSeek',
+                  description: 'Launch the official browser UI in WSL. Separate from Harness terminal panes and task routing.',
+                  mark: (size) => Icon(Icons.open_in_browser, size: size),
+                ),
+                AgentChoice(
+                  id: 'zcode-desktop',
+                  actionLabel: 'Open desktop app',
+                  label: 'ZCode',
+                  detail: 'Desktop app on this PC',
+                  creator: 'Z.ai',
+                  description: 'Open the installed official desktop app. Choose your project and sign in there.',
+                  mark: (size) => Icon(Icons.desktop_windows, size: size),
+                ),
+              ],
+              for (final identity in allEngines)
+                if (_compatibleEngines.contains(identity.id))
+                  AgentChoice(
+                    id: identity.id,
+                    label: _labelOf(identity.id),
+                    detail: identity.tagline ?? identity.category,
+                    creator: identity.creator,
+                    keywords: identity.category,
+                    description: identity.blurb,
+                    mark: (size) => EngineMark(engine: identity.id, size: size),
+                  ),
               // After every agent: a plain shell, for when none of them is
               // wanted — the same tile ⌘⇧T opens, from here with a machine
               // and a folder chosen. Every machine has one, so the search
               // lists it with what the machine has (_installedIds).
-              AgentChoice(
-                id: kTerminalEngine,
-                label: terminalIdentity.label,
-                detail: terminalIdentity.tagline,
-                keywords: '${terminalIdentity.category} shell bash zsh',
-                description: terminalIdentity.blurb,
-                mark: (size) => EngineMark(engine: kTerminalEngine, size: size),
-              ),
+              if (_harnessId == null)
+                AgentChoice(
+                  id: kTerminalEngine,
+                  label: terminalIdentity.label,
+                  detail: terminalIdentity.tagline,
+                  keywords: '${terminalIdentity.category} shell bash zsh',
+                  description: terminalIdentity.blurb,
+                  mark: (size) =>
+                      EngineMark(engine: kTerminalEngine, size: size),
+                ),
             ],
             onChanged: (value) async {
               if (_choicesLocked) return;
@@ -1252,11 +1406,11 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                 return;
               }
               setState(() {
-                unawaited(widget.notifier.agentPreference.select(value));
                 _engineChosenByUser = true;
+                _selectionTouched = true;
                 if (_engine != value) {
                   _engine = value;
-                  if (_generatedProject != null) {
+                  if (_generatedProject != null && _harnessId == null) {
                     _generatedProject = ProjectFolderRequest.generated(
                       label:
                           widget.notifier
@@ -1285,7 +1439,6 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                 // false, see _submit), so coming back to Claude Code finds it as it was left.
                 _error = null;
               });
-              if (isHarnessId(value)) unawaited(_probeHarnesses());
             },
           ),
           const SizedBox(height: 6),
@@ -1307,10 +1460,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                   child: Text(
                     'Couldn’t check whether ${_labelOf(_baseEngine(_engine))} is installed. '
                     'You can still try starting the harness.',
-                    style: boxMonoStyle(
-                      size: 12,
-                      color: grid.AppPalette.textSecondary,
-                    ),
+                    style: boxMonoStyle(color: grid.AppPalette.textSecondary),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -1323,6 +1473,16 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
             ),
           ],
           SizedBox(height: sectionGap),
+          if (widget.initialDraft?.model case final model?
+              when !_engineIsTerminal) ...[
+            _sectionHeader(
+              'Model',
+              [model.id, if (model.node.isNotEmpty) model.node].join(' · '),
+              null,
+              compactHeight: compactHeight,
+            ),
+            const SizedBox(height: sectionGap),
+          ],
           _sectionHeader(
             'Machine',
             'Where would you like your agent to run?',
@@ -1442,7 +1602,8 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
     listenable: _task,
     builder: (context, _) {
       final radius = BorderRadius.circular(2);
-      final line = MediaQuery.textScalerOf(context).scale(13) * 1.35;
+      final line =
+          MediaQuery.textScalerOf(context).scale(grid.AppType.monoSize) * 1.35;
       final padding = ((minHeight - line) / 2).clamp(6.0, double.infinity);
       final tooLong = _taskTooLong;
       final errorBorder = OutlineInputBorder(
@@ -1533,27 +1694,28 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
           onPressed: _choicesLocked ? null : _toggleAdvanced,
           style: TextButton.styleFrom(
             foregroundColor: grid.AppPalette.textSecondary,
-            textStyle: boxMonoStyle(size: 12),
+            textStyle: boxMonoStyle(),
             minimumSize: const Size(28, 28),
             padding: const EdgeInsets.all(6),
           ),
-          child: Text(_advancedOpen ? '[-] options' : '[+] options'),
+          child: Text(_advancedOpen ? '[-] Advanced' : '[+] Advanced'),
         ),
       ),
       if (permissionModesOf(_baseEngine(_engine)) case final modes
           when modes.isNotEmpty)
         _setting(_permissionModeField(modes)),
-      if (_baseEngine(_engine) == 'codex') _setting(_profileOptions()),
+      if (_baseEngine(_engine) == 'codex' && widget.initialDraft?.model == null)
+        _setting(_profileOptions()),
     ],
   );
 
   /// How far the agent may go without asking. The field shows the mode; the menu says what each
   /// one does, since "Accept edits" and "Plan first" mean little on their own.
   Widget _permissionModeField(List<PermissionMode> modes) => SizedBox(
-    width: 156 * math.min(1.8, MediaQuery.textScalerOf(context).scale(13) / 13),
+    width: 156 * math.min(1.8, grid.appTextScaleOf(context)),
     height: math.max(
       34,
-      MediaQuery.textScalerOf(context).scale(13) * 1.35 + 14,
+      MediaQuery.textScalerOf(context).scale(grid.AppType.monoSize) * 1.35 + 14,
     ),
     child: AppSelectField<String>(
       key: const Key('new-agent-permission-mode'),
@@ -1561,7 +1723,8 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       radius: 2,
       height: math.max(
         34,
-        MediaQuery.textScalerOf(context).scale(13) * 1.35 + 14,
+        MediaQuery.textScalerOf(context).scale(grid.AppType.monoSize) * 1.35 +
+            14,
       ),
       menuWidth: 340,
       value: _permissionModeFor(_baseEngine(_engine)),
@@ -1667,6 +1830,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       setState(() {
         _machineRevision++;
         _engineChosenByUser = true;
+        _selectionTouched = true;
         _machineId = id;
         _folder = null;
         _repository = null;
@@ -1694,7 +1858,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       ?widget.notifier.stateOf(_machineId),
       ...widget.notifier.machineStates.values,
     ])
-      for (final agent in machine.agents.reversed) ?(agent.dsh ?? agent.engine),
+      for (final agent in machine.agents.reversed) ?agent.engine,
   ];
 
   /// A line for the agent search's preview: is [id] on the chosen machine, or

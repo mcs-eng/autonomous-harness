@@ -122,6 +122,15 @@ describe('remote-password link + relay session crypto (interop with the real E2e
       expect(crypto.handleWelcome(welcome.payload as Record<string, unknown>)).toBe(true)
       expect(crypto.ready).toBe(true)
       expect(crypto.terminalP2pVersion).toBe(1)
+      expect(crypto.strictDown).toBe(true)
+
+      // A daemon that says strictDown gets the formerly-plaintext RPCs sealed, and opens them.
+      const install = { requestId: 'dsh-1', url: 'https://example.invalid/harness.git' }
+      const sealedInstall = crypto.wrapOutgoing({ type: 'dsh_install', payload: install })
+      expect(sealedInstall.payload).not.toHaveProperty('url')
+      expect(manager.unwrapDown('session-conn', sealedInstall)?.payload).toEqual(install)
+      // …and nothing unsealed is opened: a plaintext frame is the relay's, not the client's.
+      expect(manager.unwrapDown('session-conn', { type: 'message', payload: { content: 'x', agentId: 'a' } })).toBeNull()
 
       // Outgoing: client encrypts a down-type frame; manager decrypts it via unwrapDown.
       const outgoing = crypto.wrapOutgoing({ type: 'terminal_input', payload: { requestId: 'r1', foo: 'bar' } })
@@ -158,6 +167,19 @@ describe('remote-password link + relay session crypto (interop with the real E2e
       const resumeReply = manager.wrapTarget('session-conn', 'agent_resume_result', resumed)!
       expect(resumeReply.payload).not.toHaveProperty('agent')
       expect(crypto.unwrapIncoming(resumeReply)?.payload).toEqual(resumed)
+
+      // Pause takes the same route, and is the half that was never covered: a relayed harness is
+      // paused by `agent_delete`, and the relay must see neither the agent id nor the reply's
+      // confirmation. Without this the whole Pause/Resume round trip over a remote machine had one
+      // end tested and the other assumed.
+      const stop = { requestId: 'stop-1', agentId: 'saved-work' }
+      const stopRequest = crypto.wrapOutgoing({ type: 'agent_delete', payload: stop })
+      expect(stopRequest.payload).not.toHaveProperty('agentId')
+      expect(manager.unwrapDown('session-conn', stopRequest)?.payload).toEqual(stop)
+      const stopped = { ...stop, deleted: true }
+      const stopReply = manager.wrapTarget('session-conn', 'agent_delete_result', stopped)!
+      expect(stopReply.payload).not.toHaveProperty('deleted')
+      expect(crypto.unwrapIncoming(stopReply)?.payload).toEqual(stopped)
 
       const lowerDown = crypto.wrapOutgoing({ type: 'terminal_resize', payload: { streamId: 's', cols: 80 } })
       const higherDown = crypto.wrapOutgoing({ type: 'terminal_resize', payload: { streamId: 's', cols: 120 } })

@@ -259,12 +259,6 @@ const envSchema = z.object({
   // `harness start` and `harness login` install the `grid` CLI when the machine has none (see
   // lib/gridInstall.ts). Off for tests and for a machine whose grid is managed some other way.
   DISABLE_GRID_INSTALL: z.string().default('false').transform((v) => v === 'true'),
-  // Account-free local mode. Set 'true' to run this computer's daemon without a sign-in: no SSO
-  // session is read or written, the backend is never dialed, the managed grid is left alone, and the
-  // local WebSocket serves the loopback on its own. A saved sign-in still wins when one exists, so the
-  // flag can never hide an account that is there. The desktop app sets it when the person chooses to
-  // use this computer without an account.
-  HARNESS_LOCAL_ONLY: z.string().default('false').transform((v) => v === 'true'),
   // Additive terminal capability. Order controls deterministic primary-route tie breaking.
   //
   // UNSET MEANS AUTO — every backend that is actually usable here, which is what makes `herdr` then an
@@ -405,6 +399,9 @@ const envSchema = z.object({
   ADAPTER_UPDATE_SLOT_SEC: z.string().default('45').transform(Number),
   // Set 'true' to disable self-update entirely.
   ADAPTER_UPDATE_DISABLE: z.string().default('false').transform((v) => v === 'true'),
+  /** How long a daemon whose start-up failed stays up serving nothing but its updater, before it
+   *  gives a clean process a turn. ~15 update slots; `0` keeps it up for ever. */
+  ADAPTER_SAFE_MODE_MS: z.string().default('900000').transform(Number),
   // Install dir holding the packaged cli.js + notify.mjs that the self-updater swaps in place.
   ADAPTER_CLI_DIR: z.string().default(adapterCliDir),
   // Where the managed Node runtime lives. Read (never written) by this process: the hook command

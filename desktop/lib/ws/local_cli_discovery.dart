@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 
 import '../core/serial_port_lease.dart';
@@ -12,6 +13,7 @@ import '../core/harness_file_store.dart';
 import '../core/models.dart';
 import '../core/wsl_runtime.dart';
 import 'session_project_paths.dart';
+import 'local_daemon_transport.dart';
 
 const localWsProtocolVersion = 1;
 const localTerminalProtocolVersion = 3;
@@ -38,6 +40,10 @@ class LocalCliEndpoint {
   /// project metadata in agent frames. This snapshot never describes a peer.
   final Map<String, AgentProject> agentProjects;
 
+  /// The daemon's Unix socket when it answered there, or null when it answered
+  /// on the loopback port. [wsUri] names the same endpoint either way.
+  final String? socketPath;
+
   const LocalCliEndpoint({
     required this.computerId,
     required this.wsUri,
@@ -46,6 +52,7 @@ class LocalCliEndpoint {
     this.machineId,
     this.backendOnline = true,
     this.agentProjects = const {},
+    this.socketPath,
   });
 }
 
@@ -272,12 +279,20 @@ class LocalCliDiscovery {
 
   final Future<void> Function() _spawnCommand;
 
+  /// Which way the daemon is reached — its socket or the loopback port. Shared
+  /// with REST and the local WebSocket; [probe] decides it.
+  final LocalDaemonTransport transport;
+
   LocalCliDiscovery({
     required this.config,
     Dio? dio,
     LocalMachineIdentity? identity,
     Future<void> Function()? spawnCommand,
+    LocalDaemonTransport? transport,
   }) : _injectedIdentity = identity,
+       transport =
+           transport ??
+           LocalDaemonTransport.detect(Uri.parse(config.localCliBaseUrl)),
        _spawnCommand = spawnCommand ?? _defaultSpawnCommand,
        _dio =
            dio ??
@@ -418,8 +433,9 @@ class LocalCliDiscovery {
   /// and a spawn into that gap is a wasted process (the CLI's own lock refuses it), not a fix.
   ///
   /// Never surfaces ORDINARY failures to the caller (no exceptions, no
-  /// [AppNotifier]-visible error); [onSignedOut] is the single exception, for the one state no
-  /// amount of respawning can recover from —
+  /// [AppNotifier]-visible error); [onSignedOut] is the single exception, and it is a NOTICE rather
+  /// than a failure — the account is gone, the daemon comes back signed out and goes on serving this
+  /// computer, and the window should say so —
   /// this runs unattended in the background for the app's whole lifetime; callers that need a
   /// one-shot "start now and tell me if it worked" should use [ensureRunning] instead. Cancel the
   /// timer to stop supervising — this never touches the daemon process itself (it self-daemonizes and
@@ -499,17 +515,16 @@ class LocalCliDiscovery {
           if (DateTime.now().isBefore(nextSpawnAllowedAt)) return;
           if (!(spawnAllowedAt?.call(DateTime.now()) ?? true)) return;
           // A daemon that signed itself OUT — its machine was deleted from another machine, or its
-          // session expired — deletes its session file and exits. Respawning it is the one failure
-          // this loop cannot fix: every replacement starts without a session and exits again,
-          // forever, silently. Stop instead, and let the caller send the user somewhere that helps.
+          // session expired — deletes its session file. It used to exit and refuse to start again
+          // without one, which made respawning it the one failure this loop could not fix; a daemon
+          // now STARTS signed out and serves this computer, so the respawn goes ahead below. The
+          // caller is still told: the window it is holding has become a guest, and should say so.
           //
           // Asked here and not on every tick because it costs a `harness auth status` process, and
           // the respawn point is already rate-limited by the backoff above — so this runs once per
           // spawn attempt rather than once every [checkInterval].
           if (stillSignedIn != null && !await stillSignedIn()) {
-            timer.cancel();
             onSignedOut?.call();
-            return;
           }
           // Canceling a periodic timer does not cancel its active async tick.
           // A closed window during the auth check must not respawn the daemon.
@@ -557,14 +572,71 @@ class LocalCliDiscovery {
       return const LocalCliProbe.down('computer id mismatch');
     }
     final base = Uri.parse(config.localCliBaseUrl);
+    // The socket first: only this user can have opened it. A daemon that
+    // answers there — ready or not — is the daemon; one that does not may
+    // predate the socket, so the port is asked next.
+    final socket = transport.candidate;
+    if (socket != null && transport.socketPresent) {
+      final viaSocket = await _probeStatus(
+        _socketDio(socket),
+        Uri.parse('http://localhost/api/status'),
+        base,
+        localComputerId,
+        socketPath: socket,
+      );
+      if (viaSocket.state != LocalCliProbeState.down) {
+        transport.useSocket();
+        return viaSocket;
+      }
+    }
+    transport.useTcp();
     if (base.host != '127.0.0.1' && base.host != 'localhost') {
       return const LocalCliProbe.down('the local CLI address is not loopback');
     }
+    return _probeStatus(
+      _dio,
+      base.resolve('/api/status'),
+      base,
+      localComputerId,
+      socketPath: null,
+    );
+  }
+
+  Dio? _socketProbe;
+  String? _socketProbePath;
+
+  Dio _socketDio(String path) {
+    if (_socketProbe == null || _socketProbePath != path) {
+      _socketProbe?.close(force: true);
+      _socketProbePath = path;
+      _socketProbe =
+          Dio(
+              BaseOptions(
+                connectTimeout: const Duration(milliseconds: 400),
+                receiveTimeout: const Duration(milliseconds: 400),
+                sendTimeout: const Duration(milliseconds: 400),
+              ),
+            )
+            ..httpClientAdapter = IOHttpClientAdapter(
+              createHttpClient: () => unixHttpClient(path),
+            );
+    }
+    return _socketProbe!;
+  }
+
+  /// Reads and validates `/api/status` from [statusUri] with [dio]. [base] is
+  /// the loopback address the WebSocket URI is named from, whichever way the
+  /// status was read.
+  Future<LocalCliProbe> _probeStatus(
+    Dio dio,
+    Uri statusUri,
+    Uri base,
+    String localComputerId, {
+    required String? socketPath,
+  }) async {
     final Map<String, dynamic>? body;
     try {
-      final response = await _dio.getUri<Map<String, dynamic>>(
-        base.resolve('/api/status'),
-      );
+      final response = await dio.getUri<Map<String, dynamic>>(statusUri);
       body = response.data;
     } on DioException catch (error) {
       switch (error.type) {
@@ -677,6 +749,7 @@ class LocalCliDiscovery {
           // cwds follow the daemon's path dialect, not this host's (review cycle-6, P2).
           _daemonPathPlatform(identity),
         ),
+        socketPath: socketPath,
       ),
       pid: pid,
       version: version,

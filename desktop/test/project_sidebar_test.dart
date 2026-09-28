@@ -8,6 +8,8 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/project_navigation.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/state/terminal_pane.dart';
+import 'package:harness/widgets/agent_drag.dart';
+import 'package:harness/widgets/pane_grid.dart';
 import 'package:harness/widgets/project_sidebar.dart';
 
 import 'swarm_attention_test.dart' show waitingQuestion;
@@ -31,6 +33,8 @@ Future<void> mountSidebar(
   SwarmProjectStore? projects,
   ValueChanged<ProjectLocation>? onNew,
   ValueChanged<SwarmAgentRef>? onOpen,
+  VoidCallback? onShowMachines,
+  VoidCallback? onSignIn,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -46,6 +50,8 @@ Future<void> mountSidebar(
             onCollapse: () {},
             onNewAgent: onNew ?? (_) {},
             onOpenAgent: onOpen ?? (_) {},
+            onShowMachines: onShowMachines ?? () {},
+            onSignIn: onSignIn ?? () {},
           ),
         ),
       ),
@@ -239,26 +245,18 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       expect(find.text('Projects'), findsOneWidget);
-      expect(find.text('Machines'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('project-sidebar-machines')),
+        findsOneWidget,
+      );
       expect(
         tester.state<ScaffoldState>(find.byType(Scaffold).first).isDrawerOpen,
         isTrue,
       );
       expect(tester.takeException(), isNull);
-      await tester.tap(find.text('Machines'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      if (find.text('Agent 0').hitTestable().evaluate().isEmpty) {
-        await tester.tap(
-          find.descendant(
-            of: find.byType(ProjectSidebar),
-            matching: find.text('Test host'),
-          ),
-        );
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 400));
-      }
-      await tester.tap(find.text('Agent 0').hitTestable());
+      await tester.tap(
+        find.byKey(const ValueKey('project-agent:m:a0')).hitTestable(),
+      );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       expect(
@@ -517,6 +515,101 @@ void main() {
     expect(tester.widget<TextField>(filter).controller!.text, 'notebook');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
+    app.dispose();
+  });
+
+  // Fork: the sidebar's machine tree gave way to upstream's Machines Manager.
+  testWidgets('Machines and Show machines open the machine list', (
+    tester,
+  ) async {
+    final app = projectApp();
+    addTearDown(app.dispose);
+    app.machineStates['m']!.agents = const [
+      Agent(
+        id: 'failed',
+        name: 'Unavailable session',
+        terminalAvailable: false,
+        terminalUnavailableReason: 'The terminal process has exited.',
+      ),
+    ];
+    var shown = 0;
+    await mountSidebar(tester, app, onShowMachines: () => shown++);
+    expect(find.text('Machines'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('project-sidebar-machines')));
+    await tester.pump();
+    expect(shown, 1);
+    await tester.tap(find.byKey(const ValueKey('project-agent:m:failed')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Show machines'));
+    await tester.pumpAndSettle();
+    expect(shown, 2);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  // Fork: local mode is upstream's guest desk, labelled, with its way out.
+  testWidgets('local mode is labelled, with sign-in, only without an account', (
+    tester,
+  ) async {
+    final app = projectApp()..signedIn = false;
+    addTearDown(app.dispose);
+    var signIns = 0;
+    await mountSidebar(tester, app, onSignIn: () => signIns++);
+    expect(app.isGuest, isTrue);
+    expect(find.text('Local mode'), findsOneWidget);
+    expect(find.text('This computer, no account'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('project-sidebar-sign-in')));
+    await tester.pump();
+    expect(signIns, 1);
+
+    app.signedIn = true;
+    await mountSidebar(tester, app);
+    expect(find.text('Local mode'), findsNothing);
+    expect(find.byKey(const ValueKey('project-sidebar-sign-in')), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  // Fork: the machine tree was where an agent was dragged onto the grid; the
+  // project rows carry that now, and only for a session that can fill a tile.
+  testWidgets('only a session with a terminal can be dragged', (tester) async {
+    final app = projectApp();
+    addTearDown(app.dispose);
+    app.machineStates['m']!.agents = const [
+      Agent(id: 'live', name: 'Live', engine: 'codex', terminalAvailable: true),
+      Agent(id: 'gone', name: 'Gone', terminalAvailable: false),
+    ];
+    await mountSidebar(tester, app);
+    Finder draggable(String id) => find.ancestor(
+      of: find.byKey(ValueKey('project-agent:m:$id')),
+      matching: find.byType(Draggable<AgentDragRef>),
+    );
+    expect(draggable('live'), findsOneWidget);
+    expect(draggable('gone'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a session dragged from the sidebar fills the tile it lands on', (
+    tester,
+  ) async {
+    final app = projectApp();
+    app.adoptSessionForTest(terminal('a0', []));
+    await mount(tester, app, size: const Size(1600, 900));
+    await tester.pump(const Duration(milliseconds: 400));
+    final row = find.byKey(const ValueKey('project-agent:m:a1'));
+    expect(row, findsOneWidget);
+    final gesture = await tester.startGesture(tester.getCenter(row));
+    await tester.pump();
+    await gesture.moveBy(const Offset(60, 0));
+    await tester.pump();
+    expect(agentDrag.value?.agentId, 'a1');
+    await gesture.moveTo(tester.getCenter(find.byType(PaneGrid)));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    expect(agentDrag.value, isNull);
+    expect(app.panes.map((pane) => pane.agentId), contains('a1'));
+    await tester.pumpWidget(const SizedBox());
+    // Before the test ends, not in a tear-down: the offline machine's retry
+    // timer the drop started must be gone when the fake clock is checked.
     app.dispose();
   });
 }

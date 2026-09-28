@@ -19,6 +19,13 @@ const _metadataUrlOverride = String.fromEnvironment(
   'DESKTOP_UPDATE_METADATA_URL',
 );
 
+/// Lets a DEBUG build check and install, so the update band and its percentage
+/// can be exercised without cutting a release. Off unless asked for
+/// (`--dart-define=DESKTOP_UPDATE_FORCE=true`), and pointless on its own: pair
+/// it with [_metadataUrlOverride] pointing at a scratch manifest, or the debug
+/// build will poll the real one and offer to replace itself with a release.
+const _forceUpdateChecks = bool.fromEnvironment('DESKTOP_UPDATE_FORCE');
+
 /// The macOS build every Mac can run, rendered on Skia: what an Intel Mac installs, what every install
 /// from before the Intel/Apple Silicon split polls on either CPU, and what the website download
 /// serves. Must match the `intel` row of scripts/publish-macos-variant.sh — RELEASE.md, "Two macOS
@@ -171,7 +178,16 @@ class DesktopUpdater {
   final String _architecture;
   final _checksInFlight = <String?, Future<DesktopUpdateCheck>>{};
 
-  static const checkInterval = Duration(hours: 6);
+  /// How often the background poll asks the manifest.
+  ///
+  /// Five minutes, not the six hours this used to be, because the offer on
+  /// screen has to be close to the build Update will actually install: a person
+  /// who leaves a notice sitting for an afternoon should not be shown a version
+  /// that was superseded hours ago. The request is one small GET that GCS
+  /// serves `no-cache`, the overlap guard in [startChecking] and the in-flight
+  /// map above mean a slow answer never stacks up a second one, and the CLI's
+  /// own self-updater polls on the same order (`cli/src/lib/selfUpdate.ts`).
+  static const checkInterval = Duration(minutes: 5);
 
   // Windows previews are replaced manually as a desktop + CLI pair. Never
   // offer the macOS manifest entry just because this host is not Linux.
@@ -206,7 +222,7 @@ class DesktopUpdater {
            ),
        _launchDetached = launchDetached ?? _defaultLaunchDetached,
        _metadataUrlForInstance = metadataUrl ?? _metadataUrl,
-       _releaseMode = releaseMode ?? kReleaseMode,
+       _releaseMode = releaseMode ?? (kReleaseMode || _forceUpdateChecks),
        _isLinux = isLinux ?? Platform.isLinux,
        // A caller that pins the platform through [isLinux] has named a
        // non-Windows target; only an unpinned updater reads the real host.
@@ -333,13 +349,25 @@ class DesktopUpdater {
   /// single AppImage file), so the sha256 check already covers everything there is: it is made
   /// executable and staged as-is, with nothing to unpack or recheck.
   /// Returns null (and cleans up anything partially written) on any verification failure.
-  Future<StagedUpdate?> downloadAndStage(UpdateInfo info) async {
+  /// [onProgress] reports the DOWNLOAD only — bytes received out of
+  /// [UpdateInfo.size]. The manifest's size is the denominator rather than the
+  /// response's, because a CDN that omits `Content-Length` leaves Dio reporting
+  /// `-1` and the manifest is the authority the hash is checked against anyway.
+  /// Verifying and unpacking afterwards have no counter, so a caller showing a
+  /// percentage stops at 100 and keeps saying "installing" until this returns.
+  Future<StagedUpdate?> downloadAndStage(
+    UpdateInfo info, {
+    void Function(int received, int total)? onProgress,
+  }) async {
     if (!_enabled) return null;
     Directory? stagingDir;
     try {
       final response = await _dio.get<List<int>>(
         info.url,
         options: Options(responseType: ResponseType.bytes),
+        onReceiveProgress: onProgress == null
+            ? null
+            : (received, _) => onProgress(received, info.size),
       );
       final bytes = response.data;
       if (bytes == null || bytes.length != info.size) {

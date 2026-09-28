@@ -1,17 +1,22 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness_mobile/auth/auth_session.dart';
 import 'package:harness_mobile/core/config.dart';
 import 'package:harness_mobile/core/models.dart';
 import 'package:harness_mobile/phone/agent_index.dart';
 import 'package:harness_mobile/phone/compact_age.dart';
+import 'package:harness_mobile/phone/phone_destination.dart';
+import 'package:harness_mobile/phone/phone_search_catalog.dart';
+import 'package:harness_mobile/phone/phone_search_commands.dart';
+import 'package:harness_mobile/phone/phone_search_controller.dart';
 import 'package:harness_mobile/phone/phone_search_field.dart';
-import 'package:harness_mobile/phone/phone_search_folder_header.dart';
 import 'package:harness_mobile/phone/phone_search_groups.dart';
-import 'package:harness_mobile/phone/phone_search_index.dart';
-import 'package:harness_mobile/phone/phone_search_order.dart';
 import 'package:harness_mobile/phone/phone_search_page.dart';
 import 'package:harness_mobile/phone/phone_search_rank.dart';
+import 'package:harness_mobile/phone/resume_agent.dart';
 import 'package:harness_mobile/phone/terminal_search.dart';
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/state/pending_question.dart';
@@ -25,12 +30,20 @@ Agent _agent(
   String cwd = '/srv/work',
   int? minutesAgo,
   bool terminal = true,
+  bool stopped = false,
+  // Stopped work that a resume can reopen has a saved conversation; `resumable: false` is the
+  // agent stopped before its engine ever saved one.
+  bool resumable = true,
+  String? resumeMode,
   String? gridModel,
   String? dshName,
 }) => Agent(
   id: id,
   name: 'work · $id',
   title: title,
+  sessionId: resumable ? 'session-$id' : null,
+  resumeMode: resumeMode,
+  status: stopped ? 'stopped' : 'active',
   engine: 'codex',
   gridModel: gridModel,
   dshName: dshName,
@@ -38,7 +51,7 @@ Agent _agent(
   updatedAt: minutesAgo == null
       ? null
       : _now.subtract(Duration(minutes: minutesAgo)),
-  terminalAvailable: terminal,
+  terminalAvailable: stopped ? false : terminal,
 );
 
 MachineState _machine(String id, List<Agent> agents) =>
@@ -120,6 +133,70 @@ class _RecentConn extends WsConn {
   }
 }
 
+/// A machine that records the PAYLOAD of every `agents_list`, and can bring a
+/// stopped agent back.
+class _StoppedConn extends WsConn {
+  _StoppedConn(this.agents)
+    : super(
+        wsBaseUrl: 'ws://fixture.invalid',
+        autonomousEnv: 'test',
+        machineId: 'box',
+        accessTokenProvider: (_, _) async => '',
+        onAuthFailure: (_) {},
+        onEvent: (_) {},
+        onStatus: (_) {},
+      );
+
+  /// What `agents_list` answers with; replaced by a resume.
+  List<Map<String, dynamic>> agents;
+  final payloads = <Map<String, dynamic>>[];
+  final resumed = <String>[];
+
+  /// Holds each resume reply until completed — a machine still bringing the agent back.
+  Completer<void>? hold;
+
+  @override
+  Future<void> waitUntilReady({required Duration timeout}) async {}
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String type, {
+    Map<String, dynamic> payload = const {},
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    if (type == 'agents_list') {
+      payloads.add(payload);
+      return {'agents': agents};
+    }
+    // The daemon's receipt shape (`backendSocket.ts`): the id the phone sent, the outcome, and the
+    // agent as it now is.
+    if (type == 'agent_resume') {
+      final id = payload['agentId'] as String;
+      resumed.add(id);
+      await hold?.future;
+      final agent = {
+        'id': id,
+        'name': 'work · $id',
+        'engine': 'claude',
+        'sessionId': 'session-$id',
+        'status': 'active',
+        'terminal': {'available': true},
+      };
+      agents = [
+        for (final row in agents)
+          if (row['id'] == id) agent else row,
+      ];
+      return {
+        'creationId': payload['creationId'],
+        'state': 'created',
+        'agent': agent,
+        'resumed': true,
+      };
+    }
+    throw StateError('unexpected $type');
+  }
+}
+
 /// One machine that answers `agents_list`, and records that it was asked.
 ///
 /// The fleet shares one [asked] list, so a test can say WHICH machines the
@@ -166,10 +243,36 @@ Future<void> _settle() async {
   }
 }
 
-List<String> _agentIds(List<PhoneSearchResult> rows) => [
+List<String> _agentIds(List<PhoneDestination> rows) => [
   for (final row in rows)
     if (row.entry != null) row.entry!.agent.id,
 ];
+
+/// The agent rows of [app]'s catalog.
+///
+/// Through a [PhoneSearchCatalogCache], as the screens do: the cache is what
+/// decides whether a row can move, so a test that skipped it would be testing a
+/// path nothing runs. Pass one in to ask a second question of the SAME catalog.
+List<PhoneDestination> _agentRows(
+  AppNotifier app, [
+  PhoneSearchCatalogCache? cache,
+]) => [
+  for (final row in (cache ?? PhoneSearchCatalogCache()).read(app))
+    if (row.isAgent) row,
+];
+
+/// [query] over [app]'s agents, ranked as the box ranks them.
+List<PhoneDestination> _rank(
+  AppNotifier app,
+  String query, {
+  List<String> recent = const [],
+  PhoneSearchCatalogCache? cache,
+}) => rankPhoneDestinations(
+  _agentRows(app, cache),
+  query,
+  recent: recent,
+  previews: app.sessionPreviews,
+);
 
 void main() {
   group('Agent.fromJson', () {
@@ -276,18 +379,21 @@ void main() {
         ]),
       ]);
       addTearDown(withFolderHit.dispose);
-      final ranked = rankPhoneSearch(phoneSearchIndex(withFolderHit), 'review');
+      final ranked = _rank(withFolderHit, 'review');
       expect(_agentIds(ranked), ['48e9', 'f00d']);
-      expect(ranked.first.subtitle, 'Review payment flow');
+      // The title earned the row its place, so the title is what is bolded —
+      // and the detail line stays the desktop's: engine · project · machine.
+      expect(ranked.first.detail, 'Codex · work · box');
     });
 
-    test('groups keep recency: the freshest agent heads the first group', () {
-      final groups = phoneSearchGroups(phoneSearchIndex(app));
-      expect([for (final group in groups) group.folder], ['work', 'node']);
-      expect(_agentIds(phoneSearchGroupedRows(groups)), [
+    test('the machine grouping keeps the order the ranking handed it', () {
+      final groups = phoneMachineGroups(_agentRows(app));
+      expect([for (final group in groups) group.machineName], ['box']);
+      // Catalog order, which the grouping preserves rather than re-sorting.
+      expect(_agentIds(phoneMachineGroupedRows(groups)), [
         '3188',
-        '48e9',
         '2312',
+        '48e9',
       ]);
     });
 
@@ -300,16 +406,12 @@ void main() {
         ]),
       ]);
       addTearDown(models.dispose);
-      final all = phoneSearchIndex(models);
-      expect(_agentIds(rankPhoneSearch(all, 'llama')), ['2222']);
-      expect(_agentIds(rankPhoneSearch(all, 'model manager')), ['3333']);
+      expect(_agentIds(_rank(models, 'llama')), ['2222']);
+      expect(_agentIds(_rank(models, 'model manager')), ['3333']);
     });
 
-    test('the best match is the first row of the first group', () {
-      final ranked = rankPhoneSearch(phoneSearchIndex(app), '2312');
-      final groups = phoneSearchGroups(ranked);
-      expect(groups.first.folder, 'node');
-      expect(_agentIds(groups.first.rows).first, '2312');
+    test('the best match heads the list', () {
+      expect(_agentIds(_rank(app, '2312')).first, '2312');
     });
   });
 
@@ -327,7 +429,7 @@ void main() {
         app.previewKey('box', app.machineStates['box']!.agents.single),
       ]);
       await _settle();
-      expect(rankPhoneSearch(phoneSearchIndex(app), 'deploy'), isEmpty);
+      expect(_rank(app, 'deploy'), isEmpty);
 
       // The reply lands while the phone is away; on return the machine re-sends
       // the agent with a later `updatedAt`, well inside the store's freshFor.
@@ -346,9 +448,7 @@ void main() {
       });
       await _settle();
       expect(conn.asked, ['live', 'live']);
-      expect(_agentIds(rankPhoneSearch(phoneSearchIndex(app), 'deploy')), [
-        'live',
-      ]);
+      expect(_agentIds(_rank(app, 'deploy')), ['live']);
     },
   );
 
@@ -368,20 +468,19 @@ void main() {
           ]),
         ], conn: conn);
         addTearDown(app.dispose);
-        expect(_agentIds(rankPhoneSearch(phoneSearchIndex(app), 'llama')), [
-          'named',
-        ]);
+        expect(_agentIds(_rank(app, 'llama')), ['named']);
 
         app.sessionPreviews.warm([
           for (final agent in app.machineStates['box']!.agents)
             app.previewKey('box', agent),
         ]);
         await _settle();
-        final ranked = rankPhoneSearch(phoneSearchIndex(app), 'llama');
+        final ranked = _rank(app, 'llama');
         expect(_agentIds(ranked), ['named', 'said']);
-        expect(phoneContentSnippet(ranked.first, ['llama']), isNull);
+        final previews = app.sessionPreviews;
+        expect(phoneContentSnippet(ranked.first, ['llama'], previews), isNull);
         expect(
-          phoneContentSnippet(ranked.last, ['llama']),
+          phoneContentSnippet(ranked.last, ['llama'], previews),
           'which llama.cpp build is running?',
         );
       },
@@ -406,10 +505,10 @@ void main() {
       });
       await event('text_delta', {'content': 'It is llama.cpp b4521.'});
 
-      final ranked = rankPhoneSearch(phoneSearchIndex(app), 'b4521');
+      final ranked = _rank(app, 'b4521');
       expect(_agentIds(ranked), ['live']);
       expect(
-        phoneContentSnippet(ranked.single, ['b4521']),
+        phoneContentSnippet(ranked.single, ['b4521'], app.sessionPreviews),
         'It is llama.cpp b4521.',
       );
     });
@@ -427,7 +526,7 @@ void main() {
     expect(compactAge(now.add(const Duration(minutes: 5)), now), 'now');
   });
 
-  testWidgets('before a word: one Recent run, newest first, each row placed', (
+  testWidgets('before a word: the hint names every mode the box has', (
     tester,
   ) async {
     final app = _app([
@@ -441,27 +540,372 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
     await tester.pump();
 
-    expect(find.text('RECENT'), findsOneWidget);
-    expect(find.byType(PhoneSearchFolderHeader), findsNothing);
-    expect(find.text('Fix login redirect · work · box'), findsOneWidget);
-    expect(find.text('node · box'), findsOneWidget);
-    expect(find.text('4m'), findsOneWidget);
-    expect(find.text('30m'), findsOneWidget);
+    // The one line that teaches `>`, `#`, `@` and `?` exist at all. It used to
+    // read "Search agents", and so nothing on the phone ever mentioned them.
+    expect(find.text(kPhoneSearchHint), findsOneWidget);
+    // One flat list: no Recent heading, no folder headings.
+    expect(find.text('RECENT'), findsNothing);
+    // ⚠️ The identity line is DRAWN as segments, not written as one string —
+    // this is the difference the desktop's picker has and the phone's did not.
+    // `Codex · work · box` as a single run of text is exactly what it must not
+    // be any more.
+    expect(find.text('Codex · work · box'), findsNothing);
+    expect(find.text('Codex'), findsNWidgets(3));
+    // The project as the desktop names it ([AgentProject.label]): with no checkout root reported,
+    // the daemon's own name for it, whatever the folder is called.
+    expect(find.text('work'), findsNWidgets(3));
+    expect(find.text('box'), findsNWidgets(3));
+    // ⚠️ Agents only in a plain query — the desktop lists no machine or project
+    // row either until `@` or `#` asks for one. A `Machine · …` line here would
+    // be the phone inventing a row the desktop has never had.
+    expect(find.textContaining('Machine · '), findsNothing);
+    expect(find.textContaining('Project · '), findsNothing);
+    // Each segment carries the desktop's own glyph.
+    expect(find.byIcon(LucideIcons.monitor300), findsNWidgets(3));
+    expect(find.byIcon(LucideIcons.folder300), findsNWidgets(3));
+    // And no age on the trailing edge: the desktop's rows end in nothing.
+    expect(find.text('4m'), findsNothing);
+    expect(find.text('30m'), findsNothing);
+
     double top(String name) => tester.getTopLeft(find.text(name)).dy;
-    // The fresh `work` agent, then `node`, then the stale `work` one: a folder
-    // does not pull its old agent up past a fresher one elsewhere.
+    // Nothing has been reached for yet, so the freshest conversation leads —
+    // NOT the alphabet, which is what the desktop falls back to only because
+    // its own visit history has already placed everything by then.
     expect(top('work · 3188'), lessThan(top('work · 2312')));
     expect(top('work · 2312'), lessThan(top('work · 9999')));
 
     await tester.enterText(find.byType(TextField), 'login');
     await tester.pump();
-    expect(find.text('RECENT'), findsNothing);
+    // `login` is in the agent's own title, which ranks like its name.
+    expect(find.text('work · 3188'), findsOneWidget);
     expect(find.text('work · 2312'), findsNothing);
-    expect(find.byType(PhoneSearchFolderHeader), findsOneWidget);
   });
 
-  group('the list holds still while it is being read', () {
-    test('a row that moves in the index keeps the place it was drawn in', () {
+  testWidgets('the modes: ? lists them, and each one takes you there', (
+    tester,
+  ) async {
+    final app = _app([
+      _machine('box', [_agent('3188', minutesAgo: 4)]),
+    ]);
+    addTearDown(app.dispose);
+    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), '?');
+    await tester.pump();
+    expect(find.text('>  Commands'), findsOneWidget);
+    expect(find.text('#  Projects'), findsOneWidget);
+    expect(find.text('@  Machines'), findsOneWidget);
+
+    // A `?` row rewrites the query in place rather than opening anything.
+    await tester.tap(find.text('@  Machines'));
+    await tester.pump();
+    expect(find.text('Machines'), findsOneWidget);
+    expect(find.text('box'), findsOneWidget);
+    // And the agent rows are gone: `@` lists machines, not their contents.
+    expect(find.text('work · 3188'), findsNothing);
+  });
+
+  testWidgets('choosing a machine narrows the search to its agents', (
+    tester,
+  ) async {
+    final app = _app([
+      _machine('box', [_agent('3188', minutesAgo: 4)]),
+      _machine('lab', [_agent('7777', minutesAgo: 9)]),
+    ]);
+    addTearDown(app.dispose);
+    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), '@box');
+    await tester.pump();
+    await tester.tap(find.text('box'));
+    await tester.pump();
+
+    // Scoped: its own harnesses, and the bar says which machine they are in.
+    expect(find.text('Harnesses · box'), findsOneWidget);
+    expect(find.text('work · 3188'), findsOneWidget);
+    expect(find.text('work · 7777'), findsNothing);
+
+    // Back leaves the machine before it leaves the screen, and puts the query
+    // that chose it back in the field.
+    await tester.tap(find.bySemanticsLabel('Back'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PhoneSearchPage), findsOneWidget);
+    expect(find.text('Harnesses · box'), findsNothing);
+  });
+
+  testWidgets('# lists projects, and a machine row says what it holds', (
+    tester,
+  ) async {
+    final app = _app([
+      _machine('box', [
+        _agent('3188', minutesAgo: 4),
+        _agent('2312', minutesAgo: 9),
+      ]),
+    ]);
+    addTearDown(app.dispose);
+    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), '#');
+    await tester.pump();
+    expect(find.text('work'), findsOneWidget);
+    expect(find.text('Project · 2 harnesses'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), '@');
+    await tester.pump();
+    expect(find.text('Machine · 2 harnesses'), findsOneWidget);
+  });
+
+  testWidgets('> runs a command by name', (tester) async {
+    final app = _app([
+      _machine('box', [_agent('3188', minutesAgo: 4)]),
+    ]);
+    addTearDown(app.dispose);
+    var ran = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhoneSearchPage(
+          notifier: app,
+          commands: () => [
+            PhoneCommand(
+              id: 'test.thing',
+              title: 'Do the thing',
+              detail: 'A command, by name',
+              run: () => ran++,
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), '> thing');
+    await tester.pump();
+    expect(find.text('Do the thing'), findsOneWidget);
+    // An agent is not a command: `>` searches one list only.
+    expect(find.text('work · 3188'), findsNothing);
+
+    await tester.tap(find.text('Do the thing'));
+    await tester.pump();
+    expect(ran, 1);
+  });
+
+  group('stopped work', () {
+    test('every agents_list asks for it', () async {
+      final conn = _StoppedConn([
+        {
+          'id': 'live',
+          'name': 'work · live',
+          'terminal': {'available': true},
+        },
+      ]);
+      final app = _app([_machine('box', [])], conn: conn);
+      addTearDown(app.dispose);
+      await app.reachAllMachines();
+      await _settle();
+
+      // ⚠️ Without this the daemon answers `registry.advertised()` — live
+      // agents only — and the phone silently shows a smaller fleet than the
+      // desktop on the same account. See `cli/src/backendSocket.ts`.
+      expect(conn.payloads, isNotEmpty);
+      for (final payload in conn.payloads) {
+        expect(payload['includeStopped'], isTrue);
+      }
+    });
+
+    test('a stopped agent is listed, and a tap can land on it', () {
+      final app = _app([
+        _machine('box', [
+          _agent('live', minutesAgo: 30),
+          _agent('saved', minutesAgo: 1, stopped: true),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+      final rows = _agentRows(app);
+      expect(_agentIds(rows), contains('saved'));
+
+      // It has no terminal and never will until something restarts it, so the
+      // bare `terminalAvailable` test would have buried it AND made it dead.
+      final saved = rows.firstWhere((row) => row.entry!.agent.id == 'saved');
+      expect(saved.entry!.agent.terminalAvailable, isFalse);
+      expect(saved.entry!.isOpenable, isTrue);
+
+      final search = PhoneSearchController(notifier: app);
+      addTearDown(search.dispose);
+      expect(search.canSubmit(saved), isTrue);
+      // And it is not sorted below the live agent for lacking a terminal.
+      expect(_agentIds(_rank(app, '')).first, 'saved');
+    });
+
+    test('opening it resumes it, and waits for the terminal', () async {
+      final conn = _StoppedConn([
+        {
+          'id': 'saved',
+          'name': 'work · saved',
+          'engine': 'claude',
+          'sessionId': 'session-saved',
+          'status': 'stopped',
+          'terminal': {'available': false},
+        },
+      ]);
+      final app = _app([
+        _machine('box', [_agent('saved', minutesAgo: 1, stopped: true)]),
+      ], conn: conn);
+      addTearDown(app.dispose);
+      final entry = agentIndex(app).single;
+      expect(entry.agent.terminalAvailable, isFalse);
+
+      expect(await resumeAgentForOpen(app, entry), isNull);
+      expect(conn.resumed, ['saved']);
+      // ⚠️ The point of the wait: it returns only once there is a terminal to
+      // open. The pager filters its pages to agents that have one, so handing
+      // it an agent still without would have opened a different agent than the
+      // row that was tapped.
+      expect(app.stateOf('box')!.agents.single.terminalAvailable, isTrue);
+    });
+
+    test('a resume that fails is reported, not opened past', () async {
+      final app = _app([
+        _machine('box', [_agent('gone', minutesAgo: 1)]),
+      ]);
+      addTearDown(app.dispose);
+      // Not stopped and with no terminal: nothing to resume, and nothing that
+      // pretending otherwise would achieve.
+      final entry = agentIndex(app).single;
+      app.machineStates['box']!.agents = [
+        _agent('gone', minutesAgo: 1, terminal: false),
+      ];
+      expect(await resumeAgentForOpen(app, entry), isNotNull);
+    });
+
+    testWidgets('a resume in flight does not relabel the other rows', (
+      tester,
+    ) async {
+      final conn = _StoppedConn([
+        {
+          'id': 'live',
+          'name': 'work · live',
+          'terminal': {'available': true},
+        },
+        {
+          'id': 'saved',
+          'name': 'work · saved',
+          'engine': 'claude',
+          'sessionId': 'session-saved',
+          'status': 'stopped',
+          'terminal': {'available': false},
+        },
+      ])..hold = Completer<void>();
+      final app = _app([
+        _machine('box', [
+          _agent('live', minutesAgo: 30),
+          _agent('saved', minutesAgo: 1, stopped: true),
+        ]),
+      ], conn: conn);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(
+        MaterialApp(home: PhoneSearchPage(notifier: app)),
+      );
+      await tester.pump();
+
+      await tester.tap(find.text('Paused'));
+      await tester.pump();
+
+      // Taps wait for the resume, but the live agent still HAS its terminal — `No terminal` over it
+      // was a claim about the agent that the in-flight resume had nothing to do with.
+      expect(conn.resumed, ['saved']);
+      expect(find.text('No terminal'), findsNothing);
+      // The list's own notify debounce, so no timer outlives the test.
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+
+    testWidgets('with no saved conversation it says so, and takes no tap', (
+      tester,
+    ) async {
+      final app = _app([
+        _machine('box', [
+          _agent('live', minutesAgo: 30),
+          _agent('blank', minutesAgo: 1, stopped: true, resumable: false),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(
+        MaterialApp(home: PhoneSearchPage(notifier: app)),
+      );
+      await tester.pump();
+
+      // The desktop's word for it. `Paused` would promise a resume the machine can only refuse.
+      expect(find.text('Resume unavailable'), findsOneWidget);
+      expect(find.text('Paused'), findsNothing);
+      final blank = _agentRows(app)
+          .firstWhere((row) => row.entry!.agent.id == 'blank');
+      expect(blank.entry!.isOpenable, isFalse);
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+
+    testWidgets('its machine saying it resumes wins over the old rule', (
+      tester,
+    ) async {
+      final app = _app([
+        _machine('box', [
+          _agent(
+            'blank',
+            minutesAgo: 1,
+            stopped: true,
+            resumable: false,
+            resumeMode: 'conversation',
+          ),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(
+        MaterialApp(home: PhoneSearchPage(notifier: app)),
+      );
+      await tester.pump();
+
+      // The desktop's `canPauseAndResume`: a current daemon resumes every engine, some as a new
+      // conversation, so the row is Paused work a tap brings back.
+      expect(find.text('Paused'), findsOneWidget);
+      expect(find.text('Resume unavailable'), findsNothing);
+      expect(_agentRows(app).single.entry!.isOpenable, isTrue);
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+
+    testWidgets('it is drawn as saved work, not as a dead row', (tester) async {
+      final app = _app([
+        _machine('box', [
+          _agent('live', minutesAgo: 30),
+          _agent('saved', minutesAgo: 1, stopped: true),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(
+        MaterialApp(home: PhoneSearchPage(notifier: app)),
+      );
+      await tester.pump();
+
+      // `Stopped` says a tap will bring it back; `No terminal` said a tap would
+      // do nothing. The two must not be confused for each other.
+      expect(find.text('Paused'), findsOneWidget);
+      expect(find.text('No terminal'), findsNothing);
+    });
+  });
+
+  group('the order is decided, not observed', () {
+    // ⚠️ This group replaces the old `PhoneSearchOrder` freeze, and the class
+    // with it. That freeze existed because the list was ordered by
+    // `lastActiveAt`, which MOVES: a turn event stamped an agent and its row
+    // jumped to the top, out from under a finger already reaching for it, and
+    // the only fix available was to pin the rows where they were first drawn.
+    //
+    // The desktop never needed one, because its empty-query order is the visit
+    // history plus the name — neither of which a daemon can change. Ranking the
+    // phone the same way makes the jump impossible rather than merely pinned,
+    // so a row that arrives mid-search now lands where it belongs instead of
+    // being parked at the bottom for ever.
+    test('a turn event does not move a row', () {
       final machine = _machine('box', [
         _agent('first', minutesAgo: 1),
         _agent('second', minutesAgo: 2),
@@ -469,19 +913,18 @@ void main() {
       ]);
       final app = _app([machine]);
       addTearDown(app.dispose);
-      final order = PhoneSearchOrder();
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), [
+      final cache = PhoneSearchCatalogCache();
+      expect(_agentIds(_rank(app, '', cache: cache)), [
         'first',
         'second',
         'third',
       ]);
 
-      // What a turn event does: the oldest agent is suddenly the most recent,
-      // and `recentAgents` puts it on top.
+      // What a turn event does: the oldest agent is suddenly the most recently
+      // active. The catalog is keyed on the SHAPE of the fleet, which a turn
+      // does not change — so the list it is sitting in never hears about it.
       machine.agentActivityAt['third'] = DateTime.now();
-      expect(_agentIds(phoneSearchIndex(app)), ['third', 'first', 'second']);
-      // The list somebody is reading does not follow it.
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), [
+      expect(_agentIds(_rank(app, '', cache: cache)), [
         'first',
         'second',
         'third',
@@ -495,32 +938,111 @@ void main() {
       ]);
       final app = _app([machine]);
       addTearDown(app.dispose);
-      final order = PhoneSearchOrder();
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), ['idle', 'busy']);
+      final cache = PhoneSearchCatalogCache();
+      expect(_agentIds(_rank(app, '', cache: cache)), ['idle', 'busy']);
 
       machine.processingAgentIds.add('busy');
-      expect(_agentIds(phoneSearchIndex(app)), ['busy', 'idle']);
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), ['idle', 'busy']);
+      expect(_agentIds(_rank(app, '', cache: cache)), ['idle', 'busy']);
     });
 
-    test('an agent that arrives mid-search goes last, not into the middle', () {
-      final machine = _machine('box', [
-        _agent('first', minutesAgo: 10),
-        _agent('second', minutesAgo: 20),
+    test('with nothing typed, the desktop monitor\'s order — visits do not move it', () {
+      final app = _app([
+        _machine('box', [
+          _agent('alpha', minutesAgo: 90),
+          _agent('bravo', minutesAgo: 60),
+          _agent('delta', minutesAgo: 1),
+        ]),
       ]);
-      final app = _app([machine]);
       addTearDown(app.dispose);
-      final order = PhoneSearchOrder();
-      order.arrange(phoneSearchIndex(app));
+      // The freshest conversation leads, as it does in the Harness Monitor.
+      expect(_agentIds(_rank(app, '')), ['delta', 'bravo', 'alpha']);
 
-      // The freshest agent on the account — and still it waits at the bottom
-      // rather than shoving the two rows somebody is looking at down one.
-      machine.agents = [...machine.agents, _agent('joined', minutesAgo: 0)];
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), [
-        'first',
-        'second',
-        'joined',
+      // ⚠️ This phone's own visits used to outrank that, so the field opened on
+      // a list the laptop beside it did not show. The monitor has no idea what
+      // the phone visited; neither does its order.
+      expect(_agentIds(_rank(app, '', recent: ['agent:box\u0000alpha'])), [
+        'delta',
+        'bravo',
+        'alpha',
       ]);
+    });
+
+    test('paused work keeps its place by when it last moved', () {
+      final app = _app([
+        _machine('box', [
+          _agent('live', minutesAgo: 60),
+          _agent('paused', minutesAgo: 1, stopped: true),
+          _agent('blank', minutesAgo: 5, stopped: true, resumable: false),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+      final search = PhoneSearchController(notifier: app);
+      addTearDown(search.dispose);
+
+      // `blank` cannot be opened, and still sits where the monitor has it.
+      expect(_agentIds(search.rows), ['paused', 'blank', 'live']);
+
+      // Once something is typed the match decides, and what a tap cannot open
+      // goes last, as it always has.
+      search.setQuery('work');
+      expect(_agentIds(search.rows).last, 'blank');
+    });
+
+    test('an agent is named as the desktop names it, and found by either', () {
+      final app = _app([
+        _machine('box', [
+          Agent(
+            id: 'titled',
+            name: 'Claude harness 9-23 13:52',
+            title: 'Logo update',
+            engine: 'claude',
+            updatedAt: _now,
+            terminalAvailable: true,
+          ),
+          Agent(
+            id: 'bare',
+            name: 'Terminal harness 9-23 11:35',
+            engine: 'terminal',
+            updatedAt: _now.subtract(const Duration(minutes: 5)),
+            terminalAvailable: true,
+          ),
+          Agent(
+            id: 'chosen',
+            name: 'api-server',
+            engine: 'codex',
+            updatedAt: _now.subtract(const Duration(minutes: 9)),
+            terminalAvailable: true,
+          ),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+
+      expect([for (final row in _rank(app, '')) row.title], [
+        'Logo update',
+        kUntitledPane,
+        'api-server',
+      ]);
+      // The CLI's name is what the terminal's title bar shows, so it still
+      // finds the row.
+      expect(_agentIds(_rank(app, 'Terminal harness')).first, 'bare');
+    });
+
+    test('the agent the search was opened from is not buried', () {
+      // ⚠️ Regression. The desktop demotes the pane it has focused, and porting
+      // that rule literally inverted it: the desktop's box always targets a new
+      // tab, so it almost never fires there (the agent you came from sat 2nd of
+      // 16 in a live window), while a phone's search is always opened FROM a
+      // terminal, so it fired every time and sent that agent to the bottom.
+      final app = _app([
+        _machine('box', [
+          _agent('here', minutesAgo: 1),
+          _agent('older', minutesAgo: 60),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+      // `here` is the agent the terminal behind the search is showing, and it
+      // leads because it is the freshest — nothing demotes it for being open.
+      expect(_agentIds(_rank(app, '')), ['here', 'older']);
     });
 
     test('a machine redialling gives its rows back where they were', () {
@@ -528,20 +1050,19 @@ void main() {
       final lab = _machine('lab', [_agent('b', minutesAgo: 50)]);
       final app = _app([box, lab]);
       addTearDown(app.dispose);
-      final order = PhoneSearchOrder();
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), ['a', 'b']);
+      expect(_agentIds(_rank(app, '')), ['a', 'b']);
 
       // Backgrounding the app drops every socket; `box` is the one that has not
       // answered yet on the way back.
       box
         ..connectionStatus = ConnectionStatus.connecting
         ..agentLoadStatus = AgentLoadStatus.loading;
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), ['b']);
+      expect(_agentIds(_rank(app, '')), ['b']);
 
       box
         ..connectionStatus = ConnectionStatus.connected
         ..agentLoadStatus = AgentLoadStatus.loaded;
-      expect(_agentIds(order.arrange(phoneSearchIndex(app))), ['a', 'b']);
+      expect(_agentIds(_rank(app, '')), ['a', 'b']);
     });
   });
 
@@ -595,9 +1116,7 @@ void main() {
     );
   });
 
-  testWidgets('the Recent list does not reshuffle under a finger', (
-    tester,
-  ) async {
+  testWidgets('the list does not reshuffle under a finger', (tester) async {
     final machine = _machine('box', [
       _agent('3188', minutesAgo: 4),
       _agent('2312', minutesAgo: 30),
@@ -621,9 +1140,6 @@ void main() {
     expect(top('work · 9999'), was);
     expect(top('work · 3188'), lessThan(top('work · 2312')));
     expect(top('work · 2312'), lessThan(top('work · 9999')));
-    // Still live in what it SAYS — only where it sits is pinned.
-    expect(find.text('now'), findsOneWidget);
-    expect(find.text('90m'), findsNothing);
   });
 
   testWidgets('opening search warms content; the matching line is quoted', (
@@ -676,6 +1192,10 @@ void main() {
       addTearDown(app.dispose);
       await tester.pumpWidget(MaterialApp(home: field(app)));
       await tester.pump();
+      // The terminal's sheet opens on its tabs, and a tap on the field is what
+      // brings the keyboard there — so the field is tapped on both.
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
       return tester.testTextInput.setClientArgs!;
     }
 
@@ -706,7 +1226,10 @@ void main() {
     }
   });
 
-  testWidgets('terminal search: the same one bar, its chevron closes it', (
+  // ⚠️ **The sheet's own bar, not the page's.** No chevron in it: Cancel ends
+  // the SEARCH and leaves the sheet up on its tabs, and Back steps out of the
+  // search first and closes the sheet only after — never leaves the agent.
+  testWidgets('terminal search: Cancel ends the search, Back then the sheet', (
     tester,
   ) async {
     final app = _app([
@@ -726,11 +1249,37 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.byType(PhoneSearchField), findsOneWidget);
+    expect(find.byType(SheetSearchField), findsOneWidget);
+    expect(find.byType(PhoneSearchField), findsNothing);
     expect(find.text('Cancel'), findsNothing);
 
-    await tester.tap(find.bySemanticsLabel('Back'));
+    // A tap on the field starts a search; Cancel slides in over 250ms.
+    Future<void> search() async {
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Cancel'), findsOneWidget);
+    }
+
+    Future<void> back() async {
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    await search();
+    await tester.tap(find.text('Cancel'));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Cancel'), findsNothing);
+    expect(closed, 0);
+
+    await search();
+    await back();
+    expect(find.text('Cancel'), findsNothing);
+    expect(closed, 0);
+
+    await back();
     expect(closed, 1);
   });
 

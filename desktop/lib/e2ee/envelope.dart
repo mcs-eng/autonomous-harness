@@ -17,6 +17,11 @@ const Set<String> encryptedDownTypes = {
   'grid_fleet_capabilities',
   'grid_fleet_run',
   'grid_fleet_cancel',
+  'machine_resources',
+  'grid_fleet_models_list',
+  'grid_fleet_model_start',
+  'grid_fleet_model_download',
+  'grid_fleet_model_stop',
   'message',
   'question_response',
   'agents_list',
@@ -33,6 +38,7 @@ const Set<String> encryptedDownTypes = {
   'agent_read_file',
   'fs_list_dir',
   'project_preview',
+  'git_project_info',
   'codex_profiles_list',
   'codex_profile_link',
   // Asks the machine to read its OWN agent accounts' usage (cli/src/lib/accountUsage.ts). Missing
@@ -41,6 +47,10 @@ const Set<String> encryptedDownTypes = {
   'usage_read',
   // The pane colours this client paints with, for the machine's tmux sessions (cli/src/lib/hostTheme.ts).
   'theme_set',
+  // What somebody searches their conversations for (cli/src/lib/sessionSearch/).
+  'session_search',
+  // Which conversation somebody is previewing, from the same index.
+  'session_tail',
   'device_e2ee_pair',
   'e2ee_pairings_list',
   'e2ee_pairing_unpair',
@@ -64,8 +74,34 @@ const Set<String> encryptedDownTypes = {
   'p2p_promote',
 };
 
-Uint8List _aad(int v, String type, String dbSessionId, String k, String epoch) =>
-    utf8Bytes('$v|$type|$dbSessionId|$k|$epoch');
+/// Requests an older CLI took in the clear and a current one refuses unsealed — applicationFrames.ts
+/// `STRICT_DOWN_TYPES`. Sealed only for a machine whose welcome says `strictDown`: an older one would
+/// never open the envelope and would read the request as empty.
+const Set<String> strictDownTypes = {
+  'dsh_install',
+  'dsh_update',
+  'dsh_remove',
+  'dsh_list',
+  'agent_retarget',
+  'engines_probe',
+  'grid_models_list',
+  'cancel',
+  'claude_login_status',
+  'speaking',
+};
+
+/// Whether [type] goes sealed to a machine — applicationFrames.ts `encryptDownFrameFor`.
+bool sealsDown(String type, {required bool strictDown}) =>
+    encryptedDownTypes.contains(type) ||
+    (strictDown && strictDownTypes.contains(type));
+
+Uint8List _aad(
+  int v,
+  String type,
+  String dbSessionId,
+  String k,
+  String epoch,
+) => utf8Bytes('$v|$type|$dbSessionId|$k|$epoch');
 
 /// Seals [payload] under [key]: [k] is 'p' (pairwise session) or 'g' (the machine's group key,
 /// which also carries an [epoch]).
@@ -101,7 +137,11 @@ Map<String, dynamic>? unwrapPayload(
 ) {
   final v = env['v'], k = env['k'], n = env['n'], ct = env['ct'];
   final epoch = env['epoch'] ?? '';
-  if (v is! int || k is! String || n is! int || ct is! String || epoch is! String) {
+  if (v is! int ||
+      k is! String ||
+      n is! int ||
+      ct is! String ||
+      epoch is! String) {
     return null;
   }
   final Uint8List sealed;
@@ -110,11 +150,17 @@ Map<String, dynamic>? unwrapPayload(
   } on FormatException {
     return null;
   }
-  final clear = aeadOpen(key, n, _aad(v, frameType, dbSessionId ?? '', k, epoch), sealed);
+  final clear = aeadOpen(
+    key,
+    n,
+    _aad(v, frameType, dbSessionId ?? '', k, epoch),
+    sealed,
+  );
   return clear == null ? null : jsonObjectOf(clear);
 }
 
-bool isWrapped(Object? payload) => payload is Map && payload.containsKey('__e2e');
+bool isWrapped(Object? payload) =>
+    payload is Map && payload.containsKey('__e2e');
 
 /// UTF-8 JSON that must be an object; null for anything else.
 Map<String, dynamic>? jsonObjectOf(List<int> utf8Json) {

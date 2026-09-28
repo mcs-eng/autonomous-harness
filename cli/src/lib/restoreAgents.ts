@@ -139,7 +139,11 @@ export async function restoreAgents(deps: RestoreAgentsDeps): Promise<RestoreSum
   const summary: RestoreSummary = { restored: [], skipped: [], failed: [] }
   const missing: Array<{ entry: RegisteredSession; runtime: TmuxRuntimeRef }> = []
 
+  // Per row, because a survey that gives up on the first bad one gives up on every row behind it —
+  // one pane whose `tmux list-panes` timed out, or one archive that could not be written, and the
+  // whole desk comes back empty. A row that cannot be surveyed is reported and the rest go on.
   for (const entry of deps.registry.list()) {
+   try {
     const runtime = tmuxRuntime(entry)
     if (!runtime) { summary.skipped.push({ agentId: entry.agentId, reason: 'no tmux pane' }); continue }
     if (entry.launch?.state === 'failed') { summary.skipped.push({ agentId: entry.agentId, reason: 'last launch failed' }); continue }
@@ -163,7 +167,15 @@ export async function restoreAgents(deps: RestoreAgentsDeps): Promise<RestoreSum
       }
       continue
     }
-    if (entry.resumeOnly && deps.retainStopped) {
+    // A strict-resume row that was never CONFIRMED (its launch still `starting` when the daemon
+    // died) goes back to the archive for an explicit Open: nothing proved the engine ever loaded
+    // that conversation, and this pass has no way to ask. One that was confirmed — hook received,
+    // engine bound, `launch: ready` — was a live agent like any other on the desk, and its tile
+    // comes back the same way the others do: the exact resume below, never the fresh fallback
+    // (`relaunchFresh` refuses it for a resume-only row). Measured: a harness opened from the
+    // catalog, then `harness stop` + `tmux kill-server` + app relaunch — every other tile came
+    // back, this one sat on "no verified terminal pane" with nothing to press.
+    if (entry.resumeOnly && entry.launch?.state !== 'ready' && deps.retainStopped) {
       deps.retainStopped(entry, false)
       summary.skipped.push({ agentId: entry.agentId, reason: 'saved conversation awaits explicit Open' })
       continue
@@ -200,6 +212,11 @@ export async function restoreAgents(deps: RestoreAgentsDeps): Promise<RestoreSum
       continue
     }
     missing.push({ entry, runtime })
+   } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    summary.failed.push({ agentId: entry.agentId, reason })
+    deps.log(`[restore] ${entry.engine} · agent ${entry.agentId} · could not be surveyed · ${reason}`)
+   }
   }
   if (!missing.length) return summary
 

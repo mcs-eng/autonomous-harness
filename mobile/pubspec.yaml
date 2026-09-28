@@ -2,7 +2,7 @@ name: harness_mobile
 description: "Harness viewer for iOS and Android."
 publish_to: 'none'
 
-version: 1.0.0+21
+version: 1.0.0+45
 
 environment:
   sdk: ^3.13.0
@@ -19,6 +19,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # `compareNatural` — the desktop's name order, so `harness 9` sorts before `harness 10` on both.
+  collection: ^1.19.1
 
   cupertino_icons: ^1.0.8
   lucide_icons_flutter: ^3.1.15
@@ -66,6 +68,12 @@ dependencies:
   # recognizer was tried first and misheard Vietnamese badly.
   record: ^7.1.1
 
+  # An agent finishing while the phone is in a pocket: the OS notification the
+  # dial's "wake the panel and open the drawer" becomes on a phone
+  # (`lib/notify/system_notices.dart`). Local only — it fires from the machine socket,
+  # so it reaches a phone whose app is still alive, not one iOS has suspended.
+  flutter_local_notifications: ^22.2.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -79,4 +87,9 @@ flutter:
   assets:
     - assets/engine-icons/
     # The real app icon, shown on the sign-in and bootstrapping screens.
+    #
+    # ⚠️ `assets/app_icon.svg` beside it is the MASTER this and all 20 launcher
+    # slots are rendered from (`scripts/build_app_icons.py`), and is deliberately
+    # NOT listed: Flutter cannot draw an SVG without a package this app does not
+    # depend on, so bundling it would only add its weight to every install.
     - assets/app_icon.png

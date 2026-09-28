@@ -3,9 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/core/codex_profiles.dart';
 import 'package:harness/core/engine_availability.dart';
 import 'package:harness/state/new_harness.dart';
-import 'package:harness/widgets/new_harness_box.dart';
+import 'package:harness/widgets/new_harness_form.dart';
 import 'package:harness/ws/ws_conn.dart';
 
 import 'keymap_host_test.dart' show MemoryKeymap, key;
@@ -97,7 +98,62 @@ class _Profiles extends WsConn {
 void main() {
   setUp(() => newHarnessOpensInBox = true);
   tearDown(() => newHarnessOpensInBox = false);
-  final input = find.byKey(const ValueKey('new-harness-input'));
+
+  test(
+    'a remembered agent missing from the catalog requires a replacement',
+    () async {
+      final connection = _Profiles('m');
+      final app = createApp(
+        connectionForTest: (_) => connection,
+        connected: true,
+      );
+      addTearDown(app.dispose);
+      await app.agentPreference.remember('claude', harnessId: 'retired/agent');
+      final box = NewHarnessController(app, machineId: 'm', folder: '/work');
+      addTearDown(box.dispose);
+      await Future<void>.delayed(Duration.zero);
+      expect(box.harnessId, 'retired/agent');
+      expect(box.requiredChoice?.field, NewHarnessField.harness);
+      expect(await box.create(), NewHarnessOutcome.failed);
+      expect(box.error, contains('Choose an agent'));
+      expect(box.harnessId, 'retired/agent');
+      expect(connection.creates, isEmpty);
+    },
+  );
+
+  for (final unavailable in [false, true]) {
+    test(
+      'an unverified or missing saved profile requires a choice (lookup failed=$unavailable)',
+      () async {
+        final connection = _Profiles('m')..failProfiles = unavailable;
+        final app = createApp(
+          connectionForTest: (_) => connection,
+          connected: true,
+        );
+        addTearDown(app.dispose);
+        final box = NewHarnessController(
+          app,
+          machineId: 'm',
+          draft: const NewHarnessDraft(
+            machineId: 'm',
+            engine: 'codex',
+            project: NewHarnessProject.folder('/work'),
+            task: '',
+            permissionMode: 'full',
+            profile: LocalCodexProfile('/profiles/m/removed', 'Removed'),
+            profileChosen: true,
+          ),
+        );
+        addTearDown(box.dispose);
+        await Future<void>.delayed(Duration.zero);
+        expect(await box.create(), NewHarnessOutcome.failed);
+        expect(box.error, contains('Choose a profile'));
+        expect(box.field, NewHarnessField.profile);
+        expect(box.draft.profile?.path, '/profiles/m/removed');
+        expect(connection.creates, isEmpty);
+      },
+    );
+  }
 
   void setting(NewHarnessController box, String id) {
     if (id == NewHarnessController.permissionsId ||
@@ -108,108 +164,44 @@ void main() {
     }
   }
 
-  testWidgets(
-    'agent settings use pickers and launch with the chosen profile and permissions',
-    (tester) async {
-      final connection = _Profiles('m');
-      final app = createApp(connectionForTest: (_) => connection);
-      seedMixedAgents(app);
-      addTearDown(app.dispose);
-      final map = MemoryKeymap();
-      addTearDown(map.dispose);
-      app.adoptSessionForTest(terminal('a0', []));
-      await configured.mount(tester, app, map);
-      await key(tester, LogicalKeyboardKey.keyN, cmd: true);
-      final box = tester
-          .widget<NewHarnessBox>(find.byType(NewHarnessBox))
-          .controller;
-      expect(
-        find.byKey(const ValueKey('new-harness-field-options')),
-        findsNothing,
-      );
-      await openLaunchRow(tester, 'agent');
-      await tester.enterText(input, 'Claude Code');
-      await key(tester, LogicalKeyboardKey.enter);
-      expect(box.engine, 'claude');
-      await openLaunchRow(tester, 'agent');
-      for (final name in ['agent', 'machine', 'project']) {
-        expect(find.byKey(ValueKey('new-harness-field-$name')), findsNothing);
-      }
-      expect(find.text('Codex profile…'), findsNothing);
-      // Move from a saved Claude selection to Codex without accepting it.
-      for (var step = 0; box.selected?.id != 'codex' && step < 30; step++) {
-        await key(tester, LogicalKeyboardKey.arrowUp);
-      }
-      expect(box.selected?.id, 'codex');
-      expect(box.engine, 'claude');
-      expect(find.text('Permissions'), findsNothing);
-      expect(find.text('Codex Profile'), findsNothing);
-      await openAgentSetting(tester, 'codex', NewHarnessController.profileId);
-      expect(box.field, NewHarnessField.profile);
-      expect(box.agentSettingsLabel, 'Codex');
-      await tester.tap(find.byKey(const ValueKey('new-harness-field-machine')));
-      await tester.pump();
-      expect(box.field, NewHarnessField.machine);
-      await key(tester, LogicalKeyboardKey.escape);
-      expect(box.field, NewHarnessField.profile);
-      expect(box.agentSettingsLabel, 'Codex');
-      expect(box.engine, 'claude');
-      await key(tester, LogicalKeyboardKey.escape);
-      expect(box.selected?.id, 'codex');
-      await key(tester, LogicalKeyboardKey.escape);
-      expect(box.engine, 'claude', reason: 'Escape keeps the saved agent');
-      expect(box.draft.profile, isNull);
-      await openLaunchRow(tester, 'agent');
-      await tester.enterText(input, 'zzzz');
-      await tester.pump();
-      expect(find.text('No agents match “zzzz”.'), findsOneWidget);
-      expect(box.selected?.id, NewHarnessController.storeId);
-      await key(tester, LogicalKeyboardKey.escape);
-      expect(box.engine, 'claude');
-      await openLaunchRow(tester, 'agent');
-      await tester.enterText(input, 'Codex');
-      await tester.pump();
-      await openAgentSetting(
-        tester,
-        'codex',
-        NewHarnessController.permissionsId,
-      );
-      expect(box.field, NewHarnessField.mode);
-      await tester.enterText(input, 'read only');
-      await key(tester, LogicalKeyboardKey.enter);
-      expect(box.field, NewHarnessField.agent);
-      expect(box.mode, 'readOnly');
-      await openAgentSetting(tester, 'codex', NewHarnessController.profileId);
-      expect(box.field, NewHarnessField.profile);
-      expect(connection.lists, greaterThanOrEqualTo(1));
-      expect(
-        box.draft.profile,
-        isNull,
-        reason: 'Discovery never changes the account',
-      );
-      await tester.enterText(input, 'Work');
-      await key(tester, LogicalKeyboardKey.enter);
-      expect(box.field, NewHarnessField.agent);
-      expect(box.draft.profile!.path, '/profiles/m/work');
-      await key(tester, LogicalKeyboardKey.escape);
-      expect(box.field, NewHarnessField.launch);
-      expect(find.text('Codex · Read only · profile Work'), findsOneWidget);
-      await openLaunchRow(tester, 'machine');
-      expect(find.text('Choose a machine').first, findsOneWidget);
-      for (final name in ['agent', 'machine', 'project']) {
-        expect(find.byKey(ValueKey('new-harness-field-$name')), findsNothing);
-      }
-      await key(tester, LogicalKeyboardKey.escape);
-      expect(box.machineId, 'm');
-      expect(box.draft.profile!.path, '/profiles/m/work');
-      expect(connection.creates, isEmpty);
-      await key(tester, LogicalKeyboardKey.enter);
-      expect(connection.creates.single['codexHome'], '/profiles/m/work');
-      expect(connection.creates.single['permissionMode'], 'readOnly');
-      await tester.pumpWidget(const SizedBox());
-      await tester.pump(const Duration(milliseconds: 200));
-    },
-  );
+  testWidgets('setup launches with the chosen profile and approvals', (
+    tester,
+  ) async {
+    final connection = _Profiles('m');
+    final app = createApp(connectionForTest: (_) => connection);
+    seedMixedAgents(app);
+    app.machineStates['m']!.localOnly = true;
+    app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
+    await app.agentPreference.remember('codex');
+    await app.projectHistory.select('m', '/work/openharness');
+    addTearDown(app.dispose);
+    final map = MemoryKeymap();
+    addTearDown(map.dispose);
+    app.adoptSessionForTest(terminal('a0', []));
+    await configured.mount(tester, app, map);
+    await key(tester, LogicalKeyboardKey.keyN, cmd: true);
+    final box = tester
+        .widget<NewHarnessForm>(find.byType(NewHarnessForm))
+        .controller;
+    await openLaunchRow(tester, 'approvals');
+    await typeHarnessQuery(tester, 'read only');
+    await key(tester, LogicalKeyboardKey.enter);
+    expect(box.mode, 'readOnly');
+    await openLaunchRow(tester, 'profile');
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(connection.lists, greaterThanOrEqualTo(1));
+    expect(box.draft.profile, isNull);
+    await typeHarnessQuery(tester, 'Work');
+    await key(tester, LogicalKeyboardKey.enter);
+    expect(box.draft.profile!.path, '/profiles/m/work');
+    expect(connection.creates, isEmpty);
+    await startHarness(tester);
+    expect(connection.creates.single['codexHome'], '/profiles/m/work');
+    expect(connection.creates.single['permissionMode'], 'readOnly');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(milliseconds: 200));
+  });
 
   testWidgets('profile discovery ignores replies from the previous machine', (
     tester,

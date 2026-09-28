@@ -1,3 +1,5 @@
+import 'support/open_harness.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -8,16 +10,19 @@ import 'package:harness/settings/sections/shortcuts_section.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/shortcuts/app_keymap.dart';
 import 'package:harness/shortcuts/keymap.dart';
-import 'package:harness/shortcuts/shortcuts_list.dart';
+import 'package:harness/shortcuts/shortcuts_browser.dart';
 import 'package:harness/state/app_state.dart';
+import 'package:harness/state/new_harness.dart';
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/widgets/agent_picker.dart';
+import 'package:harness/widgets/new_harness_form.dart';
 import 'package:harness/widgets/swarm_switcher.dart';
 import 'package:xterm/xterm.dart';
 
 import 'keymap_host_test.dart' show MemoryKeymap, key;
+import 'support/launch_menu.dart';
 import 'swarm_screen_test.dart' show terminal;
 import 'swarm_state_test.dart' show createApp;
 
@@ -60,6 +65,23 @@ Future<void> native(WidgetTester tester, String method, [Object? arguments]) {
 }
 
 Future<void> tabToResult(WidgetTester tester, {String? id}) async {
+  final results = find.byType(SwarmSearchResults);
+  if (results.evaluate().isNotEmpty) {
+    final search = tester.widget<SwarmSearchResults>(results).search;
+    if (search.setupLayout) {
+      for (var i = 0; i < search.rows.length; i++) {
+        if (id == null
+            ? search.selected?.isCreate == false
+            : search.selected?.id == id) {
+          break;
+        }
+        await key(tester, LogicalKeyboardKey.keyN, ctrl: true);
+      }
+      if (id != null) expect(search.selected?.id, id);
+      return;
+    }
+  }
+
   ListTile? focusedResult() => FocusManager.instance.primaryFocus?.context
       ?.findAncestorWidgetOfExactType<ListTile>();
   bool reached() => id == null
@@ -72,6 +94,156 @@ Future<void> tabToResult(WidgetTester tester, {String? id}) async {
 }
 
 void main() {
+  testWidgets(
+    'New Harness remapped navigation works in both fields and choices',
+    (tester) async {
+      final previousEntry = newHarnessOpensInBox;
+      newHarnessOpensInBox = true;
+      addTearDown(() => newHarnessOpensInBox = previousEntry);
+      final map = MemoryKeymap()
+        ..apply('''{"bindings":[
+      {"keys":"ctrl+j","command":"picker.next","when":"picker"},
+      {"keys":"ctrl+k","command":"picker.previous","when":"picker"},
+      {"keys":"ctrl+l","command":"picker.complete","when":"picker"},
+      {"keys":"ctrl+h","command":"picker.complete_back","when":"picker"}
+    ]}''');
+      final app = createApp();
+      addTearDown(map.dispose);
+      addTearDown(app.dispose);
+      app.machineStates['m']!.localOnly = true;
+      app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
+      await app.agentPreference.remember('codex');
+      await app.projectHistory.select('m', '/work/openharness');
+      await mount(tester, app, map);
+      await key(tester, LogicalKeyboardKey.keyN, cmd: true);
+      final box = tester
+          .widget<NewHarnessForm>(find.byType(NewHarnessForm))
+          .controller;
+      bool selected(String row) =>
+          tester
+              .widget<Semantics>(find.byKey(ValueKey('new-harness-field-$row')))
+              .properties
+              .selected ==
+          true;
+      await key(tester, LogicalKeyboardKey.keyJ, ctrl: true);
+      expect(selected('agent'), isTrue);
+      await key(tester, LogicalKeyboardKey.keyK, ctrl: true);
+      expect(selected('start'), isTrue);
+      await key(tester, LogicalKeyboardKey.keyJ, ctrl: true);
+      await key(tester, LogicalKeyboardKey.enter);
+      expect(box.field, NewHarnessField.harness);
+      final cursor = box.cursor;
+      final engine = box.engine;
+      await key(tester, LogicalKeyboardKey.keyJ, ctrl: true);
+      expect(box.cursor, (cursor + 1) % box.options.length);
+      await key(tester, LogicalKeyboardKey.keyK, ctrl: true);
+      expect(box.cursor, cursor);
+      expect(box.engine, engine);
+      // Remapped Tab switches panes without walking rows or applying a choice.
+      await key(tester, LogicalKeyboardKey.keyH, ctrl: true);
+      expect(harnessChoicesActive(tester), isFalse);
+      expect(selected('agent'), isTrue);
+      expect(box.engine, engine);
+      await key(tester, LogicalKeyboardKey.keyL, ctrl: true);
+      expect(harnessChoicesActive(tester), isTrue);
+      expect(box.engine, engine);
+      await key(tester, LogicalKeyboardKey.escape);
+      await focusLaunchRow(tester, 'advanced');
+      final expanded = box.advancedOpen;
+      await key(tester, LogicalKeyboardKey.arrowRight);
+      expect(box.advancedOpen, !expanded);
+      await key(tester, LogicalKeyboardKey.arrowLeft);
+      expect(box.advancedOpen, expanded);
+      expect(app.panes, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  for (final command in ['newAgent', 'commands']) {
+    testWidgets('native $command preserves composing New Harness input', (
+      tester,
+    ) async {
+      final previousEntry = newHarnessOpensInBox;
+      newHarnessOpensInBox = true;
+      addTearDown(() => newHarnessOpensInBox = previousEntry);
+      final map = MemoryKeymap();
+      final app = createApp();
+      addTearDown(map.dispose);
+      addTearDown(app.dispose);
+      app.machineStates['m']!.localOnly = true;
+      app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
+      await app.agentPreference.remember('codex');
+      await app.projectHistory.select('m', '/work/openharness');
+      await mount(tester, app, map, native: true);
+      await key(tester, LogicalKeyboardKey.keyN, cmd: true);
+      final form = find.byType(NewHarnessForm);
+      final original = tester.widget<NewHarnessForm>(form).controller;
+      await openLaunchRow(tester, 'project');
+      final field = find.byKey(const ValueKey('new-harness-query'));
+      await tester.tap(field);
+      const composing = TextEditingValue(
+        text: 'moon',
+        selection: TextSelection.collapsed(offset: 4),
+        composing: TextRange(start: 0, end: 4),
+      );
+      tester.testTextInput.updateEditingValue(composing);
+      await tester.pump();
+      final opening = native(tester, command);
+      await tester.pump();
+      await opening;
+      expect(form, findsOneWidget);
+      expect(tester.widget<NewHarnessForm>(form).controller, same(original));
+      expect(tester.widget<TextField>(field).controller!.value, composing);
+      expect(original.query, 'moon');
+      expect(find.byKey(const ValueKey('swarm-search-input')), findsNothing);
+      expect(app.panes, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  for (final mode in ['P', 'Shift-P']) {
+    for (final command in ['next', 'previous', 'submit', 'add', 'close']) {
+      testWidgets(
+        'native search $command respects an IME candidate in Cmd-$mode',
+        (tester) async {
+          final map = MemoryKeymap();
+          final app = createApp();
+          addTearDown(map.dispose);
+          addTearDown(app.dispose);
+          await mount(tester, app, map, native: true);
+          await key(
+            tester,
+            LogicalKeyboardKey.keyP,
+            cmd: true,
+            shift: mode == 'Shift-P',
+          );
+          final field = find.byKey(const ValueKey('swarm-search-input'));
+          final candidate = mode == 'P' ? 'Agent' : '> rename';
+          final composing = TextEditingValue(
+            text: candidate,
+            selection: TextSelection.collapsed(offset: candidate.length),
+            composing: TextRange(
+              start: mode == 'P' ? 0 : 2,
+              end: candidate.length,
+            ),
+          );
+          tester.testTextInput.updateEditingValue(composing);
+          await tester.pump();
+          final search = tester
+              .widget<SwarmSearchResults>(find.byType(SwarmSearchResults))
+              .search;
+          final selected = search.selected;
+          final opening = native(tester, 'searchCommand', {'command': command});
+          await tester.pump();
+          await opening;
+          expect(field, findsOneWidget);
+          expect(search.selected, same(selected));
+          expect(tester.widget<TextField>(field).controller!.value, composing);
+          expect(app.panes, isEmpty);
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+    }
+  }
   for (final remapped in [false, true]) {
     testWidgets(
       'the configured Layout key cycles choices and returns to latest output (remapped=$remapped)',
@@ -114,17 +286,20 @@ void main() {
             : LogicalKeyboardKey.keyL;
         await key(tester, shortcut, cmd: true, shift: !remapped);
         await tester.pumpAndSettle();
-        if (remapped)
+        if (remapped) {
           await key(tester, LogicalKeyboardKey.keyL, cmd: true, shift: true);
+        }
         // Fast repeated chords can arrive before the next rendered frame.
         await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
-        if (!remapped)
+        if (!remapped) {
           await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        }
         await tester.sendKeyEvent(shortcut);
         await tester.sendKeyEvent(shortcut);
         await tester.sendKeyEvent(shortcut);
-        if (!remapped)
+        if (!remapped) {
           await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        }
         await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
         await tester.pump();
         expect(find.byType(Dialog), findsOneWidget);
@@ -202,6 +377,8 @@ void main() {
     await key(tester, LogicalKeyboardKey.keyT, cmd: true);
     expect(app.swarms, hasLength(2));
     expect(app.activeSwarm, isNot(same(original)));
+    expect(find.byKey(const ValueKey('swarm-search-input')), findsNothing);
+    await openHarnessPicker(tester);
     expect(
       tester
           .widget<TextField>(find.byKey(const ValueKey('swarm-search-input')))
@@ -372,8 +549,7 @@ void main() {
         {"keys":"enter","command":null,"when":"picker"},
         {"keys":"alt+enter","command":"picker.accept","when":"picker"}
       ]}''');
-        final app = createApp();
-        app.machineStates['m']!.nodeOnline = true;
+        final app = createApp(connected: true);
         final frames = <TerminalBinaryFrame>[];
         final pane = app.adoptSessionForTest(terminal('a0', frames));
         app.newSwarm();
@@ -385,7 +561,7 @@ void main() {
         if (inline) {
           await tester.tap(input);
         } else {
-          await key(tester, LogicalKeyboardKey.keyP, cmd: true);
+          await openHarnessPicker(tester);
         }
         await tester.enterText(input, 'Agent');
         await tester.pump();
@@ -396,10 +572,7 @@ void main() {
         await key(tester, LogicalKeyboardKey.arrowDown);
         expect(search.cursor, initial);
         await key(tester, LogicalKeyboardKey.keyJ, ctrl: true);
-        expect(
-          search.cursor,
-          inline ? (initial - 1) % search.rows.length : initial + 1,
-        );
+        expect(search.cursor, (initial - 1) % search.rows.length);
         await tester.enterText(input, 'Agent 0');
         await tester.pump();
         expect(
@@ -466,13 +639,13 @@ void main() {
           .widget<TextField>(find.byKey(const ValueKey('swarm-search-input')))
           .controller!
           .text,
-      '> ',
+      '>',
     );
     await key(tester, LogicalKeyboardKey.escape);
     expect(field, findsOneWidget);
     expect(find.byType(SwarmSearchResults), findsNothing);
     expect(tester.widget<TextField>(field).controller!.text, isEmpty);
-    await key(tester, LogicalKeyboardKey.keyP, cmd: true);
+    await openHarnessPicker(tester);
     final modal = find.byKey(const ValueKey('swarm-search-input'));
     expect(tester.widget<TextField>(modal).focusNode!.hasFocus, isTrue);
     expect(tester.widget<TextField>(modal).controller!.text, isEmpty);
@@ -567,14 +740,14 @@ void main() {
       );
       final commandField = find.byKey(const ValueKey('swarm-search-input'));
       expect(commandField, findsOneWidget);
-      expect(tester.widget<TextField>(commandField).controller!.text, '> ');
+      expect(tester.widget<TextField>(commandField).controller!.text, '>');
       expect(
         tester.widget<TextField>(commandField).focusNode!.hasPrimaryFocus,
         isTrue,
       );
       expect(
         tester.widget<TextField>(commandField).decoration!.hintText,
-        'Search commands…',
+        'Search commands',
       );
       await key(tester, LogicalKeyboardKey.escape);
       await tester.pump();
@@ -627,11 +800,13 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsOneWidget);
         expect(find.byType(SwarmSearchResults), findsNothing);
-        // The form opens with focus on its agent bar, and Escape there still
+        // The form opens with focus on its harness bar, and Escape there still
         // closes the form.
         expect(
           tester
-              .widget<AgentPicker>(find.byType(AgentPicker))
+              .widget<AgentPicker>(
+                find.byKey(const Key('new-agent-harness-picker')),
+              )
               .focusNode!
               .hasPrimaryFocus,
           isTrue,
@@ -655,8 +830,7 @@ void main() {
     testWidgets(
       'focused results share picker selection and configured keys (inline=$inline)',
       (tester) async {
-        final app = createApp();
-        app.machineStates['m']!.nodeOnline = true;
+        final app = createApp(connected: true);
         final firstInput = <TerminalBinaryFrame>[];
         final secondInput = <TerminalBinaryFrame>[];
         app.adoptSessionForTest(terminal('a0', firstInput));
@@ -677,7 +851,7 @@ void main() {
         if (inline) {
           await tester.tap(field);
         } else {
-          await key(tester, LogicalKeyboardKey.keyP, cmd: true);
+          await openHarnessPicker(tester);
         }
         await tester.enterText(field, 'Agent');
         await tester.pump();
@@ -690,7 +864,7 @@ void main() {
         final next =
             search.rows[inline
                 ? (search.cursor + 1) % search.rows.length
-                : (search.cursor - 1).clamp(0, search.rows.length - 1)];
+                : (search.cursor + 1) % search.rows.length];
         await key(tester, LogicalKeyboardKey.arrowDown);
         expect(search.selected, same(secondRow));
         await key(tester, LogicalKeyboardKey.keyG, ctrl: true);
@@ -749,7 +923,7 @@ void main() {
       await tester.pump();
       await key(tester, LogicalKeyboardKey.keyT, cmd: true);
       expect(app.swarms, hasLength(2));
-      expect(find.byKey(const ValueKey('swarm-search-input')), findsOneWidget);
+      expect(find.byKey(const ValueKey('swarm-search-input')), findsNothing);
       await tester.pumpWidget(const SizedBox());
       app.dispose();
       map.dispose();
@@ -774,7 +948,7 @@ void main() {
         ),
       );
       final map = MemoryKeymap();
-      final app = createApp();
+      final app = createApp(connected: true);
       final pane = app.adoptSessionForTest(terminal('a0', []));
       await mount(tester, app, map, native: true);
       expect(calls.where((c) => c.method == 'keymapState'), hasLength(1));
@@ -800,7 +974,11 @@ void main() {
       await native(tester, 'keymapCommand', {'command': 'swarm.new'});
       await tester.pump();
       final field = find.byKey(const ValueKey('swarm-search-input'));
+      expect(field, findsNothing);
+      await native(tester, 'keymapCommand', {'command': 'agent.open'});
+      await tester.pump();
       await tester.tap(field);
+      await key(tester, LogicalKeyboardKey.backspace);
       await tester.enterText(field, 'Agent 0');
       await tester.pump();
       expect(find.byType(SwarmSearchResults), findsOneWidget);
@@ -855,7 +1033,7 @@ void main() {
         KeymapContext.terminal,
       );
       expect(terminalRows.where((r) => r.chords.isEmpty), isNotEmpty);
-      expect(find.byType(ShortcutsDeck), findsOneWidget);
+      expect(find.byType(ShortcutsBrowser), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       map.dispose();

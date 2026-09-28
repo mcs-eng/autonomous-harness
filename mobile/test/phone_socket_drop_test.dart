@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_mobile/core/models.dart';
+import 'package:harness_mobile/core/viewer_mode.dart';
 import 'package:harness_mobile/phone/agent_index.dart';
 import 'package:harness_mobile/phone/phone_status.dart';
 import 'package:harness_mobile/state/app_state.dart';
@@ -30,15 +31,21 @@ void main() {
     expect(machine.pendingOfflineAgentId, 'b');
   });
 
-  test('a desktop still reads its CLI socket dropping as offline', () async {
-    final app = pagerApp(PagerConn());
-    addTearDown(app.dispose);
-    await liveAgent(app, 'b');
+  test(
+    'a desktop still reads its CLI socket dropping as offline',
+    () async {
+      final app = pagerApp(PagerConn());
+      addTearDown(app.dispose);
+      await liveAgent(app, 'b');
 
-    app.connectionStatusForTest('m', ConnectionStatus.reconnecting);
+      app.connectionStatusForTest('m', ConnectionStatus.reconnecting);
 
-    expect(app.stateOf('m')!.nodeOnline, isFalse);
-  });
+      expect(app.stateOf('m')!.nodeOnline, isFalse);
+    },
+    skip: kViewerMode
+        ? 'This host builds the mobile package in viewer mode.'
+        : false,
+  );
 
   test('a machine that has never answered lists nothing yet', () {
     final app = pagerApp(PagerConn(), viewer: true);

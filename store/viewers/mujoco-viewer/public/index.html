@@ -23,13 +23,14 @@
   </nav>
   <div id="agent" hidden><span class="pulse"></span><span id="agent-text"></span></div>
   <div class="tools">
+    <button type="button" id="btn-experiment" title="Compare two futures from one moment">What if…</button>
     <button type="button" class="icon" id="btn-show" title="Show: contacts, forces, joints, frames… " aria-haspopup="true">
       <svg viewBox="0 0 20 20"><path d="M1.5 10s3-5.5 8.5-5.5S18.5 10 18.5 10s-3 5.5-8.5 5.5S1.5 10 1.5 10Z"/><circle cx="10" cy="10" r="2.6"/></svg>
     </button>
     <button type="button" class="icon" id="btn-camera" title="Camera" aria-haspopup="true">
       <svg viewBox="0 0 20 20"><rect x="2" y="5.5" width="11.5" height="9" rx="2"/><path d="m13.5 9 4.5-2.5v7L13.5 11"/></svg>
     </button>
-    <button type="button" class="icon" id="btn-panel" title="Controls and model (Tab)">
+    <button type="button" class="icon" id="btn-panel" title="Controls and model (N)">
       <svg viewBox="0 0 20 20"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M12.5 3.5v13"/></svg>
     </button>
     <button type="button" class="icon" id="btn-help" title="Shortcuts (?)">
@@ -47,6 +48,7 @@
     <span id="hud-extra"></span>
   </div>
   <div id="camera-chip" hidden></div>
+  <div id="comparison-legend" hidden><b id="comparison-time"></b><span class="original">Original · wireframe</span><span class="changed">Changed · solid</span></div>
   <div id="chip" hidden>
     <span class="swatch"></span>
     <span id="chip-name"></span>
@@ -108,10 +110,12 @@
     <button type="button" data-tab="controls" class="on">Controls</button>
     <button type="button" data-tab="model">Model</button>
     <button type="button" data-tab="sensors">Sensors</button>
+    <button type="button" data-tab="experiment">What if</button>
   </nav>
   <section id="tab-controls" class="tab on"></section>
   <section id="tab-model" class="tab"></section>
   <section id="tab-sensors" class="tab"></section>
+  <section id="tab-experiment" class="tab"></section>
   <section id="plot">
     <div class="plot-head">
       <select id="plot-signal" aria-label="Signal to plot"></select>
@@ -168,7 +172,7 @@
       <div><kbd>−</kbd> <kbd>=</kbd> slower / faster</div>
       <div><kbd>S</kbd> <kbd>R</kbd> <kbd>V</kbd> simulate / replay / video</div>
       <div><kbd>Enter</kbd> simulate from this frame</div>
-      <div><kbd>Tab</kbd> controls panel</div>
+      <div><kbd>N</kbd> controls panel · <kbd>Tab</kbd> next control</div>
       <div>double-click: select a body</div>
       <div><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + drag: push it</div>
       <div><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>⇧</kbd> + drag: twist it</div>

@@ -1,3 +1,5 @@
+import 'support/launch_menu.dart';
+
 import 'dart:async';
 
 import 'package:flutter/gestures.dart';
@@ -9,7 +11,7 @@ import 'package:harness/state/new_harness.dart';
 import 'package:harness/state/pane_arrangement.dart';
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/terminal/terminal_binary.dart';
-import 'package:harness/widgets/new_harness_box.dart';
+import 'package:harness/widgets/new_harness_form.dart';
 import 'package:harness/ws/ws_conn.dart';
 import 'package:xterm/xterm.dart';
 
@@ -95,7 +97,7 @@ void main() {
         of: find.byKey(target.cellKey),
         matching: find.byKey(ValueKey('pane-split-$direction')),
       );
-      expect(tester.widget<IconButton>(button).onPressed, isNotNull);
+      expect(button, findsNothing);
       final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
       final targetRect = tester.getRect(find.byKey(target.cellKey));
       await mouse.addPointer(location: targetRect.center);
@@ -106,8 +108,13 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 120));
-      expect(button.hitTestable(), findsOneWidget);
-      await tester.tap(button);
+      expect(button, findsNothing);
+      await chord(
+        tester,
+        axis == PaneResizeAxis.x
+            ? LogicalKeyboardKey.keyR
+            : LogicalKeyboardKey.keyD,
+      );
       await tester.pump();
       expect(find.text(title), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
@@ -283,7 +290,7 @@ void main() {
     }
 
     testWidgets(
-      'edge + $direction targets that pane without disturbing its neighbor',
+      'hovering the $direction edge stays quiet and the shortcut splits the focused pane',
       (tester) async {
         final app = createApp();
         final machine = app.machineStates['m']!;
@@ -319,7 +326,7 @@ void main() {
           of: target,
           matching: find.byKey(ValueKey('pane-split-$direction')),
         );
-        expect(button.hitTestable(), findsNothing);
+        expect(button, findsNothing);
         final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
         await mouse.addPointer(location: rect.center);
         await mouse.moveTo(
@@ -328,19 +335,21 @@ void main() {
               : Offset(rect.center.dx, rect.bottom - 2),
         );
         await tester.pump(const Duration(milliseconds: 120));
-        expect(button.hitTestable(), findsOneWidget);
+        expect(button, findsNothing);
         expect(app.focusedPaneId, neighbor.id);
         expect(FocusManager.instance.primaryFocus, same(previousFocus));
         expect(tester.element(view), same(retained));
         expect(tester.getRect(target), rect);
         expect(frames, isEmpty);
 
-        // Moving from the border onto the inset button must keep it visible.
-        await mouse.moveTo(tester.getCenter(button));
-        await tester.pump();
-        expect(button.hitTestable(), findsOneWidget);
-        await mouse.down(tester.getCenter(button));
-        await mouse.up();
+        await chord(tester, LogicalKeyboardKey.arrowLeft);
+        expect(app.focusedPaneId, first.id);
+        await chord(
+          tester,
+          axis == PaneResizeAxis.x
+              ? LogicalKeyboardKey.keyR
+              : LogicalKeyboardKey.keyD,
+        );
         await tester.pump();
         final search = find.byKey(const ValueKey('swarm-search-input'));
         expect(search, findsOneWidget);
@@ -383,6 +392,7 @@ void main() {
       addTearDown(() => newHarnessOpensInBox = false);
       final connection = _Creation();
       final app = createApp(connectionForTest: (_) => connection);
+      app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
       final machine = app.machineStates['m']!;
       machine.nodeOnline = true;
       machine.localOnly = true;
@@ -416,7 +426,7 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
       final box = tester
-          .widget<NewHarnessBox>(find.byType(NewHarnessBox))
+          .widget<NewHarnessForm>(find.byType(NewHarnessForm))
           .controller;
       expect(box.split?.axis, axis);
       expect(box.split?.paneId, pane.id);
@@ -425,7 +435,7 @@ void main() {
       expect(box.project.folder, '/work/checkout');
       expect(app.panes, [pane]);
       expect(connection.calls, isNot(contains('agent_create')));
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await startHarness(tester);
       await tester.pump();
       expect(
         connection.calls.where((call) => call == 'agent_create'),
@@ -473,7 +483,9 @@ void main() {
       app.focusPane(first.id);
       await mountWide(tester, app);
       expect(app.preparePaneSplit(PaneResizeAxis.x), isNotNull);
-      tester.view.physicalSize = const Size(3000, 1800);
+      // Halving one of three columns needs room for six minimum-width panes.
+      // This case checks fixed neighbors; the cases above cover scroll growth.
+      tester.view.physicalSize = const Size(4000, 1800);
       await tester.pump();
       final unchanged = [second, third];
       final rects = [

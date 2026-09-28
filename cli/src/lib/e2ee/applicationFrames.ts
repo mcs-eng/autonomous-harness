@@ -11,9 +11,20 @@ import { ENCRYPTED_RPC_RESULT_TYPES, isEncryptedDownType } from './core.js'
 import { SHARE_REQUEST_TYPES, SHARE_RESULT_TYPES } from '../../sharing/protocol.js'
 import { VIEWER_DOWN_TYPES } from '../viewerWire.js'
 
-const FLEET_REQUESTS = new Set(['grid_fleet_capabilities', 'grid_fleet_run', 'grid_fleet_cancel'])
+const FLEET_REQUESTS = new Set(['grid_fleet_capabilities', 'grid_fleet_run', 'grid_fleet_cancel',
+  'grid_fleet_models_list', 'grid_fleet_model_download', 'grid_fleet_model_start', 'grid_fleet_model_stop'])
 const FLEET_RESULTS = new Set([...FLEET_REQUESTS].map(type => `${type}_result`))
+const MACHINE_REQUESTS = new Set(['git_project_info', 'git_pull_request', 'machine_resources', 'api_connections'])
+const MACHINE_RESULTS = new Set([...MACHINE_REQUESTS].map(type => `${type}_result`))
 export const encryptDownFrame = (type: string): boolean =>
-  isEncryptedDownType(type) || FLEET_REQUESTS.has(type) || SHARE_REQUEST_TYPES.has(type) || VIEWER_DOWN_TYPES.has(type)
+  isEncryptedDownType(type) || MACHINE_REQUESTS.has(type) || FLEET_REQUESTS.has(type) || SHARE_REQUEST_TYPES.has(type) || VIEWER_DOWN_TYPES.has(type)
+/** Client→daemon requests that older daemons took in the clear and no longer do. A client seals them
+ * only for a daemon whose e2e_welcome says `strictDown` — an older one would never open the envelope
+ * and would read the request as empty. A daemon that says `strictDown` refuses them unsealed. */
+export const STRICT_DOWN_TYPES = new Set(['dsh_install', 'dsh_update', 'dsh_remove', 'dsh_list',
+  'agent_retarget', 'engines_probe', 'grid_models_list', 'cancel', 'claude_login_status', 'speaking'])
+/** What a client seals for a given daemon: the always-sealed types, plus STRICT_DOWN_TYPES when it opens them. */
+export const encryptDownFrameFor = (type: string, peer: { strictDown: boolean }): boolean =>
+  encryptDownFrame(type) || (peer.strictDown && STRICT_DOWN_TYPES.has(type))
 export const encryptRpcResult = (type: string): boolean =>
-  ENCRYPTED_RPC_RESULT_TYPES.has(type) || FLEET_RESULTS.has(type) || SHARE_RESULT_TYPES.has(type)
+  ENCRYPTED_RPC_RESULT_TYPES.has(type) || MACHINE_RESULTS.has(type) || FLEET_RESULTS.has(type) || SHARE_RESULT_TYPES.has(type)

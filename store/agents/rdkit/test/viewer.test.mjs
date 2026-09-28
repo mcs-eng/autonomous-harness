@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { workspaceFileUrl } from '../pane/files.mjs'
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..')
 const VIEWER = join(PKG, 'viewer.mjs')
@@ -98,16 +99,16 @@ async function viewer({ env = {}, workspace } = {}) {
   }
 }
 
-function http(port, path, { method = 'GET' } = {}) {
+function http(port, path, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path, method }, (res) => {
+    const req = request({ host: '127.0.0.1', port, path, method, headers }, (res) => {
       let body = ''
       res.setEncoding('utf8')
       res.on('data', (chunk) => { body += chunk })
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }))
     })
     req.on('error', reject)
-    req.end()
+    req.end(body)
   })
 }
 
@@ -149,6 +150,7 @@ describe('files', () => {
     assert.equal(head.body, '')
     assert.ok(Number(head.headers['content-length']) > 1000)
     assert.equal(head.headers['content-type'], 'text/javascript; charset=utf-8')
+    assert.equal((await v.get('/files.mjs')).headers['content-type'], 'text/javascript; charset=utf-8')
   })
 
   test('3Dmol.js from this package, cached, and nothing else under /vendor/', async () => {
@@ -162,6 +164,24 @@ describe('files', () => {
     assert.equal((await v.get('/vendor/jquery.js')).status, 404)
   })
 
+  test('bond-scan writes require the pane token, same origin and bounded input', async () => {
+    const page = await v.get('/')
+    const token = page.body.match(/name="torsion-token" content="([a-f0-9]{64})"/)[1]
+    const endpoint = '/api/torsion/keep', method = 'POST'
+    assert.equal((await v.get(endpoint, { method, body: '{}' })).status, 403)
+    assert.equal((await v.get(endpoint, { method, headers: { 'x-torsion-token': token, origin: 'https://outside.example' }, body: '{}' })).status, 403)
+    assert.equal((await v.get(endpoint, { method, headers: { 'x-torsion-token': token, host: 'outside.example' }, body: '{}' })).status, 403)
+    const headers = { 'x-torsion-token': token, origin: `http://127.0.0.1:${v.port}` }
+    assert.equal((await v.get(endpoint, { method, headers, body: '{bad json' })).status, 400)
+    assert.equal((await v.get(endpoint, { method, headers, body: '{}' })).status, 400)
+    assert.equal((await v.get(endpoint, { method, headers: { ...headers, 'content-length': '262145' }, body: 'x'.repeat(262145) })).status, 413)
+    assert.equal((await v.get(endpoint, { method, headers: { ...headers, 'transfer-encoding': 'chunked' }, body: 'x'.repeat(262145) })).status, 413)
+    assert.equal((await v.get('/', { method: 'PUT' })).status, 405)
+    assert.deepEqual((await v.json('/api/torsions')).body, [])
+    assert.equal((await v.get('/torsion-pane.mjs')).headers['content-type'], 'text/javascript; charset=utf-8')
+    assert.equal((await v.get('/')).status, 200)
+  })
+
   test('workspace files, a download, and nothing outside the workspace', async () => {
     put(v.ws, 'out/x.json', '{"a":1}')
     put(v.ws, 'out/blob.bin', 'b')
@@ -172,12 +192,38 @@ describe('files', () => {
     assert.equal(json.headers['cache-control'], 'no-store')
     assert.equal((await v.get('/out/blob.bin')).headers['content-type'], 'application/octet-stream')
     const download = await v.get('/out/a%22b.sdf?download')
-    assert.equal(download.headers['content-disposition'], 'attachment; filename="ab.sdf"')
+    assert.equal(download.headers['content-disposition'], `attachment; filename="ab.sdf"; filename*=UTF-8''a%22b.sdf`)
     assert.equal(download.headers['content-type'], 'chemical/x-mdl-sdfile')
     assert.equal((await v.get('/out')).status, 404)
     assert.equal((await v.get('/out/missing.sdf')).status, 404)
     const outside = await v.get('/%2e%2e/%2e%2e/etc/hosts')
     assert.deepEqual([outside.status, JSON.parse(outside.body)], [404, { error: 'not found' }])
+  })
+
+  test('pane URLs load and download exact filenames containing URL punctuation', async () => {
+    for (const name of ['candidate #1', 'candidate ?2', 'candidate %3', 'α "lead" & analogue']) {
+      const folder = 'out/series #1'
+      for (const extension of ['.sdf', '.conformers.sdf', '.svg']) {
+        const path = `${folder}/${name}${extension}`
+        const content = `${name}${extension}\nexact workspace bytes`
+        put(v.ws, path, content)
+        const source = workspaceFileUrl(path, { v: 123 })
+        const url = new URL(source, `http://127.0.0.1:${v.port}`)
+        assert.equal(url.hash, '')
+        assert.equal(url.searchParams.get('v'), '123')
+        const loaded = await v.get(url.pathname + url.search)
+        assert.equal(loaded.status, 200, path)
+        assert.equal(loaded.body, content, path)
+        const saved = await v.get(workspaceFileUrl(path, { download: 1 }))
+        assert.equal(saved.status, 200, path)
+        assert.equal(saved.body, content, path)
+        assert.match(saved.headers['content-disposition'], /^attachment;/)
+        if (name.startsWith('α')) {
+          const encodedName = saved.headers['content-disposition'].split("filename*=UTF-8''")[1]
+          assert.equal(decodeURIComponent(encodedName), name + extension)
+        }
+      }
+    }
   })
 
   test('a malformed URL is an error answer, not a dead pane', async () => {
@@ -209,6 +255,15 @@ describe('/api/mol', () => {
   let v
   before(async () => { v = await viewer() })
   after(() => v.stop())
+
+  test('MOL exports retain Unicode and quoted molecule names', async () => {
+    const name = 'α "lead" #1'
+    put(v.ws, `out/${name}.sdf`, 'molecule\nM  END\n$$$$\n')
+    const mol = await v.get('/api/mol?path=' + encodeURIComponent(`out/${name}.sdf`))
+    assert.equal(mol.status, 200)
+    assert.equal(mol.body, 'molecule\nM  END\n')
+    assert.equal(decodeURIComponent(mol.headers['content-disposition'].split("filename*=UTF-8''")[1]), name + '.mol')
+  })
 
   test('the first record as a MOL file, named for the molecule', async () => {
     put(v.ws, 'out/x.conformers.sdf', 'x\n  RDKit\n\n  0  0\nM  END\n> <energy>\n1\n\n$$$$\nsecond\nM  END\n')

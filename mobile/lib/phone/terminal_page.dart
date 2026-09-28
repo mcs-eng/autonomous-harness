@@ -1,5 +1,8 @@
 import 'dart:async';
 
+// `defaultTargetPlatform` — the navigation bar this page keeps clear of is
+// Android's alone; see [_TerminalPageState._navigationBar].
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 // `PlatformException` — a refused camera permission arrives as one, and it is
 // the one picker failure with something the person can do about it.
@@ -7,21 +10,26 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import 'package:harness_mobile/core/models.dart' show AgentProject;
+import 'package:harness_mobile/core/models.dart' show Agent, AgentProject;
 import 'package:harness_mobile/shared/theme/app_theme.dart';
-import 'package:harness_mobile/shared/widgets/app_icon_button.dart';
 import 'package:harness_mobile/shared/widgets/skeleton.dart';
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/terminal/image_transcode.dart';
 import 'package:harness_mobile/terminal/terminal_font_store.dart';
 import 'package:harness_mobile/terminal/terminal_theme.dart';
 import 'package:harness_mobile/terminal/terminal_theme_store.dart';
+import 'package:harness_mobile/terminal/key_hints.dart';
+import 'package:harness_mobile/terminal/question_pane.dart';
+import 'package:harness_mobile/terminal/question_pane_watcher.dart';
 import 'package:harness_mobile/terminal/terminal_session.dart';
+import 'package:harness_mobile/widgets/engine_identity.dart'
+    show engineIdentity;
 import 'package:harness_mobile/widgets/rename_agent_dialog.dart';
 import 'package:harness_mobile/widgets/terminal_panel.dart';
 
+import 'agent_model_sections.dart';
+import 'agent_model_sheet.dart';
 import 'agents_list_page.dart';
-import 'agents_page.dart' show openNewAgent;
 import 'delete_agent.dart';
 import 'held_height.dart';
 import 'machines_tab.dart';
@@ -33,6 +41,7 @@ import 'status_pill.dart';
 import 'terminal_action_column.dart';
 import 'terminal_chrome_scroll.dart';
 import 'terminal_header.dart';
+import 'terminal_header_action.dart';
 import 'terminal_input_dock.dart';
 import 'terminal_search.dart';
 import 'voice_input_controller.dart';
@@ -165,9 +174,19 @@ typedef _PageFacts = ({
   AgentLoadStatus? agentLoadStatus,
   bool machinePresent,
   PhoneMachineStatus? machineStatus,
+  bool redialling,
   bool imagePaste,
   String? machineName,
 });
+
+/// What a page has asked for back — see [_TerminalPageState._reclaiming].
+enum _Reclaim {
+  /// The keyboard, off another app that holds the terminal or is driving it.
+  control,
+
+  /// A dead stream, reopened.
+  reconnect,
+}
 
 class _TerminalPageState extends State<TerminalPage>
     with WidgetsBindingObserver, TickerProviderStateMixin {
@@ -214,43 +233,71 @@ class _TerminalPageState extends State<TerminalPage>
   /// the remote resize until this clears.
   bool _keyboardSettling = false;
 
-  /// Drives search opening out of the header bar and collapsing back into it.
+  /// Whether the keyboard was this page's when the app went into the
+  /// background, and so has to come back with it.
   ///
-  /// ⚠️ **One controller for both halves of the move, read by both.** The search
-  /// overlay grows on it while the terminal and its chrome fade out on the same
-  /// value — two controllers, or an implicit animation on either side, would let
-  /// the two drift apart on a dropped frame and show the terminal through the
-  /// gap.
-  /// ⚠️ Unhurried on purpose. Nothing here moves any more — the header swaps
-  /// one control for another and the results fade up — and a cross-fade run
-  /// fast enough for a slide reads as a flicker rather than as an exchange. The
-  /// way back is a little quicker than the way in, the way dismissals usually
-  /// are.
+  /// ⚠️ **Android takes the keyboard away on the way out and does not bring it
+  /// back.** Switching to another app hides the IME, the inset falls to zero,
+  /// and the metrics tick that follows spends [_keyboardRequested] and clears
+  /// [_keyboardIsUp] — so the page returned to holds no record that it was
+  /// being typed into, and shows a bare terminal over a half-written prompt.
+  /// What was on screen on the way out is what belongs on screen on the way
+  /// back.
+  bool _keyboardHeldForBackground = false;
+
+  /// The lifecycle state as of the last callback, so LEAVING the foreground can
+  /// be told apart from arriving back in it.
+  ///
+  /// ⚠️ **Both directions pass through `inactive`**: resumed → inactive →
+  /// paused going away, and paused → inactive → resumed coming back. Recording
+  /// the keyboard on every non-resumed state therefore recorded it a second
+  /// time on the way home, by which point the keyboard was long gone — wiping
+  /// the answer one callback before it was due to be read.
+  ///
+  /// ⚠️ Read eagerly in `initState`, deliberately NOT as a `late` initializer.
+  /// Flutter sets `lifecycleState` BEFORE it notifies observers, so a field
+  /// first touched inside the callback would initialise itself to the state
+  /// being announced — and the very first announcement a page hears is the app
+  /// going away. `was` would then read `inactive`, the branch below would
+  /// decide this was not the step out of the foreground, and the one keyboard
+  /// worth remembering would be the one never recorded.
+  AppLifecycleState _lifecycle = AppLifecycleState.resumed;
+
+  /// Bumped to ask [TerminalPanel] for the input connection again when nothing
+  /// else about it has changed — see [didChangeAppLifecycleState].
+  int _focusRequest = 0;
+
+  /// Drives the search sheet up from the bottom edge and back down — see
+  /// [TerminalSearchOverlay].
+  ///
+  /// ⚠️ **One controller for the sheet and the dimming behind it, read by
+  /// both.** Two, or an implicit animation on either side, would let them drift
+  /// apart on a dropped frame: a sheet arriving over a page not yet dimmed, or
+  /// the dimming still there after the sheet had gone.
+  ///
+  /// The timings are [BottomSheet]'s own, as is the curve below, so this sheet
+  /// comes and goes like every sheet the app opens as a route — the way down a
+  /// little quicker than the way up, the way dismissals usually are.
   late final AnimationController _searchOpen = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 420),
-    reverseDuration: const Duration(milliseconds: 340),
+    duration: const Duration(milliseconds: 250),
+    reverseDuration: const Duration(milliseconds: 200),
   );
 
-  /// The curve everything on the open/close reads.
-  ///
-  /// ⚠️ Eased at BOTH ends, where this was once eased out alone. An ease-out
-  /// starts at its quickest, which suits something travelling into place —
-  /// nothing here travels. What is left is opacity, and opacity leaving its
-  /// resting value at full speed is seen as a blink at the start of the fade.
+  /// The curve everything on the open/close reads: [BottomSheet]'s, which
+  /// arrives quickly and settles, and leaves the same way run backwards.
   late final Animation<double> _searchCurve = CurvedAnimation(
     parent: _searchOpen,
-    curve: Curves.easeInOutCubic,
-    reverseCurve: Curves.easeInOutCubic,
+    curve: Easing.legacyDecelerate,
   );
 
-  /// Whether the search overlay is BUILT — true from the first frame of the
+  /// Whether the search sheet is BUILT — true from the first frame of the
   /// opening animation to the last frame of the closing one.
   ///
-  /// ⚠️ Not the same question as "is the animation at 1". The overlay holds a
-  /// focused [TextField], so it must come down the moment the collapse finishes
-  /// and not a frame later — a field left mounted behind the terminal keeps the
-  /// keyboard and swallows what the terminal is owed.
+  /// ⚠️ Not the same question as "is the animation at 1". The sheet holds a
+  /// [TextField] that may have the keyboard, so it must come down the moment
+  /// the sheet is gone and not a frame later — a field left mounted behind the
+  /// terminal keeps the keyboard and swallows what the terminal is owed.
   bool _searching = false;
 
   /// Whether the terminal had the keyboard up when search opened — what closing
@@ -267,7 +314,7 @@ class _TerminalPageState extends State<TerminalPage>
   ///
   /// ⚠️ **Not [_searching], and the difference is the whole bug.** iOS takes
   /// the keyboard's view away at once, but the inset it reports falls over
-  /// ~0.5s — longer than search's fade out. Released with [_searching], the
+  /// ~0.5s — longer than the sheet takes to go. Released with [_searching], the
   /// terminal took the still-falling inset as its own keyboard: its key bar came
   /// up, its floating column went, and it shrank and grew back over a few
   /// frames right after the search had gone. Held until the inset reaches zero
@@ -374,11 +421,216 @@ class _TerminalPageState extends State<TerminalPage>
     if (_settleTimer != null || _slideTimer != null) return;
     if (!mounted || !_keyboardSettling) return;
     setState(() => _keyboardSettling = false);
+    // The keyboard has stopped moving, so whether it is up is now a fact: a
+    // question read while it moved is decided here. See [_raiseForQuestion].
+    _raiseForQuestion();
   }
 
   /// What the last build read from the notifier — the baseline [_onNotifier]
   /// compares the next tick against.
   _PageFacts? _facts;
+
+  /// What THIS page has asked for back and not yet heard about: the keyboard off another app, or a
+  /// dead stream reopened. Null while it has asked for nothing.
+  ///
+  /// A take holds the banner up through the `opening` that answers it, so the banner can say so —
+  /// rather than blinking out and back as the status moves. A reconnect raises no banner: the
+  /// header draws it as the wait it is, the way it draws Attaching — see [phoneSessionSummary]'s
+  /// `reconnecting`.
+  ///
+  /// ⚠️ **Two kinds, because they read differently.** Both are the same call, and this used to be
+  /// one flag: pressing Reconnect raised a banner saying "Taking control…" over a stream nobody
+  /// else held.
+  ///
+  /// Taken back by [_onNotifier] once that open lands, and by [_takeControl] itself for a request
+  /// the notifier declined without ever changing a status.
+  _Reclaim? _reclaiming;
+
+  /// The header's status as of its last build, for the mark on the actions sheet.
+  ///
+  /// The sheet is a route of its own, so this page's `setState` never reaches it: the mark there
+  /// listens to this instead, and shows the dot the header is showing for as long as the sheet is
+  /// up — a reconnect that starts under it included — rather than the moment it opened.
+  ///
+  /// ⚠️ Moved AFTER the frame, never during the build that works it out: the sheet listening to it
+  /// would otherwise be marked dirty in the middle of this page's build. See
+  /// [_publishActionsStatus].
+  final ValueNotifier<PhoneSummary> _actionsStatus = ValueNotifier((
+    label: '',
+    tone: PhoneTone.quiet,
+  ));
+
+  /// The status the end of this frame hands to [_actionsStatus]; null while none is waiting.
+  PhoneSummary? _nextActionsStatus;
+
+  /// The skeleton's one identity across the two places the body draws it.
+  ///
+  /// ⚠️ **Two places, one skeleton.** It stands in for the panel while there is no session, and
+  /// lies OVER the panel once there is one whose first keyframe has not landed. The session arrives
+  /// a moment after the page — the attach is made after the first frame — so every launch crossed
+  /// from one place to the other: the first skeleton was unmounted, a second mounted in its place,
+  /// and the sweep started again from the top edge a beat after the page appeared. Under one
+  /// [GlobalKey] Flutter moves the same skeleton across, and its sweep carries on. The two places
+  /// are never built in the same frame: one wants no session, the other a session.
+  final GlobalKey _skeletonKey = GlobalKey(debugLabel: 'terminal skeleton');
+
+  /// Reads this page's own terminal buffer for an open question dialog.
+  ///
+  /// ⚠️ **Built late and only once**, when the agent's engine is first known:
+  /// the engine decides whether there is anything to look for at all, and it
+  /// arrives with the agent rather than with the page. Null until then, and for
+  /// every engine this parser is not verified against — which keeps the
+  /// keyboard from being raised over a dialog nobody can read.
+  QuestionPaneWatcher? _questionWatcher;
+
+  /// The engine [_questionWatcher] was built for, so a page that somehow
+  /// re-opens on a different engine rebuilds it rather than reading a Codex
+  /// dialog with Claude's rules.
+  QuestionEngine? _questionEngine;
+
+  /// The dialog the keyboard was last raised for.
+  ///
+  /// ⚠️ **This is what stops the keyboard fighting the person.** The watcher
+  /// reports every change of dialog, and a multi-question exchange changes it
+  /// several times; raising on each one would shove the keyboard back up
+  /// seconds after somebody put it away. One raise per question, and a question
+  /// is new only when its text or its options differ.
+  String? _questionRaisedFor;
+
+  /// The queue of Codex async questions the keyboard was last raised for — see
+  /// [_onQuestionPane]. Once per change of the queue, for the reason
+  /// [_questionRaisedFor] is once per question: a keyboard put away while the
+  /// same questions wait stays away.
+  QueuedQuestions? _queueRaisedFor;
+
+  /// Whether this page's session took input as of the last [_onNotifier] —
+  /// so the moment it starts to can be told apart from every other tick.
+  bool _acceptedInput = false;
+
+  /// Point the question watcher at this page's current terminal.
+  ///
+  /// Called from `build`, where both the engine and the session are known, and
+  /// cheap to call on every frame: [QuestionPaneWatcher.attach] returns at once
+  /// for a terminal it already holds.
+  void _syncQuestionWatcher(String? engineId, TerminalSession? session) {
+    final engine = questionEngineOf(engineId);
+    if (engine != _questionEngine) {
+      _questionEngine = engine;
+      _questionWatcher?.removeListener(_onQuestionPane);
+      _questionWatcher?.dispose();
+      // Nothing to watch for on an engine this parser does not know: leave the
+      // watcher null so not even a listener is attached.
+      _questionWatcher = engine == null
+          ? null
+          : (QuestionPaneWatcher(engine: engine)..addListener(_onQuestionPane));
+    }
+    _questionWatcher?.attach(session?.terminal);
+  }
+
+  /// The agent just asked something, or stopped asking.
+  ///
+  /// ⚠️ **Raising the keyboard is the whole feature, and it must happen at
+  /// most once per question.** An agent that blocks mid-turn is waiting on a
+  /// keystroke, and on a phone that keystroke is unreachable until the keyboard
+  /// is up — so the page opens it rather than making the person find the
+  /// terminal and tap it. But a person who puts the keyboard away during a
+  /// question has said they are not answering yet, and a watcher that raised it
+  /// again on the next repaint would be arguing with them.
+  void _onQuestionPane() {
+    if (!mounted) return;
+    final view = _questionWatcher?.view;
+    final open = view != null && view.answerable;
+    setState(() {
+      // Cleared as the dialog goes, so the NEXT question raises the keyboard
+      // again even if it words itself identically.
+      if (!open) _questionRaisedFor = null;
+    });
+    if (_questionWatcher?.queued == null) _queueRaisedFor = null;
+    _raiseForQuestion();
+  }
+
+  /// Raise the keyboard for the question on the pane, if it has not had its
+  /// one raise yet — see [_questionRaisedFor] and [_queueRaisedFor].
+  ///
+  /// ⚠️ **A question is marked only once its raise could be DECIDED, and two
+  /// moments cannot decide it.** While the session takes no input a keyboard
+  /// would type nothing, so [_raiseKeyboardForQuestion] backs out — a page
+  /// opened onto an agent already asking. And while the keyboard is moving
+  /// ([_keyboardSettling]) the page cannot tell one on its way down from one
+  /// that is up: a dialog read mid-`⌄` found the keyboard still on screen,
+  /// counted it as the person's own, and marked the question — the keyboard
+  /// finished leaving and nothing raised it again.
+  ///
+  /// ⚠️ **On a simulator with "Connect Hardware Keyboard" on, none of this
+  /// shows a keyboard**, and that is iOS, not this: with a hardware keyboard
+  /// attached it answers a focus with the key strip alone and no software
+  /// keyboard, for a tap and for this alike. Measured: the claim landed, the
+  /// input connection opened, the key strip rose with `⏎`, and the inset
+  /// stayed at zero.
+  ///
+  /// Marking in either moment spent the one raise on nothing. So neither marks:
+  /// this is asked again when the session starts taking input ([_onNotifier])
+  /// and when the keyboard stops moving ([_endSettle]), and decides then.
+  void _raiseForQuestion() {
+    final watcher = _questionWatcher;
+    if (watcher == null || _keyboardSettling) return;
+    if (!(_readFacts().session?.acceptsInput ?? false)) return;
+    final view = watcher.view;
+    if (view != null && view.answerable) {
+      final key = view.fingerprint;
+      if (_questionRaisedFor == key) return;
+      _questionRaisedFor = key;
+      _raiseKeyboardForQuestion();
+      return;
+    }
+    // A queued question — Codex's async kind — raises the keyboard too, once
+    // per change of the queue, by the same rule as a dialog above: its
+    // `shift+← to answer` is a key on the key strip, and the strip is only on
+    // screen while the keyboard is.
+    final queued = watcher.queued;
+    if (queued == null || queued == _queueRaisedFor) return;
+    _queueRaisedFor = queued;
+    _raiseKeyboardForQuestion();
+  }
+
+  /// Open the keyboard because an agent is waiting on an answer.
+  ///
+  /// ⚠️ **Not [_raiseKeyboard], and synchronous where that one is not.** That
+  /// one belongs to a TAP on the terminal, and awaits the mic's transcript to
+  /// drain into the prompt first, because tapping mid-sentence is asking to
+  /// finish that sentence. Nothing was said here — the agent asked — so
+  /// draining voice would paste a half-spoken phrase into an answer the person
+  /// has not started, and with nothing to await this runs in one frame.
+  void _raiseKeyboardForQuestion() {
+    final facts = _readFacts();
+    final session = facts.session;
+    // A terminal this page only watches cannot be typed into, so a keyboard
+    // over it would be a keyboard that does nothing.
+    if (session == null || !session.acceptsInput) return;
+    // Already up on THIS page, or on its way: nothing to do, and calling again
+    // would restart the settle hold for no reason.
+    //
+    // ⚠️ `_ownsInput`, not the screen-wide `_keyboardIsUp`. That flag is true
+    // whenever any page's keyboard is showing — it exists to hold the keyboard
+    // across a swipe — so reading it here would skip the raise on a page swiped
+    // to while a keyboard belonging to the page behind it was still up.
+    if (_keyboardRequested || _ownsInput) return;
+    // The controls somebody reaches for next are in the header.
+    _chrome.reveal();
+    setState(() {
+      _keyboardRequested = true;
+      // ⚠️ **The claim is asked for outright, not left to `focused` turning
+      // true.** A tap raises the keyboard through the terminal's own gesture;
+      // this has no tap, only the flag — and a flag the panel already reads as
+      // true (the screen-wide [_keyboardIsUp] a moment behind a keyboard just
+      // put away) is no change for it to act on. See [_restoreKeyboard], which
+      // hit the same wall.
+      _focusRequest++;
+    });
+    // The keyboard is on its way and the key bar opens with it — see
+    // [_raiseKeyboard], which holds the resize the same way.
+    _armSettle();
+  }
 
   _PageFacts _readFacts() {
     final notifier = widget.notifier;
@@ -397,7 +649,7 @@ class _TerminalPageState extends State<TerminalPage>
       session: session,
       status: session?.status,
       rendered: session?.hasRenderedFrame ?? false,
-      agentName: agent?.name,
+      agentName: agent?.displayName,
       agentEngine: agent?.engine,
       agentProject: agent?.project,
       agentPresent: agent != null,
@@ -405,6 +657,14 @@ class _TerminalPageState extends State<TerminalPage>
       agentLoadStatus: machine?.agentLoadStatus,
       machinePresent: machine != null,
       machineStatus: machine == null ? null : phoneMachineStatusOf(machine),
+      // Only while the stream is dead — the one state it changes how the
+      // header reads. A live page has no reason to rebuild each time the agent
+      // list refreshes underneath it.
+      redialling:
+          machine != null &&
+          (session?.status == TerminalSessionStatus.error ||
+              session?.status == TerminalSessionStatus.closed) &&
+          phoneMachineRedialling(machine),
       imagePaste: machine?.terminalImagePasteAvailable ?? false,
       machineName: machine?.machine.displayName,
     );
@@ -425,7 +685,26 @@ class _TerminalPageState extends State<TerminalPage>
   void _onNotifier() {
     if (!mounted) return;
     final facts = _readFacts();
-    if (facts == _facts) return;
+    // The session has just started taking input: a question read before it
+    // could has its raise decided now. See [_raiseForQuestion].
+    final accepts = facts.session?.acceptsInput ?? false;
+    if (accepts != _acceptedInput) {
+      _acceptedInput = accepts;
+      if (accepts) _raiseForQuestion();
+    }
+    // ⚠️ Checked BEFORE the equality bail below, not after. A take that ends where it began —
+    // `takenOver` again, because the other app answered first — moves no fact this page reads, so
+    // the bail would keep the band saying "Taking control…" over a page that had already been
+    // told no. See [_takeControl].
+    final settled =
+        _reclaiming != null &&
+        facts.status != TerminalSessionStatus.opening &&
+        facts.status != null;
+    if (settled) _reclaiming = null;
+    if (facts == _facts) {
+      if (settled) setState(() {});
+      return;
+    }
     setState(() => _facts = facts);
   }
 
@@ -433,6 +712,8 @@ class _TerminalPageState extends State<TerminalPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _lifecycle =
+        WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
     widget.notifier.addListener(_onNotifier);
   }
 
@@ -464,69 +745,89 @@ class _TerminalPageState extends State<TerminalPage>
   @override
   void dispose() {
     widget.notifier.removeListener(_onNotifier);
+    _questionWatcher?.removeListener(_onQuestionPane);
+    _questionWatcher?.dispose();
     _cancelSettle();
     _searchHoldTimer?.cancel();
     _chrome.dispose();
     _searchOpen.dispose();
+    // A sheet still open over a page that is going keeps the last dot it was given; its listener
+    // comes off when it closes, which a disposed notifier allows.
+    _actionsStatus.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
-  /// Opens the machine's new-agent form.
+  /// Hands [status] to the actions sheet's mark once this frame is done — see [_actionsStatus].
   ///
-  /// Awaited: the form may be backed out of rather than completed, and this page
-  /// gets no rebuild when it lands back on top.
-  Future<void> _newAgent() async {
-    await openNewAgent(context, widget.notifier, widget.machineId);
-    if (mounted) setState(() {});
+  /// The last build of a frame is the one handed over, and nothing is scheduled while the status
+  /// stands still.
+  void _publishActionsStatus(PhoneSummary status) {
+    final waiting = _nextActionsStatus != null;
+    if (!waiting && status == _actionsStatus.value) return;
+    _nextActionsStatus = status;
+    if (waiting) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final next = _nextActionsStatus;
+      _nextActionsStatus = null;
+      if (!mounted || next == null) return;
+      _actionsStatus.value = next;
+    });
   }
 
   /// Opens the account-wide agent list.
   ///
-  /// Awaited for the same reason [_newAgent] is: the list is backed out of as often as it is tapped
-  /// through, and this page gets no rebuild when it lands back on top.
+  /// Awaited: the list is backed out of as often as it is tapped through, and
+  /// this page gets no rebuild when it lands back on top.
   Future<void> _openAgentList() async {
     await Navigator.of(context)
         .push(phoneRoute((_) => AgentsListPage(notifier: widget.notifier)));
     if (mounted) setState(() {});
   }
 
-  /// Fades the search screen up over the terminal.
+  /// Brings the search sheet up over the terminal, reading the account's tabs
+  /// with its field not yet focused — see [TerminalSearchOverlay].
   ///
-  /// ⚠️ The overlay is mounted on THIS frame and the animation started on it,
-  /// so the field is there to take the keyboard as the screen opens. Mounting
-  /// at the end of the fade would land the caret a beat too late for a button
-  /// that was tapped to type in.
+  /// ⚠️ **The terminal is held from THIS frame, though no keyboard is coming
+  /// yet.** The sheet's field raises one the moment it is tapped, and by then
+  /// the terminal must already be ignoring it — see [_heldForSearch] for what
+  /// it does with that keyboard otherwise.
   void _openSearch() {
     if (_searching) return;
     _keyboardBeforeSearch = _keyboardIsUp;
     _keyboardUpAtSearch = _keyboardUp;
     _searchHoldTimer?.cancel();
+    // ⚠️ **Whatever holds the keys lets go of them.** The sheet opens with its
+    // field NOT focused, so nothing takes focus from the terminal the way the
+    // search once did by focusing itself — and a terminal on a hardware
+    // keyboard keeps its focus with no inset to show for it, so it would go on
+    // typing into the shell from under the dimming.
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _searching = true;
       _heldForSearch = true;
-      // ⚠️ Handed over, not left standing. The bar can be tapped with the
-      // terminal's own keyboard already up, and a claim still outstanding would
-      // race the search field for it the moment the inset ticks — the panel
-      // would win and the query would be typed into the shell.
+      // ⚠️ Handed over, not left standing. A claim still outstanding when the
+      // sheet opens would race the search field for the keyboard the moment
+      // the field raises one — the panel would win and the query would be
+      // typed into the shell.
       _keyboardRequested = false;
     });
     _searchOpen.forward();
   }
 
-  /// Collapses it back into the bar, and takes the overlay down once it is home.
+  /// Sends the sheet back down, and takes it down once it is gone.
   ///
-  /// ⚠️ **Guarded on the controller's own status, not on [_searching].** The
-  /// field's chevron and the system back gesture can both arrive while the reverse is already
-  /// running — a second `reverse()` restarts it from wherever it had got to, and
-  /// the bar visibly bounces.
+  /// ⚠️ **Guarded on the controller's own status, not on [_searching].** A tap
+  /// on the dimmed page, a pull on the sheet and the system back gesture can
+  /// all arrive while the reverse is already running — a second `reverse()`
+  /// restarts it from wherever it had got to, and the sheet visibly bounces.
   void _closeSearch() {
     if (!_searching || _searchOpen.status == AnimationStatus.reverse) return;
     // ⚠️ **The keyboard up now is the SEARCH field's, not the terminal's.** Its
     // inset set [_keyboardIsUp], and left standing, the terminal read that as
-    // its own the moment search came down — the chevron, Back or opening an agent
-    // brought up a keyboard nobody had asked the terminal for. Put away like a
-    // swipe's, unless the terminal had one up before search opened.
+    // its own the moment search came down — closing the sheet, Back or opening
+    // an agent brought up a keyboard nobody had asked the terminal for. Put
+    // away like a swipe's, unless the terminal had one up before search opened.
     if (!_keyboardBeforeSearch) dismissKeyboardForSwipe();
     _searchOpen.reverse().whenCompleteOrCancel(() {
       // A completed reverse is the only thing that unmounts the overlay; a
@@ -621,12 +922,76 @@ class _TerminalPageState extends State<TerminalPage>
     //
     // The flag belongs to [_armSettle] and [_endSettle] alone now; they know
     // about both clocks, and this method arms them like any other caller.
-    if (up == _keyboardUp && requested == _keyboardRequested) return;
+    // The bar itself can come and go under a live page — a switch from buttons
+    // to gestures in Settings, a rotation that moves it to the side — and
+    // nothing else here would notice: [_navigationBar] reads the view rather
+    // than a MediaQuery, so no rebuild follows the change on its own.
+    final bar = View.of(context).viewPadding.bottom;
+    final barMoved = bar != _lastViewPaddingBottom;
+    _lastViewPaddingBottom = bar;
+    if (up == _keyboardUp && requested == _keyboardRequested) {
+      if (barMoved) setState(() {});
+      return;
+    }
     setState(() {
       _keyboardUp = up;
       _keyboardRequested = requested;
     });
   }
+
+  /// Leaves the page as it was found: the keyboard the app went away with is the
+  /// keyboard it comes back to.
+  ///
+  /// ⚠️ **The restore cannot ride on `focused` alone.** [_shouldFocus] reads
+  /// [_keyboardIsUp], which the keyboard's own metrics tick clears — and whether
+  /// that tick lands before the process is frozen or after it is woken is
+  /// Android's business, not ours. Landing early, `focused` goes false and back
+  /// to true and the panel notices the change; landing late, `focused` was never
+  /// false, so there is no change for the panel to notice and the keyboard stays
+  /// away. [_focusRequest] covers both: it moves either way, and re-claiming a
+  /// connection that turned out to still be open is a no-op.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    final was = _lifecycle;
+    _lifecycle = state;
+    if (state != AppLifecycleState.resumed) {
+      // Only the step OUT of the foreground reads the keyboard — see [_lifecycle].
+      if (was == AppLifecycleState.resumed) {
+        // The search field's keyboard is not this page's to put back, and a
+        // page with something stacked over it is not the page being returned to.
+        _keyboardHeldForBackground =
+            !_heldForSearch && (_ownsInput || _keyboardRequested);
+      }
+      return;
+    }
+    if (!_keyboardHeldForBackground) return;
+    _keyboardHeldForBackground = false;
+    _restoreKeyboard();
+  }
+
+  /// The keyboard this page had before the app went away, asked for again.
+  void _restoreKeyboard() {
+    if (!mounted || !widget.isActive) return;
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
+    // Gone, detached or read-only while the app was away: a keyboard over it
+    // would be a keyboard that does nothing. See [_raiseKeyboardForQuestion].
+    final session = _readFacts().session;
+    if (session == null || !session.acceptsInput) return;
+    setState(() {
+      _keyboardRequested = true;
+      _focusRequest++;
+    });
+    // The key bar opens with it and the pane's height moves while it does — the
+    // same hold [_raiseKeyboard] takes. See [_armSettle].
+    _armSettle();
+  }
+
+  /// The window's own bottom inset as of the last metrics tick, in physical
+  /// pixels — see the note above on why it is watched. Starts at -1 rather than
+  /// 0 so a page that first hears from the platform with no bar at all is not
+  /// read as a page whose bar has just gone.
+  double _lastViewPaddingBottom = -1;
 
   /// Whether [TerminalPanel] should hold the input connection: while the
   /// keyboard is up, and while one is on its way — see [_keyboardRequested].
@@ -717,6 +1082,58 @@ class _TerminalPageState extends State<TerminalPage>
 
   /// [_keyBarUp] as of the last build, so a change to it can be spotted.
   bool _keyBarWasUp = false;
+
+  /// The strip at the foot of the window the terminal must stay out of:
+  /// Android's navigation BAR, and nothing else. Zero everywhere else, which is
+  /// what keeps the page edge to edge where there is nothing solid to clash
+  /// with.
+  ///
+  /// ⚠️ **A bar and a gesture handle are not the same inset, though both arrive
+  /// as `viewPadding.bottom`.** The handle is a hairline drawn ON the content —
+  /// output running under it still reads, and reserving a strip for it would
+  /// leave a band of window background under the newest line, which is the line
+  /// being read. A three-button bar is opaque chrome with targets in it: output
+  /// under THAT is gone, and a tap meant for the terminal ends the app. So the
+  /// height is what separates them — a handle is 24dp on every Android that
+  /// draws one, a bar is 48dp — and [_navigationBarMin] sits between the two.
+  /// (`Settings.Secure.navigation_mode` would say it outright, but it needs a
+  /// platform channel and a native class on both platforms to answer what one
+  /// number already answers.)
+  ///
+  /// ⚠️ **Zero while the keyboard is up**, which [_windowBottomInset] is where
+  /// this reads it: Android's IME inset already includes the bar — the keyboard
+  /// reserves that strip inside its own height and the bar is drawn over it —
+  /// and `PhoneShell`'s Scaffold has resized this page to sit above the whole
+  /// of it. Reserving it again here opened a band of background between the key
+  /// bar and the keyboard.
+  double get _navigationBar {
+    if (defaultTargetPlatform != TargetPlatform.android) return 0;
+    final inset = _windowBottomInset;
+    return inset >= _navigationBarMin ? inset : 0;
+  }
+
+  /// Between a 24dp gesture handle and a 48dp navigation bar — see
+  /// [_navigationBar].
+  static const double _navigationBarMin = 36;
+
+  /// The whole inset at the foot of the WINDOW — bar, gesture handle or home
+  /// indicator alike — for the chrome that wants to clear all three. The
+  /// terminal is the one thing that does not: see [_navigationBar].
+  ///
+  /// ⚠️ **Zero while the keyboard is up, and that is the whole point of it
+  /// being a getter.** `viewPadding` never moves for a keyboard — that is what
+  /// separates it from `viewInsets` — so read raw it still claims a bar's
+  /// height on a page the Scaffold has already cut off at the top of the
+  /// keyboard. Search read it that way and left a strip of terminal showing
+  /// between its last result and the keys.
+  ///
+  /// [View.of] rather than MediaQuery for the reason [didChangeMetrics] gives,
+  /// and its value is in PHYSICAL pixels.
+  double get _windowBottomInset {
+    if (_keyboardUp) return 0;
+    final view = View.of(context);
+    return view.viewPadding.bottom / view.devicePixelRatio;
+  }
 
   /// Starts the hold that covers [TerminalKeyBar]'s slide, if this build is the
   /// one that sets it going.
@@ -867,311 +1284,507 @@ class _TerminalPageState extends State<TerminalPage>
         !machine.agentsFromCache &&
         machine.agentLoadStatus == AgentLoadStatus.loaded;
     // Captured while the agent is still listed, for the sentence above.
-    if (agent != null) _cachedAgentName = agent.name;
-    final reclaim = phoneReclaimAction(session);
+    if (agent != null) _cachedAgentName = agent.displayName;
+    // A dead stream already on its way back: its machine is redialling, or this page has just
+    // asked for it. The header draws that as the wait it is — spinner on the mark, sweep along the
+    // rule — rather than as Disconnected beside a button. See [phoneSessionSummary].
+    //
+    // Never for an agent that is gone: nothing will reopen its stream, however the socket is doing.
+    final reconnecting =
+        !agentGone &&
+        (_reclaiming == _Reclaim.reconnect ||
+            (machine != null && phoneMachineRedialling(machine)));
+    final reclaim = phoneReclaimAction(session, reconnecting: reconnecting);
+    // Read-only either way — the terminal was never this pane's (a watcher) or was taken from it.
+    // `_AgentGone` owns the page when the agent itself is missing, so this stays out of its way.
+    final blocked =
+        !agentGone &&
+        session != null &&
+        (session.watching || session.status == TerminalSessionStatus.takenOver);
+    // The keys the pane's chrome offers and a phone cannot press — see
+    // [parseKeyHints], and [TerminalKeyBar.hints] for where they are drawn.
+    // Not on a pane that cannot type.
+    //
+    // ⚠️ **A queued Codex question is answered from here, and only here.** Its
+    // `shift+← to answer` is one of these keys; a band under the header that
+    // offered the same press was taken out — the one band up there is "Take
+    // control" ([_ControlBanner]), for a pane that cannot type at all.
+    final keyHints = agentGone || blocked || !(session?.acceptsInput ?? false)
+        ? const <KeyHint>[]
+        : _questionWatcher?.hints ?? const <KeyHint>[];
     final takerName = phoneTakerName(
       session,
       (id) => widget.notifier.stateOf(id)?.machine.displayName,
     );
     final takeoverNotice = phoneTakeoverNotice(session, takerName);
-    // Creating needs the machine to list its folders and name its engines,
-    // so one that is offline or still wants its password cannot host a new
-    // agent — the same gate the Agents tab puts on its fab.
-    final canCreate =
-        machine != null &&
-        phoneMachineStatusOf(machine) == PhoneMachineStatus.ready;
+    final holderName = phoneHolderName(
+      session,
+      (id) => widget.notifier.stateOf(id)?.machine.displayName,
+    );
+    final headerStatus = phoneSessionSummary(
+      session,
+      takerName: takerName,
+      reconnecting: reconnecting,
+    );
+    // The actions sheet draws the same dot beside the agent's name, and is not rebuilt by this
+    // page — see [_actionsStatus].
+    _publishActionsStatus(headerStatus);
+    // Read this page's own buffer for a dialog, and raise the keyboard when one
+    // appears. Must run on every build: the session arrives a frame or two
+    // after the page, and the engine with the agent.
+    //
+    // ⚠️ **The buffer is the only source there is on a phone.** The daemon
+    // already detects the same dialog and publishes `commander_question`, but
+    // that frame goes out device-and-loopback only — a phone attached over the
+    // relay never receives it. See [QuestionPaneWatcher].
+    _syncQuestionWatcher(agent?.engine, session);
+    // Read once: the body reserves it, and search subtracts what the body
+    // already took. See [_navigationBar].
+    final navigationBar = _navigationBar;
     return Scaffold(
       backgroundColor: AppPalette.windowBg,
       // ⚠️ No fab. New agent is the `+` in the header — see the note there.
       // A Scaffold fab floats over the body, and the body here is the
       // terminal: it covered the newest line of output, which on a page
       // that streams is the line being read.
-      // ⚠️ Plain `SafeArea`. A `bottom: !keyboardUp` toggle was here,
-      // computed from `MediaQuery.viewInsetsOf(context).bottom > 0` — and
-      // that value is pinned at ZERO inside this page (see
-      // [didChangeMetrics]). The toggle therefore never toggled.
-      body: SafeArea(
-        child: Stack(
-          children: [
-            // ⚠️ The terminal is FADED, never unbuilt, while search is
-            // open. Taking it down would detach the pane and drop the
-            // scrollback; cancelling has to hand back the same screen that
-            // was there, mid-stream.
-            //
-            // ⚠️ **The header is NOT inside the fade, on purpose.** The
-            // overlay's bar sits exactly on top of this one and has to read
-            // as the same object growing — fading this one out underneath
-            // it made the row flicker on every open, which is the opposite
-            // of what the expansion is for.
-            // ⚠️ **Held at its height while search is open.** The search
-            // field's keyboard shrinks this page like any other; followed,
-            // the terminal shrank under the search and grew back through it
-            // as it faded out — the flash seen on every close. Nothing here
-            // is on screen while search covers it, so nothing here moves.
-            HeldHeight(
-              hold: _heldForSearch,
-              child: Column(
-                children: [
-                  Expanded(
-                    // ⚠️ The mic floats INSIDE this box, over the terminal
-                    // — not over the whole page. Stacked any higher it
-                    // would hang over the key bar while the keyboard is
-                    // up, which is the one row the thumb is working.
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          // ⚠️ The chrome is driven from OUT HERE, not
-                          // from inside the panel. xterm's own
-                          // [Scrollable] is several widgets down and is
-                          // remounted whenever the agent changes;
-                          // listening for its notifications as they
-                          // bubble past is what survives that, and costs
-                          // the panel no knowledge of the page's chrome.
-                          child: NotificationListener<ScrollNotification>(
-                            onNotification: _chrome.onNotification,
-                            child: agentGone
-                                ? _AgentGone(
-                                    name: _cachedAgentName,
-                                    onPickAnother: _pickAnotherAgent,
-                                  )
-                                : pane == null || session == null
-                                ? const _Attaching()
-                                : TerminalPanel(
-                                    key: ValueKey(pane.id),
-                                    notifier: widget.notifier,
-                                    session: session,
-                                    // Only the page on screen takes the keyboard — see
-                                    // [TerminalPage.isActive]. `visible` is the same answer for the
-                                    // panel's other half: a page parked beside this one releases
-                                    // focus, stops rendering and stops resizing its remote shell.
-                                    //
-                                    // Whether it also HOLDS one that is already
-                                    // up is a separate question, and the pager asks
-                                    // it on every swipe — see [_shouldFocus].
-                                    focused: _shouldFocus,
-                                    visible: widget.isActive,
-                                    // Hold the remote resize while the keyboard
-                                    // slides. Separate from `visible` because this
-                                    // must NOT release focus — the animation being
-                                    // waited on is the one that focus started.
-                                    //
-                                    // The keyboard is the only thing left that
-                                    // moves this pane's height: the header slides
-                                    // OVER the terminal rather than out of its
-                                    // column — see [_SlideAway].
-                                    //
-                                    // ⚠️ Held for as long as search is open, too:
-                                    // its keyboard is typing a query over a faded
-                                    // terminal, and resizing the agent's shell for
-                                    // it redrew the whole TUI on the way in and
-                                    // again on the way out.
-                                    settling:
-                                        _keyboardSettling || _heldForSearch,
-                                    // ⚠️ The tap is taken in the panel, not by a
-                                    // `Listener` over it. xterm's own `_onTapDown`
-                                    // calls `requestKeyboard()`, so anything that
-                                    // merely ALSO reacted to the tap would raise
-                                    // the keyboard before the words said were typed
-                                    // into the prompt — and a re-armed claim on top
-                                    // of it was measured asking Android twice per
-                                    // tap, which answers a show mid-animation by
-                                    // cancelling and restarting it. Null while the
-                                    // keyboard is up or coming, so the tap is
-                                    // xterm's and the keyboard stays.
-                                    onInputTap: _shouldFocus
-                                        ? null
-                                        : () => unawaited(
-                                            _raiseKeyboard(session),
-                                          ),
-                                    showHeader: false,
-                                    // No composer, and so no grip above it: the
-                                    // page hands the pane its full height and the
-                                    // software keyboard drives the terminal
-                                    // directly. The mic's send is what kept the
-                                    // composer's batched turn.
+      // ⚠️ **`bottom: false`, top left on.** The two edges are not the same
+      // problem. At the bottom the inset reserved a strip of window background
+      // under the newest line of output — the line being read — so it is off
+      // and the home indicator floats over the terminal's own last row. At the
+      // top the status bar sits where the header sits, and the header is
+      // chrome: that inset is what keeps its row clear of the clock, so it
+      // stays.
+      //
+      // A `bottom: !keyboardUp` toggle lived here once, computed from
+      // `MediaQuery.viewInsetsOf(context).bottom > 0`; that value is pinned at
+      // ZERO inside this page (see [didChangeMetrics]), so the toggle never
+      // toggled. Off outright now — with the keyboard up the inset is under the
+      // keyboard anyway.
+      //
+      // ⚠️ **`removePadding` around it, and this one is not cosmetic.** A
+      // `SafeArea` only clears the edges it APPLIES, so `bottom: false` leaves
+      // the bottom inset sitting in the MediaQuery it hands down — and xterm
+      // reads exactly that value as the terminal's own padding
+      // (`TerminalView.build`: `padding: MediaQuery.of(context).padding`). The
+      // pane was therefore 812px tall while its renderer sized rows, scroll
+      // extent and viewport dimension for 778, and a `Scrollable` told a
+      // viewport height its box does not have re-corrects its offset every
+      // frame: the terminal ran a layout loop and the page juddered. Cleared
+      // here, the inset reaches nothing below — which is the whole intent of
+      // turning it off.
+      body: Stack(
+        children: [
+          // ⚠️ **What gives this Stack the window's height instead of the
+          // page's.** A Stack is as tall as its tallest NON-POSITIONED child,
+          // and that child is the column below — whose terminal is frozen at
+          // the height it had when search opened (see [HeldHeight]). With a
+          // keyboard up at that moment the column is a keyboard shorter than
+          // the screen, so the search sheet, laid over this Stack, was clipped
+          // to a box that ended a keyboard's height above the bottom: it drew
+          // at the top of the screen with a band of empty page under it, long
+          // after the keyboard had gone.
+          //
+          // An empty box that asks for everything is enough. It paints nothing
+          // and takes no hits; it only stops the Stack from inheriting a height
+          // that belongs to something being deliberately held still.
+          const SizedBox.expand(),
+          MediaQuery.removePadding(
+            context: context,
+            removeBottom: true,
+            child: SafeArea(
+              bottom: false,
+              // ⚠️ **The one bottom inset that IS taken back, by hand rather than
+              // through the MediaQuery the lines above strip.** Android's
+              // navigation bar is opaque chrome with targets in it, so the page
+              // ends above it; a gesture handle or a home indicator is not, and
+              // this is zero there — see [_navigationBar]. Padding the box rather
+              // than restoring the inset is deliberate: xterm reads
+              // `MediaQuery.padding` as its own and would size rows for a height
+              // its box does not have, which is the layout loop the note above
+              // describes.
+              child: Padding(
+                padding: EdgeInsets.only(bottom: navigationBar),
+                child: Stack(
+                  children: [
+                    // ⚠️ The terminal is FADED, never unbuilt, while search is
+                    // open. Taking it down would detach the pane and drop the
+                    // scrollback; cancelling has to hand back the same screen that
+                    // was there, mid-stream.
+                    //
+                    // ⚠️ **The header is NOT inside the fade, on purpose.** The
+                    // overlay's bar sits exactly on top of this one and has to read
+                    // as the same object growing — fading this one out underneath
+                    // it made the row flicker on every open, which is the opposite
+                    // of what the expansion is for.
+                    // ⚠️ **Held at its height while search is open.** The search
+                    // field's keyboard shrinks this page like any other; followed,
+                    // the terminal shrank under the search and grew back through it
+                    // as it faded out — the flash seen on every close. Nothing here
+                    // is on screen while search covers it, so nothing here moves.
+                    HeldHeight(
+                      hold: _heldForSearch,
+                      child: Column(
+                        children: [
+                          Expanded(
+                            // ⚠️ The mic floats INSIDE this box, over the terminal
+                            // — not over the whole page. Stacked any higher it
+                            // would hang over the key bar while the keyboard is
+                            // up, which is the one row the thumb is working.
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  // ⚠️ The chrome is driven from OUT HERE, not
+                                  // from inside the panel. xterm's own
+                                  // [Scrollable] is several widgets down and is
+                                  // remounted whenever the agent changes;
+                                  // listening for its notifications as they
+                                  // bubble past is what survives that, and costs
+                                  // the panel no knowledge of the page's chrome.
+                                  child:
+                                      NotificationListener<ScrollNotification>(
+                                        onNotification: _chrome.onNotification,
+                                        child: agentGone
+                                            ? _AgentGone(
+                                                name: _cachedAgentName,
+                                                onPickAnother:
+                                                    _pickAnotherAgent,
+                                              )
+                                            : pane == null || session == null
+                                            ? _Attaching(key: _skeletonKey)
+                                            : TerminalPanel(
+                                                key: ValueKey(pane.id),
+                                                notifier: widget.notifier,
+                                                session: session,
+                                                // Only the page on screen takes the keyboard — see
+                                                // [TerminalPage.isActive]. `visible` is the same answer for the
+                                                // panel's other half: a page parked beside this one releases
+                                                // focus, stops rendering and stops resizing its remote shell.
+                                                //
+                                                // Whether it also HOLDS one that is already
+                                                // up is a separate question, and the pager asks
+                                                // it on every swipe — see [_shouldFocus].
+                                                focused: _shouldFocus,
+                                                // Asks again when `focused` did
+                                                // not move — coming back from
+                                                // another app. See
+                                                // [didChangeAppLifecycleState].
+                                                focusRequest: _focusRequest,
+                                                visible: widget.isActive,
+                                                // Hold the remote resize while the keyboard
+                                                // slides. Separate from `visible` because this
+                                                // must NOT release focus — the animation being
+                                                // waited on is the one that focus started.
+                                                //
+                                                // The keyboard is the only thing left that
+                                                // moves this pane's height: the header slides
+                                                // OVER the terminal rather than out of its
+                                                // column — see [_SlideAway].
+                                                //
+                                                // ⚠️ Held for as long as search is open, too:
+                                                // its keyboard is typing a query over a faded
+                                                // terminal, and resizing the agent's shell for
+                                                // it redrew the whole TUI on the way in and
+                                                // again on the way out.
+                                                settling:
+                                                    _keyboardSettling ||
+                                                    _heldForSearch,
+                                                // ⚠️ The tap is taken in the panel, not by a
+                                                // `Listener` over it. xterm's own `_onTapDown`
+                                                // calls `requestKeyboard()`, so anything that
+                                                // merely ALSO reacted to the tap would raise
+                                                // the keyboard before the words said were typed
+                                                // into the prompt — and a re-armed claim on top
+                                                // of it was measured asking Android twice per
+                                                // tap, which answers a show mid-animation by
+                                                // cancelling and restarting it. Null while the
+                                                // keyboard is up or coming, so the tap is
+                                                // xterm's and the keyboard stays.
+                                                //
+                                                // ⚠️ A tap on a pane that cannot take input
+                                                // asks for the TERMINAL, not the keyboard:
+                                                // raising one over a read-only pane offers
+                                                // a prompt that silently swallows every
+                                                // letter. The band above says why, so the
+                                                // tap takes the person to its button. See
+                                                // [_ControlBanner].
+                                                onInputTap: blocked
+                                                    ? () => unawaited(
+                                                        _takeControl(),
+                                                      )
+                                                    : _shouldFocus
+                                                    ? null
+                                                    : () => unawaited(
+                                                        _raiseKeyboard(session),
+                                                      ),
+                                                showHeader: false,
+                                                // No composer, and so no grip above it: the
+                                                // page hands the pane its full height and the
+                                                // software keyboard drives the terminal
+                                                // directly. The mic's send is what kept the
+                                                // composer's batched turn.
+                                              ),
+                                      ),
+                                ),
+                                // ⚠️ **The skeleton is laid OVER the live panel, not
+                                // swapped in for it, and that is not a stylistic
+                                // choice.** [TerminalPanel.initState] calls
+                                // `session.attachViewport`, which is how the machine
+                                // learns how many rows and columns to draw; a page
+                                // that showed a skeleton INSTEAD would leave the
+                                // session with no viewport, and the first keyframe
+                                // would arrive sized for nothing.
+                                //
+                                // So the panel mounts, measures and resizes as always,
+                                // and this covers the empty emulator buffer it paints
+                                // meanwhile. `session == null` upstream keeps its own
+                                // branch for the frames before a session exists at all.
+                                //
+                                // ⚠️ **This is also the bug that made the skeleton
+                                // invisible.** The only gate used to be `session ==
+                                // null`, and `selectAgent` creates the pane and the
+                                // session in one frame — so the branch above was
+                                // essentially never taken, and what a person actually
+                                // waited in front of was a mounted terminal with an
+                                // empty buffer: a black rectangle, for as long as the
+                                // keyframe took.
+                                //
+                                // ⚠️ **A page on a terminal another app holds still
+                                // renders.** It attaches as a WATCHER — live output,
+                                // no typing (see [TerminalSession.watching]) — so the
+                                // keyframe this covers arrives exactly as it does for
+                                // any other page, and nothing here needs to know the
+                                // difference. The header says who has it and offers
+                                // "Take control"; the body is the terminal.
+                                if (session != null &&
+                                    !session.hasRenderedFrame)
+                                  Positioned.fill(
+                                    child: _Attaching(key: _skeletonKey),
                                   ),
+                                // The mic and Search, floating in the
+                                // terminal's bottom-right corner — see
+                                // [TerminalActionColumn].
+                                //
+                                // ⚠️ Hidden while this page owns the keyboard.
+                                // Typing is the other way of saying what the mic
+                                // says, the key bar is already under the thumb, and
+                                // a column floating over the prompt being typed into
+                                // would be in the way of both.
+                                // ⚠️ **Search stays while the keyboard is up; the
+                                // mic goes.** Typing says what the mic says, so
+                                // with a keyboard on screen the two are one
+                                // errand and the key bar is already under the
+                                // thumb. Search is not: another harness, another
+                                // machine, and nothing on the key bar reaches
+                                // them — so hiding the column whole meant
+                                // putting the keyboard away first just to look
+                                // something up.
+                                //
+                                // It moves to the TOP of the pane rather than
+                                // staying put. Down here it floats over the
+                                // prompt being typed into, which is exactly
+                                // what the keyboard is for; up there it covers
+                                // the oldest rows on screen.
+                                Positioned(
+                                  right: TerminalActionColumn.inset,
+                                  top: _ownsInput
+                                      ? TerminalActionColumn.topInset
+                                      : null,
+                                  bottom: _ownsInput
+                                      ? null
+                                      : TerminalActionColumn.bottomInset,
+                                  child: TerminalActionColumn(
+                                    voice: widget.voice,
+                                    session: session,
+                                    onSearch: _openSearch,
+                                    searchOnly: _ownsInput,
+                                    unread: widget.notifier.agentNotices.unread,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        // ⚠️ **The skeleton is laid OVER the live panel, not
-                        // swapped in for it, and that is not a stylistic
-                        // choice.** [TerminalPanel.initState] calls
-                        // `session.attachViewport`, which is how the machine
-                        // learns how many rows and columns to draw; a page
-                        // that showed a skeleton INSTEAD would leave the
-                        // session with no viewport, and the first keyframe
-                        // would arrive sized for nothing.
-                        //
-                        // So the panel mounts, measures and resizes as always,
-                        // and this covers the empty emulator buffer it paints
-                        // meanwhile. `session == null` upstream keeps its own
-                        // branch for the frames before a session exists at all.
-                        //
-                        // ⚠️ **This is also the bug that made the skeleton
-                        // invisible.** The only gate used to be `session ==
-                        // null`, and `selectAgent` creates the pane and the
-                        // session in one frame — so the branch above was
-                        // essentially never taken, and what a person actually
-                        // waited in front of was a mounted terminal with an
-                        // empty buffer: a black rectangle, for as long as the
-                        // keyframe took.
-                        if (session != null && !session.hasRenderedFrame)
-                          const Positioned.fill(child: _Attaching()),
-                        // The mic, Search and New agent, floating in the
-                        // terminal's bottom-right corner — see
-                        // [TerminalActionColumn].
-                        //
-                        // ⚠️ Hidden while this page owns the keyboard.
-                        // Typing is the other way of saying what the mic
-                        // says, the key bar is already under the thumb, and
-                        // a column floating over the prompt being typed into
-                        // would be in the way of both.
-                        if (!_ownsInput)
-                          Positioned(
-                            right: TerminalActionColumn.inset,
-                            bottom: TerminalActionColumn.bottomInset,
-                            child: TerminalActionColumn(
-                              voice: widget.voice,
+                          // The bottom of this page IS just above the keyboard:
+                          // `PhoneShell`'s Scaffold has already resized for it —
+                          // the same resize that empties this page's MediaQuery
+                          // insets (see [didChangeMetrics]).
+                          if (session != null)
+                            TerminalInputDock(
                               session: session,
-                              onSearch: _openSearch,
-                              onNewAgent: canCreate
-                                  ? () => unawaited(_newAgent())
+                              keyboardUp: _keyBarUp,
+                              onDismiss: _dismissInput,
+                              // A dialog the watcher can read is open: the
+                              // strip offers Enter for it. See
+                              // [TerminalKeyBar.questionOpen].
+                              questionOpen: _questionWatcher?.view != null,
+                              hints: keyHints,
+                              // Only where the far side can actually take one: an
+                              // older CLI never advertises the binary kind, so the
+                              // upload would go nowhere silently. Null leaves the
+                              // buttons undrawn rather than drawn dead.
+                              onPickImage:
+                                  machine?.terminalImagePasteAvailable == true
+                                  ? () => unawaited(
+                                      _sendImage(session, ImageSource.gallery),
+                                    )
                                   : null,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  // The bottom of this page IS just above the keyboard:
-                  // `PhoneShell`'s Scaffold has already resized for it —
-                  // the same resize that empties this page's MediaQuery
-                  // insets (see [didChangeMetrics]).
-                  if (session != null)
-                    TerminalInputDock(
-                      session: session,
-                      keyboardUp: _keyBarUp,
-                      onDismiss: _dismissInput,
-                      // Only where the far side can actually take one: an
-                      // older CLI never advertises the binary kind, so the
-                      // upload would go nowhere silently. Null leaves the
-                      // buttons undrawn rather than drawn dead.
-                      onPickImage: machine?.terminalImagePasteAvailable == true
-                          ? () => unawaited(
-                              _sendImage(session, ImageSource.gallery),
-                            )
-                          : null,
-                      onTakePhoto: machine?.terminalImagePasteAvailable == true
-                          ? () => unawaited(
-                              _sendImage(session, ImageSource.camera),
-                            )
-                          : null,
-                    ),
-                ],
-              ),
-            ),
-            // The header, laid OVER the terminal rather than above it in the
-            // column.
-            //
-            // ⚠️ **Over, not beside, and that is what keeps scrolling smooth.**
-            // It used to shrink out of the column and hand its height to the
-            // terminal. Every fold then changed the terminal's row count: a
-            // `terminal_resize` and a real SIGWINCH on the far machine, a
-            // keyframe back carrying up to 500 lines of history to re-parse on
-            // this thread, and the agent's whole screen redrawn — once as the
-            // header left, once as it came back, on every change of scroll
-            // direction. The renderer was held frozen for each slide on top of
-            // that, so a fling stopped dead for a third of a second.
-            //
-            // Laid over, the terminal keeps one height whatever the header
-            // does. The rows under it are the oldest on the screen, and the
-            // first push of a scroll is what slides it away from them.
-            //
-            // Nothing stands in for it while it is gone: `⋯` comes back with
-            // the header on the first scroll the other way.
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: _SlideAway(
-                progress: _chrome.header,
-                // Opaque: the terminal is underneath now, and the row has to
-                // read as the same bar it was when the two were stacked.
-                child: ColoredBox(
-                  color: AppPalette.windowBg,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      TerminalHeader(
-                        agent: agent,
-                        status: phoneSessionSummary(
-                          session,
-                          takerName: takerName,
-                        ),
-                        trailing: [
-                          // Read-only is a state to get OUT of, so its way
-                          // out is a labelled button in the header rather
-                          // than a line in the actions sheet: the sheet is
-                          // where you go having decided to do something,
-                          // and this is the thing telling you that typing
-                          // will go nowhere until you do.
-                          // While the strip below says who took over, its
-                          // button is the way back; two "Take control" a
-                          // finger apart would be noise.
-                          if (reclaim != null && takeoverNotice == null)
-                            _ReclaimButton(
-                              action: reclaim,
-                              onPressed: () => widget.notifier.selectAgent(
-                                widget.machineId,
-                                widget.agentId,
-                              ),
-                            ),
-                          // Null while the agent is not loaded: there is
-                          // nothing to act on yet, and a menu of actions
-                          // that all fail is worse than no menu.
-                          if (agent != null)
-                            _HeaderAction(
-                              icon: LucideIcons.ellipsis300,
-                              size: 21,
-                              tooltip: 'Agent actions',
-                              // Last in the row, so its padding stops at
-                              // the header's own right inset.
-                              last: true,
-                              onPressed: () => _showActions(
-                                machineName: machine?.machine.displayName ?? '',
-                                agentName: agent.name,
-                                project: agent.project,
-                              ),
+                              onTakePhoto:
+                                  machine?.terminalImagePasteAvailable == true
+                                  ? () => unawaited(
+                                      _sendImage(session, ImageSource.camera),
+                                    )
+                                  : null,
                             ),
                         ],
                       ),
-                      Divider(height: 1, color: AppGlass.hair),
-                      // The desktop's "took control" band, at phone size: a
-                      // status dot alone is easy to miss, and the person is
-                      // about to wonder why typing does nothing.
-                      if (takeoverNotice != null)
-                        _TakeoverStrip(
-                          notice: takeoverNotice,
-                          onTakeControl: () => widget.notifier.selectAgent(
-                            widget.machineId,
-                            widget.agentId,
+                    ),
+                    // The header, laid OVER the terminal rather than above it in the
+                    // column.
+                    //
+                    // ⚠️ **Over, not beside, and that is what keeps scrolling smooth.**
+                    // It used to shrink out of the column and hand its height to the
+                    // terminal. Every fold then changed the terminal's row count: a
+                    // `terminal_resize` and a real SIGWINCH on the far machine, a
+                    // keyframe back carrying up to 500 lines of history to re-parse on
+                    // this thread, and the agent's whole screen redrawn — once as the
+                    // header left, once as it came back, on every change of scroll
+                    // direction. The renderer was held frozen for each slide on top of
+                    // that, so a fling stopped dead for a third of a second.
+                    //
+                    // Laid over, the terminal keeps one height whatever the header
+                    // does. The rows under it are the oldest on the screen, and the
+                    // first push of a scroll is what slides it away from them.
+                    //
+                    // Nothing stands in for it while it is gone: `⋯` comes back with
+                    // the header on the first scroll the other way.
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: _SlideAway(
+                        progress: _chrome.header,
+                        // Opaque: the terminal is underneath now, and the row has to
+                        // read as the same bar it was when the two were stacked.
+                        child: ColoredBox(
+                          color: AppPalette.windowBg,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              TerminalHeader(
+                                agent: agent,
+                                status: headerStatus,
+                                machineName: machine?.machine.displayName,
+                                trailing: [
+                                  // Read-only is a state to get OUT of, so its way
+                                  // out is a labelled button in the header rather
+                                  // than a line in the actions sheet: the sheet is
+                                  // where you go having decided to do something,
+                                  // and this is the thing telling you that typing
+                                  // will go nowhere until you do.
+                                  // ⚠️ **Not while the band is up.** The band below
+                                  // carries the same words and the same button, a
+                                  // finger's width under this one, and two "Take
+                                  // control"s stacked read as two different offers.
+                                  // The band is the better of the two — it says WHY
+                                  // typing stopped, and by whom — so this one gives
+                                  // way to it.
+                                  //
+                                  // Kept for the states the band does not cover:
+                                  // "Reconnect", for a stream that died with nobody
+                                  // else involved. See [_ControlBanner]. Gone while
+                                  // that stream is already coming back — see
+                                  // `reconnecting` above.
+                                  if (reclaim != null &&
+                                      !blocked &&
+                                      _reclaiming == null)
+                                    _ReclaimButton(
+                                      action: reclaim,
+                                      // The same call the band's button makes — see
+                                      // [_takeControl].
+                                      onPressed: () =>
+                                          unawaited(_takeControl()),
+                                    ),
+                                  // ⚠️ **No tabs mark here.** The account's tabs
+                                  // are the first thing the floating Search button
+                                  // opens, above the thumb — see
+                                  // [TerminalSearchOverlay] — and a mark up here
+                                  // for the same panel was a second door to it.
+                                  // Null while the agent is not loaded: there is
+                                  // nothing to act on yet, and a menu of actions
+                                  // that all fail is worse than no menu.
+                                  if (agent != null)
+                                    TerminalHeaderAction(
+                                      // Stood up, not laid flat: three dots in a
+                                      // column is the narrower mark AND the one a
+                                      // phone means by "more actions", so it reads
+                                      // as a menu rather than as a truncation.
+                                      icon: LucideIcons.ellipsisVertical300,
+                                      size: 21,
+                                      tooltip: 'Harness actions',
+                                      // Last in the row, so its padding stops at
+                                      // the header's own right inset.
+                                      last: true,
+                                      onPressed: () => _showActions(
+                                        machineName:
+                                            machine?.machine.displayName ?? '',
+                                        agent: agent,
+                                        status: headerStatus,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              // The hairline, carrying a sweep while the header
+                              // reads as a wait — Attaching, Resyncing,
+                              // Reconnecting. See [TerminalHeaderRule].
+                              TerminalHeaderRule(
+                                busy: headerStatus.tone == PhoneTone.busy,
+                              ),
+                              // ⚠️ Inside the header's own slide, not under it: the two are one bar as far
+                              // as a scroll is concerned, and a band left behind while the header left
+                              // would sit on the output with nothing above it.
+                              //
+                              // Up for a take in flight, not for a reconnect: that one is the header's
+                              // own wait, and a band over it said "Taking control…" of a stream nobody
+                              // else held. See [_reclaiming].
+                              if (blocked || _reclaiming == _Reclaim.control)
+                                _ControlBanner(
+                                  watching: session?.watching ?? false,
+                                  busy: !blocked,
+                                  takeoverNotice: takeoverNotice,
+                                  holderName: holderName,
+                                  onTakeControl: _takeControl,
+                                ),
+                            ],
                           ),
                         ),
-                    ],
-                  ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
-            // Search, faded up over the whole page. Only built while it is
-            // on its way in, up, or on its way out — see [_searching].
-            if (_searching)
-              Positioned.fill(
-                child: TerminalSearchOverlay(
-                  notifier: widget.notifier,
-                  animation: _searchCurve,
-                  onClose: _closeSearch,
-                ),
+          ),
+          // The search sheet, up from the bottom edge over the whole page —
+          // built from the first frame of its way up to the last of its way
+          // down, and not otherwise. See [_searching].
+          //
+          // ⚠️ **Out here, beside the insets rather than inside them.** It is a
+          // sheet over the page, and the page includes the strip under the
+          // status bar: laid inside the `SafeArea`, the dimming would stop at
+          // the header and leave the clock on a bright band above a darkened
+          // screen. Its foot runs under the home indicator the same way, and it
+          // is TOLD that inset rather than reading it — the body strips it from
+          // the MediaQuery (see the note on `removePadding` above).
+          if (_searching)
+            Positioned.fill(
+              child: TerminalSearchOverlay(
+                notifier: widget.notifier,
+                showing: (machineId: widget.machineId, agentId: widget.agentId),
+                animation: _searchCurve,
+                bottomInset: _windowBottomInset,
+                onClose: _closeSearch,
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     );
   }
@@ -1222,24 +1835,48 @@ class _TerminalPageState extends State<TerminalPage>
 
   void _showActions({
     required String machineName,
-    required String agentName,
-    AgentProject? project,
+    required Agent agent,
+    required PhoneSummary status,
   }) {
+    // Set here, where no build is running, so the sheet opens on the dot the header shows now
+    // rather than on whatever the last frame handed over. See [_actionsStatus].
+    _actionsStatus.value = status;
+    final agentName = agent.displayName;
     showPhoneSheet(
       context,
       title: '$agentName · $machineName',
-      // The agent, then where it runs — machine, folder with its parent, branch — one line each
-      // behind its icon. The header has no room for the path.
+      // The agent, then where it runs — the machine, then the folder with its parent beside the
+      // branch — each behind its icon. The header has no room for the path.
       titleParts: [agentName],
-      titleDetail: AgentPlaceLines(machineName: machineName, project: project),
-      // Two groups: what acts on THIS agent, and the screens the app itself has. Each of those is a
-      // door rather than a list of its own — the lists belong on the pages behind them, where they
-      // have room for every row and do not push the rest of this sheet down.
+      // The engine mark carrying the header's own dot: the sheet's anchor, and the same picture of
+      // this agent the header draws above it. The ring is the sheet's ground, which the dot is
+      // notched out of.
+      titleLeading: ValueListenableBuilder<PhoneSummary>(
+        valueListenable: _actionsStatus,
+        builder: (context, status, _) {
+          AppTheme.watch(context);
+          return BadgedEngineMark(
+            agent: agent,
+            status: status,
+            ring: AppPalette.panelBg,
+            size: 40,
+          );
+        },
+      ),
+      titleDetail: AgentPlaceLines(
+        machineName: machineName,
+        project: agent.project,
+      ),
+      // Three cards: what acts on THIS agent, the screens the app itself has, and — alone at the
+      // end — the one act that cannot be undone. No caption over the first: the name above it
+      // already says which harness its rows act on, which is also why they no longer repeat
+      // "Harness" in their labels.
+      //
+      // Each screen is a door rather than a list of its own — the lists belong on the pages behind
+      // them, where they have room for every row and do not push the rest of this sheet down. The
+      // chevron is what tells a door from an action.
       sections: [
-        PhoneSheetSection(
-          caption: 'Agent',
-          actions: [..._agentActions(agentName)],
-        ),
+        PhoneSheetSection(actions: _agentActions(agent)),
         PhoneSheetSection(
           caption: 'App',
           actions: [
@@ -1251,12 +1888,14 @@ class _TerminalPageState extends State<TerminalPage>
             // longer than a screenful.
             PhoneSheetAction(
               icon: LucideIcons.squareTerminal300,
-              label: 'Agents',
+              label: 'Harnesses',
+              chevron: true,
               onTap: () => unawaited(_openAgentList()),
             ),
             PhoneSheetAction(
               icon: LucideIcons.laptopMinimal300,
               label: 'Machines',
+              chevron: true,
               onTap: () => Navigator.of(context).push(
                 phoneRoute(
                   (_) => MachinesTab(notifier: widget.notifier, large: false),
@@ -1266,6 +1905,7 @@ class _TerminalPageState extends State<TerminalPage>
             PhoneSheetAction(
               icon: LucideIcons.settings300,
               label: 'Settings',
+              chevron: true,
               onTap: () => Navigator.of(context).push(
                 phoneRoute(
                   (_) => SettingsPage(notifier: widget.notifier, large: false),
@@ -1274,50 +1914,121 @@ class _TerminalPageState extends State<TerminalPage>
             ),
           ],
         ),
+        PhoneSheetSection(actions: [_stopAction(agent)]),
       ],
     );
   }
 
-  List<PhoneSheetAction> _agentActions(String agentName) => [
+  /// What acts on this agent and can be taken back — the first card of its sheet.
+  List<PhoneSheetAction> _agentActions(Agent agent) => [
+    // Where this agent runs, above the actions that act ON it: the desktop
+    // keeps it in the pane header, and this sheet is the phone's pane header.
+    //
+    // Offered only on the engines whose switching has been driven end to end
+    // (see [modelSheetSupports]) — a row that looks like a choice and may not
+    // be one costs an agent answering on a model nobody asked for.
+    if (modelSheetSupports(agent.engine))
+      PhoneSheetAction(
+        icon: LucideIcons.cpu300,
+        label: 'Model',
+        // The model the agent is on now, so the sheet is worth opening only
+        // when somebody means to change it. A grid model is named; its own
+        // login is the engine's name, which is the word the sheet uses too.
+        value:
+            agent.gridModel ??
+            engineIdentity(
+              agent.engine,
+              displayName: agent.engineDisplayName,
+            ).label,
+        // A picker of its own, so it ends on the chevron a Settings row with a
+        // value does.
+        chevron: true,
+        onTap: () => unawaited(
+          showAgentModelSheet(
+            context,
+            widget.notifier,
+            machineId: widget.machineId,
+            agentId: widget.agentId,
+          ),
+        ),
+      ),
     PhoneSheetAction(
       icon: LucideIcons.pencil300,
-      label: 'Rename agent…',
+      label: 'Rename…',
       onTap: () => showAgentRenameDialog(
         context,
         widget.notifier,
         widget.machineId,
         widget.agentId,
-        agentName,
+        agent.name,
       ),
     ),
     PhoneSheetAction(
       icon: LucideIcons.refreshCw300,
-      label: 'Restart agent',
+      label: 'Restart',
       onTap: () => unawaited(_restart()),
     ),
-    // Last, and alone in red: the two above are recoverable and this one is
-    // not, so it does not sit where a thumb lands on the way to them.
-    //
-    // ⚠️ Nothing here pops this page. Deleting detaches the pane, and the
-    // `_hadPane` branch above leaves on its own when that happens — the same
-    // path a delete from the list, or from the desktop, already takes. A pop
-    // here would be a second one, and the parked pages in this pager share
-    // the route.
-    PhoneSheetAction(
-      icon: LucideIcons.trash2300,
-      label: 'Delete agent…',
-      destructive: true,
-      onTap: () => unawaited(
-        confirmDeleteAgent(
-          context,
-          widget.notifier,
-          widget.machineId,
-          widget.agentId,
-          agentName,
-        ),
+  ];
+
+  /// Stopping the agent: the last card of its sheet, alone.
+  ///
+  /// Alone and in red because everything above it is recoverable and this is not, so it does not
+  /// sit where a thumb lands on the way to them. The label keeps "Harness" where the others dropped
+  /// it: a bare "Stop" in a terminal reads as stopping the reply that is running, and the list's
+  /// own sheet and the desktop say it this way too.
+  ///
+  /// ⚠️ Nothing here pops this page. Deleting detaches the pane, and the `_hadPane` branch above
+  /// leaves on its own when that happens — the same path a delete from the list, or from the
+  /// desktop, already takes. A pop here would be a second one, and the parked pages in this pager
+  /// share the route.
+  PhoneSheetAction _stopAction(Agent agent) => PhoneSheetAction(
+    icon: LucideIcons.trash2300,
+    label: 'Stop Harness…',
+    destructive: true,
+    onTap: () => unawaited(
+      confirmDeleteAgent(
+        context,
+        widget.notifier,
+        widget.machineId,
+        widget.agentId,
+        agent.name,
       ),
     ),
-  ];
+  );
+
+  /// Asks for the terminal this pane is only watching, or reopens the stream it lost — the band's
+  /// button, and the header's.
+  ///
+  /// Which of the two it is comes from the stream as it stands, not from the button: somebody else
+  /// holding or driving it makes this a take, and a dead one a reconnect. [_reclaiming] carries
+  /// that through the `opening` this starts, so a take reads as one action answering rather than
+  /// a band that vanished and came back, and a reconnect reads as the header's wait from the
+  /// moment it is pressed. `selectAgent` declines quietly when the pane cannot be attached at all
+  /// (its machine went offline meanwhile, the agent was withdrawn), and that leaves the status
+  /// where it was — so the flag is taken back here too, rather than left armed over a page
+  /// nothing is going to answer for.
+  Future<void> _takeControl() async {
+    final notifier = widget.notifier;
+    final before = notifier
+        .paneOfAgent(widget.machineId, widget.agentId)
+        ?.session;
+    final kind =
+        before != null &&
+            (before.watching ||
+                before.status == TerminalSessionStatus.takenOver)
+        ? _Reclaim.control
+        : _Reclaim.reconnect;
+    if (_reclaiming != kind) setState(() => _reclaiming = kind);
+    await notifier.selectAgent(widget.machineId, widget.agentId);
+    if (!mounted) return;
+    final session = notifier
+        .paneOfAgent(widget.machineId, widget.agentId)
+        ?.session;
+    if (_reclaiming != null &&
+        session?.status != TerminalSessionStatus.opening) {
+      setState(() => _reclaiming = null);
+    }
+  }
 
   /// Restarting is a round trip that can fail, and the phone has no status rail to fail into — so
   /// the answer lands as a snackbar, which is the one surface a pushed page here always has.
@@ -1330,61 +2041,6 @@ class _TerminalPageState extends State<TerminalPage>
     final error = result.error;
     if (error == null || messenger == null || !mounted) return;
     messenger.showSnackBar(SnackBar(content: Text(error)));
-  }
-}
-
-/// One line under the header while another client drives this terminal:
-/// who, and the way back. Pairs with [_ReclaimButton] in the header; the
-/// strip says who, the button in it is the same gesture.
-class _TakeoverStrip extends StatelessWidget {
-  const _TakeoverStrip({required this.notice, required this.onTakeControl});
-
-  final String notice;
-  final VoidCallback onTakeControl;
-
-  @override
-  Widget build(BuildContext context) {
-    AppTheme.watch(context);
-    final color = phoneToneColor(PhoneTone.attention);
-    return Semantics(
-      key: const ValueKey('phone-takeover-strip'),
-      liveRegion: true,
-      child: Container(
-        color: color.withValues(alpha: 0.12),
-        padding: const EdgeInsets.only(left: 14, right: 6, top: 4, bottom: 4),
-        child: Row(
-          children: [
-            Icon(LucideIcons.lock300, size: 13, color: color),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                notice,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: color,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-            TextButton(
-              onPressed: onTakeControl,
-              style: TextButton.styleFrom(
-                foregroundColor: color,
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              ),
-              child: const Text(
-                'Take control',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
 
@@ -1457,7 +2113,7 @@ class _AgentGone extends StatelessWidget {
           const SizedBox(height: 14),
           Text(
             name == null || name!.isEmpty
-                ? 'That agent is gone'
+                ? 'That harness is gone'
                 : '$name is gone',
             textAlign: TextAlign.center,
             style: TextStyle(
@@ -1483,12 +2139,148 @@ class _AgentGone extends StatelessWidget {
               foregroundColor: AppPalette.accent,
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
             ),
-            child: const Text('Open another agent'),
+            child: const Text('Open another harness'),
           ),
         ],
       ),
     ),
   );
+}
+
+/// The band over the output saying this pane cannot be typed into, and offering the way in.
+///
+/// ⚠️ **Over the output, not in the header.** The header's status word is 11pt in a corner beside
+/// the agent's name, and somebody mid-sentence never looks there — the keystrokes simply stop
+/// landing and nothing on screen says why. This sits where the eyes already are. The desktop puts
+/// the same band in the same place for the same reason (`widgets/terminal_panel.dart`); this is
+/// that band at phone width.
+///
+/// Covers both ways a pane goes read-only. A WATCHER never held the terminal — the page attached
+/// to an agent the desktop was already driving, output and all (see [TerminalSession.watching]) —
+/// while `takenOver` is a terminal this phone HAD and lost. One sentence each, because "another
+/// app has it, press this" is the part that matters either way; the lost one names the taker when
+/// the daemon said who.
+class _ControlBanner extends StatelessWidget {
+  const _ControlBanner({
+    required this.watching,
+    required this.busy,
+    required this.takeoverNotice,
+    required this.holderName,
+    required this.onTakeControl,
+  });
+
+  /// True where the terminal was never this pane's; false where it was taken away.
+  final bool watching;
+
+  /// The take is in flight — its `terminal_open` is out and this pane is waiting to hear.
+  final bool busy;
+
+  /// Who took it, as the one sentence [phoneTakeoverNotice] writes. Null for a watcher, which
+  /// never lost a terminal, and while a take is in flight.
+  final String? takeoverNotice;
+
+  /// Who is driving the terminal a watcher is looking at, as [phoneHolderName] names it — the
+  /// machine, as the desktop names a taker. Null when the daemon did not say.
+  final String? holderName;
+
+  final VoidCallback onTakeControl;
+
+  String get _title {
+    if (busy) return 'Taking control…';
+    if (watching) return '${holderName ?? 'Another app'} is using this terminal';
+    return takeoverNotice ?? 'Another app took control of this terminal';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    AppTheme.watch(context);
+    final ink = phoneToneColor(PhoneTone.attention);
+    return Semantics(
+      key: const ValueKey('phone-takeover-strip'),
+      container: true,
+      liveRegion: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          // Composited over the pane's own ground rather than laid on as a wash: the terminal
+          // theme behind this band may be any colour, and a bare translucent fill would read
+          // differently on each of them.
+          color: Color.alphaBlend(
+            ink.withValues(alpha: 0.12),
+            AppPalette.windowBg,
+          ),
+          border: Border(
+            bottom: BorderSide(color: ink.withValues(alpha: 0.55)),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+          child: Row(
+            children: [
+              if (busy)
+                SizedBox(
+                  width: 15,
+                  height: 15,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: ink),
+                )
+              else
+                Icon(LucideIcons.lock300, size: 15, color: ink),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: AppPalette.textPrimary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (!busy) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'Typing is paused. Take control to type here.',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: AppPalette.textSecondary,
+                          fontSize: 11,
+                          height: 1.3,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (!busy) ...[
+                const SizedBox(width: 10),
+                TextButton(
+                  onPressed: onTakeControl,
+                  style: TextButton.styleFrom(
+                    foregroundColor: ink,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text(
+                    'Take control',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// The terminal's body while its first keyframe is still crossing the network.
@@ -1513,14 +2305,14 @@ class _AgentGone extends StatelessWidget {
 /// ⚠️ **It draws the transcript's STRUCTURE, not a stack of grey bars.** The
 /// first version was a column of plain lines and read as a loading page for some
 /// other app — nothing about it suggested a terminal. What actually arrives has
-/// a strong, repeating shape: a prompt banner on its own lighter ground, a
-/// bulleted answer indented under it, a dim meta line closing the turn. Standing
+/// a strong, repeating shape: a prompt led by its `›`, a bulleted answer
+/// indented under it, a dim meta line closing the turn. Standing
 /// in for THAT is what makes the wait read as "your session is coming back"
 /// rather than "something is loading", and it is the same rule
 /// `PhoneListSkeleton` follows for a list of cards — the same cards, empty, at a
 /// real row's height.
 class _Attaching extends StatefulWidget {
-  const _Attaching();
+  const _Attaching({super.key});
 
   @override
   State<_Attaching> createState() => _AttachingState();
@@ -1676,31 +2468,25 @@ class _AttachingState extends State<_Attaching> with TickerProviderStateMixin {
     // gets bars that are darker than its ground rather than lighter.
     final light =
         ThemeData.estimateBrightnessForColor(ground) == Brightness.light;
-    final rest = Color.alphaBlend(
-      (light ? Colors.black : Colors.white).withValues(alpha: 0.10),
-      ground,
-    );
-    final peak = Color.alphaBlend(
-      (light ? Colors.black : Colors.white).withValues(alpha: 0.17),
-      ground,
-    );
-    // The prompt's banner sits on its own ground, a step above the terminal's —
-    // the band an agent paints behind the line it is answering, and the one
-    // element that makes this block read as a transcript rather than as a list
-    // of lines.
+    final ink = light ? Colors.black : Colors.white;
+    final rest = Color.alphaBlend(ink.withValues(alpha: 0.10), ground);
+    final peak = Color.alphaBlend(ink.withValues(alpha: 0.17), ground);
+    // The prompt — the line the person typed — a step brighter than the answer
+    // under it, and breathing with it.
     //
-    // 0.08, not the 0.05 this started at: the banner has to be legible as a BAND
-    // at arm's length on a phone, and at 0.05 over `#181818` it was a shade
-    // nobody would notice. Still well under the bars themselves (0.10–0.17), so
-    // it reads as the ground behind them rather than as another bar.
-    final banner = Color.lerp(
-      ground,
-      light ? Colors.black : Colors.white,
-      0.08,
-    )!;
+    // ⚠️ **This is what marks the prompt now, in place of a band.** The prompt
+    // used to sit on its own full-width ground: a square-cornered band with a
+    // rounded bar inside it — one shape nested in another, and the only square
+    // corners in a block of rounded bars. It read as a table row with a
+    // placeholder in it rather than as a line of a transcript. What sets the
+    // prompt apart on the real screen is its `›` and its weight, so that is what
+    // is drawn: the chevron in the gutter, and a bar a step brighter than the
+    // answer's. Its rest is the answer's peak, so the two never meet mid-breath.
+    final promptRest = Color.alphaBlend(ink.withValues(alpha: 0.17), ground);
+    final promptPeak = Color.alphaBlend(ink.withValues(alpha: 0.25), ground);
     final bar = (fontSize * 0.62).clamp(5.0, 12.0).toDouble();
     return SkeletonBlock(
-      semanticsLabel: 'Attaching to the agent',
+      semanticsLabel: 'Attaching to the harness',
       // ⚠️ **One painter, repainted, in a layer of its own** — where this was a
       // column of seventy-odd widgets rebuilt on every frame of the breath, under
       // a [ShaderMask] that pushed the whole pane through an offscreen buffer on
@@ -1717,7 +2503,8 @@ class _AttachingState extends State<_Attaching> with TickerProviderStateMixin {
             ground: ground,
             rest: rest,
             peak: peak,
-            banner: banner,
+            promptRest: promptRest,
+            promptPeak: promptPeak,
           ),
           child: const SizedBox.expand(),
         ),
@@ -1728,12 +2515,12 @@ class _AttachingState extends State<_Attaching> with TickerProviderStateMixin {
   /// What one turn occupies, so the painter can work out how many fit.
   ///
   /// ⚠️ **Must stay in step with [_SkeletonPainter._turn]**, which is why the
-  /// terms are written in the same order as the rows it draws: banner, gap,
+  /// terms are written in the same order as the rows it draws: prompt, gap,
   /// answer lines, gap and meta line, trailing gap. A drift here does not break
   /// the picture — the block is clipped either way — it just means a turn too
   /// few (a band of empty ground at the top) or one too many (wasted paint).
   static double _turnHeight(_SkeletonTurn turn, {required double lineHeight}) =>
-      lineHeight + // the prompt banner
+      lineHeight + // the prompt
       lineHeight * 0.35 + // the gap under it
       lineHeight * turn.answer.length +
       (turn.meta == null ? 0 : lineHeight * 0.35 + lineHeight) +
@@ -1755,7 +2542,8 @@ class _SkeletonPainter extends CustomPainter {
     required this.ground,
     required this.rest,
     required this.peak,
-    required this.banner,
+    required this.promptRest,
+    required this.promptPeak,
   }) : super(repaint: Listenable.merge([breath, reveal]));
 
   /// 0 at rest, 1 at the peak of the breath.
@@ -1773,7 +2561,11 @@ class _SkeletonPainter extends CustomPainter {
   final Color ground;
   final Color rest;
   final Color peak;
-  final Color banner;
+
+  /// The prompt's bar at rest and at the peak of the breath — a step above
+  /// [rest] and [peak]. See the note where they are mixed.
+  final Color promptRest;
+  final Color promptPeak;
 
   /// ⚠️ The terminal view's OWN padding (`TerminalPanel` passes
   /// `EdgeInsets.all(10)` to the xterm view), so a bar starts on the column the
@@ -1830,6 +2622,7 @@ class _SkeletonPainter extends CustomPainter {
     // gap after it. See `last` in [_turn].
     total -= lineHeight * 0.9;
     final fill = Color.lerp(rest, peak, breath.value)!;
+    final prompt = Color.lerp(promptRest, promptPeak, breath.value)!;
     canvas.save();
     canvas.clipRect(full);
     var top = inner.bottom - total;
@@ -1847,7 +2640,7 @@ class _SkeletonPainter extends CustomPainter {
         inner: inner,
         top: top,
         fill: Color.lerp(ground, fill, opacity)!,
-        banner: Color.lerp(ground, banner, opacity)!,
+        prompt: Color.lerp(ground, prompt, opacity)!,
         last: i == turns.length - 1,
       );
     }
@@ -1855,8 +2648,8 @@ class _SkeletonPainter extends CustomPainter {
     canvas.restore();
   }
 
-  /// One turn: the prompt banner, the bulleted answer under it, the meta line —
-  /// drawn from [top] down, answering with where the next turn starts.
+  /// One turn: the prompt, the bulleted answer under it, the meta line — drawn
+  /// from [top] down, answering with where the next turn starts.
   ///
   /// Every row is exactly one terminal line box tall, so the whole block
   /// occupies a whole number of rows and the keyframe replaces it without the
@@ -1870,22 +2663,26 @@ class _SkeletonPainter extends CustomPainter {
     required Rect inner,
     required double top,
     required Color fill,
-    required Color banner,
+    required Color prompt,
     required bool last,
   }) {
     final x = inner.left;
     final width = inner.width;
     final paint = Paint()..color = fill;
+    // Where every row's text starts — after the prompt's `›` and the answer's
+    // bullet alike, so the block keeps the one left edge the transcript has.
+    final indent = bar * 1.25;
     var y = top;
-    // The prompt, on its own full-width ground — the one element that makes
-    // this read as a transcript rather than as a list of lines.
-    canvas.drawRect(
-      Rect.fromLTWH(x, y, width, lineHeight),
-      Paint()..color = banner,
+    // The prompt: its `›` in the gutter, then the line, a step brighter than
+    // the answer — the two things that set it apart on the real screen.
+    _chevron(canvas, x, y, prompt);
+    _bar(
+      canvas,
+      x + indent,
+      y,
+      turn.prompt * (width - indent),
+      Paint()..color = prompt,
     );
-    // The `›` gutter the real prompt keeps.
-    final gutter = bar * 0.9;
-    _bar(canvas, x + gutter, y, turn.prompt * (width - gutter), paint);
     y += lineHeight + lineHeight * 0.35;
     // The answer: a bullet on the first row, the rest indented under it.
     for (var i = 0; i < turn.answer.length; i++) {
@@ -1896,24 +2693,52 @@ class _SkeletonPainter extends CustomPainter {
           dot / 2,
           paint,
         );
-        final indent = dot + bar * 0.7;
-        _bar(canvas, x + indent, y, turn.answer[i] * (width - indent), paint);
-      } else {
-        final indent = bar * 1.25;
-        _bar(canvas, x + indent, y, turn.answer[i] * (width - indent), paint);
       }
+      _bar(canvas, x + indent, y, turn.answer[i] * (width - indent), paint);
       y += lineHeight;
     }
     final meta = turn.meta;
     if (meta != null) {
       y += lineHeight * 0.35;
       // The `✳ Crunched for 3s · done 10:36` line that closes a turn: always
-      // shorter, and thinner than a line of body text.
-      _bar(canvas, x, y, meta * width, paint, height: bar * 0.7);
+      // shorter, thinner than a line of body text, and quieter than it — the
+      // third step down from the prompt.
+      _bar(
+        canvas,
+        x,
+        y,
+        meta * width,
+        Paint()..color = Color.lerp(ground, fill, 0.7)!,
+        height: bar * 0.7,
+      );
       y += lineHeight;
     }
     if (!last) y += lineHeight * 0.9;
     return y;
+  }
+
+  /// The prompt's `›`, in the gutter the real one keeps: as tall as a bar and
+  /// centred on the row like the bullet under it, so the two marks line up.
+  void _chevron(Canvas canvas, double left, double top, Color color) {
+    final height = bar * 0.84;
+    final start = left + bar * 0.08;
+    final middle = top + lineHeight / 2;
+    final stroke = bar * 0.22;
+    canvas.drawPath(
+      Path()
+        ..moveTo(start, middle - height / 2)
+        ..lineTo(start + height * 0.5, middle)
+        ..lineTo(start, middle + height / 2),
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        // Floored at a pixel and a bit: at the smallest terminal fonts the bar
+        // is 5pt, and a stroke in proportion to it would be a hairline beside
+        // bars and a bullet that are not.
+        ..strokeWidth = stroke < 1.2 ? 1.2 : stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
   }
 
   /// A bar of text, centred in the line box that starts at [top].
@@ -1934,7 +2759,10 @@ class _SkeletonPainter extends CustomPainter {
           width,
           thickness,
         ),
-        const Radius.circular(3),
+        // Round-ended, the same family as the bullet and the chevron's caps:
+        // with a fixed 3pt corner a large terminal font drew square-shouldered
+        // slabs beside a round dot.
+        Radius.circular(thickness / 2),
       ),
       paint,
     );
@@ -1997,7 +2825,8 @@ class _SkeletonPainter extends CustomPainter {
       old.ground != ground ||
       old.rest != rest ||
       old.peak != peak ||
-      old.banner != banner ||
+      old.promptRest != promptRest ||
+      old.promptPeak != promptPeak ||
       !identical(old.breath, breath) ||
       !identical(old.reveal, reveal);
 }
@@ -2010,7 +2839,7 @@ class _SkeletonTurn {
     required this.meta,
   });
 
-  /// Width of the prompt text inside its banner, as a fraction of the pane.
+  /// Width of the prompt's text, as a fraction of the row after its `›`.
   final double prompt;
 
   /// The answer's lines, longest first — a paragraph wraps full-width and its
@@ -2111,43 +2940,3 @@ String _clipTitle(String name) {
 /// dead space either side and the three stay 24px each — under the 44 iOS asks
 /// for. Fixing that belongs in the shared button, where every screen's header
 /// would get it, not in a wrapper one page defines.
-class _HeaderAction extends StatelessWidget {
-  const _HeaderAction({
-    required this.icon,
-    required this.tooltip,
-    required this.onPressed,
-    this.size = 21,
-    this.last = false,
-  });
-
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback onPressed;
-  final double size;
-
-  /// The rightmost action, whose trailing padding is dropped: [PhoneHeader]
-  /// already insets the row's right edge, and keeping it here would push the
-  /// last mark further from the edge than the others are from each other.
-  final bool last;
-
-  /// Half the gap between two marks — each neighbour contributes one, so the
-  /// boxes end up 14 apart.
-  ///
-  /// 14 because that is [PhoneHeader]'s own right inset: the gap between two
-  /// actions and the gap from the last one to the screen edge are then the
-  /// same measure, and the three read as evenly placed rather than as a group
-  /// shoved against the corner.
-  static const double gap = 7;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: EdgeInsets.fromLTRB(gap, 0, last ? 0 : gap, 0),
-    child: AppIconButton(
-      icon: icon,
-      size: size,
-      tooltip: tooltip,
-      color: AppPalette.textSecondary,
-      onPressed: onPressed,
-    ),
-  );
-}

@@ -56,6 +56,28 @@ class SetupAttempt {
   }
 }
 
+/// A window that never reaches for a real daemon.
+///
+/// A signed-out DESKTOP window (`viewer == null`) now lands on the guest desk
+/// past the daemon gate instead of stopping at a login wall — see
+/// `_continueAfterEnvironmentReady`. A unit test must not shell out to a real
+/// `harness` daemon to get there.
+class _GuestApp extends AppNotifier {
+  _GuestApp({
+    required super.config,
+    required super.authSession,
+    super.configStore,
+    super.cliLogin,
+    super.environmentProvisioner,
+  });
+
+  @override
+  Future<void> ensureCliDaemonReady() async {}
+
+  @override
+  Future<bool> refreshMachines() async => true;
+}
+
 class SetupProvisioner extends EnvironmentProvisioner {
   SetupProvisioner() : super(isMacOS: true);
   final attempts = <SetupAttempt>[];
@@ -101,9 +123,11 @@ Future<void> _mount(
       ),
       home: ListenableBuilder(
         listenable: app,
-        builder: (_, _) => app.status == AppStatus.unauthenticated
-            ? const Scaffold(body: Text('Sign-in reached'))
-            : EnvironmentSetupScreen(notifier: app),
+        builder: (_, _) => app.status == AppStatus.preparingEnvironment
+            ? EnvironmentSetupScreen(notifier: app)
+            // Setup finishing moves a signed-out desktop straight to the guest
+            // desk (AppStatus.authenticated, isGuest), not a login wall.
+            : const Scaffold(body: Text('Guest desk reached')),
       ),
     ),
   );
@@ -111,7 +135,7 @@ Future<void> _mount(
 }
 
 AppNotifier _app(SetupProvisioner provisioner) =>
-    AppNotifier(
+    _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: null,
@@ -416,52 +440,57 @@ void main() {
     });
   }
 
-  testWidgets('Enter installs and retries once before reaching sign-in', (
-    tester,
-  ) async {
-    final provisioner = SetupProvisioner();
-    final app = _app(provisioner);
-    await _mount(tester, app);
-    expect(provisioner.attempts, isEmpty);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(provisioner.attempts, hasLength(1));
-    expect(provisioner.attempts.single.install, isTrue);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(provisioner.attempts, hasLength(1));
-    provisioner.attempts.single.finish(
-      setupReview.copyWith(
-        phase: EnvironmentSetupPhase.failed,
-        failure: const EnvironmentFailure(
-          title: 'Could not install Harness',
-          detail: 'Check your connection, then retry setup.',
+  testWidgets(
+    'Enter installs and retries once before reaching the guest desk',
+    (tester) async {
+      final provisioner = SetupProvisioner();
+      final app = _app(provisioner);
+      await _mount(tester, app);
+      expect(provisioner.attempts, isEmpty);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, hasLength(1));
+      expect(provisioner.attempts.single.install, isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, hasLength(1));
+      provisioner.attempts.single.finish(
+        setupReview.copyWith(
+          phase: EnvironmentSetupPhase.failed,
+          failure: const EnvironmentFailure(
+            title: 'Could not install Harness',
+            detail: 'Check your connection, then retry setup.',
+          ),
         ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(provisioner.attempts, hasLength(2));
-    provisioner.attempts.last.finish(
-      const EnvironmentReadiness(
-        steps: {
-          EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
-          EnvironmentStep.tmux: EnvironmentStepStatus.ready,
-          EnvironmentStep.harness: EnvironmentStepStatus.ready,
-        },
-        phase: EnvironmentSetupPhase.ready,
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    expect(find.text('Sign-in reached'), findsOneWidget);
-    expect(provisioner.attempts.map((attempt) => attempt.install), [
-      true,
-      true,
-    ]);
-    await tester.pumpWidget(const SizedBox());
-    app.dispose();
-  });
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, hasLength(2));
+      provisioner.attempts.last.finish(
+        const EnvironmentReadiness(
+          steps: {
+            EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
+            EnvironmentStep.tmux: EnvironmentStepStatus.ready,
+            EnvironmentStep.harness: EnvironmentStepStatus.ready,
+          },
+          phase: EnvironmentSetupPhase.ready,
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      // A signed-out DESKTOP window lands on the guest desk (local mode),
+      // not a login wall.
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
+      expect(find.text('Guest desk reached'), findsOneWidget);
+      expect(provisioner.attempts.map((attempt) => attempt.install), [
+        true,
+        true,
+      ]);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+    },
+  );
 }

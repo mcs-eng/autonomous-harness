@@ -12,12 +12,20 @@ library;
 /// One example on a product page: the prompt, a picture of what the harness made from it, and a line
 /// naming the result. Read defensively — it arrives from any machine's catalog.
 class StoreExample {
-  const StoreExample({required this.prompt, this.image, this.caption});
+  const StoreExample({
+    required this.prompt,
+    this.image,
+    this.video,
+    this.caption,
+  });
 
   final String prompt;
 
   /// An https picture of the output, or null when the package has none for this prompt.
   final String? image;
+
+  /// An HTTPS recording, loaded only when the person chooses to watch.
+  final String? video;
   final String? caption;
 
   static StoreExample? fromJson(Object? raw) {
@@ -28,6 +36,8 @@ class StoreExample {
     }
     final image = raw['image'];
     final uri = image is String ? Uri.tryParse(image.trim()) : null;
+    final video = raw['video'];
+    final videoUri = video is String ? Uri.tryParse(video.trim()) : null;
     final caption = raw['caption'];
     return StoreExample(
       prompt: prompt.trim(),
@@ -37,6 +47,14 @@ class StoreExample {
               uri.hasAuthority &&
               (image as String).length <= 2048
           ? image.trim()
+          : null,
+      video:
+          videoUri != null &&
+              videoUri.scheme == 'https' &&
+              videoUri.hasAuthority &&
+              videoUri.host.isNotEmpty &&
+              (video as String).length <= 2048
+          ? video.trim()
           : null,
       caption: caption is String && caption.trim().isNotEmpty
           ? caption.trim().substring(0, caption.trim().length.clamp(0, 120))
@@ -50,6 +68,7 @@ class DshEntry {
     required this.id,
     required this.name,
     required this.engine,
+    this.engines = const [],
     this.description,
     this.category,
     this.installed = false,
@@ -77,8 +96,10 @@ class DshEntry {
   /// The tile's name, as the manifest or the registry spells it.
   final String name;
 
-  /// The base engine the harness runs on: what `agent_create` must be sent.
+  /// Default engine. Older daemons only advertise this one engine.
   final String engine;
+  final List<String> engines;
+  List<String> get supportedEngines => engines.isEmpty ? [engine] : engines;
   final String? description;
 
   /// The kind of thing it makes, in a word or two — the picker's second line.
@@ -173,6 +194,15 @@ class DshEntry {
           ? name.trim().substring(0, name.trim().length.clamp(0, 40))
           : id.substring(id.indexOf('/') + 1),
       engine: engine is String ? engine : '',
+      engines: raw['engines'] is List
+          ? (raw['engines'] as List)
+                .whereType<String>()
+                .where(
+                  (id) => id.isNotEmpty && id.length <= 64 && !id.contains('/'),
+                )
+                .toSet()
+                .toList(growable: false)
+          : const [],
       kind: kind,
       description: description is String && description.trim().isNotEmpty
           ? description.trim().substring(

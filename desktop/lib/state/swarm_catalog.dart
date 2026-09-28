@@ -33,6 +33,7 @@ class SwarmAgentRef {
     agent.displayName,
     agent.engine,
     machine.machine.displayName,
+    project?.label,
     project?.name,
     project?.branch,
     project?.cwd,
@@ -113,7 +114,7 @@ List<SwarmProjectGroup> swarmProjects(
     final id = project.identity(entry.machineId);
     final group = groups.putIfAbsent(
       id,
-      () => SwarmProjectGroup(id: id, name: project.name),
+      () => SwarmProjectGroup(id: id, name: project.label),
     );
     group.agents.add(entry);
     folders[_folderKey(entry.machineId, project.cwd)] = id;

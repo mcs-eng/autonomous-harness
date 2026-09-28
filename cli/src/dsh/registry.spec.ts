@@ -1,3 +1,4 @@
+import { dshSupportedEngines } from './manifest.js'
 // The registry readers on fixture trees: the runtime's (registry.ts) and the build's
 // (scripts/lib/dshRegistry.mjs), held to the same answer; the baked-in registry the release reads; and
 // the store ref a branch under test moves the built-in shelf to.
@@ -24,6 +25,15 @@ const write = (path: string, body: string): void => {
 }
 
 describe('StoreExampleSchema: what a product page example may hold', () => {
+  it('carries HTTPS demo recordings through Store facts and catalog parsing', () => {
+    const example = { prompt: 'Shape this lamp.', image: 'https://example.com/lamp.png', video: 'https://example.com/lamp.mp4', caption: 'A real recorded session' }
+    expect(StoreFactsSchema.parse({ examples: [example] }).examples).toEqual([example])
+    expect(StoreExampleSchema.parse(example)).toEqual(example)
+    for (const video of ['http://example.com/a.mp4', 'file:///tmp/a.mp4', 'javascript:alert(1)', 'https://' + 'x'.repeat(2048)]) {
+      expect(StoreExampleSchema.safeParse({ ...example, video }).success).toBe(false)
+    }
+  })
+
   it('takes a prompt, an https picture and a caption; a catalog entry drops unknown fields, store.json refuses them', () => {
     expect(StoreExampleSchema.parse({ prompt: '  A desk lamp.  ', image: 'https://example.com/a.jpg', caption: 'Lamp', later: 1 }))
       .toEqual({ prompt: 'A desk lamp.', image: 'https://example.com/a.jpg', caption: 'Lamp' })
@@ -63,7 +73,7 @@ describe('storeEntry', () => {
     const [bare, checked, cad, pane, sim, lamp] = cases.map(([, manifest, facts]) => storeEntry('p', manifest, facts))
     expect(sim.tagline).toBe('Advanced physics simulation')
     expect(lamp.examples).toEqual([{ prompt: 'A desk lamp.', image: 'https://example.com/lamp.jpg', caption: 'Lamp · glTF' }])
-    expect(bare).toEqual({ id: 'autonomous/bare', name: 'Bare', repo: HARNESS_MONOREPO, ref: 'main', path: 'p', engine: 'claude', tier: 0, verified: true })
+    expect(bare).toEqual({ id: 'autonomous/bare', name: 'Bare', repo: HARNESS_MONOREPO, ref: 'main', path: 'p', engine: 'claude', engines: dshSupportedEngines({ engine: 'claude' }), tier: 0, verified: true })
     expect(checked.tier).toBe(1)
     expect(cad).toMatchObject({ category: 'CAD', author: 'Autonomous', description: 'd', homepage: 'https://example.com', license: 'MIT', viewerUse: 'autonomous/cad-viewer', tier: 2 })
     expect(pane).toMatchObject({ kind: 'viewer', upstream: 'https://example.com/up', screenshots: ['https://example.com/1.png'], tier: 2 })

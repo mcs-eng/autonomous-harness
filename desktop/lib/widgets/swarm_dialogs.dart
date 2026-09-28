@@ -2,13 +2,15 @@ import 'dart:async';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:harness/shared/theme/app_type.dart';
 
+import '../core/desktop_window.dart';
 import '../shared/widgets/app_dialog.dart';
 import '../shared/widgets/app_select_field.dart';
 import '../state/app_state.dart';
 import '../shortcuts/app_keymap.dart';
 import '../state/swarm_catalog.dart';
-import 'link_another_machine_dialog.dart';
+import 'machines_panel.dart';
 import 'remote_folder_picker.dart';
 import 'clone_repository_dialog.dart';
 import 'terminal_name_prompt.dart';
@@ -78,7 +80,9 @@ class _ProjectDialogState extends State<_ProjectDialog> {
     });
     try {
       final folder = widget.notifier.machineSharesGuiFilesystem(id)
-          ? await getDirectoryPath(initialDirectory: path)
+          ? await whileNativePicker(
+              () => getDirectoryPath(initialDirectory: path),
+            )
           : await showRemoteFolderPicker(
               context,
               notifier: widget.notifier,
@@ -149,81 +153,82 @@ class _ProjectDialogState extends State<_ProjectDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Add project'),
-    content: SizedBox(
-      width: 460,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Choose an existing working folder.',
-            style: TextStyle(fontSize: 12, color: Colors.white60),
-          ),
-          const SizedBox(height: 20),
-          if (machineId != null)
-            AppSelectField<String>(
-              value: machineId!,
-              options: [
-                for (final machine in widget.notifier.machineStates.values)
-                  SelectOption(
-                    value: machine.machine.machineId,
-                    label: machine.isLocalMachine
-                        ? 'This computer'
-                        : machine.machine.displayName,
-                  ),
-              ],
-              onChanged: (value) => setState(() {
-                if (machineId == value) return;
-                _machineRevision++;
-                machineId = value;
-                path = null;
-                error = null;
-              }),
-            ),
-          const SizedBox(height: 16),
-          OutlinedButton.icon(
-            onPressed: machineId == null || picking ? null : browse,
-            icon: const Icon(Icons.folder_open, size: 17),
-            label: Text(
-              path ?? 'Choose folder',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (widget.notifier.machineSharesGuiFilesystem(machineId ?? ''))
-            TextButton(
-              onPressed: picking ? null : clone,
-              style: TextButton.styleFrom(foregroundColor: Colors.white70),
-              child: const Text('Clone repository…'),
-            ),
-          if (error != null)
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Add project'),
+      content: SizedBox(
+        width: 460,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             Text(
-              error!,
-              style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+              'Choose an existing working folder.',
+              style: AppType.body(color: Colors.white60),
             ),
-        ],
+            const SizedBox(height: 20),
+            if (machineId != null)
+              AppSelectField<String>(
+                value: machineId!,
+                options: [
+                  for (final machine in widget.notifier.machineStates.values)
+                    SelectOption(
+                      value: machine.machine.machineId,
+                      label: machine.isLocalMachine
+                          ? 'This computer'
+                          : machine.machine.displayName,
+                    ),
+                ],
+                onChanged: (value) => setState(() {
+                  if (machineId == value) return;
+                  _machineRevision++;
+                  machineId = value;
+                  path = null;
+                  error = null;
+                }),
+              ),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: machineId == null || picking ? null : browse,
+              icon: const Icon(Icons.folder_open, size: 17),
+              label: Text(
+                path ?? 'Choose folder',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (widget.notifier.machineSharesGuiFilesystem(machineId ?? ''))
+              TextButton(
+                onPressed: picking ? null : clone,
+                style: TextButton.styleFrom(foregroundColor: Colors.white70),
+                child: const Text('Clone repository…'),
+              ),
+            if (error != null)
+              Text(error!, style: AppType.body(color: Colors.orangeAccent)),
+          ],
+        ),
       ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        onPressed: path == null || folderName.isEmpty || picking ? null : _save,
-        child: const Text('Add project'),
-      ),
-    ],
-  );
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: path == null || folderName.isEmpty || picking
+              ? null
+              : _save,
+          child: const Text('Add project'),
+        ),
+      ],
+    );
+  }
 }
 
-/// Link another machine. The dialog itself lives in
-/// `link_another_machine_dialog.dart`; this name is what every caller — the
-/// Machines menu, ⌘ commands, the machines manager — has always used.
+/// Compatibility entry point: every setup entry opens the same Machines panel.
 Future<void> showSwarmLinkDialog(
   BuildContext context,
   AppNotifier notifier, {
   AppKeymap? keymap,
-}) => showLinkAnotherMachineDialog(context, notifier, keymap: keymap);
+}) async {
+  await showMachinesPanel(context, notifier, keymap: keymap);
+}

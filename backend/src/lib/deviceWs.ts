@@ -1,7 +1,7 @@
 import type { IncomingMessage } from 'http'
 import type { Duplex } from 'stream'
 import { WebSocket, type RawData } from 'ws'
-import { createWss, WS_LIMITS } from './wsServer.js'
+import { createWss, upgradeStatusText, WS_LIMITS } from './wsServer.js'
 import { randomUUID } from 'crypto'
 import { attachHubClient, trackSocketLiveness, DEVICE_IDLE_DEADLINE_MS, type HubClient } from './hub.js'
 import {
@@ -28,7 +28,7 @@ import { transcribe, MAX_PCM, normalizeLang } from './stt.js'
 import { reserveVoice, releaseVoice } from './voiceBudget.js'
 import { prisma } from './prisma.js'
 import { deviceService } from '../services/index.js'
-import { touchDeviceOnlineDay } from './dailyTracking.js'
+import { presenceWriteDue, touchDeviceOnlineDay, type PresenceWriteState } from './dailyTracking.js'
 import { countryCodeFromHeaders } from './clientGeo.js'
 import { utcDayKey } from '../types/analytics.js'
 import { agentLimit, recordCreatedAgent } from './agentTracker.js'
@@ -43,6 +43,7 @@ import { authenticateAccessToken, SsoAuthError } from './ssoAuth.js'
 import { parseAutonomousEnvironment } from './autonomousEnvironment.js'
 import { AppError } from '../errors/index.js'
 import type { Machine } from '@prisma/client'
+import { isBackendOnlyDownType } from './backendOnlyFrames.js'
 import {
   VoiceQuotaExceededError,
   voiceQuotaService,
@@ -76,6 +77,11 @@ const wss = createWss(WS_LIMITS.device, { echoFirstProtocol: true })
 
 // Presence refresh must beat the key TTL (45s in bus.setDevicePresence) with margin.
 const DEVICE_PRESENCE_REFRESH_MS = 15_000
+// Daily device presence (`user_daily_device_presence`): how often an OPEN device socket refreshes its
+// row's `lastSeenAt`. Same value and same reasoning as MACHINE_PRESENCE_WRITE_MS in adapterWs.ts —
+// this rides the 15s presence tick above, so the constant is only the floor between two Mongo writes
+// and a device that is up all day costs ~300 upserts, not ~6000. Connect and close always write.
+const DEVICE_PRESENCE_WRITE_MS = 5 * 60_000
 // How long a graceful close gets to complete before the socket is forced shut.
 const CLOSE_GRACE_MS = 2_000
 // Device chunks normally arrive every ~20ms. A 10s idle window tolerates transient network stalls
@@ -357,7 +363,7 @@ export function handleDeviceUpgrade(req: IncomingMessage, socket: Duplex, head: 
         countryCode: countryCodeFromHeaders(req.headers),
       }))
   })().catch((err) => {
-    if (err instanceof AppError) { denyWith(err.statusCode, 'Service Unavailable'); return }
+    if (err instanceof AppError) { denyWith(err.statusCode, upgradeStatusText(err.statusCode)); return }
     logger.warn('device-ws upgrade failed', { error: errMsg(err) })
     denyWith(503, 'Service Unavailable')
   })
@@ -460,30 +466,36 @@ function relay(device: WebSocket, opts: RelayOpts): void {
   let presenceDeviceId: string | null = null
   let controlUnsub: (() => void) | null = null
   let machineListUnsub: (() => void) | null = null
-  // Daily device presence: mark today online on first presence start for this connection, and
-  // re-check on the existing 15s refresh tick / on close so a connection spanning UTC midnight
-  // gets counted for the new day too (mirrors webWs.ts's touchUserOnlineDay/touchPresence). The
-  // guard only advances on a SUCCESSFUL write, so a transient DB failure gets retried on the next
-  // tick instead of being silently skipped for the rest of the day.
-  let lastDevicePresenceDayKey: string | null = null
-  const touchDevicePresence = (id: string, isNewConnection: boolean): void => {
-    const now = new Date()
-    const dayKey = utcDayKey(now)
-    if (!isNewConnection && dayKey === lastDevicePresenceDayKey) return
-    touchDeviceOnlineDay(userId, id, now, { isNewConnection, countryCode: opts.countryCode })
-      .then(() => { lastDevicePresenceDayKey = dayKey })
-      .catch((err) => logger.warn('device presence tracking failed', { userId, deviceId: id, error: String(err) }))
+  // Daily device presence: mark today online when this connection starts, refresh `lastSeenAt` on the
+  // existing 15s tick (floored to DEVICE_PRESENCE_WRITE_MS), and write once more on close. Same shape
+  // as adapterWs.ts's machine presence, and for the same reason: until this rode the floor instead of
+  // a day-key guard, `lastSeenAt` only ever moved on a RECONNECT, so a device that stayed connected
+  // read as last-seen-at-midnight all day and no session length could be derived from the row at all.
+  // `presenceWriteDue` also writes whenever the UTC day rolled over since the last write, which is
+  // what gives a connection spanning midnight its row on the new day (with `connections: 0`).
+  // The state only advances on a SUCCESSFUL write, so a transient DB failure is retried on the next
+  // tick rather than silently skipped for the rest of the interval.
+  const lastDevicePresence: PresenceWriteState = { dayKey: null, wroteAt: 0 }
+  let devicePresenceInFlight = false
+  const touchDevicePresence = (id: string, kind: 'connect' | 'tick' | 'close', at?: Date): void => {
+    const now = at ?? new Date()
+    if (kind === 'tick' && (devicePresenceInFlight || !presenceWriteDue(lastDevicePresence, now, DEVICE_PRESENCE_WRITE_MS))) return
+    devicePresenceInFlight = true
+    touchDeviceOnlineDay(userId, id, now, { isNewConnection: kind === 'connect', countryCode: opts.countryCode })
+      .then(() => { lastDevicePresence.dayKey = utcDayKey(now); lastDevicePresence.wroteAt = now.getTime() })
+      .catch((err) => logger.warn('device presence tracking failed', { userId, deviceId: id, kind, error: String(err) }))
+      .finally(() => { devicePresenceInFlight = false })
   }
   const startPresence = (id: string): void => {
     if (closed || presenceDeviceId === id) return
     presenceDeviceId = id
     void setDevicePresence(id, connToken)
     void publishDeviceStatus(userId, { deviceId: id, online: true })
-    touchDevicePresence(id, true)
+    touchDevicePresence(id, 'connect')
     if (presenceTimer) clearInterval(presenceTimer)
     presenceTimer = setInterval(() => {
       void setDevicePresence(id, connToken)
-      touchDevicePresence(id, false)
+      touchDevicePresence(id, 'tick')
     }, DEVICE_PRESENCE_REFRESH_MS)
     // Control channel: a revoke must reach the device even when it's parked on the machine PICKER
     // (no hub attach → the machine-targeted pushDeviceRevoked can't reach it). Deliver the frame the
@@ -539,6 +551,11 @@ function relay(device: WebSocket, opts: RelayOpts): void {
     goal ? `/goal ${text}` : loop ? `/loop ${text}` : text
 
   const ROUTE_AUTO_THRESHOLD = 0.75
+  // A harness CLI machine (`remote`) takes a turn only sealed under the sender's own E2EE session, and
+  // this backend holds no key — so a transcript can no longer be typed into one from here. The current
+  // dial speaks the cable protocol and its daemon transcribes and seals the turn itself; only firmware
+  // that dials device-ws directly still takes this path.
+  const REMOTE_VOICE_UNSUPPORTED = 'FIRMWARE_UPDATE_REQUIRED'
   const ROUTE_PENDING_TTL_MS = 60_000
   const pendingRoutes = new Map<string, { text: string; goal: boolean; loop: boolean; ts: number }>()
   // Pruned on a timer too, not only on the next route_confirm: a device that walks away after a routed
@@ -869,14 +886,24 @@ function relay(device: WebSocket, opts: RelayOpts): void {
     if (machineListUnsub) { machineListUnsub(); machineListUnsub = null }
     if (presenceDeviceId) {
       const id = presenceDeviceId
-      // Conditional clear: only publish offline if the key is really gone (a superseding reconnect
-      // keeps its own key → we stay silent). lastSeenAt = the moment the device actually went away.
+      // A SUPERSEDED socket says nothing at all. The device reconnected before this one was reaped
+      // (up to ~100s later, on the hub heartbeat), so it is online on the newer socket: announcing it
+      // offline would be a lie, and stamping either `lastSeenAt` would date the row to the moment
+      // this corpse was collected rather than to anything the device did. adapterWs.ts applies the
+      // same rule to a superseded adapter. `seenAt` is taken here, at the close, not after the Redis
+      // round trip, so what lands is when the device went away — the thing a session is measured by.
       const seenAt = new Date()
-      fireAndForget(clearDevicePresence(id, connToken).then((gone) => {
-        if (gone) return publishDeviceStatus(userId, { deviceId: id, online: false, lastSeenAt: seenAt.toISOString() })
+      fireAndForget(clearDevicePresence(id, connToken).then((outcome) => {
+        if (outcome === 'superseded') return
+        // 'unknown' (Redis unreachable) still writes these two: we watched this socket until now, so
+        // the timestamp is honest, and a goodbye lost to an outage cannot be recovered later.
+        touchDevicePresence(id, 'close', seenAt)
+        void prisma.deviceBinding.update({ where: { deviceId: id }, data: { lastSeenAt: seenAt } })
+          .catch(() => { /* best effort */ })
+        // The offline PUSH is different: it is only justified by a clear we actually observed. On
+        // 'unknown' the device may well be online, and watchDevices re-reads liveness on its own.
+        if (outcome === 'cleared') return publishDeviceStatus(userId, { deviceId: id, online: false, lastSeenAt: seenAt.toISOString() })
       }), 'device offline publish', { userId, deviceId: id })
-      void prisma.deviceBinding.update({ where: { deviceId: id }, data: { lastSeenAt: seenAt } }).catch(() => { /* best effort */ })
-      touchDevicePresence(id, false)
     }
     for (const [, unsub] of statusSubs) unsub()
     statusSubs.clear()
@@ -1094,6 +1121,9 @@ function relay(device: WebSocket, opts: RelayOpts): void {
 
   const handleFrame = async (msg: CommanderMsg): Promise<void> => {
     const type = msg.type
+    // A device is a client: whatever it sends is relayed down under its own connId, so the backend's own
+    // control frames are refused here as on the web socket (lib/backendOnlyFrames.ts).
+    if (isBackendOnlyDownType(type)) return
     if (type === 'machine_select') { await bindMachine(payloadOf(msg).machineId); return }
     if (type === 'machine_deselect') {
       selectGen++ // cancel any in-flight bindMachine
@@ -1121,6 +1151,7 @@ function relay(device: WebSocket, opts: RelayOpts): void {
       if (!agentId || agentId === 'new') { sendDeviceNow({ type: 'error', message: 'route needs an agent' }); return } // 'new' (create-agent) is a later phase
       const ac = activeClient()
       if (!ac) { sendDeviceNow({ type: 'error', message: 'NO_MACHINE_SELECTED' }); return }
+      if (activeRemote()) { sendDeviceNow({ type: 'error', message: REMOTE_VOICE_UNSUPPORTED }); return }
       try {
         await ensureActiveReady()
         sendDeviceNow({ type: 'commander_event', agentId, payload: { kind: 'processing' } })
@@ -1300,6 +1331,8 @@ function relay(device: WebSocket, opts: RelayOpts): void {
         ? activeBinding
         : await prisma.machine.findUnique({ where: { machineId } })
       if (!voiceBinding || voiceBinding.deletedAt) throw new Error('machine not found')
+      // Before the quota is reserved: the transcript could never be delivered, so do not charge for it.
+      if (voiceBinding.authMode === 'remote') throw new Error(REMOTE_VOICE_UNSUPPORTED)
       const durationMs = pcm.length / ((sr * 2) / 1000)
       const reservation = await voiceQuotaService.reserve(machineId, uploadId, durationMs)
       if (reservation.state !== 'reserved') {

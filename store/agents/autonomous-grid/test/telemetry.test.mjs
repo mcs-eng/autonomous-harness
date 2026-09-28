@@ -32,16 +32,16 @@ test('an exact endpoint receives shared host GPU readings without claiming engin
   const sensor={id:'bran-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://bran:11434/v1',host:'hermes@bran'};
   const input={...reads,engines:{ok:true,value:[{name:'Bran Ollama',where:'http://bran:11434/v1',models:['gemma4:12b'],memory_gb:99,gpu_temp_c:99}]}};
   const reading={ok:true,value:{name:'RTX 2000 Ada',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:94,temperatureC:68,powerW:67.54,powerLimitW:70}};
-  const data=assemble({...config,mode:'local',sensors:[sensor]},input,null,'2026-09-19T12:00:00Z',{'bran-gpu':reading});
+  const data=assemble({...config,mode:'local',sensors:[sensor]},input,null,'2026-09-19T12:00:00Z',null,{'bran-gpu':reading});
   assert.equal(data.status,'live');assert.equal(data.nodes[0].temperatureC,68);assert.equal(data.nodes[0].memoryUsedGb,9859/1024);
   assert.deepEqual(data.nodes[0].gpuTelemetry,{scope:'shared-host',source:'bran-gpu',name:'RTX 2000 Ada',observedAt:'2026-09-19T12:00:00Z',checkedAt:'2026-09-19T12:00:00Z',error:null});
 });
 test('sensor failure and duplicate endpoint mapping clear attributed values and report partial telemetry',()=>{
   const sensor={id:'bran-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://bran:11434/v1',host:'hermes@bran'};
   const engine={name:'Bran Ollama',where:'http://bran:11434/v1',models:['gemma4:12b'],vram_used_mb:9000,gpu_temp_c:68};
-  const failed=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine]}},null,'now',{'bran-gpu':{ok:false,error:'NVIDIA SSH sensor timed out.'}});
+  const failed=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine]}},null,'now',null,{'bran-gpu':{ok:false,error:'NVIDIA SSH sensor timed out.'}});
   assert.equal(failed.status,'partial');assert.equal(failed.nodes[0].memoryUsedGb,null);assert.equal(failed.nodes[0].temperatureC,null);assert.equal(failed.nodes[0].gpuTelemetry.observedAt,null);assert.equal(failed.nodes[0].gpuTelemetry.checkedAt,'now');assert.match(failed.nodes[0].gpuTelemetry.error,/timed out/);
-  const duplicate=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine,{...engine,name:'Duplicate'}]}},null,'now',{'bran-gpu':{ok:true,value:{name:'GPU',memoryTotalMb:10,memoryUsedMb:1,memoryFreeMb:9,utilizationPct:1,temperatureC:1,powerW:1,powerLimitW:2}}});
+  const duplicate=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine,{...engine,name:'Duplicate'}]}},null,'now',null,{'bran-gpu':{ok:true,value:{name:'GPU',memoryTotalMb:10,memoryUsedMb:1,memoryFreeMb:9,utilizationPct:1,temperatureC:1,powerW:1,powerLimitW:2}}});
   assert.equal(duplicate.status,'partial');assert.ok(duplicate.nodes.every(node=>node.temperatureC===null));assert.match(duplicate.sources['sensor:bran-gpu'].error,/more than one/);
 });
 test('engine re-registration maps host sensors to the current engine and clears historical readings',()=>{
@@ -49,13 +49,13 @@ test('engine re-registration maps host sensors to the current engine and clears 
   const fleet={...config,mode:'local',sensors:[sensor]};
   const engine={node_id:'old',name:'rig',where:sensor.engineEndpoint,models:['m']};
   const reading={ok:true,value:{name:'GPU',memoryTotalMb:16000,memoryUsedMb:8000,memoryFreeMb:8000,utilizationPct:0,temperatureC:40,powerW:10,powerLimitW:70}};
-  const before=assemble(fleet,{...reads,engines:{ok:true,value:[engine]}},null,'2026-09-19T12:00:00Z',{gpu:reading});
-  const after=assemble(fleet,{...reads,engines:{ok:true,value:[{...engine,node_id:'new'}]}},before,'2026-09-19T12:00:08Z',{gpu:reading});
+  const before=assemble(fleet,{...reads,engines:{ok:true,value:[engine]}},null,'2026-09-19T12:00:00Z',null,{gpu:reading});
+  const after=assemble(fleet,{...reads,engines:{ok:true,value:[{...engine,node_id:'new'}]}},before,'2026-09-19T12:00:08Z',null,{gpu:reading});
   assert.equal(after.status,'live');assert.equal(after.nodes.length,2);
   assert.equal(after.nodes.find(n=>n.online).temperatureC,40);
   const departed=after.nodes.find(n=>!n.online);
   assert.equal(departed.temperatureC,null);assert.equal(departed.gpuTelemetry.observedAt,null);
-  const failed=assemble(fleet,{...reads,engines:{ok:false,error:'unavailable'}},before,'2026-09-19T12:00:08Z',{gpu:reading});
+  const failed=assemble(fleet,{...reads,engines:{ok:false,error:'unavailable'}},before,'2026-09-19T12:00:08Z',null,{gpu:reading});
   assert.equal(failed.nodes[0].temperatureC,null);assert.equal(failed.sources['sensor:gpu'].ok,false);
 });
 
@@ -108,4 +108,22 @@ test('collector reads an opted-in sensor and stamps the completed source observa
   const readSensor=async()=>{sensorCalls++;return {ok:true,observedAt:'2026-09-19T12:00:08Z',value:{name:'RTX 2000 Ada',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:94,temperatureC:68,powerW:67.54,powerLimitW:70}};};
   const snapshot=await createCollector(dir,{runJson,readSensor})();
   assert.equal(sensorCalls,1);assert.equal(snapshot.nodes[0].temperatureC,68);assert.equal(snapshot.nodes[0].gpuTelemetry.observedAt,'2026-09-19T12:00:08Z');assert.equal(snapshot.sources['sensor:bran-gpu'].observedAt,'2026-09-19T12:00:08Z');
+});
+
+
+test('sleeping and updating grids retain the last GPU reading without new sensor freshness',()=>{
+  const sensor={id:'gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://fixture.test:11434/v1',host:'fixture.test'};
+  const fleet={...config,sensors:[sensor]};
+  const input={...reads,engines:{ok:true,value:[{name:'fixture',where:sensor.engineEndpoint,models:['m']}]}};
+  const reading={ok:true,value:{name:'GPU',memoryTotalMb:16000,memoryUsedMb:8000,memoryFreeMb:8000,utilizationPct:0,temperatureC:40,powerW:10,powerLimitW:70}};
+  const before=assemble(fleet,input,null,'2026-09-27T12:00:00Z',null,{gpu:reading});
+  for(const hold of ['asleep','updating']) {
+    const after=assemble(fleet,{},before,'2026-09-27T12:00:08Z',hold,{gpu:{...reading,value:{...reading.value,temperatureC:99}}});
+    assert.equal(after.status,hold);
+    assert.equal(after.nodes[0].stale,true);
+    assert.equal(after.nodes[0].temperatureC,40);
+    assert.deepEqual(after.nodes[0].gpuTelemetry,before.nodes[0].gpuTelemetry);
+    assert.equal(after.summary.enginesOnline,0);
+    assert.deepEqual(after.events,before.events);
+  }
 });

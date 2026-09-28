@@ -30,12 +30,24 @@ void main() {
       final keymap = MemoryKeymap();
       addTearDown(keymap.dispose);
       final defaults = nativeKeymapSnapshot(keymap);
+      for (final context in ['workspace', 'terminal']) {
+        final rows = ((defaults['contexts'] as Map)[context] as List)
+            .cast<Map>();
+        expect(
+          rows.singleWhere(
+            (row) => (row['keys'] as List).join(' ') == 'cmd+o',
+          )['command'],
+          'agent.open',
+        );
+      }
       keymap.apply('''{"bindings":[
       {"keys":"cmd+t","command":null},
       {"keys":"cmd+o","command":"swarm.new"},
       {"keys":"cmd+k","command":null},
       {"keys":"cmd+k cmd+n","command":"swarm.new"},
       {"keys":"cmd+left","command":null,"when":"terminal"},
+      {"keys":"cmd+i","command":null},
+      {"keys":"cmd+y","command":"models.list"},
       {"keys":"down","command":null,"when":"picker"},
       {"keys":"ctrl+j","command":"picker.previous","when":"picker"}
     ]}''');

@@ -5,6 +5,8 @@ import type http from 'node:http'
 import type { Socket } from 'node:net'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import { watchSocketLiveness } from './lib/wsLiveness.js'
+import { isLoopbackRequest, loopbackHosts } from './lib/loopbackRequest.js'
+import { isTrustedLocal } from './lib/localSocket.js'
 import type { Frame, LocalClientSink } from './backendSocket.js'
 import {
   decodeTerminalLocal,
@@ -32,11 +34,15 @@ export interface LocalWsBackend {
   unregisterLocalClient: (connId: string) => Promise<void>
   handleLocalFrame: (connId: string, frame: Frame) => void
   handleLocalBinary: (connId: string, frame: TerminalBinaryClear) => Promise<void>
+  /** The agent this window has focused, or null — which of its terminals gets the short output window. */
+  setLocalTerminalFocus?: (connId: string, agentId: string | null) => void
 }
 
 export interface LocalWsServerOptions {
   machineId: string
   backend: LocalWsBackend
+  /** The daemon's Unix-socket server (lib/localSocket.ts), served the same endpoint beside TCP. */
+  localSocketServer?: http.Server | null
   /** Serves a `machine_select` for any OTHER machine this signed-in user owns, by relaying to
    *  backend's `/api/web-ws` — see lib/remoteRelay.ts. Omit to keep today's own-machine-only behavior. */
   relayPool?: RemoteRelayPool
@@ -53,9 +59,14 @@ export interface LocalWsServerOptions {
    *  the window, so the two screens stay one desk. */
   /** Explicit app focus, including clear/disconnect, for voice routing independent of the dial. */
   onAppFocusState?: (machineId: string, agentId: string | null, connId: string, expectedRevision?: string) => unknown
+  onDevicePrepareOpened?: (operationId: string, agentId: string) => void
   onAppFocus?: (machineId: string, agentId: string) => void
   /** Every agent the window currently has a tile for, across all its machines. */
-  onAppPanes?: (agentIds: string[]) => void
+  onAppPanes?: (agentIds: string[], foreground: boolean) => void
+  /** The window has looked at this harness — see the `agent_seen` case below. */
+  onAgentSeen?: (agentId: string) => void
+  /** Everything the window still has unread, newest first — see the `app_unread` case below. */
+  onAppUnread?: (items: Array<{ agentId: string; machineId: string; question: boolean; text: string }>) => void
   /**
    * The window's swarms — its named groups of agents, one of them on screen. The whole list each time,
    * and `null` when the window goes away, so the daemon never keeps describing tabs nobody can see.
@@ -231,17 +242,27 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
   const onUpgrade = (req: http.IncomingMessage, socket: Socket, head: Buffer): void => {
     const path = (req.url ?? '').split('?')[0]
     if (path !== LOCAL_WS_PATH) return
+    // Over the daemon's own socket (lib/localSocket.ts) the filesystem already vouched for the peer;
+    // it has no address or port to check. It still must not be a browser.
+    if (isTrustedLocal(req)) {
+      if (req.headers.origin) { rejectUpgrade(socket, 403, 'Forbidden'); return }
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
+      return
+    }
     if (!isLoopback(req.socket.remoteAddress)) {
       rejectUpgrade(socket, 403, 'Forbidden')
       return
     }
-    if (req.headers.origin) {
+    // Also refuses any Origin: a browser always sends one on a WebSocket, and no browser is a client.
+    const bound = server.address()
+    if (req.headers.origin || !bound || typeof bound === 'string' || !isLoopbackRequest(req, loopbackHosts(bound.port))) {
       rejectUpgrade(socket, 403, 'Forbidden')
       return
     }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
   }
-  server.on('upgrade', onUpgrade)
+  const servers = [server, ...(options.localSocketServer ? [options.localSocketServer] : [])]
+  for (const each of servers) each.on('upgrade', onUpgrade)
 
   wss.on('connection', (ws) => {
     const connId = `local:${randomUUID()}`
@@ -327,7 +348,10 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
           // its pooled entry is suspect (most commonly the relayed machine's own Harness process
           // restarted, dropping its E2EE session without the transport itself ever closing). Drop it
           // so this select dials fresh instead of handing back the same dead session again.
-          if (payload?.forceReconnect === true && payload?.relayIsolation !== true) options.relayPool.invalidate(requestedMachineId)
+          if (payload?.forceReconnect === true) {
+            if (payload?.relayIsolation === true) options.relayPool.invalidateIsolated(requestedMachineId)
+            else options.relayPool.invalidate(requestedMachineId)
+          }
           try {
             relay = payload?.relayIsolation === true
               ? await options.relayPool.acquireIsolated(requestedMachineId, options.autonomousEnv, frame, sink, close)
@@ -348,6 +372,15 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
         // to the close at the bottom.
         const parsed = isBinary ? null : jsonFrame(raw)
 
+        // Local desktop acknowledgement only; never forward this through a remote relay.
+        if (parsed?.type === 'device_prepare_opened') {
+          const p = parsed.payload as Record<string, unknown> | undefined
+          if (!relay && boundMachineId === options.machineId && typeof p?.operationId === 'string'
+            && /^[a-f0-9]{64}$/.test(p.operationId) && typeof p.agentId === 'string' && p.agentId.length > 0 && p.agentId.length <= 200) {
+            options.onDevicePrepareOpened?.(p.operationId, p.agentId)
+          }
+          return
+        }
         // THE APP MOVED — tell whoever wants to follow it, before the frame is dispatched either way.
         // Sniffed here rather than in the backend socket because that path never sees a RELAYED machine's
         // frames: those are forwarded upstream a few lines below and would be invisible, which is exactly
@@ -362,10 +395,56 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
         // whether a finished turn is already in front of the person.
         if (!isBinary && options.onAppPanes) {
           if (parsed?.type === 'app_panes') {
-            const raw = (parsed.payload as Record<string, unknown> | undefined)?.agentIds
+            const payload = parsed.payload as Record<string, unknown> | undefined
+            const raw = payload?.agentIds
             const ids = Array.isArray(raw) ? raw.filter((id): id is string => typeof id === 'string' && id !== '') : []
+            // Absent from a window that predates the field. TRUE then, which is
+            // what every such window meant: it only ever sent this list while it
+            // was up, and reading absence as "behind something" would start
+            // announcing work that is in plain sight.
+            const foreground = payload?.foreground !== false
             sentPanes = true
-            options.onAppPanes(ids)
+            options.onAppPanes(ids, foreground)
+            return
+          }
+        }
+        // THE WINDOW LOOKED AT A HARNESS. Consumed here like `app_focus` and the
+        // roster above — it describes a pair of eyes at this desk, not anything
+        // the machine could act on, so it never goes on the wire.
+        //
+        // The dial takes a notification away when a row is TAPPED; the window
+        // takes it away when the tab holding that harness comes to the front.
+        // Two gestures, and each has to reach the other screen or the badge and
+        // the pill part company the first time either is used. This is the half
+        // the window owns; the dial's half already travels as `agent.open`.
+        if (!isBinary && options.onAgentSeen) {
+          if (parsed?.type === 'agent_seen') {
+            const agentId = (parsed.payload as Record<string, unknown> | undefined)?.agentId
+            if (typeof agentId === 'string' && agentId) options.onAgentSeen(agentId)
+            return
+          }
+        }
+        // EVERYTHING THE WINDOW STILL HAS UNREAD. Consumed here like the roster and the focus — it
+        // describes a screen at this desk, never anything a machine could act on.
+        //
+        // The dial keeps its drawer in RAM and loses it to any reboot, while this window does not.
+        // Held here so a cable attaching later can be handed the list without a round trip to a window
+        // that may be busy.
+        if (!isBinary && options.onAppUnread) {
+          if (parsed?.type === 'app_unread') {
+            const raw = (parsed.payload as Record<string, unknown> | undefined)?.items
+            const items = Array.isArray(raw)
+              ? raw.flatMap((row) => {
+                  const item = row as Record<string, unknown> | null
+                  const agentId = item?.agentId
+                  const machineId = item?.machineId
+                  const text = typeof item?.text === 'string' ? item.text : ''
+                  return typeof agentId === 'string' && agentId && typeof machineId === 'string'
+                    ? [{ agentId, machineId, question: item?.question === true, text }]
+                    : []
+                })
+              : []
+            options.onAppUnread(items)
             return
           }
         }
@@ -444,6 +523,10 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
           const agentId = (parsed?.payload as Record<string, unknown> | undefined)?.agentId
           if (parsed?.type === 'app_focus') {
             if (agentId === null || (typeof agentId === 'string' && agentId)) {
+              // Ahead of the dial's revision check below: that gate is about which agent the voice
+              // follows, and a stale one says nothing about which terminal is in front of the person.
+              // Only this daemon's own streams — a relayed machine's live on that machine's daemon.
+              if (!relay && boundMachineId === options.machineId) options.backend.setLocalTerminalFocus?.(connId, agentId)
               const revision = (parsed.payload as Record<string, unknown>)?.focusRevision
               if (options.onAppFocusState?.(boundMachineId, agentId, connId,
                 typeof revision === 'string' ? revision : undefined) === false) return
@@ -498,7 +581,7 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
       // A window that went away has no tiles open. Left standing, the roster
       // would keep silencing the dial for agents nobody can see any more —
       // exactly backwards, and permanently.
-      if (sentPanes) options.onAppPanes?.([])
+      if (sentPanes) options.onAppPanes?.([], false)
       if (sentSwarms) options.onAppSwarms?.(null)
       if (relay) { relay.detach(); relay = null }
       else if (selected) void options.backend.unregisterLocalClient(connId)
@@ -510,7 +593,7 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
 
   return {
     close: async () => {
-      server.off('upgrade', onUpgrade)
+      for (const each of servers) each.off('upgrade', onUpgrade)
       for (const client of wss.clients) client.close(1001, 'server shutting down')
       await new Promise<void>((resolve) => wss.close(() => resolve()))
     },
