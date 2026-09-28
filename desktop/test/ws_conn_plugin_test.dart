@@ -112,6 +112,13 @@ class _RecordingPlugin implements TerminalTransportPlugin {
 Future<void> _settle() =>
     Future<void>.delayed(const Duration(milliseconds: 40));
 
+Future<void> _until(bool Function() done) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!done() && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
 void main() {
   late HttpServer server;
   late Completer<WebSocket> socketReady;
@@ -214,6 +221,7 @@ void main() {
         'payload': {'streamId': 'st', 'requestId': 'r'},
       }),
     );
+    await _until(() => events.isNotEmpty && plugin.calls.length >= 4);
     await _settle();
     expect(events.map((e) => e['type']), ['terminal_ready']);
     expect(plugin.calls.skip(2), [
