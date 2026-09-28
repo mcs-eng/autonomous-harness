@@ -6206,6 +6206,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                                                     HarnessPlacement
                                                                         .currentTab,
                                                               ),
+                                                          resume: _resumeWork(),
                                                           onStore: _openStore,
                                                           onResourceSearch:
                                                               (

@@ -1474,7 +1474,6 @@ class _PaneContent extends StatelessWidget {
           visible: visible,
           compactHeader: swarmMode,
           composerVisible: pane.composerVisible,
-          sharedModelControl: swarmMode,
           readOnly: notice != null,
           notice: notice,
           onToggleComposer: () => notifier.toggleComposer(pane.id),

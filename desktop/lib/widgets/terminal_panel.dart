@@ -125,9 +125,6 @@ class TerminalPanel extends StatefulWidget {
   final (int, int, int?)? layoutRequest;
   final bool compactHeader;
 
-  /// Workspace status owns the focused model selector; tiles retain their close control.
-  final bool sharedModelControl;
-
   /// The tile's own header strip — engine, title, status, pin, close — and
   /// whether it is built at all. False on the phone, where [PhoneHeader] already
   /// names the agent above this panel, there is no tile to pin, close or drag,
@@ -171,7 +168,6 @@ class TerminalPanel extends StatefulWidget {
     this.paneLocation,
     this.layoutRequest,
     this.compactHeader = false,
-    this.sharedModelControl = false,
     this.showHeader = true,
     this.focusRequest = 0,
     this.focusByUser = true,
@@ -2340,7 +2336,6 @@ class _TerminalPanelState extends State<TerminalPanel>
       verdict: agent?.verdict,
       project: agent == null ? null : machine?.projectOf(agent),
       compact: widget.compactHeader,
-      sharedModelControl: widget.sharedModelControl,
       close: widget.onClose != null,
       delete: widget.onDelete != null,
       composer: widget.composerVisible,
@@ -2359,7 +2354,6 @@ class _TerminalPanelState extends State<TerminalPanel>
         notice: widget.notice,
         readOnly: widget.readOnly,
         compact: widget.compactHeader,
-        sharedModelControl: widget.sharedModelControl,
         zoomed: widget.zoomed,
         onToggleZoom: widget.onToggleZoom == null
             ? null
@@ -2450,7 +2444,6 @@ class _TerminalHeader extends StatelessWidget {
   /// chip and the in-pane band drive one path.
   final VoidCallback onReconnect;
   final bool compact;
-  final bool sharedModelControl;
   final VoidCallback? onToggleZoom;
   final bool zoomed;
 
@@ -2481,7 +2474,6 @@ class _TerminalHeader extends StatelessWidget {
     this.onDelete,
     required this.onReconnect,
     this.compact = false,
-    this.sharedModelControl = false,
     this.onToggleZoom,
     this.zoomed = false,
     this.paneDrag,
@@ -2577,8 +2569,7 @@ class _TerminalHeader extends StatelessWidget {
     ].join('\n');
     // Reserve space for the pane-local model selector.
     // Engines without a picker keep their existing header width.
-    final showModelPicker =
-        !sharedModelControl && modelPickerSupports(session.engineId);
+    final showModelPicker = !compact && modelPickerSupports(session.engineId);
     // The picker: a model id up to 220px and its padding.
     final pickerWidth = showModelPicker ? 250.0 : 0.0;
     final closeWidth = onClose == null
@@ -2649,7 +2640,7 @@ class _TerminalHeader extends StatelessWidget {
                   );
             // The name/status retain space while model and project text yield.
             final rightWidth = math.min(
-              compact && sharedModelControl ? closeWidth : desiredRightWidth,
+              compact ? closeWidth : desiredRightWidth,
               math.max(0.0, constraints.maxWidth - 99),
             );
             return Row(
@@ -2837,7 +2828,7 @@ class _TerminalHeader extends StatelessWidget {
                               ),
                             ),
                           ),
-                        if (onClose != null && (!compact || sharedModelControl))
+                        if (onClose != null)
                           PaneCloseButton(onPressed: onClose!),
                       ],
                     ),
