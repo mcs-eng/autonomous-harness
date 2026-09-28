@@ -453,8 +453,17 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                               ),
                             );
                         // This fork's resume list needs the height that an
-                        // empty page spends above the search.
-                        final top = widget.resume == null ? open : 24.0;
+                        // empty page spends above the search, and the search
+                        // and entry buttons at their own size first; a short
+                        // or large-text window keeps upstream's layout.
+                        final showResume =
+                            widget.resume != null &&
+                            entryConstraints.maxHeight >=
+                                24.0 +
+                                    140.0 *
+                                        MediaQuery.textScalerOf(context)
+                                            .scale(1.0);
+                        final top = showResume ? 24.0 : open;
                         return Padding(
                           padding: EdgeInsets.only(top: top),
                           child: Column(
@@ -464,9 +473,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                               // With the resume list below, the search keeps its own
                               // height and the list takes the space that is left.
                               Flexible(
-                                flex: widget.resume != null && !_showResults
-                                    ? 0
-                                    : 1,
+                                flex: showResume && !_showResults ? 0 : 1,
                                 child: _searchPanel(),
                               ),
                               if (!_showResults) ...[
@@ -518,7 +525,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                       ),
                                   ],
                                 ),
-                                if (widget.resume != null) ...[
+                                if (showResume) ...[
                                   const SizedBox(height: 20),
                                   Flexible(
                                     child: SingleChildScrollView(
