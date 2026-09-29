@@ -54,6 +54,18 @@ drawer, so two panes keep their full header controls. A narrow pane header uses
 upstream's **Pane actions** menu. Tab and Enter operate the navigation controls
 without taking terminal input.
 
+Each project's **+** (**New agent here**) sits on its title row when the project
+has one location; a project with several checkouts keeps one beside each folder.
+Right-click a session, long-press it, or press Menu or Shift+F10 on it (a **...**
+button also appears on hover) for **Stop harness…** (**Stop terminal…** for a
+plain terminal). It opens the same confirmation as the pane header, and once you
+confirm, the session ends and leaves the list; project files and saved history are
+kept. Sessions on a shared machine are view-only. A project you saved with
+**Add folder** or **New project** has a **...** button on its title row, and the same
+right-click menu, with **Remove from sidebar**. That forgets only the saved entry:
+the folder is untouched, and any sessions in it keep running and stay listed under
+the project.
+
 Sessions are listed by what they are. A row shows the session's own name or
 title, otherwise its harness or engine (**Grid**, **Codex**); the clock-stamped
 name Harness invented stays in the tooltip. Two rows with the same label in one
@@ -71,8 +83,10 @@ so a rename starts from the session's real name.
 These fork changes touch upstream files: the engine-exit message in
 `cli/src/lib/engineLaunch.ts`, **Ready** in
 `desktop/lib/widgets/swarm_search_preview.dart`, the pane header's omission of a
-generated folder in `desktop/lib/widgets/terminal_panel.dart`, and
-`isGeneratedWorkFolder` in `desktop/lib/core/project_folder.dart`, with their tests.
+generated folder in `desktop/lib/widgets/terminal_panel.dart`,
+`isGeneratedWorkFolder` in `desktop/lib/core/project_folder.dart`, and
+`SwarmProjectStore.remove` in `desktop/lib/state/swarm_catalog.dart`, with their
+tests.
 The labels themselves live in the fork's `desktop/lib/state/project_navigation.dart`.
 
 This source change does not update an installed Preview 7 bundle or desktop shortcut.

@@ -1,9 +1,12 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/shared/widgets/app_icon_button.dart';
+import 'package:harness/shared/widgets/app_menu.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/project_navigation.dart';
 import 'package:harness/state/swarm_catalog.dart';
@@ -15,6 +18,25 @@ import 'package:harness/widgets/project_sidebar.dart';
 import 'swarm_attention_test.dart' show waitingQuestion;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
+
+class _MemoryStore implements LocalKeyValueStore {
+  final values = <String, String>{};
+  bool failWrites = false;
+  int writes = 0;
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async {
+    if (failWrites) throw StateError('disk full');
+    writes++;
+    values[key] = value;
+  }
+
+  @override
+  Future<void> delete(String key) async => values.remove(key);
+}
 
 AppNotifier projectApp() {
   final app = createApp();
@@ -611,5 +633,300 @@ void main() {
     // Before the test ends, not in a tear-down: the offline machine's retry
     // timer the drop started must be gone when the fake clock is checked.
     app.dispose();
+  });
+
+  Finder menuItem(String prefix) => find.byWidgetPredicate(
+    (widget) => widget is AppMenuItem && widget.label.startsWith(prefix),
+  );
+
+  AppNotifier connectedApp() {
+    final app = projectApp();
+    app.machineStates['m']!
+      ..nodeOnline = true
+      ..connectionStatus = ConnectionStatus.connected;
+    return app;
+  }
+
+  testWidgets('a project with one location keeps its plus on the title row', (
+    tester,
+  ) async {
+    final app = connectedApp();
+    addTearDown(app.dispose);
+    ProjectLocation? chosen;
+    await mountSidebar(tester, app, onNew: (location) => chosen = location);
+    final groups = swarmProjects(app, const []);
+    expect(groups, hasLength(2));
+    for (final group in groups) {
+      final location = projectLocations(group).single;
+      final title = tester.getRect(find.byKey(ValueKey('project:${group.id}')));
+      final plus = tester.getRect(
+        find.byKey(
+          ValueKey(
+            'new-project-agent:${location.machineId}:${location.folder}',
+          ),
+        ),
+      );
+      expect(plus.top, greaterThanOrEqualTo(title.top));
+      expect(plus.bottom, lessThanOrEqualTo(title.bottom));
+      expect(plus.right, lessThanOrEqualTo(title.right));
+      expect(plus.center.dx, greaterThan(title.center.dx));
+    }
+    expect(tester.takeException(), isNull);
+    await tester.tap(
+      find.byKey(const ValueKey('new-project-agent:m:/work/notebook')),
+    );
+    expect(chosen, (machineId: 'm', folder: '/work/notebook'));
+
+    app.machineStates['m']!.nodeOnline = false;
+    await mountSidebar(tester, app);
+    final button = tester.widget<AppIconButton>(
+      find.byKey(const ValueKey('new-project-agent:m:/work/notebook')),
+    );
+    expect(button.onPressed, isNull);
+    expect(button.tooltip, 'Connect this machine to create an agent');
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'checkouts of one repository keep a plus each beside their folder',
+    (tester) async {
+      final app = connectedApp();
+      addTearDown(app.dispose);
+      app.machineStates['m']!.localProjects = const {
+        'a0': AgentProject(
+          name: 'Notebook',
+          cwd: '/work/notebook',
+          remote: 'example/repo',
+        ),
+        'a1': AgentProject(
+          name: 'Notebook',
+          cwd: '/work/copy',
+          remote: 'example/repo',
+        ),
+      };
+      await mountSidebar(tester, app);
+      final group = swarmProjects(app, const []).single;
+      final title = tester.getRect(find.byKey(ValueKey('project:${group.id}')));
+      for (final (folder, shown) in [
+        ('/work/notebook', 'notebook'),
+        ('/work/copy', 'copy'),
+      ]) {
+        final plus = tester.getRect(
+          find.byKey(ValueKey('new-project-agent:m:$folder')),
+        );
+        expect(plus.top, greaterThanOrEqualTo(title.bottom));
+        expect(find.text(shown), findsOneWidget);
+      }
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('a right click on a session offers to stop it and asks first', (
+    tester,
+  ) async {
+    final app = connectedApp();
+    addTearDown(app.dispose);
+    await mountSidebar(tester, app);
+    await tester.tap(
+      find.byKey(const ValueKey('project-agent:m:a0')),
+      buttons: kSecondaryButton,
+    );
+    await tester.pumpAndSettle();
+    expect(menuItem('Stop harness'), findsOneWidget);
+    await tester.tap(menuItem('Stop harness'));
+    await tester.pumpAndSettle();
+    expect(find.text('Stop Harness'), findsOneWidget);
+    // The session's name: once on its sidebar row, once in the confirmation.
+    final name = app.machineStates['m']!.agents.first.displayName;
+    expect(find.text(name), findsNWidgets(2));
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.text('Stop Harness'), findsNothing);
+    expect(app.machineStates['m']!.agents, hasLength(2));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('the row button appears on hover and opens the same menu', (
+    tester,
+  ) async {
+    final app = connectedApp();
+    addTearDown(app.dispose);
+    await mountSidebar(tester, app);
+    final row = find.byKey(const ValueKey('project-agent:m:a0'));
+    final button = find.byKey(const ValueKey('project-agent-menu:m:a0'));
+    await tester.tap(button, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(menuItem('Stop harness'), findsNothing);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(tester.getCenter(row));
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(menuItem('Stop harness'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a long press opens the session menu for touch', (tester) async {
+    final app = connectedApp();
+    addTearDown(app.dispose);
+    await mountSidebar(tester, app);
+    await tester.longPress(find.byKey(const ValueKey('project-agent:m:a0')));
+    await tester.pumpAndSettle();
+    expect(menuItem('Stop harness'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final (name, press) in <(String, Future<void> Function(WidgetTester))>[
+    ('Menu', (tester) => tester.sendKeyEvent(LogicalKeyboardKey.contextMenu)),
+    (
+      'Shift+F10',
+      (tester) async {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      },
+    ),
+  ]) {
+    testWidgets('$name on a focused session opens its menu', (tester) async {
+      final app = connectedApp();
+      addTearDown(app.dispose);
+      await mountSidebar(tester, app);
+      await tester.enterText(
+        find.byKey(const ValueKey('project-filter')),
+        'review',
+      );
+      await tester.pumpAndSettle();
+      // Add folder, New project, the title, its plus, then the session row.
+      for (var i = 0; i < 5; i++) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+      }
+      await press(tester);
+      await tester.pumpAndSettle();
+      expect(menuItem('Stop harness'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  testWidgets('a session on a shared machine cannot be stopped from here', (
+    tester,
+  ) async {
+    final app = connectedApp();
+    addTearDown(app.dispose);
+    const shared = Machine(
+      machineId: 'shared',
+      name: 'Shared host',
+      authMode: MachineAuthMode.remote,
+      isShared: true,
+    );
+    app.machines.add(shared);
+    app.machineStates['shared'] = MachineState(shared)
+      ..nodeOnline = true
+      ..connectionStatus = ConnectionStatus.connected
+      ..agents = const [
+        Agent(
+          id: 's0',
+          name: 'Shared',
+          engine: 'codex',
+          terminalAvailable: true,
+        ),
+      ]
+      ..localProjects = const {
+        's0': AgentProject(name: 'Shared', cwd: '/work/shared'),
+      };
+    await mountSidebar(tester, app);
+    await tester.tap(
+      find.byKey(const ValueKey('project-agent:shared:s0')),
+      buttons: kSecondaryButton,
+    );
+    await tester.pumpAndSettle();
+    expect(menuItem('Stop harness'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Tooltip &&
+            widget.message == 'Shared harnesses are view-only.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(menuItem('Stop harness'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(find.text('Stop Harness'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('only a saved project can be taken off the sidebar', (
+    tester,
+  ) async {
+    final app = connectedApp();
+    addTearDown(app.dispose);
+    final store = _MemoryStore();
+    final projects = SwarmProjectStore(storage: store);
+    await projects.add(
+      const SavedSwarmProject(
+        machineId: 'm',
+        path: '/work/notebook',
+        name: 'Notebook',
+      ),
+    );
+    await projects.add(
+      const SavedSwarmProject(
+        machineId: 'm',
+        path: '/work/empty',
+        name: 'Empty',
+      ),
+    );
+    await mountSidebar(tester, app, projects: projects);
+    final groups = swarmProjects(app, projects.projects);
+    final live = groups.singleWhere((g) => g.saved?.path == '/work/notebook');
+    final empty = groups.singleWhere((g) => g.saved?.path == '/work/empty');
+    final plain = groups.singleWhere((g) => g.saved == null);
+    Finder menuButton(SwarmProjectGroup g) =>
+        find.byKey(ValueKey('project-menu:${g.id}'));
+    expect(menuButton(live), findsOneWidget);
+    expect(menuButton(empty), findsOneWidget);
+    expect(menuButton(plain), findsNothing);
+
+    await tester.tap(
+      find.byKey(ValueKey('project:${plain.id}')),
+      buttons: kSecondaryButton,
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(AppMenuItem), findsNothing);
+
+    // An empty saved project disappears; nothing else was stored or touched.
+    await tester.tap(menuButton(empty));
+    await tester.pumpAndSettle();
+    expect(find.text('The folder itself is not touched.'), findsOneWidget);
+    await tester.tap(menuItem('Remove from sidebar'));
+    await tester.pumpAndSettle();
+    expect(projects.projects.map((p) => p.path), ['/work/notebook']);
+    expect(store.values['swarm_projects_v1'], contains('/work/notebook'));
+    expect(store.values['swarm_projects_v1'], isNot(contains('/work/empty')));
+    expect(find.byKey(ValueKey('project:${empty.id}')), findsNothing);
+
+    // One with a live session loses its entry but keeps the group and session.
+    await tester.tap(
+      find.byKey(ValueKey('project:${live.id}')),
+      buttons: kSecondaryButton,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'Its session keeps running and stays listed. The folder is not touched.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(menuItem('Remove from sidebar'));
+    await tester.pumpAndSettle();
+    expect(projects.projects, isEmpty);
+    expect(store.values['swarm_projects_v1'], '[]');
+    expect(find.byKey(ValueKey('project:${live.id}')), findsOneWidget);
+    expect(find.byKey(const ValueKey('project-agent:m:a0')), findsOneWidget);
+    expect(menuButton(live), findsNothing);
+    expect(app.machineStates['m']!.agents, hasLength(2));
+    await tester.pumpWidget(const SizedBox());
   });
 }
