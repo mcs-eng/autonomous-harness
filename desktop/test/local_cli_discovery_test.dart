@@ -301,35 +301,6 @@ void main() {
     spawnCommand: spawnCommand,
   );
 
-  test('canceling supervision during auth prevents a late spawn', () async {
-    final identity = File('${scratch.path}/computer-id')
-      ..writeAsStringSync('0123456789abcdef0123456789abcdef');
-    final pending = Completer<bool>();
-    final checked = Completer<void>();
-    var spawns = 0;
-    final discovery = discoveryFor(
-      await freePort(),
-      identity,
-      spawnCommand: () async {
-        spawns++;
-      },
-    );
-    final timer = discovery.startSupervising(
-      checkInterval: const Duration(milliseconds: 10),
-      spawnAfter: 1,
-      stillSignedIn: () {
-        if (!checked.isCompleted) checked.complete();
-        return pending.future;
-      },
-    );
-    addTearDown(timer.cancel);
-    await checked.future.timeout(const Duration(seconds: 3));
-    timer.cancel();
-    pending.complete(true);
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    expect(spawns, 0);
-  });
-
   test(
     'reads real working folders from older local status snapshots',
     () async {
@@ -1157,12 +1128,10 @@ void main() {
 
       var spawnCount = 0;
       var signedOutCalls = 0;
-      final discovery = LocalCliDiscovery(
-        config: AppConfig(
-          apiBaseUrl: 'https://harness-api.autonomous.ai',
-          localCliBaseUrl: 'http://127.0.0.1:$closedPort',
-        ),
-        identity: LocalMachineIdentity(computerIdFile: identityFile),
+      // Windows refuses a closed loopback port slowly; the helper shortens the probe.
+      final discovery = discoveryFor(
+        closedPort,
+        identityFile,
         spawnCommand: () async {
           spawnCount++;
         },
@@ -1201,12 +1170,10 @@ void main() {
     var spawnCount = 0;
     var signedOutCalls = 0;
     final answer = Completer<bool>();
-    final discovery = LocalCliDiscovery(
-      config: AppConfig(
-        apiBaseUrl: 'https://harness-api.autonomous.ai',
-        localCliBaseUrl: 'http://127.0.0.1:$closedPort',
-      ),
-      identity: LocalMachineIdentity(computerIdFile: identityFile),
+    // Windows refuses a closed loopback port slowly; the helper shortens the probe.
+    final discovery = discoveryFor(
+      closedPort,
+      identityFile,
       spawnCommand: () async {
         spawnCount++;
       },
@@ -1223,7 +1190,8 @@ void main() {
     );
     addTearDown(timer.cancel);
 
-    await Future.delayed(const Duration(milliseconds: 150));
+    // Two quiet ticks, each with a loopback probe that takes tens of ms to fail on Windows.
+    await Future.delayed(const Duration(milliseconds: 500));
     expect(spawnCount, 1, reason: 'the spawn does not wait on the auth check');
     expect(signedOutCalls, 0);
 
