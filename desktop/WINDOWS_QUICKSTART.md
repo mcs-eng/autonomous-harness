@@ -358,6 +358,10 @@ files into native and web variants; the fork's Windows fixes moved with them,
 including reading the OpenCode usage folder when Windows reports it missing and
 refusing a damaged saved WSL account choice on load; only an explicit Save
 replaces it, and the damaged file is kept.
+Upstream's compact pane header now applies only inside workspaces, where the
+focused pane's model is chosen with the single workspace model selector; a
+compact header never shows its own. This supersedes the September 27 note about
+standalone compact terminals.
 The Windows and WSL paths, local mode, the projects sidebar, and the account
 screen remain. This is a source change; it does not update an installed desktop
 or daemon.
