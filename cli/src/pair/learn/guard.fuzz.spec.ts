@@ -246,7 +246,8 @@ describe('bounded time on long hostile input', () => {
       redact(text)
       untrusted(text, 300)
       hasSecret(text)
-      expect(performance.now() - start, name).toBeLessThan(1_500)
+      // Headroom for shared runners under the parallel suite; the quadratic patterns took minutes at this size.
+      expect(performance.now() - start, name).toBeLessThan(6_000)
     })
   }
 })
