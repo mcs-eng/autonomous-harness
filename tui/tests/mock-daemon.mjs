@@ -44,6 +44,24 @@ const agents = DEMO ? {
   [LOCAL]: [agent(randomUUID(), 'Mock Claude', 'claude'), agent(randomUUID(), 'Mock Codex', 'codex'), agent(randomUUID(), 'Mock paused', 'claude', 'stopped')],
   [REMOTE]: [agent(randomUUID(), 'Remote shell', 'terminal')],
 }
+// Opt-in viewer fixtures, so the normal terminal roster and its tests keep their identities.
+if (process.env.MOCK_VIEWER === '1') {
+  agents[LOCAL].push({ ...agent('mock-blender', 'Mock Blender', 'claude'), dsh: 'autonomous/blender',
+    viewerName: '3D Viewer', viewerUrl: `http://127.0.0.1:${port}/test-viewer?file=model.glb` })
+  agents[REMOTE].push({ ...agent('remote-blender', 'Remote Blender', 'claude'), dsh: 'autonomous/blender',
+    viewerName: '3D Viewer', viewerUrl: 'http://127.0.0.1:19679/?file=model.glb' })
+}
+if (process.env.MOCK_VIEWER_EDGES === '1') {
+  agents[LOCAL].push(
+    { ...agent('waiting-viewer', 'Waiting Viewer', 'claude'), viewerName: '3D Viewer' },
+    { ...agent('failed-viewer', 'Failed Viewer', 'claude'), viewerError: 'Renderer could not start' },
+    { ...agent('unsafe-viewer', 'Unsafe Viewer', 'claude'), viewerName: 'Viewer', viewerUrl: 'javascript:alert(1)' },
+    { ...agent('quoted-viewer', 'Quoted " viewer; $(false)', 'claude'), viewerName: 'Viewer', viewerUrl: `http://127.0.0.1:${port}/test-viewer?x=a&y=b` },
+    { ...agent('mock-blender-extended', 'Mock Blender Extended', 'claude'), viewerName: 'Viewer' },
+    { ...agent('duplicate-local', 'Duplicate Viewer', 'claude'), viewerName: 'Viewer' },
+  )
+  agents[REMOTE].push({ ...agent('duplicate-remote', 'Duplicate Viewer', 'claude'), viewerName: 'Viewer' })
+}
 // Claude Code and Codex conversations on this machine that Harness did not start (session_search's
 // `external` hits): two closed, one still open in a terminal (not to be opened twice).
 const HOUR = 3_600_000
@@ -131,6 +149,18 @@ const dial = { said: {}, replies: [], messages: [] }
 // How many of each request the windows made (GET /test/counts), for tests of what hn asks.
 const counts = {}
 const windows = new Set()
+// Opt-in faults for reconnect.py. No real daemon or agent is involved.
+// Controlled desk latency/failures for layout reconciliation tests, on private ports only.
+const layoutTest = process.env.MOCK_LAYOUT === '1'
+if (layoutTest && !(port >= 19800 && port <= 19809)) throw new Error('unsafe layout test port')
+const layoutFaults = { delays: [], failures: [], writes: [] }
+const reconnect = process.env.MOCK_RECONNECT === '1'
+if (reconnect && !(port >= 19780 && port <= 19789)) throw new Error('unsafe reconnect test port')
+const connections = new Map()
+const opens = []
+const inputs = []
+const readOnly = new Set()
+let nextConnection = 0
 // The questions open on this computer, as the daemon keeps them: replayed to a window as it
 // connects, then their ids (commander_questions_open).
 const openQs = new Map()
@@ -138,7 +168,42 @@ let demoAsked = false
 
 const json = (res, body) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ success: true, data: body })) }
 const server = http.createServer((req, res) => {
-  if (req.url === '/api/status') return json(res, { machineId: LOCAL, signedIn: true, version: 'mock' })
+  if (layoutTest && req.url === '/test/layout') {
+    if (req.method === 'GET') return json(res, layoutFaults)
+    let body = ''
+    req.on('data', c => { body += c })
+    req.on('end', () => {
+      const f = JSON.parse(body)
+      for (const key of ['delays', 'failures']) if (Array.isArray(f[key])) layoutFaults[key] = f[key]
+      json(res, layoutFaults)
+    })
+    return
+  }
+  if (reconnect && req.url === '/test/reconnect') {
+    if (req.method === 'GET') return json(res, { opens, inputs, counts, connections: [...connections.values()].map(c => ({
+      id: c.id, machine: c.machine, streams: [...c.streams].map(([id, s]) => ({ id, agent: s.agent.id })),
+    })) })
+    let body = ''
+    req.on('data', c => { body += c })
+    req.on('end', () => {
+      const f = JSON.parse(body)
+      if (f.action === 'watch') readOnly.add(f.agent)
+      for (const c of connections.values()) {
+        if (f.machine && c.machine !== f.machine) continue
+        if (f.action === 'hang') c.hang = true
+        if (f.action === 'disconnect') c.ws.terminate()
+        if (f.action === 'close') for (const [id, s] of c.streams) {
+          if (f.agent && s.agent.id !== f.agent) continue
+          c.streams.delete(id)
+          c.ws.send(JSON.stringify({ type: 'terminal_closed', payload: { streamId: id, reason: f.reason,
+            ...(f.takenBy ? { takenBy: { name: f.takenBy } } : {}) } }))
+        }
+      }
+      json(res, { ok: true })
+    })
+    return
+  }
+  if (req.url === '/api/status') return json(res, { machineId: LOCAL, signedIn: true, version: 'mock', webUrl: process.env.MOCK_WEB_URL || 'https://harness.example' })
   if (req.url === '/api/machines') return json(res, { machines: [
     { machineId: LOCAL, name: DEMO ? 'studio' : 'mock-local', status: 'running' },
     { machineId: REMOTE, name: DEMO ? 'gpu-box' : 'mock-remote', status: 'running' },
@@ -174,7 +239,16 @@ const server = http.createServer((req, res) => {
     // Applied as the daemon's desk store applies them (MOCK_DESK=fixed: left as it is).
     let body = ''
     req.on('data', (c) => { body += c })
-    req.on('end', () => {
+    req.on('end', async () => {
+      const delay = layoutTest ? (layoutFaults.delays.shift() || 0) : 0
+      const failure = layoutTest ? (layoutFaults.failures.shift() || 0) : 0
+      if (layoutTest) layoutFaults.writes.push(JSON.parse(body || '{}'))
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
+      if (failure) {
+        res.writeHead(failure, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: 'injected desk failure' }))
+        return
+      }
       let ops = []
       try { ops = JSON.parse(body || '{}').ops || [] } catch {}
       if (process.env.MOCK_DESK === 'fixed') ops = []
@@ -220,6 +294,11 @@ const wss = new WebSocketServer({ server, path: '/api/local-ws' })
 wss.on('connection', (ws) => {
   let machine = null
   const streams = new Map() // streamId → { seq, agent }
+  const connection = { id: ++nextConnection, ws, streams, machine: null, hang: false }
+  if (reconnect) {
+    connections.set(connection.id, connection)
+    ws.on('close', () => connections.delete(connection.id))
+  }
   const send = (type, payload) => ws.send(JSON.stringify({ type, payload }))
   ws.on('message', (raw, isBinary) => {
     if (isBinary) {
@@ -228,6 +307,7 @@ wss.on('connection', (ws) => {
       const streamId = bytes.subarray(12, 28).toString('hex').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5')
       const stream = streams.get(streamId)
       if (!stream) return
+      if (reconnect) inputs.push({ connection: connection.id, agent: stream.agent.id, text: bytes.subarray(36).toString() })
       // Echo: what was typed comes back as output, Enter as a new prompt line.
       const text = bytes.subarray(36).toString('utf8').replace(/\r/g, '\r\n$ ')
       stream.screen += text
@@ -237,6 +317,7 @@ wss.on('connection', (ws) => {
     const { type, payload = {} } = JSON.parse(String(raw))
     if (type === 'machine_select') {
       machine = payload.machineId
+      connection.machine = machine
       if (!agents[machine]) return ws.close(4403, 'machine mismatch')
       send('connected', { machineId: machine, transport: 'local', localProtocolVersion: 1 })
       // This machine's own connections are the daemon's windows (backend.sendLocal's audience).
@@ -354,6 +435,8 @@ wss.on('connection', (ws) => {
         return
       }
       case 'terminal_open': {
+        if (reconnect) opens.push({ connection: connection.id, machine, agent: payload.agentId, takeover: payload.takeover, hung: connection.hang, at: Date.now() })
+        if (reconnect && connection.hang) return // WS still answers pings; application requests do not.
         const target = agents[machine].find((a) => a.id === payload.agentId)
         if (!target || target.status !== 'active') return send('terminal_error', { requestId: payload.requestId, code: 'TERMINAL_AGENT_NOT_FOUND' })
         const streamId = randomUUID()
@@ -362,7 +445,7 @@ wss.on('connection', (ws) => {
         // MOCK_PLAIN: a terminal that is only its prompt.
         const screen = DEMO ? demoScreen(target) : process.env.MOCK_PLAIN ? '\x1bc$ ' : `\x1bc${target.name} (mock)\r\n${banner}$ `
         streams.set(streamId, { seq: 1, agent: target, screen })
-        send('terminal_ready', { requestId: payload.requestId, streamId, agentId: target.id, readOnly: false })
+        send('terminal_ready', { requestId: payload.requestId, streamId, agentId: target.id, readOnly: reconnect && readOnly.has(target.id), heldBy: { name: 'test observer' } })
         ws.send(frame(3, streamId, 0, Buffer.from(screen), [payload.cols, payload.rows]))
         return
       }

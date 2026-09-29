@@ -25,6 +25,15 @@ void ht_character_layout(ht_scene_t *s, const ht_character_face_t *f, uint8_t fr
 void ht_inbox_card(ht_scene_t *scene, const char *mark, const char *name,
                    const char *message, uint16_t foreground, uint16_t status_ink);
 void ht_notification_bell(ht_scene_t *scene, unsigned count, uint16_t ink);
+/*
+ * The same badge, placed.
+ *
+ * The creature skins pin it under the companion at HT_NOTIFICATION_Y, which is the row the hint
+ * would use and the only space a portrait leaves. A face that fills the footer with its own control
+ * has no such row, so it puts the badge at the top — which is also where the device drew it before
+ * habitat (mockup/device-screens/png/inbox.png).
+ */
+void ht_notification_bell_at(ht_scene_t *scene, unsigned count, uint16_t ink, int y);
 // The envelope is painted in the character's own cells, attached to its limb.
 void ht_character_letter(ht_scene_t *s, const ht_character_face_t *f,
                          const ht_font_t *font, int x, int y);

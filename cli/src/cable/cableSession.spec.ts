@@ -277,6 +277,33 @@ describe('cable session', () => {
     } finally { await session.stop() }
   })
 
+  it('carries read tokens through snapshots and accepts only bounded read receipts', async () => {
+    const readNotification = vi.fn(), openAgent = vi.fn()
+    const { session, port } = await connect(makeHost({ readNotification, openAgent }))
+    try {
+      await session.replaceNotifications([{ agentId: 'a1', machineId: 'mac-local', question: true, text: 'Which branch?', readToken: 'question-2' }])
+      expect(port.sent.at(-1)).toMatchObject({ t: 'notif.replace', items: [{ readToken: 'question-2' }] })
+      port.say({ t: 'notif.read', agentId: 'a1', readToken: 'question-2' })
+      for (const readToken of ['', 42, null, 'a'.repeat(64), 'line\nbreak']) port.say({ t: 'notif.read', agentId: 'a1', readToken })
+      await settle()
+      expect(readNotification).toHaveBeenCalledExactlyOnceWith('a1', 'question-2')
+      expect(openAgent).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+
+  it.each(['turn-1', 'turn-2'])('a late read of %s cannot clear a newer snapshot occurrence', async readToken => {
+    let finish!: (value: Array<{ recap: string; text: string }>) => void
+    const history = new Promise<Array<{ recap: string; text: string }>>(resolve => { finish = resolve })
+    const { session, port } = await connect(makeHost({ recentSummaries: () => history }))
+    try {
+      const pending = session.replaceNotifications([{ agentId: 'a1', machineId: 'mac-local', question: false, text: '', readToken: 'turn-2' }])
+      await session.agentSeen('a1', readToken)
+      finish([{ recap: 'Same words.', text: 'Same words.' }]); await pending
+      const items = port.sent.at(-1)!.items as unknown[]
+      expect(items).toHaveLength(readToken === 'turn-2' ? 0 : 1)
+    } finally { await session.stop() }
+  })
+
   it('fetches the chosen agent question and submits its reviewed token once', async () => {
     const answerReviewed = vi.fn<NonNullable<CableHost['answerReviewed']>>(async () => ({ ok: true as const }))
     const { session, port } = await connect(makeHost({ answerReviewed }))
@@ -534,7 +561,7 @@ describe('cable session', () => {
     const core = await connect()
     core.port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
     await vi.waitFor(() => expect(core.port.types()).toContain('welcome'))
-    expect(core.port.sent[0].features).toEqual(['voice.draft', 'agents.refresh'])
+    expect(core.port.sent[0].features).toEqual(['voice.draft', 'agents.refresh', 'settings'])
     await core.session.stop()
 
     const advanced = await connect(makeHost({
@@ -545,8 +572,49 @@ describe('cable session', () => {
     }))
     advanced.port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
     await vi.waitFor(() => expect(advanced.port.types()).toContain('welcome'))
-    expect(advanced.port.sent[0].features).toEqual(['voice.draft', 'agents.refresh', 'form', 'selection', 'visit', 'question.review'])
+    expect(advanced.port.sent[0].features).toEqual(['voice.draft', 'agents.refresh', 'form', 'selection', 'visit', 'question.review', 'settings'])
     await advanced.session.stop()
+  })
+
+  it('carries the device settings both ways, and lets a refusal correct the window', async () => {
+    /*
+     * The device owns these. This computer proposes, and what comes back is what the device HOLDS —
+     * read back from its own NVS, not echoed from the request. That is what makes a refusal
+     * self-correcting: a window that asked for a character this image does not have is told the real
+     * one rather than left showing its own optimism.
+     */
+    const seen: unknown[] = []
+    const lines: string[] = []
+    const { session, port } = await connect(makeHost({ onDialStatus: (s) => seen.push(s), log: (l) => lines.push(l) }))
+    const settings = {
+      brightness: 80, character: 0, face: 466, muted: false, quiet: false, straightTitle: false,
+      focusFace: false, scrollReversed: false, round: true, voiceLang: 'vi',
+    }
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', fw: '0.0.90', proto: 3, settings })
+    await vi.waitFor(() => expect(seen.at(-1)).toMatchObject({ attached: true, settings }))
+
+    // Only the named field crosses. Two windows open on one device must not overwrite each other with
+    // whatever each of them last saw.
+    await session.setSettings({ character: 9 })
+    expect(port.sent.at(-1)).toEqual({ t: 'settings.set', character: 9 })
+    await session.setSettings({})
+    expect(port.sent.at(-1)).toEqual({ t: 'settings.set', character: 9 })   // nothing to say, nothing sent
+
+    port.say({ t: 'settings.state', ok: false, error: 'This device has no such character.', settings })
+    await vi.waitFor(() => expect(seen.at(-1)).toMatchObject({ settings }))
+    expect(lines.some((l) => l.includes('refused a settings change: This device has no such character.'))).toBe(true)
+
+    // A change made on the glass arrives unprompted and moves the pane.
+    const quieter = { ...settings, quiet: true, brightness: 20 }
+    port.say({ t: 'settings.state', ok: true, settings: quieter })
+    await vi.waitFor(() => expect(seen.at(-1)).toMatchObject({ settings: quieter }))
+
+    // Half an object is refused whole: a default here is a value this computer invented, and the pane
+    // would then show a setting the device does not have.
+    port.say({ t: 'settings.state', ok: true, settings: { brightness: 50 } })
+    await settle()
+    expect(seen.at(-1)).toMatchObject({ settings: quieter })
+    await session.stop()
   })
 
   it('answers a repeat hello WITHOUT re-pushing the list', async () => {
@@ -569,14 +637,16 @@ describe('cable session', () => {
     const seen: unknown[] = []
     const { session, port } = await connect(makeHost({ onDialStatus: (status) => seen.push(status) }))
     port.say({ t: 'hello', product: 'harness', fw: '0.0.58', proto: 1, mac: 'aa:bb' })
-    await vi.waitFor(() => expect(seen).toEqual([{ attached: true, fw: '0.0.58' }]))
+    await vi.waitFor(() => expect(seen).toEqual([{ attached: true, fw: '0.0.58', mac: 'aa:bb' }]))
 
     port.say({ t: 'hello', product: 'harness', fw: '0.0.58', proto: 1, mac: 'aa:bb' })
     await settle()
     expect(seen).toHaveLength(1)
 
+    // Unplugged still says WHICH device left. A desk can hold two, and the settings pane has to know
+    // whose rows to show read-only rather than dropping a robot off the list.
     await port.close('unplugged')
-    await vi.waitFor(() => expect(seen.at(-1)).toEqual({ attached: false }))
+    await vi.waitFor(() => expect(seen.at(-1)).toEqual({ attached: false, mac: 'aa:bb' }))
     await session.stop()
   })
 
@@ -1629,10 +1699,10 @@ describe('cable session', () => {
     const { session, port } = await connect(makeHost({ log: (l) => lines.push(l), onDialStatus: (s) => seen.push(s) }))
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', fw: '0.0.68', proto: 3, hw: 'cst816s' })
     await vi.waitFor(() => expect(lines.some((l) => l.includes('on fw 0.0.68 proto 3 hw cst816s'))).toBe(true))
-    expect(seen).toEqual([{ attached: true, fw: '0.0.68', hw: 'cst816s' }])
+    expect(seen).toEqual([{ attached: true, fw: '0.0.68', hw: 'cst816s', mac: 'aa:bb' }])
     port.say({ t: 'hello', product: 'harness', mac: 'cc:dd', fw: '0.0.67', proto: 3 })
     await vi.waitFor(() => expect(lines.some((l) => l.includes('dial cc:dd on fw 0.0.67 proto 3'))).toBe(true))
-    expect(seen.at(-1)).toEqual({ attached: true, fw: '0.0.67' })
+    expect(seen.at(-1)).toEqual({ attached: true, fw: '0.0.67', mac: 'cc:dd' })
     await session.stop()
   })
 

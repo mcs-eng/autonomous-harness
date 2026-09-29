@@ -1,10 +1,11 @@
-# Settings BOTH boards share. ESP-IDF reads this first, then appends sdkconfig.defaults.<target>
-# for whichever of the two is being built — so anything that names a pin count, a PSRAM mode, a CPU
-# clock or a radio belongs in the per-target file beside this one, not here.
+# The dial's config. ESP-IDF reads this first, then appends sdkconfig.defaults.esp32s3.
 #
-# `idf.py build` with no target still builds the round dial: sdkconfig.defaults.esp32s3 carries
-# CONFIG_IDF_TARGET, and the Pro is reached through `make pro-build` (see the Makefile) which sets its
-# own target and its own sdkconfig file.
+# CONFIG_IDF_TARGET IS HERE, AND THAT MATTERS. IDF only reads sdkconfig.defaults.<target> once it
+# already knows the target, so while it lived in the per-target file a build that named no target
+# guessed — from a stale `sdkconfig` if one was lying around, and from plain `esp32` if not, which
+# died at CMake on a clean checkout (verified 2026-09-28). With one board there is nothing to choose
+# between, so the choice is made here, once, where it is always read.
+CONFIG_IDF_TARGET="esp32s3"
 
 # --- Flash (both boards carry 16 MB) ---
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -33,25 +34,6 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
 # --- Log level ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
-# --- LVGL v9 (configured via the lvgl/lvgl component's Kconfig) ---
-CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_USE_PERF_MONITOR=n
-# Fonts used by ui_screens.c (montserrat_14 default; _22 headers; _30 OTA title; _40 big pairing code).
-# 18 is the Model/Effort pills; 22 was 20% too big on the panel. 24 is the swarm pill that replaced
-# them — one pill on the band where two sat, so it has the room the pair did not.
-CONFIG_LV_FONT_MONTSERRAT_18=y
-CONFIG_LV_FONT_MONTSERRAT_22=y
-CONFIG_LV_FONT_MONTSERRAT_24=y
-CONFIG_LV_FONT_MONTSERRAT_30=y
-CONFIG_LV_FONT_MONTSERRAT_40=y
-# Keep a small built-in internal LVGL pool and add a 64KiB PSRAM pool at
-# runtime. EXPAND_SIZE sets the TLSF size classes needed for that added pool.
-CONFIG_LV_USE_LOG=y
-CONFIG_LV_LOG_LEVEL_WARN=y
-CONFIG_LV_LOG_PRINTF=y
-CONFIG_LV_ASSERT_HANDLER_INCLUDE="stdlib.h"
-CONFIG_LV_MEM_SIZE_KILOBYTES=8
-CONFIG_LV_MEM_POOL_EXPAND_SIZE_KILOBYTES=512
 
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
@@ -68,7 +50,7 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # ── a wedged UI task reboots instead of freezing ─────────────────────────────────────────────────────
-# The LVGL task subscribes to the task watchdog (display.c). Without PANIC the watchdog only prints a
+# The render task subscribes to the task watchdog (display_habitat.c). Without PANIC the watchdog only prints a
 # warning every few seconds and the glass stays frozen; with it the dial reboots, and the reset reason
 # plus the last log lines before it come back over the cable (last_words.c). 10s rather than the 5s
 # default: a full-face redraw or a touch-controller reset (60ms of delays inside the indev read) must

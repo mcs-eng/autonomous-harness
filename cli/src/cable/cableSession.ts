@@ -28,6 +28,7 @@ import { SerialLink, findDialPort } from './serial.js'
 import { PassageCarry, withCarriedPassage, type CarryRead } from './passageCarry.js'
 import { VoiceDraft, type DraftPin } from './voiceDraft.js'
 import { QuestionInbox, type ReviewedAnswer, type AnswerReceipt, type QuestionSpeech } from './questionInbox.js'
+import { notificationReadToken, type UnreadNotification } from './notificationRead.js'
 
 /** Bumped when the VOCABULARY changes. Separate from the frame version, which is the envelope. */
 export const CABLE_PROTO_VERSION = 3   // 3: + question.close (a question answered on another client)
@@ -284,6 +285,7 @@ export interface CableHost {
    * because a reconnect re-shows every unanswered question and each used to open a tab.
    */
   openAgent(agentId: string, reason?: OpenReason): void
+  readNotification?(agentId: string, readToken: string): void
   /** The dial asked for a fork of this agent — a second one with its history, opened in the window. */
   forkAgent(agentId: string): Promise<{ ok: true; agentId: string } | { ok: false; error: string; detail?: string }>
   /**
@@ -319,7 +321,7 @@ export interface CableHost {
   /** One agent's last turn summaries, newest first — what a reattached dial needs to redraw its tiles. */
   recentSummaries(agentId: string): Promise<Array<{ recap: string; text: string }>>
   /** What the window still has unread, newest first — replayed to a dial that has just attached. */
-  listUnread(): Array<{ agentId: string; machineId: string; question: boolean; text: string }>
+  listUnread(): UnreadNotification[]
   /**
    * The image to offer a dial running `runningVersion`, or null for "nothing to do" — which covers a
    * dial that is current, a dev build that must not be touched, and an unreachable manifest.
@@ -344,14 +346,62 @@ export interface CableHost {
   log(line: string): void
 }
 
+/**
+ * The settings a device owns and an app may change, exactly as they cross the cable.
+ *
+ * Named booleans rather than the firmware's NVS bitmask: those bit positions are the device's private
+ * arrangement, and an app that knew them would have to ship in step with a header it cannot see.
+ *
+ * `round` is not a preference — it is the face. A square device has no curved title, so the app HIDES
+ * that row rather than greying out a control for a setting that does not exist there.
+ */
+export interface DeviceSettings {
+  brightness: number
+  character: number
+  /** The glass, in pixels across. Informational: a support line reads it, nobody chooses it. */
+  face: number
+  muted: boolean
+  quiet: boolean
+  straightTitle: boolean
+  focusFace: boolean
+  scrollReversed: boolean
+  round: boolean
+  voiceLang: string
+}
+
+/** The fields a `settings.set` may name. Absent means unchanged — see handle_settings_set on the device. */
+export type DeviceSettingsPatch = Partial<Omit<DeviceSettings, 'round' | 'face'>>
+
 /** What a window needs to draw the device row. `updating` names the version on its way over. */
 export interface DialStatus {
   attached: boolean
+  /**
+   * Which device this is, when there is more than one. The fleet's key — the USB serial, or the port
+   * path when the descriptor has none. Absent from a session running without a fleet around it.
+   */
+  id?: string
+  /** The device's own address, from `hello.mac`. Survives being moved to another port; `id` may not. */
+  mac?: string
+  /**
+   * What the device holds, as IT last reported — never what this computer last sent. Absent until the
+   * first greeting, and from a firmware that does not carry settings at all (the LVGL build).
+   */
+  settings?: DeviceSettings
   fw?: string
   /** Which of the two dials this is — `cst9217+axp2101`, `cst816s`, … — as the firmware detected itself
    *  at boot (device: board.h). Absent from a firmware that predates the field. Informational. */
   hw?: string
   updating?: string
+  /**
+   * Every device on this computer, when a fleet is reporting. Present only on the primary status, and
+   * the primary is one of these rows — the flat fields above repeat it so a window that predates this
+   * still draws something true.
+   *
+   * It exists because one desk can hold two devices and the settings pane has to name which one it is
+   * changing. Before this the fleet picked a row and threw the rest away, and the app drew one robot
+   * however many were plugged in.
+   */
+  devices?: DialStatus[]
 }
 
 interface Message {
@@ -383,6 +433,36 @@ export const openDialPort: PortOpener = async (onData, onClosed) => {
   return SerialLink.open(port.path, onData, onClosed)
 }
 
+/**
+ * Read a device's reported settings, or undefined.
+ *
+ * Every field must be there and be the right type. A partial object is refused whole rather than
+ * filled with defaults: a default is a value this computer invented, and the pane would then show a
+ * setting the device does not have — the exact failure `settings.state` exists to prevent.
+ */
+function readSettings(value: unknown): DeviceSettings | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const raw = value as Record<string, unknown>
+  const flags = ['muted', 'quiet', 'straightTitle', 'focusFace', 'scrollReversed', 'round'] as const
+  for (const key of flags) if (typeof raw[key] !== 'boolean') return undefined
+  if (typeof raw.brightness !== 'number' || !Number.isFinite(raw.brightness)) return undefined
+  if (typeof raw.character !== 'number' || !Number.isFinite(raw.character)) return undefined
+  if (typeof raw.face !== 'number' || !Number.isFinite(raw.face)) return undefined
+  if (typeof raw.voiceLang !== 'string') return undefined
+  return {
+    brightness: Math.max(0, Math.min(100, Math.round(raw.brightness))),
+    character: Math.round(raw.character),
+    face: Math.round(raw.face),
+    muted: raw.muted as boolean,
+    quiet: raw.quiet as boolean,
+    straightTitle: raw.straightTitle as boolean,
+    focusFace: raw.focusFace as boolean,
+    scrollReversed: raw.scrollReversed as boolean,
+    round: raw.round as boolean,
+    voiceLang: raw.voiceLang,
+  }
+}
+
 export class CableSession {
   private link: CablePort | null = null
   private decoder = new CableDecoder()
@@ -390,6 +470,8 @@ export class CableSession {
   private greetedMac: string | null = null
   /** The board this device says it is (`hello.hw`). Decides which firmware it may be offered. */
   private greetedHw: string | undefined
+  /** What the device last SAID its settings are. Never what this computer last asked for. */
+  private greetedSettings: DeviceSettings | undefined
   private greetedFw: string | null = null
   private lastRx = 0
   private stopped = false
@@ -702,7 +784,14 @@ export class CableSession {
     this.activityRefreshAt = 0
     this.activityRefreshAgent = ''
     this.activityLabels.clear()
-    this.host.onDialStatus?.({ attached: false })
+    // Unplugged, but not forgotten: the mac and the last settings ride along so the app can show the
+    // device's rows read-only rather than emptying the pane. The settings are kept on the session too —
+    // a device that comes back on the same port should not make the pane blink through empty.
+    this.host.onDialStatus?.({
+      attached: false,
+      ...(this.greetedMac ? { mac: this.greetedMac } : {}),
+      ...(this.greetedSettings ? { settings: this.greetedSettings } : {}),
+    })
     this.link = null
     this.greetedMac = null
     this.greetedFw = null
@@ -797,6 +886,9 @@ export class CableSession {
             ...(this.host.selectPassage ? ['selection'] : []),
             ...(this.host.visit ? ['visit'] : []),
             ...(this.host.answerReviewed ? ['question.review'] : []),
+            // The desktop will carry this device's preferences. A device that does not see this keeps
+            // its own settings screens and never reports.
+            'settings',
           ],
         })
         // Log a dial that is new OR that came back running something else. The version half of that test
@@ -807,13 +899,19 @@ export class CableSession {
         const fw = str('fw') ?? '?'
         const hw = str('hw')
         this.greetedHw = hw || undefined
+        // Read before the change test below, so a device that only changed a setting still corrects the
+        // pane: its fw and mac are the same, and without this the greeting would be treated as a keepalive.
+        const settings = readSettings(msg.settings)
+        const settingsChanged = JSON.stringify(settings) !== JSON.stringify(this.greetedSettings)
+        if (settings) this.greetedSettings = settings
+        if (settingsChanged && mac === this.greetedMac && fw === this.greetedFw) this.report()
         if (mac !== this.greetedMac || fw !== this.greetedFw) {
           const returning = mac === this.greetedMac
           this.greetedMac = mac
           this.greetedFw = fw
           this.log(`cable: dial ${mac} ${returning ? 'back ' : ''}on fw ${fw} proto ${msg.proto}${hw ? ` hw ${hw}` : ''}`)
           this.dialLog.greeted()
-          this.host.onDialStatus?.({ attached: true, fw, ...(hw ? { hw } : {}) })
+          this.report({ fw })
           // BEFORE the state push, not after: the push reads the selected machine, and for a remote one
           // that means an RPC over a lane this is what re-opens.
           this.host.onDialAttached?.()
@@ -917,6 +1015,12 @@ export class CableSession {
           this.host.focus(agentId)
         }
         return
+      case 'notif.read': {
+        const agentId = str('agentId')
+        const token = notificationReadToken(msg.readToken)
+        if (agentId && token) this.host.readNotification?.(agentId, token)
+        return
+      }
       case 'agent.open':
         // Only the one reason the window knows; anything else reads as a tap, the older frame's meaning.
         if (str('agentId')) this.host.openAgent(str('agentId')!, str('reason') === 'question' ? 'question' : undefined)
@@ -1159,11 +1263,21 @@ export class CableSession {
       case 'voice.confirm':
         if (str('routeId') && str('agentId')) this.host.focus(str('agentId')!)
         return
+      case 'settings.state': {
+        // The device's answer to a `settings.set`, and also what it sends unprompted after a change made
+        // on the glass. Carries the values READ BACK, so a refusal corrects the pane rather than leaving
+        // it hopeful — which is why the settings are taken even when `ok` is false.
+        const settings = readSettings(msg.settings)
+        if (settings) this.greetedSettings = settings
+        if (msg.ok === false) this.log(`cable: device refused a settings change: ${str('error') ?? 'no reason given'}`)
+        this.report()
+        return
+      }
       case 'fw.accept':
         // The dial has erased its slot and is expecting bytes. Nothing was sent before this.
         // The window is told NOW rather than at the offer: an offer the dial refuses is nothing to
         // show, and the minute that matters — do not unplug it — starts here.
-        this.host.onDialStatus?.({ attached: true, fw: this.greetedFw ?? undefined, updating: this.offeringTo })
+        this.report({ updating: this.offeringTo })
         await this.transfer?.pump()
         return
       case 'fw.progress':
@@ -1179,7 +1293,7 @@ export class CableSession {
         this.offeringTo = ''
         // Still attached from the window's side: the reboot re-greets within seconds and the fw
         // field corrects itself then. Clearing `updating` is what matters.
-        this.host.onDialStatus?.({ attached: true, fw: this.greetedFw ?? undefined })
+        this.report()
         return
       case 'fw.error':
         // The outcome is `refused`, not the dial's message: that string is the
@@ -1187,7 +1301,7 @@ export class CableSession {
         this.transfer?.finish(`refused: ${str('message') ?? 'no reason given'}`)
         this.transfer = null
         this.offeringTo = ''
-        this.host.onDialStatus?.({ attached: true, fw: this.greetedFw ?? undefined })
+        this.report()
         return
       default:
         this.log(`cable: unhandled message '${msg.t}'`)
@@ -1370,7 +1484,7 @@ export class CableSession {
       const command = turn.form.command
       if (!command || transcript.length > 240) {
         this.cancelFormVoice()
-        await reply({ t: 'voice.error', message: 'Say a short agent or project name.' })
+        await reply({ t: 'voice.error', message: 'Say a short harness or project name.' })
         return
       }
       const result = await this.host.form!({ ...command, op: 'query', text: transcript })
@@ -1440,7 +1554,7 @@ export class CableSession {
     agentName = agents.find((a) => a.id === agentId)?.name ?? ''
 
     if (!agentId) {
-      await reply({ t: 'voice.error', message: 'No agent to send that to' })
+      await reply({ t: 'voice.error', message: 'No harness to send that to' })
       return
     }
     const instruction = turn.cmd ? `/${turn.cmd} ${transcript}` : transcript
@@ -1503,6 +1617,39 @@ export class CableSession {
   }
 
   // ── outbound ──────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Every status line this session emits. It exists so identity and settings ride on all of them: a
+   * window that learned the settings from the greeting and then received a bare `{attached:true}` from
+   * a firmware transfer would blank the pane in the middle of an update.
+   */
+  private report(extra: Partial<DialStatus> = {}): void {
+    this.host.onDialStatus?.({
+      attached: true,
+      fw: this.greetedFw ?? undefined,
+      ...(this.greetedHw ? { hw: this.greetedHw } : {}),
+      ...(this.greetedMac ? { mac: this.greetedMac } : {}),
+      ...(this.greetedSettings ? { settings: this.greetedSettings } : {}),
+      ...extra,
+    })
+  }
+
+  /**
+   * Ask the device to change the named settings. Absent fields are not sent, so two windows open on the
+   * same device cannot overwrite each other with the values each last saw.
+   *
+   * Resolves when the frame is on the wire, NOT when the device has agreed: the answer is a
+   * `settings.state`, which arrives as a status update like any other. A caller that waited here would
+   * be waiting on a device that may be asleep.
+   */
+  async setSettings(patch: DeviceSettingsPatch): Promise<boolean> {
+    // `id` addresses the DEVICE; it is not one of its settings and must not be sent as one.
+    const fields = Object.entries(patch).filter(([key, value]) => value !== undefined && key !== 'id')
+    if (!fields.length) return true
+    const sent = await this.send({ t: 'settings.set', ...Object.fromEntries(fields) })
+    if (!sent) this.log('cable: settings change not written — the device is not on the wire')
+    return sent
+  }
 
   private async send(msg: Message): Promise<boolean> {
     if (!this.link?.isOpen) return false
@@ -1913,7 +2060,7 @@ export class CableSession {
    * daemon already knows, so those never have a second source that can disagree.
    */
   async replaceNotifications(
-    items: Array<{ agentId: string; machineId: string; question: boolean; text: string }>,
+    items: UnreadNotification[],
   ): Promise<void> {
     const replay = { seen: new Set<string>() }
     this.notificationReplay = replay
@@ -1930,14 +2077,16 @@ export class CableSession {
           summary = summary ? extendShortRecap(summary, saved?.text ?? '') : saved?.recap ?? ''
         } catch { /* keep the supplied text if history cannot be read */ }
       }
-      return { agentId: item.agentId, name: who.name, machine: who.machine, summary, question: item.question }
+      return { agentId: item.agentId, name: who.name, machine: who.machine, summary, question: item.question,
+        ...(notificationReadToken(item.readToken) ? { readToken: item.readToken } : {}) }
     }))
     if (this.notificationReplay !== replay) return
     this.notificationReplay = undefined
     if (this.link !== link || this.stopped) return
-    // Seen completion rows stay cleared even if their history arrived late.
-    // Questions still require an answer; looking at one cannot dismiss it.
-    await this.send({ t: 'notif.replace', items: rows.filter(row => row.question || !replay.seen.has(row.agentId)) })
+    // Reading clears the notice, not the underlying question. Versioned clears
+    // cannot eat a newer turn whose history happened to take longer to load.
+    await this.send({ t: 'notif.replace', items: rows.filter(row =>
+      (row.question || !replay.seen.has(row.agentId)) && !replay.seen.has(`${row.agentId}\0${row.readToken}`)) })
   }
 
   /**
@@ -1950,10 +2099,11 @@ export class CableSession {
    * Fire and forget, like every other card: a dial that predates the message
    * counts it as unknown and drops it, which is the behaviour it has today.
    */
-  async agentSeen(agentId: string): Promise<void> {
+  async agentSeen(agentId: string, readToken?: string): Promise<void> {
     if (!agentId) return
-    this.notificationReplay?.seen.add(agentId)
-    await this.send({ t: 'notif.seen', agentId })
+    if (readToken !== undefined && !notificationReadToken(readToken)) return
+    this.notificationReplay?.seen.add(readToken ? `${agentId}\0${readToken}` : agentId)
+    await this.send({ t: 'notif.seen', agentId, ...(readToken ? { readToken } : {}) })
   }
   async turnError(agentId: string, message: string): Promise<void> {
     this.activityReads.delete(agentId)

@@ -12,7 +12,6 @@ dependencies:
   # lock that pinned 9.5.0 was gitignored, so every fresh checkout — a clone, CI, a worktree — resolved to
   # 9.6.0 and built a dial that boot-looped. Moving to 9.6 is a deliberate change to the pool setup, not
   # something a fresh build should do on its own.
-  lvgl/lvgl: "~9.5.0"
   # Official CO5300 AMOLED panel driver (the controller on this board).
   espressif/esp_lcd_co5300:
     version: "*"
@@ -43,24 +42,3 @@ dependencies:
   # libsodium — the E2EE crypto stack (Ed25519, X25519, ristretto255 CPace, ChaCha20-Poly1305,
   # SHA-2, HKDF/HMAC). Backs devices/harness-device/firmware/main/e2ee/e2ee_core.c (byte-identical twin of the web/adapter
   # TS core). The Espressif port wires randombytes to the hardware RNG. See e2ee_core.h.
-  espressif/libsodium:
-    version: "^1.0.20"
-    rules:
-      - if: "target in [esp32s3]"
-
-  # ── Harness Pro (ESP32-P4) ────────────────────────────────────────────────────────────────────────
-  # The panel driver carries everything the vendor BSP would have given us and that we cannot derive
-  # ourselves: the ST7703's power-on register sequence, and the DSI timings for THIS panel —
-  # ST7703_720_720_PANEL_60HZ_DPI_CONFIG (38 MHz pixel clock, porches 50/20/50 by 20/4/20) and
-  # ST7703_PANEL_BUS_DSI_2CH_CONFIG (2 lanes at 480 Mbps). It is published for esp32p4 only.
-  waveshare/esp_lcd_st7703:
-    version: "^2.0.0"
-    rules:
-      - if: "target in [esp32p4]"
-  # GT911 → LVGL pointer indev. Its reset is done BY HAND in board/pro_bringup.c before this driver is
-  # opened, because the chip decides its own I2C address from the INT pin at the rising edge of RESET —
-  # so the driver is always given GPIO_NUM_NC and must never be allowed to pulse it again.
-  espressif/esp_lcd_touch_gt911:
-    version: "^1.1.0"
-    rules:
-      - if: "target in [esp32p4]"

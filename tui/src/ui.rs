@@ -71,12 +71,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Some(Modal::DisplayPanes { .. }) = &app.modal { display_panes(buf, app) }
     let search_busy = app.said_due.is_some() || app.said_pending > 0;
+    let msg_style = app.message_style();
     if let Some(modal) = &mut app.modal {
         match modal {
             // (--no-input: no prompt, no cursor.)
             // (Too small to hold a list — a window being dragged, a drop-down terminal opening: none
             // drawn until it has the room, as fzf clamps and tmux draws what fits; never a crash.)
-            Modal::Picker { kind, picker } if body.height >= 1 && body.width >= 2 => { let at = fzf(buf, body, picker, kind, search_busy); cursor = (!theme::fzf_opts().no_input).then_some(at) }
+            Modal::Picker { kind, picker } if body.height >= 1 && body.width >= 2 => { let at = fzf(buf, body, picker, kind, search_busy, msg_style); cursor = (!theme::fzf_opts().no_input).then_some(at) }
             _ => {}
         }
     }
@@ -302,8 +303,18 @@ fn borders(buf: &mut Buffer, app: &App, body: Rect) {
 /// pane-border-style, or for the active pane pane-active-border-style (tmux's: yellow while the
 /// pane is in copy mode, red while the window's panes are synchronized, else green), as the
 /// window has them: colours, background and attributes, a format in them expanded for the pane.
+/// hn leaves a stock border — tmux's green active border — alone only when you set one yourself;
+/// otherwise it takes the theme's readable foreground (the active pane dimmed), so the selected
+/// pane reads as the theme rather than tmux's green.
 fn border_style(app: &App, active: bool) -> Style {
-    app.style_of(if active { "pane-active-border-style" } else { "pane-border-style" }, app.active, app.focused())
+    let mut s = app.style_of(if active { "pane-active-border-style" } else { "pane-border-style" }, app.active, app.focused());
+    let own = if active { app.look.active_border.is_some() } else { app.look.border.is_some() };
+    if !own {
+        let (_, fg, _) = crate::theme::palette();
+        s = s.fg(fg);
+        if !active { s = s.add_modifier(Modifier::DIM) }
+    }
+    s
 }
 
 /// A pane's status line over its border characters: its pane-border-format (hn's: the harness's
@@ -325,6 +336,7 @@ const WORDMARK: [&str; 2] = ["█ █ ▄▀█ █▀█ █▄ █ █▀▀ �
 
 fn empty_window(buf: &mut Buffer, app: &App, area: Rect) {
     let rows = home_rows(app);
+    let (_, theme_fg, _) = crate::theme::palette();
     let width = area.width.min(84).saturating_sub(4);
     let left = area.x + (area.width.saturating_sub(width)) / 2;
     let compact = area.height < 22;
@@ -379,12 +391,12 @@ fn empty_window(buf: &mut Buffer, app: &App, area: Rect) {
             let selected = app.home_moved && index == app.home_cursor;
             // The chosen row as fzf draws its current line (reverse video where there is no colour).
             let bg = match (selected, theme::fzf().bw) { (true, true) => Style::default().add_modifier(Modifier::REVERSED), (true, false) => Style::default().bg(theme::fzf().bg_plus), _ => Style::default() };
-            let tint = |c: Color| if c == theme::MUTED || c == theme::SOFT { bg.add_modifier(Modifier::DIM) } else { bg.fg(theme::paint(c)) };
+            let tint = |c: Color| if c == theme::MUTED || c == theme::SOFT { bg.fg(theme::paint(theme_fg)).add_modifier(Modifier::DIM) } else { bg.fg(theme::paint(c)) };
             lines.push(Line::from(vec![
                 Span::styled(format!("{} ", index + 1), tint(theme::ACCENT)),
                 Span::styled(format!("{dot} "), tint(color)),
                 Span::styled(format!("{mark} "), tint(mark_color)),
-                Span::styled(format!("{name}  "), bg.add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{name}  "), bg.fg(theme::paint(theme_fg)).add_modifier(Modifier::BOLD)),
                 Span::styled(detail_text, tint(detail.1)),
                 Span::styled(" ".repeat(pad), bg),
                 Span::styled(right, tint(theme::MUTED)),
@@ -958,7 +970,7 @@ fn fzf_split(inner: Rect, picker: &Picker) -> (Rect, Option<PreviewBox>, bool) {
 /// fzf 0.67's default layout, measured: rows bottom-up (best nearest the prompt), `▌` gutter
 /// (236; the current row's in 161 on 236), matches in 108 (151 on the current row), the info line
 /// `  4/7 ───` (144, separator 59), the prompt `> ` (110). Returns where the cursor goes.
-fn fzf(buf: &mut Buffer, body: Rect, picker: &mut Picker, kind: &PickerKind, search_busy: bool) -> Position {
+fn fzf(buf: &mut Buffer, body: Rect, picker: &mut Picker, kind: &PickerKind, search_busy: bool, msg_style: Style) -> Position {
     let frame = fzf_frame(body, picker);
     crate::term_out::clear_extras(frame.screen);
     picker.screen_area.set(frame.screen);
@@ -1221,7 +1233,7 @@ fn fzf(buf: &mut Buffer, body: Rect, picker: &mut Picker, kind: &PickerKind, sea
     if let Some(flash) = picker.flash.as_ref().map(|f| f.0.clone()) {
         let text = format!(" {flash} ");
         let fx = (ia.x + ia.width).saturating_sub(text.width() as u16 + 1);
-        buf.set_string(fx, info_y, &text, Style::default().fg(Color::Black).bg(Color::Yellow));
+        buf.set_string(fx, info_y, &text, msg_style);
     }
     let header_y = if !o.no_input || in_header.is_some() { header_y } else if prompt_top { area.y } else { bottom.saturating_sub(1) };
     if let Some(h) = &header { let (hx, hw) = in_header.map(|r| (r.x, r.width)).unwrap_or((area.x, area.width)); buf.set_line(hx, header_y, h, hw); }
@@ -2543,7 +2555,7 @@ mod fzf_list_tests {
     fn screen(p: &mut Picker) -> String {
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        fzf(&mut buf, area, p, &PickerKind::Output { title: String::new(), lines: vec![] }, false);
+        fzf(&mut buf, area, p, &PickerKind::Output { title: String::new(), lines: vec![] }, false, Style::default());
         (0..area.height).map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
     }
 

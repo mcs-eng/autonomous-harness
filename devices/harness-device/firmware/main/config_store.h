@@ -24,8 +24,12 @@ void    config_save_brightness(uint8_t level);
 bool config_load_muted(void);
 bool config_save_muted(bool muted);
 
-// Local Habitat experiments: bit 0 = legacy focus face, bit 1 = rim scroll,
-// bit 2 = quiet reactions, bit 3 = straight title (default: curved).
+// Local Habitat experiments: bit 0 = legacy focus face, bit 2 = quiet reactions,
+// bit 3 = straight title (default: curved).
+//
+// BIT 1 IS RETIRED, NOT FREE. It was rim scrolling — drag a finger around the bezel — and devices in
+// the field still hold it set. A new preference given that bit would inherit their answer, so the
+// next one takes bit 4.
 uint8_t config_load_habitat_options(void);
 bool config_save_habitat_options(uint8_t options);
 
@@ -48,12 +52,6 @@ void config_save_scroll_reversed(bool reversed);
 // agent in the list. True: it goes to the previous one.
 bool config_load_swipe_reversed(void);
 void config_save_swipe_reversed(bool reversed);
-
-// Screen lock: a 3x3 pattern, stored as a short digit string.
-bool config_lock_enabled(void);
-bool config_check_lock(const char *pattern);
-void config_set_lock(const char *pattern);
-void config_clear_lock(void);
 
 // Factory reset (BOOT held at power-on, or Settings → Reset): forget all of the above.
 bool config_clear_all(void);

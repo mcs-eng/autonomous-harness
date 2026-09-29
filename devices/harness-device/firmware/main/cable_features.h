@@ -9,6 +9,10 @@ enum {
     CABLE_FEATURE_DRAFT = 1u << 3,
     CABLE_FEATURE_QUESTIONS = 1u << 4,
     CABLE_FEATURE_AGENTS_REFRESH = 1u << 5,
+    // The daemon will carry this device's preferences to the desktop app and send back changes. A
+    // device that does not see it keeps its own settings screens; nothing here is load-bearing for a
+    // session, so an older daemon simply never asks.
+    CABLE_FEATURE_SETTINGS = 1u << 6,
 };
 
 // Optional welcome field. Older daemons omit it and retain the core voice,

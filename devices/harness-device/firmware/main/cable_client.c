@@ -147,6 +147,98 @@ const char *cable_fw_version(void)
     return esp_app_get_description()->version;
 }
 
+/*
+ * Habitat only, and deliberately. The LVGL build keeps its settings on the glass, so it has nothing to
+ * report and nothing to be told; sending it anyway would put rows in the app that the device's own
+ * screens would then contradict. When LVGL goes, so does this guard.
+ */
+/*
+ * THE SETTINGS OBJECT, one shape written once and read once.
+ *
+ * Named booleans, not the NVS bitmask: the bit positions in config_store.h are this firmware's private
+ * arrangement, and an app that knew them would have to be updated in step with a header it cannot see.
+ * `round` is the face, not a preference — it tells the app which rows to leave out entirely.
+ */
+static void msg_settings(cJSON **root)
+{
+    ui_settings_t now;
+    ui_settings_read(&now);
+    if (!*root) return;
+    cJSON *object = cJSON_CreateObject();
+    if (!object || !cJSON_AddItemToObject(*root, "settings", object)) {
+        cJSON_Delete(object);
+        msg_check(root, false);
+        return;
+    }
+    cJSON *held = object;   // owned by the tree now; failures below fall to msg_check on the root
+    bool ok = cJSON_AddNumberToObject(held, "brightness", now.brightness) &&
+              cJSON_AddNumberToObject(held, "character", now.character) &&
+              cJSON_AddNumberToObject(held, "face", now.face) &&
+              cJSON_AddBoolToObject(held, "muted", now.muted) &&
+              cJSON_AddBoolToObject(held, "quiet", now.quiet) &&
+              cJSON_AddBoolToObject(held, "straightTitle", now.straight_title) &&
+              cJSON_AddBoolToObject(held, "focusFace", now.focus_face) &&
+              cJSON_AddBoolToObject(held, "scrollReversed", now.scroll_reversed) &&
+              cJSON_AddBoolToObject(held, "round", now.round) &&
+              cJSON_AddStringToObject(held, "voiceLang", now.voicelang);
+    msg_check(root, ok);
+}
+void cable_client_report_settings(void)
+{
+    cJSON *root = msg("settings.state");
+    if (!root) return;
+    msg_bool(&root, "ok", true);
+    msg_settings(&root);
+    send_json(root);
+}
+/*
+ * `settings.set`. Absent means unchanged — a frame naming one row must not restate the other ten, or
+ * two windows open on the same device would fight over every setting each of them last saw.
+ */
+static void handle_settings_set(const cJSON *p)
+{
+    ui_settings_t want;
+    ui_settings_read(&want);   // the unnamed fields keep what the device holds
+    uint32_t fields = 0;
+    const cJSON *item;
+    struct { const char *key; uint32_t bit; bool *slot; } flags[] = {
+        {"muted", UI_SETTING_MUTED, &want.muted},
+        {"quiet", UI_SETTING_QUIET, &want.quiet},
+        {"straightTitle", UI_SETTING_STRAIGHT_TITLE, &want.straight_title},
+        {"focusFace", UI_SETTING_FOCUS_FACE, &want.focus_face},
+        {"scrollReversed", UI_SETTING_SCROLL, &want.scroll_reversed},
+    };
+    for (unsigned i = 0; i < sizeof flags / sizeof flags[0]; i++) {
+        item = cJSON_GetObjectItemCaseSensitive(p, flags[i].key);
+        if (cJSON_IsBool(item)) { *flags[i].slot = cJSON_IsTrue(item); fields |= flags[i].bit; }
+    }
+    item = cJSON_GetObjectItemCaseSensitive(p, "brightness");
+    if (cJSON_IsNumber(item)) {
+        // Clamped here rather than refused: a slider that overshoots by a pixel is not an error, and
+        // ui_settings_apply still refuses anything this cannot make sense of.
+        double value = item->valuedouble;
+        want.brightness = (uint8_t)(value < 0 ? 0 : value > 100 ? 100 : value);
+        fields |= UI_SETTING_BRIGHTNESS;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(p, "character");
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble < 255) {
+        want.character = (uint8_t)item->valuedouble;
+        fields |= UI_SETTING_CHARACTER;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(p, "voiceLang");
+    if (cJSON_IsString(item) && item->valuestring) {
+        snprintf(want.voicelang, sizeof want.voicelang, "%s", item->valuestring);
+        fields |= UI_SETTING_VOICELANG;
+    }
+    char error[96] = "";
+    bool ok = ui_settings_apply(&want, fields, error, sizeof error);
+    cJSON *root = msg("settings.state");
+    if (!root) return;
+    msg_bool(&root, "ok", ok);
+    if (!ok) msg_string(&root, "error", error);
+    msg_settings(&root);   // always the values read back, never the ones asked for
+    send_json(root);
+}
 static void send_hello(void)
 {
     cJSON *root = msg("hello");
@@ -163,6 +255,9 @@ static void send_hello(void)
     char mac[24] = "";
     device_mac_str(mac, sizeof(mac));
     msg_string(&root, "mac", mac);
+    // Carried on every greeting so the app's pane opens on what the device holds rather than on what
+    // this computer last sent it — which after a reboot, a reset or a second window is not the same.
+    msg_settings(&root);
     send_json(root);
 }
 
@@ -234,6 +329,16 @@ void cable_client_send_open(const char *agent_id, const char *reason)
     // Absent for a tap: an older daemon reads the frame exactly as before.
     if (reason && reason[0]) msg_string(&root, "reason", reason);
     send_json(root);
+}
+
+bool cable_client_notification_read(const char *agent_id, const char *read_token)
+{
+    if (!agent_id || !agent_id[0] || strlen(agent_id) >= ID_MAX ||
+        !read_token || !read_token[0] || strlen(read_token) >= CABLE_READ_TOKEN_MAX) return false;
+    cJSON *root = msg("notif.read");
+    msg_string(&root, "agentId", agent_id);
+    msg_string(&root, "readToken", read_token);
+    return send_json(root);
 }
 
 void cable_client_send_scroll(cable_scroll_phase_t phase, int dy, int velocity)
@@ -701,40 +806,12 @@ static void handle_swarms(const cJSON *p)
     if (selected && strlen(selected) >= ID_MAX) selected = NULL;
     ui_swarms_replace(rows, n, selected);
 
-#ifndef DEVICE_HABITAT
-    /* …and the selected tab's shape, which rides the same frame so the two can never be read half
-     * updated: a grid drawn against the previous tab's rectangles puts agents where they are not. */
-    static cable_tile_t tiles[SWARM_TILES_MAX];
-    int tn = 0;
-    const cJSON *ti = NULL;
-    cJSON_ArrayForEach(ti, cJSON_GetObjectItemCaseSensitive(p, "tiles")) {
-        if (tn >= SWARM_TILES_MAX) break;
-        const cJSON *x1 = cJSON_GetObjectItemCaseSensitive(ti, "x1");
-        const cJSON *y1 = cJSON_GetObjectItemCaseSensitive(ti, "y1");
-        const cJSON *x2 = cJSON_GetObjectItemCaseSensitive(ti, "x2");
-        const cJSON *y2 = cJSON_GetObjectItemCaseSensitive(ti, "y2");
-        if (!cJSON_IsNumber(x1) || !cJSON_IsNumber(y1) || !cJSON_IsNumber(x2) || !cJSON_IsNumber(y2)) continue;
-        /* Reject out-of-range/NaN/infinite coordinates before converting to integer pixels. */
-        if (!(x1->valuedouble >= 0 && x1->valuedouble <= 1000 &&
-              y1->valuedouble >= 0 && y1->valuedouble <= 1000 &&
-              x2->valuedouble >= 0 && x2->valuedouble <= 1000 &&
-              y2->valuedouble >= 0 && y2->valuedouble <= 1000)) continue;
-        tiles[tn].x1 = (int16_t)x1->valuedouble;
-        tiles[tn].y1 = (int16_t)y1->valuedouble;
-        tiles[tn].x2 = (int16_t)x2->valuedouble;
-        tiles[tn].y2 = (int16_t)y2->valuedouble;
-        /* The daemon already refuses an empty rectangle, so a bad one here is a wire fault rather
-         * than a shape — drop it rather than draw nothing at that seat. */
-        if (tiles[tn].x2 <= tiles[tn].x1 || tiles[tn].y2 <= tiles[tn].y1) continue;
-        const cJSON *a = cJSON_GetObjectItemCaseSensitive(ti, "a");
-        snprintf(tiles[tn].agent_id, sizeof(tiles[tn].agent_id), "%s",
-                 cJSON_IsString(a) ? a->valuestring : "");
-        tn++;
-    }
-    /* Tagged with the tab these rectangles are OF — the same `selected` the rows above carry, read
-     * from the same frame so the two can never disagree. */
-    ui_tiles_replace(tiles, tn, selected);
-#endif
+/* …and the selected tab's shape, which rides the same frame so the two can never be read half
+ * updated: a grid drawn against the previous tab's rectangles puts agents where they are not.
+ *
+ * THE ROUND DIAL IS THE ONLY BUILD THAT SKIPS THIS. A spatial desk needs corners: habitat on the dial
+ * shows its panes as a list of rows and has no use for a rectangle, while habitat on the Pro draws the
+ * app's own shape and needs every one of them. */
 }
 
 static void session_up(const cJSON *p)
@@ -950,6 +1027,9 @@ static void handle_notifications(const cJSON *p)
         snprintf(rows[n].summary, sizeof(rows[n].summary), "%s", str_of(it, "summary") ? str_of(it, "summary") : "");
         rows[n].question = bool_of(it, "question");
         rows[n].failed = bool_of(it, "failed");
+        const char *token = str_of(it, "readToken");
+        if (token && token[0] && strlen(token) < sizeof rows[n].read_token)
+            snprintf(rows[n].read_token, sizeof rows[n].read_token, "%s", token);
         n++;
     }
     ui_notif_replace(rows, n);
@@ -983,6 +1063,7 @@ static void handle_message(const cJSON *root)
         ui_machine_select_error(str_of(p, "machineId"), str_of(p, "code"), str_of(p, "message"));
         return;
     }
+    if (strcmp(t, "settings.set") == 0) { handle_settings_set(p); return; }
     if (strcmp(t, "models") == 0) { handle_models(p); return; }
     if (strcmp(t, "swarms") == 0) { handle_swarms(p); return; }
 
@@ -1018,9 +1099,7 @@ static void handle_message(const cJSON *root)
         return;
     }
     if (strcmp(t, "turn.activity") == 0) {
-#ifdef DEVICE_HABITAT
         if (agent_id) ui_project_emit(agent_id, "", "activity", str_of(p, "text"), NULL);
-#endif
         return;
     }
     if (strcmp(t, "turn.done") == 0) {
@@ -1083,7 +1162,12 @@ static void handle_message(const cJSON *root)
     // empty — see ui_notif_replace.
     if (strcmp(t, "notif.replace") == 0) { handle_notifications(p); return; }
     if (strcmp(t, "notif.seen") == 0) {
-        if (agent_id) ui_notif_seen(agent_id);
+        const cJSON *token = cJSON_GetObjectItemCaseSensitive(p, "readToken");
+        if (agent_id && token) {
+            if (cJSON_IsString(token) && token->valuestring[0] &&
+                strlen(token->valuestring) < CABLE_READ_TOKEN_MAX)
+                ui_notif_read(agent_id, token->valuestring);
+        } else if (agent_id) ui_notif_seen(agent_id);
         return;
     }
     if (strcmp(t, "turn.error") == 0) {

@@ -203,10 +203,8 @@ bool audio_capture_init(void)
     // Full-duplex I2S (BSP-exact): ES7210(ADC)+ES8311(codec) share BCLK/WS, so create both
     // tx+rx and enable them — RX-only setups leave the shared clocks misconfigured → silence.
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-#ifdef DEVICE_HABITAT
     chan_cfg.dma_frame_num = 160; // 10ms of mono PCM at 16kHz.
     chan_cfg.dma_desc_num = 12;   // 120ms of DMA headroom, independent of the USB sender.
-#endif
     if (i2s_new_channel(&chan_cfg, &s_tx, &s_rx) != ESP_OK) return capture_init_failed("I2S allocation");
 
     i2s_std_config_t std = {

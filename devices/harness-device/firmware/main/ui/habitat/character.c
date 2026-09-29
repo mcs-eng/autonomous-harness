@@ -1,6 +1,7 @@
 #include "character.h"
 #include "octopus.h"
 #include "tux.h"
+#include "focus.h"
 #include <string.h>
 
 typedef struct {
@@ -8,12 +9,25 @@ typedef struct {
     bool (*tick)(ht_character_motion_t *, uint32_t, ht_character_mood_t,
                  bool, bool, bool, int, unsigned, uint32_t);
     ht_character_painter_t paint;
+    /*
+     * A SKIN THAT OWNS THE WHOLE FACE, rather than one rectangle inside ht_character_layout()'s seat
+     * plan. A creature is a portrait with words arranged around it, so the layout owns the title,
+     * recap, status and hint and hands the painter a single y. Focus is not a portrait: it spends the
+     * middle of the glass on the work, and the arrangement IS the skin.
+     *
+     * NULL means the old path, unchanged — which is what Tim and Tux take.
+     */
+    void (*face)(ht_scene_t *, const ht_character_face_t *, uint8_t frame, uint16_t ink,
+                 const char *recap);
 } character_definition_t;
 
 // Adding artwork changes this registry and its adapter, never the action layer.
 static const character_definition_t characters[HT_CHARACTER_COUNT] = {
-    [HT_CHARACTER_TIM] = {"Tim", ht_octopus_motion_tick, ht_octopus_draw},
-    [HT_CHARACTER_TUX] = {"Tux", ht_tux_motion_tick, ht_tux_draw},
+    [HT_CHARACTER_TIM] = {"Tim", ht_octopus_motion_tick, ht_octopus_draw, NULL},
+    [HT_CHARACTER_TUX] = {"Tux", ht_tux_motion_tick, ht_tux_draw, NULL},
+    // Nothing of Focus moves, so its tick is the shared motion step with a one-frame animation; the
+    // only thing that animates on it is the status shimmer, which the compositor already owns.
+    [HT_CHARACTER_FOCUS] = {"Focus", ht_focus_motion_tick, ht_focus_portrait, ht_focus_face},
 };
 static const character_definition_t *definition(ht_character_id_t id)
 {
@@ -21,7 +35,9 @@ static const character_definition_t *definition(ht_character_id_t id)
 }
 ht_character_id_t ht_character_default(void)
 {
-#ifdef DEVICE_DEFAULT_CHARACTER_TUX
+#if defined(DEVICE_DEFAULT_CHARACTER_FOCUS)
+    return HT_CHARACTER_FOCUS;
+#elif defined(DEVICE_DEFAULT_CHARACTER_TUX)
     return HT_CHARACTER_TUX;
 #else
     return HT_CHARACTER_TIM;
@@ -78,7 +94,9 @@ void ht_character_face(ht_scene_t *s, const ht_character_t *c,
                        const ht_character_face_t *f, uint16_t ink, const char *recap)
 {
     ht_character_face_t face = delivery_face(c, f);
-    ht_character_layout(s, &face, c->motion.frame, ink, recap, definition(c->id)->paint);
+    const character_definition_t *skin = definition(c->id);
+    if (skin->face) { skin->face(s, &face, c->motion.frame, ink, recap); return; }
+    ht_character_layout(s, &face, c->motion.frame, ink, recap, skin->paint);
 }
 void ht_character_portrait(ht_scene_t *s, const ht_character_t *c,
                            const ht_character_face_t *f, uint16_t ink,

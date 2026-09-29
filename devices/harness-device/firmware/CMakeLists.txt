@@ -1,18 +1,20 @@
-# Top-level ESP-IDF project file. ONE project, TWO boards.
+# Top-level ESP-IDF project file. ONE project, ONE board, ONE renderer.
 #
 #   dial  ESP32-S3R8 · 466x466 round AMOLED (CO5300, QSPI) · CST9217 or CST816S touch
-#   pro   ESP32-P4   · 720x720 square LCD  (ST7703I, MIPI-DSI) · GT911 touch
 #
-# They share the cable protocol, the OTA path, the config store and the screens; they differ in the SoC,
-# so the split is made at compile time by CONFIG_IDF_TARGET_* (main/board/board_pins.h) rather than by
-# the runtime probe that tells the two DIALS apart (main/board/board.h).
+# The ESP32-P4 Pro was built from this project until 2026-09-29 and now has its own firmware, owned by
+# the team that owns the board. What the two shared was the CABLE PROTOCOL — see main/cable_client.c —
+# which is a wire format rather than a build, so nothing had to stay here for a Pro to keep working with
+# this daemon. The runtime probe in main/board/board.h still tells the two DIAL revisions apart; that is
+# a different question and it remains.
 #
-# Requires ESP-IDF >= 5.5. Build either board through the Makefile at the repo root:
+# Requires ESP-IDF >= 5.5.
 #
-#   make dial-build   make dial-flash     # -B build.dial -D SDKCONFIG=sdkconfig.dial
-#   make pro-build    make pro-flash      # -B build.pro  -D SDKCONFIG=sdkconfig.pro
+#   idf.py build           idf.py -p <port> flash
 #
-# A bare `idf.py build` here still means the dial, so older muscle memory keeps working.
+# No target and no flags: sdkconfig.defaults names the chip and there is one renderer. The
+# `make dial-build` / `make pro-build` pair this comment used to advertise named Makefile targets
+# that no longer existed anywhere in the repository.
 cmake_minimum_required(VERSION 3.16)
 
 # ── Keep sdkconfig honest about sdkconfig.defaults ───────────────────────────────────────────────────
@@ -70,14 +72,4 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 
-# ── Make LVGL asserts speak ──────────────────────────────────────────────────────────────────────────
-# LV_ASSERT_HANDLER is `while(1);` ("Halt by default") and LV_USE_ASSERT_MALLOC / _NULL are on, so any
-# failed allocation or NULL inside LVGL spins the LVGL task forever: the screen freezes, the task watchdog
-# prints a backtrace every 5s, and the rest of the firmware keeps running so the device looks alive but is
-# not. LVGL logging was also off, so it died without a word — which is why several rounds of diagnosis only
-# ever saw "stuck somewhere in the draw pipeline".
-#
-# CONFIG_LV_USE_LOG is now on (see sdkconfig): the assert prints its reason before halting. Overriding the
-# handler itself to abort() was tried and abandoned — CMake eats the trailing semicolon of a compile
-# definition, expanding the macro without a terminator and breaking lv_assert.h.
 project(interns_commander)

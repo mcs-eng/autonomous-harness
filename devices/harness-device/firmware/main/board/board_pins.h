@@ -9,12 +9,5 @@
 // Every file keeps including board_pins.h. Nothing includes pins_dial.h or pins_pro.h directly.
 #pragma once
 
-#include "sdkconfig.h"
-
-#if defined(CONFIG_IDF_TARGET_ESP32P4)
-#include "pins_pro.h"
-#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+// One board. The Pro's pin map left with its firmware.
 #include "pins_dial.h"
-#else
-#error "no pin map for this target — add one beside pins_dial.h / pins_pro.h"
-#endif

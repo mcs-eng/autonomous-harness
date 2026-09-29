@@ -1,10 +1,10 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
+import '../core/open_in_browser.dart';
 import '../core/runtime_platform.dart';
 import '../core/models.dart' show AgentVerdict;
 import '../core/test_run.dart';
@@ -277,10 +277,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
     });
     var opened = false;
     try {
-      opened =
-          await (widget.openBrowser ??
-              (uri) =>
-                  launchUrl(uri, mode: LaunchMode.externalApplication))(uri);
+      opened = await (widget.openBrowser ?? openInBrowser)(uri);
     } catch (_) {
       // A platform error can include the viewer's authenticated URL.
     }
@@ -459,6 +456,10 @@ class _WebPanePanelState extends State<WebPanePanel> {
       );
     }
     if (controller == null) {
+      // No embedded webview on this platform (it ships for macOS only — see
+      // [webviewAvailable]), so the page it would have shown opens in the
+      // browser instead of sitting here as text (openharness#108).
+      final page = url == null ? null : Uri.tryParse(url);
       return _Notice(
         key: const ValueKey('web-pane-placeholder'),
         icon: LucideIcons.globe,
@@ -471,7 +472,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
                 ? 'The viewer did not provide a valid HTTP or HTTPS address.'
                 : url),
         action: TextButton.icon(
-          key: const ValueKey('web-pane-open-browser'),
+          key: const ValueKey('web-pane-open-in-browser'),
           onPressed: uri == null || _openingBrowser ? null : _openBrowser,
           icon: const Icon(LucideIcons.externalLink, size: 16),
           label: Text(_openingBrowser ? 'Opening…' : 'Open in browser'),
@@ -549,7 +550,7 @@ class _ViewerActions extends StatelessWidget {
         action('Open viewer in browser', LucideIcons.externalLink, onBrowser),
         const SizedBox(width: 2),
         action(
-          zoomed ? 'Restore agents' : 'Zoom viewer',
+          zoomed ? 'Restore harnesses' : 'Zoom viewer',
           zoomed ? LucideIcons.minimize : LucideIcons.maximize,
           onZoom,
         ),

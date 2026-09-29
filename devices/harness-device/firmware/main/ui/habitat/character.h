@@ -2,7 +2,9 @@
 #include "character_layout.h"
 
 // IDs are stored in NVS. Append new characters; never renumber existing IDs.
-typedef enum { HT_CHARACTER_TIM = 0, HT_CHARACTER_TUX = 1, HT_CHARACTER_COUNT } ht_character_id_t;
+typedef enum {
+    HT_CHARACTER_TIM = 0, HT_CHARACTER_TUX = 1, HT_CHARACTER_FOCUS = 2, HT_CHARACTER_COUNT
+} ht_character_id_t;
 typedef struct {
     ht_character_id_t id;
     ht_character_motion_t motion;

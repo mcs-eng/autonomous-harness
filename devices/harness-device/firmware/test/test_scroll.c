@@ -26,7 +26,7 @@ static int travel(void)
 static void begin(ht_scroll_t *g, bool reversed, uint32_t now)
 {
     memset(g, 0, sizeof(*g)); count = 0; stalled = false;
-    ht_scroll_begin(g, 200, 200, now, reversed, false, emit, NULL);
+    ht_scroll_begin(g, 200, 200, now, reversed, emit, NULL);
     assert(count == 1 && reports[0].phase == HT_SCROLL_DOWN);
 }
 int main(void)
@@ -99,48 +99,16 @@ int main(void)
     ht_scroll_move(&g, 200, 220, 8);
     assert(ht_scroll_end(&g, 200, 230, 8) && travel() == 30);
     assert(reports[count - 1].velocity <= 6000);
-    // Several complete clockwise/counterclockwise turns cross all octants and the angle seam.
-    for(int sign=-1;sign<=1;sign+=2) for(int reversed=0;reversed<2;reversed++) {
-        memset(&g,0,sizeof(g)); count=0;
-        ht_scroll_begin(&g,433,233,1000,reversed!=0,true,emit,NULL);
-        for(int step=1;step<=96;step++) {
-            double angle=sign*step*6.283185307179586/32;
-            int x=233+(int)lround(200*cos(angle)),y=233+(int)lround(200*sin(angle));
-            ht_scroll_move(&g,x,y,1000+step*20);
-        }
-        assert(ht_scroll_end(&g,433,233,2940));
-        int expected=-sign*(reversed?-1:1)*1800;
-        assert(abs(travel()-expected)<=2);
-        assert(g.axis==3 && reports[count-1].velocity==0);
-    }
-    memset(&g,0,sizeof(g)); count=0;
-    ht_scroll_begin(&g,433,233,1000,false,true,emit,NULL);
-    assert(ht_scroll_end(&g,433,233,1080) && travel()==0); // rim tap never speaks
-    memset(&g,0,sizeof(g)); count=0;
-    ht_scroll_begin(&g,433,233,1000,false,true,emit,NULL);
-    ht_scroll_move(&g,233,233,1010);
-    assert(!g.live && ht_scroll_end(&g,33,233,1020)); // radial/invalid path cannot become a swipe
-    assert(travel()==0 && reports[count-1].velocity==0);
-    unsigned seed=1899;
-    for(int trial=0;trial<6000;trial++) {
-        memset(&g,0,sizeof(g)); count=0;
-        ht_scroll_begin(&g,433,233,1000,false,true,emit,NULL);
-        for(int step=0;step<12;step++) {
-            seed=seed*1664525u+1013904223u; int x=(int)(seed%466);
-            seed=seed*1664525u+1013904223u; int y=(int)(seed%466);
-            ht_scroll_move(&g,x,y,1004+step*4);
-        }
-        assert(ht_scroll_end(&g,433,233,1060));
-        int downs=0,ups=0;
-        for(int j=0;j<count;j++) {
-            downs+=reports[j].phase==HT_SCROLL_DOWN;
-            ups+=reports[j].phase==HT_SCROLL_UP;
-            assert(abs(reports[j].dy)<=2048);
-        }
-        assert(downs==1 && ups==1 && reports[count-1].velocity==0);
-    }
+    /*
+     * The rim scenarios that used to sit here — full turns across the octant seam, the radial
+     * cancel, the 6000-trial random walk — went with rim scrolling itself. It was a drag around the
+     * bezel that scrolled the desktop, and it took the footer buttons with it: ht_scroll_cancel()
+     * cleared `live` but not `rim_candidate`, ht_scroll_end() returned that flag whenever the
+     * gesture was not live, and a footer press deliberately never calls ht_scroll_begin() — so one
+     * touch on the bezel disabled every footer control until something else reset the struct.
+     */
     assert(ht_scroll_coast_ms(0)==0 && ht_scroll_coast_ms(39)==0);
     assert(ht_scroll_coast_ms(6000)>700 && ht_scroll_coast_ms(6000)<900);
     assert(ht_scroll_coast_ms(-6000)==ht_scroll_coast_ms(6000));
-    puts("scroll: PASS (10 linear scenarios, full rim turns, reversal, seam, radial cancellation and brake window)");
+    puts("scroll: PASS (10 linear scenarios, reversal and brake window)");
 }
