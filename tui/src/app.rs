@@ -316,6 +316,8 @@ pub struct Tab {
     /// The desk's layout document for this tab, kept whole: a preset chosen here updates its entry
     /// and leaves the sizes other windows saved alone.
     pub layout: Value,
+    /// Last layout observed on the desk, separate from the local edit awaiting its reply.
+    pub desk_layout: Value,
 }
 
 impl Tab {
@@ -327,7 +329,7 @@ impl Tab {
     pub fn home() -> Tab { Tab::with_wid("home", NO_WID) }
     /// A window with the id it had (a session another client kept, the desk's).
     pub fn with_wid(name: &str, wid: u64) -> Tab {
-        Tab { id: Uuid::new_v4().simple().to_string(), wid: std::cell::Cell::new(wid), size: None, name: name.to_string(), named: false, home: false, root: None, focus: None, zoomed: false, last: Vec::new(), order: Vec::new(), points: HashMap::new(), alerts: 0, last_output: Instant::now(), activity: crate::format::now_secs(), layout_at: None, on_desk: false, sync: false, first_named: false, layout: json!({}) }
+        Tab { id: Uuid::new_v4().simple().to_string(), wid: std::cell::Cell::new(wid), size: None, name: name.to_string(), named: false, home: false, root: None, focus: None, zoomed: false, last: Vec::new(), order: Vec::new(), points: HashMap::new(), alerts: 0, last_output: Instant::now(), activity: crate::format::now_secs(), layout_at: None, on_desk: false, sync: false, first_named: false, layout: json!({}), desk_layout: json!({}) }
     }
     /// Its @N, numbered now if it has none yet.
     pub fn wid(&self) -> u64 {
@@ -403,6 +405,7 @@ struct LinkState {
 
 pub struct App {
     pub port: u16,
+    pub viewer_web_url: String,
     pub sink: UnboundedSender<Event>,
     pub fleet: Fleet,
     links: HashMap<String, LinkState>,
@@ -530,8 +533,12 @@ pub struct App {
     orphans: HashMap<Uuid, (Instant, Vec<proto::Frame>)>,
     /// Native exit notices can race the same terminal_ready callback as its first frame.
     orphan_exits: HashMap<Uuid, (Instant, pane::Exit)>,
-    /// Desk writes sent and not yet answered; while any are out, the desk is not reconciled.
-    desk_inflight: u32,
+    /// One desk write at a time: an older layout must not land after a newer choice.
+    desk_inflight: bool,
+    desk_pending: Vec<Value>,
+    /// Accepted layouts since the last reconciliation. Their replies acknowledge our local
+    /// geometry, including when an older backend can store only the desktop preset.
+    desk_acked_layouts: HashMap<String, Value>,
     /// The desk moved while writes were out: fetch it once they land.
     desk_stale: bool,
     /// tmux's s->lastw: the windows current before, the most recent first, by tab id — C-b l goes
@@ -778,6 +785,7 @@ impl App {
         };
         App {
             port,
+            viewer_web_url: String::new(),
             sink,
             fleet: Fleet::default(),
             links: HashMap::new(),
@@ -957,7 +965,9 @@ impl App {
             status_ranges: Vec::new(),
             orphans: HashMap::new(),
             orphan_exits: HashMap::new(),
-            desk_inflight: 0,
+            desk_inflight: false,
+            desk_pending: Vec::new(),
+            desk_acked_layouts: HashMap::new(),
             desk_stale: false,
             lastw: Vec::new(),
             terminal_focused: true,
@@ -1087,6 +1097,7 @@ impl App {
         self.spawn(async move { http_json(port, "GET", "/api/status", None).await }, |app, status| match status {
             Ok(status) => {
                 app.daemon_down = false;
+                app.viewer_web_url = status.get("webUrl").and_then(Value::as_str).unwrap_or("").to_string();
                 let id = status.get("machineId").and_then(Value::as_str).unwrap_or("").to_string();
                 if status.get("signedIn").and_then(Value::as_bool) == Some(false) {
                     app.say("This computer is not signed in — run `harness login`", theme::DANGER);
@@ -1182,16 +1193,34 @@ impl App {
 
     fn schedule_reconnect(&mut self, machine_id: &str) {
         let Some(state) = self.links.get_mut(machine_id) else { return };
-        state.link = None;
+        if let Some(link) = state.link.take() { link.close(); }
         state.attempts += 1;
         let wait = Duration::from_millis((500 * 2u64.pow(state.attempts.min(5))).min(15_000));
         state.retry_at = Some(Instant::now() + wait);
     }
 
+    /// Tell every connected machine's daemon the terminal's own colours (`theme_set`), so it
+    /// paints the panes to match and the agents in them read the right light/dark. Called when
+    /// the terminal answers OSC 11 and again when a machine connects; the daemon restyles the
+    /// existing sessions too, as the desktop app's `theme_set` does.
+    pub fn push_theme(&mut self) {
+        let Some((bg, fg)) = crate::term_out::terminal_colours() else { return };
+        let machines: Vec<String> = self.fleet.machines.iter()
+            .filter(|m| self.link(&m.id).is_some())
+            .map(|m| m.id.clone()).collect();
+        for machine_id in machines {
+            let Some(link) = self.link(&machine_id) else { continue };
+            let bg = bg.clone(); let fg = fg.clone();
+            self.spawn(async move { link.rpc("theme_set", json!({ "background": bg, "foreground": fg }), Duration::from_secs(5)).await }, |_app, _reply| {});
+        }
+    }
+
     // ── machine events ───────────────────────────────────────────────────────
 
     pub fn on_machine(&mut self, machine_id: String, generation: u64, event: MachineEvent) {
-        let current = self.links.get(&machine_id).map(|s| s.generation) == Some(generation);
+        // A cancelled link can already have queued events. Ignore them during backoff too,
+        // before the replacement connection has a new generation.
+        let current = self.links.get(&machine_id).is_some_and(|s| s.generation == generation && s.link.is_some());
         if !current { return }
         match event {
             MachineEvent::Connected => {
@@ -1202,6 +1231,7 @@ impl App {
                 if let Some(machine) = self.fleet.machine_mut(&machine_id) { machine.reach = Reach::Ready }
                 if machine_id == self.fleet.local_id && !crate::local::is_local(&machine_id) { self.daemon_down = false; crate::dial::reconnected(self) }
                 self.relist(&machine_id);
+                self.push_theme();
                 // Its home folder, so its paths read `~/…` like this machine's do.
                 if !self.homes.contains_key(&machine_id) {
                     if let Some(link) = self.link(&machine_id) {
@@ -1240,7 +1270,7 @@ impl App {
                     }
                     pane.dirty = true;
                 }
-                if needs_link { if let Some(state) = self.links.get_mut(&machine_id) { state.link = None } }
+                if needs_link { if let Some(state) = self.links.get_mut(&machine_id) { if let Some(link) = state.link.take() { link.close(); } state.retry_at = None; } }
                 else { self.schedule_reconnect(&machine_id) }
             }
             MachineEvent::Terminal(frame) => self.on_terminal(frame),
@@ -1297,8 +1327,13 @@ impl App {
                 if ty == "agent_renamed" && row.get("engine").is_none() {
                     if let (Some(agent), Some(name)) = (self.fleet.agents.get_mut(&key), row.get("name").and_then(Value::as_str)) { agent.name = name.to_string() }
                 } else {
-                    let agent = fleet::agent_from(machine_id, &row, self.fleet.agents.get(&key));
+                    let previous = self.fleet.agents.get(&key);
+                    let agent = fleet::agent_from(machine_id, &row, previous);
+                    let viewer_ready = !agent.viewer_url.is_empty() && previous.is_none_or(|a| a.viewer_url.is_empty())
+                        && crate::input::focused_key(self).as_ref() == Some(&key);
+                    let viewer_name = if agent.viewer_name.is_empty() { "Viewer".to_string() } else { agent.viewer_name.clone() };
                     self.fleet.agents.insert(key, agent);
+                    if viewer_ready { self.say(format!("{viewer_name} ready — C-b : view opens it"), theme::ONLINE) }
                 }
                 self.sync_titles();
             }
@@ -1499,7 +1534,15 @@ impl App {
                     self.open_stream(id, false);
                 } else {
                     let id = pane.id;
-                    self.after_end(id, payload.get("reason").and_then(Value::as_str).unwrap_or("the terminal closed").to_string());
+                    let reason = payload.get("reason").and_then(Value::as_str).unwrap_or("the terminal closed");
+                    if matches!(reason, "heartbeat timeout" | "backend disconnected") {
+                        // A lease expiry says nothing about the process. Renew the machine route
+                        // and all its panes, including hidden windows and split shells, without
+                        // restarting anything or taking the keyboard from another client.
+                        self.recover_streams(machine_id, reason);
+                    } else {
+                        self.after_end(id, reason.to_string());
+                    }
                 }
             }
             "terminal_error" => {
@@ -1599,6 +1642,13 @@ impl App {
 
     // ── streams ─────────────────────────────────────────────────────────────
 
+    fn recover_streams(&mut self, machine_id: &str, detail: &str) {
+        if let Some(state) = self.links.get(machine_id) {
+            self.on_machine(machine_id.to_string(), state.generation,
+                MachineEvent::Closed(RpcError::new("TERMINAL_CONNECTION_LOST", detail)));
+        }
+    }
+
     /// Open (or re-open) a pane's terminal. [takeover]: take the keyboard from any other window.
     pub fn open_stream(&mut self, pane_id: u64, takeover: bool) {
         let content = self.content_size(pane_id);
@@ -1616,7 +1666,10 @@ impl App {
         }
         let Some(pane) = self.panes.get_mut(&pane_id) else { return };
         if pane.opening { return }
-        let Some(link) = self.links.get(&pane.machine_id).and_then(|s| s.link.clone()) else {
+        // Do not send an open before machine_select has succeeded: its reply could otherwise
+        // be discarded by the selecting link, leaving this pane waiting for 45 seconds.
+        let Some(link) = self.links.get(&pane.machine_id).and_then(|s| s.link.clone())
+            .filter(|_| self.fleet.machine(&pane.machine_id).is_some_and(Machine::usable)) else {
             pane.phase = Phase::Connecting("Connecting…".into());
             return;
         };
@@ -1704,6 +1757,11 @@ impl App {
                 } else {
                     pane.phase = Phase::Card { title: "Could not open the terminal".into(), detail: code, keys: vec![("enter".into(), "retry".into()), (self.keymap.hint("confirm-before -p \"kill-pane #P? (y/n)\" kill-pane").unwrap_or_else(|| "C-b x".into()), "close pane".into())] };
                 }
+            }
+            Err(error) if matches!(error.code.as_str(), "TIMEOUT" | "DISCONNECTED") => {
+                // A local WebSocket pong cannot establish that the remote terminal route is
+                // healthy. Drop that route so retrying cannot wait on the same stuck request.
+                self.recover_streams(machine_id, &error.to_string());
             }
             Err(error) => {
                 pane.phase = Phase::Card { title: "Could not open the terminal".into(), detail: error.to_string(), keys: vec![("enter".into(), "retry".into()), (self.keymap.hint("confirm-before -p \"kill-pane #P? (y/n)\" kill-pane").unwrap_or_else(|| "C-b x".into()), "close pane".into())] };
@@ -1984,7 +2042,7 @@ impl App {
         let opens_shell = words.iter().any(|w| matches!(crate::cmd::find(w).map(|e| e.name), Ok("new-session" | "new-window" | "split-window" | "respawn-pane" | "respawn-window" | "display-popup")));
         // list-harnesses from a client just started (hn with no terminal, for a script): once
         // every machine's harnesses are known, so it says what each one is doing.
-        let asks_fleet = matches!(words.first().map(String::as_str), Some("list-harnesses" | "lsh" | "answer-harness" | "answer" | "open-harness" | "openh" | "send-message" | "restart-harness" | "restarth" | "pause-harness" | "resume-harness" | "clone-harness" | "rename-harness"));
+        let asks_fleet = matches!(words.first().map(String::as_str), Some("open-viewer" | "view" | "list-harnesses" | "lsh" | "answer-harness" | "answer" | "open-harness" | "openh" | "send-message" | "restart-harness" | "restarth" | "pause-harness" | "resume-harness" | "clone-harness" | "rename-harness"));
         self.last_cli = Instant::now();
         if !self.cli_held.is_empty() || (opens_shell && !self.cli_ready()) || (asks_fleet && !self.fleet_ready()) { self.cli_held.push_back(job); return }
         job(self)
@@ -3570,15 +3628,35 @@ impl App {
     /// where they are not `default` (NO_COLOR or not: tmux doesn't read it).
     pub fn status_style(&self) -> Style {
         let mut s = self.style_of("status-style", self.active, None);
+        let mut own = !self.look.status_bg.is_none() || !self.look.status_fg.is_none();
         for (name, fg) in [("status-fg", true), ("status-bg", false)] {
             let c = self.options.get(name, "", None).and_then(|v| crate::tmuxconf::colour(&v)).filter(|c| *c != Color::Reset);
-            if let Some(c) = c { s = if fg { s.fg(c) } else { s.bg(c) } }
+            if let Some(c) = c { own = true; s = if fg { s.fg(c) } else { s.bg(c) } }
+        }
+        // No status colours of its own and the terminal has told us what it looks like: the bar
+        // takes the theme's own colours — its background the terminal's background, its text the
+        // readable opposite — so it is a visible bar in the theme (a dark bar, light text on a
+        // dark terminal), not a transparent one, and not tmux's stock green.
+        if !own {
+            let (bg, fg, _) = crate::theme::palette();
+            s = s.bg(bg).fg(fg);
         }
         s
     }
 
     /// message-style (tmux's yellow), for messages and prompts.
-    pub fn message_style(&self) -> Style { self.style_of("message-style", self.active, None) }
+    pub fn message_style(&self) -> Style {
+        let mut s = self.style_of("message-style", self.active, None);
+        let own = self.look.message_fg.is_some() || self.look.message_bg.is_some();
+        // No message colours of its own and the terminal has told us what it looks like: the
+        // message line shows the theme's readable text on the terminal's own background (left
+        // transparent), so it blends with the theme instead of tmux's stock yellow.
+        if !own {
+            let (_, fg, _) = crate::theme::palette();
+            s = s.bg(Color::Reset).fg(fg);
+        }
+        s
+    }
 
     /// mode-keys as it stands (tmux's default: emacs, unless $VISUAL or $EDITOR is a vi).
     pub fn mode_keys_emacs(&self) -> bool {
@@ -4359,7 +4437,10 @@ impl App {
             if &old.3 != focus && old.3.is_some() { crate::commands::notify(self, "window-pane-changed", Some(w), None) }
         }
         if before.current != now.current && before.current.is_some() { let (sid, name) = (self.session_id, self.session_name()); crate::commands::notify_session(self, "session-window-changed", sid, &name, None) }
-        for id in resized { if let Some(w) = at(self, &id) { self.layout_changed(w) } }
+        // Fitting a shared layout to this terminal fires tmux's resize hook, but is not
+        // a new desk arrangement. Publishing it makes differently sized clients resize
+        // one another indefinitely. Explicit layout/divider edits use layout_changed.
+        for id in resized { if let Some(w) = at(self, &id) { crate::commands::notify(self, "window-layout-changed", Some(w), None) } }
         // Pane focus (window_pane_update_focus), where tmux looks again: a window's active pane
         // that changed and a window that became current only with focus-events; a window whose
         // active pane went away (window_lost_pane), and the client's own focus, always.
@@ -4931,10 +5012,10 @@ impl App {
     }
 
     fn fetch_desk(&mut self) {
-        if self.desk_inflight > 0 { self.desk_stale = true; return }
+        if self.desk_inflight { self.desk_stale = true; return }
         let port = self.port;
         self.spawn(async move { http_json(port, "GET", "/api/desk", None).await }, |app, desk| {
-            if app.desk_inflight > 0 { app.desk_stale = true; return }
+            if app.desk_inflight { app.desk_stale = true; return }
             if let Ok(desk) = desk { app.apply_desk(&desk) }
             if !app.desk_answered { app.desk_answered = true; app.maybe_start_shell() }
         });
@@ -4956,6 +5037,7 @@ impl App {
         let revision = desk.get("revision").and_then(Value::as_i64).unwrap_or(0);
         if revision <= self.desk_revision { return }
         self.desk_revision = revision;
+        let acknowledged = std::mem::take(&mut self.desk_acked_layouts);
         let Some(rows) = desk.get("tabs").and_then(Value::as_array) else { return };
         let first_load = self.tabs.iter().all(|t| !t.on_desk);
         let mut seen = Vec::new();
@@ -4975,7 +5057,13 @@ impl App {
                     // stays as automatic-rename gives it here, from what the window runs.
                     if named { tab.name = name; tab.named = true } else if tab.named { tab.named = false }
                     tab.on_desk = true;
-                    let relayout = tab.layout != layout_doc;
+                    // A reply to our own write is an acknowledgement, not a request to
+                    // arrange again. In particular, a legacy desk omits layout.tmux. Also
+                    // keep input queued in this event batch until its layout is sent.
+                    let relayout = tab.desk_layout != layout_doc && tab.layout != layout_doc
+                        && acknowledged.get(&id) != Some(&layout_doc)
+                        && !self.desk_layouts.contains(&id);
+                    tab.desk_layout = layout_doc.clone();
                     tab.layout = layout_doc;
                     if relayout && missing_is_empty(&tab.panes(), &panes, &self.panes) {
                         let ids = tab.panes();
@@ -5007,6 +5095,7 @@ impl App {
                     let Some(mut tab) = self.sessions.iter().flat_map(|s| s.tabs.iter()).find(|t| t.id == id && t.root.is_some()).cloned() else { continue };
                     tab.alerts = 0;
                     tab.on_desk = true;
+                    tab.desk_layout = layout_doc.clone();
                     tab.layout = layout_doc;
                     if named { tab.name = name; tab.named = true }
                     let at = rows.iter().position(|r| r.get("id").and_then(Value::as_str) == Some(tab.id.as_str())).unwrap_or(self.tabs.len()).min(self.tabs.len());
@@ -5020,6 +5109,7 @@ impl App {
                     tab.id = id;
                     tab.named = named;
                     tab.on_desk = true;
+                    tab.desk_layout = layout_doc.clone();
                     tab.layout = layout_doc;
                     let (w, h) = (self.size.0, self.size.1.saturating_sub(2));
                     tab.root = desk_root(&tab.layout, preset, &ids, w, h);
@@ -5076,23 +5166,36 @@ impl App {
 
     pub fn desk_op(&mut self, op: Value) { self.desk_ops(vec![op]) }
 
-    /// Send ops as one write. The reply is the whole desk, other windows' changes included; it is
-    /// reconciled only when none of this window's writes are still out — reconciling to a desk that
-    /// has the tab but not yet its pane would close the tab this window just made.
+    /// Preserve input order across writes, including the retry for an older desk schema.
+    /// Only reconcile once the queue drains, so an earlier reply cannot undo a later edit.
     pub fn desk_ops(&mut self, ops: Vec<Value>) {
         if self.desk_mode != DeskMode::Sync || !self.session_desk || ops.is_empty() { return }
-        // A layout's tmux form (layout.tmux) goes only to a desk that keeps it: one that refuses
-        // it (a backend from before it) is sent the layout without it from then on.
+        self.desk_pending.extend(ops);
+        self.send_desk_ops();
+    }
+
+    fn send_desk_ops(&mut self) {
+        if self.desk_inflight || self.desk_pending.is_empty() { return }
         let strip = |ops: &[Value]| -> Vec<Value> { ops.iter().cloned().map(|mut o| { if let Some(l) = o.get_mut("layout").and_then(Value::as_object_mut) { l.remove("tmux"); } o }).collect() };
+        // The backend accepts at most 200 operations per request.
+        let ops: Vec<Value> = self.desk_pending.drain(..self.desk_pending.len().min(200)).collect();
         let ops = if self.desk_no_tmux { strip(&ops) } else { ops };
-        let tried_tmux = ops.iter().any(|o| o.pointer("/layout/tmux").is_some());
-        let again = tried_tmux.then(|| strip(&ops));
+        let again = ops.iter().any(|o| o.pointer("/layout/tmux").is_some()).then(|| strip(&ops));
+        let layouts: HashMap<String, Value> = ops.iter().filter(|o| o["op"] == "tab.layout")
+            .filter_map(|o| Some((o["id"].as_str()?.to_string(), o["layout"].clone()))).collect();
         let port = self.port;
-        self.desk_inflight += 1;
+        self.desk_inflight = true;
         self.spawn(async move { http_json(port, "POST", "/api/desk/ops", Some(&json!({ "ops": ops }))).await }, move |app, reply| {
-            app.desk_inflight = app.desk_inflight.saturating_sub(1);
-            if let (Err(_), Some(ops)) = (&reply, again) { app.desk_no_tmux = true; return app.desk_ops(ops) }
-            if app.desk_inflight > 0 { app.desk_stale = true; return }
+            app.desk_inflight = false;
+            // Network/auth/server failures do not mean the schema lacks tmux layouts.
+            if let (Err(error), Some(ops)) = (&reply, again) { if error.code == "HTTP_400" {
+                app.desk_no_tmux = true;
+                app.desk_pending.splice(0..0, ops);
+                app.send_desk_ops();
+                return;
+            } }
+            if reply.is_ok() { app.desk_acked_layouts.extend(layouts) }
+            if !app.desk_pending.is_empty() { app.desk_stale = true; app.send_desk_ops(); return }
             match reply {
                 Ok(desk) => app.apply_desk(&desk),
                 Err(_) => app.fetch_desk(),
@@ -5511,4 +5614,174 @@ pub fn hostname() -> String {
         let raw = std::process::Command::new("hostname").arg("-s").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         if raw.is_empty() { "this computer".into() } else { raw }
     }).clone()
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    // Current-thread tests never yield to this link: it is cancelled before it can connect.
+    // No daemon, disk cache, real pane or server socket is used.
+    fn fixture() -> App {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (80, 24));
+        app.fleet.machines.push(Machine { id: "test-peer".into(), name: "Peer".into(), local: false, status: "running".into(), reach: Reach::Ready });
+        let link = Link::spawn(app.port, "test-peer", 1, app.sink.clone());
+        app.links.insert("test-peer".into(), LinkState { link: Some(link), generation: 1, attempts: 0, retry_at: None });
+        for id in 1..=4 {
+            let mut pane = Pane::new(id, if id == 4 { "other-peer" } else { "test-peer" }, &format!("agent-{id}"), 80, 24);
+            pane.phase = Phase::Live;
+            pane.stream = Some(Uuid::new_v4());
+            pane.open_token = 7;
+            app.panes.insert(id, pane);
+        }
+        app.panes.get_mut(&3).unwrap().phase = Phase::Card { title: "Paused".into(), detail: String::new(), keys: Vec::new() };
+        app.panes.get_mut(&3).unwrap().stream = None;
+        app.shells.insert(("test-peer".into(), "agent-2".into()));
+        app
+    }
+
+    #[tokio::test]
+    async fn expired_lease_recovers_hidden_shells_and_ignores_cancelled_events() {
+        let mut app = fixture();
+        let other = app.panes[&4].stream;
+        let expired = app.panes[&2].stream.unwrap();
+        app.on_machine("test-peer".into(), 1, MachineEvent::Frame { ty: "terminal_closed".into(), payload: json!({"streamId":expired.to_string(),"reason":"heartbeat timeout"}) });
+        assert_eq!(app.panes.len(), 4);
+        assert!(app.shells.contains(&("test-peer".into(), "agent-2".into())));
+        for id in [1, 2] {
+            assert!(matches!(app.panes[&id].phase, Phase::Connecting(_)));
+            assert!(app.panes[&id].stream.is_none());
+            assert_eq!(app.panes[&id].open_token, 8);
+        }
+        assert!(matches!(app.panes[&3].phase, Phase::Card { .. }));
+        assert_eq!(app.panes[&4].stream, other);
+        assert!(app.links["test-peer"].link.is_none());
+        let retry = app.links["test-peer"].retry_at;
+        assert!(retry.is_some());
+        // Events already queued by the cancelled task cannot resurrect it or delay the retry.
+        app.on_machine("test-peer".into(), 1, MachineEvent::Connected);
+        app.on_machine("test-peer".into(), 1, MachineEvent::Closed(RpcError::new("DISCONNECTED", "")));
+        assert_eq!(app.links["test-peer"].retry_at, retry);
+        assert!(matches!(app.fleet.machines[0].reach, Reach::Error(_)));
+        let late = Uuid::new_v4();
+        app.opened(1, "test-peer", 7, (80, 24), Ok(("terminal_ready".into(), json!({"streamId":late.to_string()}))));
+        assert!(app.panes[&1].stream.is_none());
+        assert!(matches!(app.panes[&1].phase, Phase::Connecting(_)));
+    }
+
+    #[tokio::test]
+    async fn open_timeout_and_disconnect_recover_but_protocol_refusals_do_not() {
+        for code in ["TIMEOUT", "DISCONNECTED", "TERMINAL_PROTOCOL_UNSUPPORTED"] {
+            let mut app = fixture();
+            app.panes.get_mut(&1).unwrap().phase = Phase::Connecting("Opening…".into());
+            app.panes.get_mut(&1).unwrap().opening = true;
+            app.opened(1, "test-peer", 7, (80, 24), Err(RpcError::new(code, "test failure")));
+            assert!(!app.panes[&1].opening);
+            if code == "TERMINAL_PROTOCOL_UNSUPPORTED" {
+                assert!(matches!(app.panes[&1].phase, Phase::Card { .. }));
+                assert!(app.links["test-peer"].retry_at.is_none());
+                app.links["test-peer"].link.as_ref().unwrap().close();
+            } else {
+                assert!(matches!(app.panes[&1].phase, Phase::Connecting(_)));
+                assert!(app.links["test-peer"].retry_at.is_some());
+                assert!(app.links["test-peer"].link.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pane_waits_for_machine_selection_before_opening() {
+        let mut app = fixture();
+        app.fleet.machines[0].reach = Reach::Connecting;
+        app.panes.get_mut(&1).unwrap().stream = None;
+        app.open_stream(1, false);
+        assert!(!app.panes[&1].opening);
+        assert_eq!(app.panes[&1].open_token, 7);
+        app.links["test-peer"].link.as_ref().unwrap().close();
+    }
+}
+
+
+#[cfg(test)]
+mod desk_layout_tests {
+    use super::*;
+
+    fn fixture() -> App {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19809, sink, (120, 36));
+        app.session_desk = true;
+        let mut tab = Tab::with_wid("Layout test", 1);
+        tab.id = "layout-test".into();
+        tab.on_desk = true;
+        tab.layout = json!({"presets":{"3":"columns"}});
+        tab.desk_layout = tab.layout.clone();
+        tab.root = layout::arrange(layout::Named::MainHorizontal, &[1, 2, 3], 120, 35, layout::Status::Top, ("80", "12"), ("0", "0"));
+        tab.focus = Some(1);
+        for id in 1..=3 {
+            let mut pane = Pane::new(id, "layout-peer", &format!("agent-{id}"), 120, 35);
+            pane.phase = Phase::Live;
+            app.panes.insert(id, pane);
+        }
+        app.tabs = vec![tab];
+        app.desk_revision = 1;
+        app
+    }
+
+    fn desk(revision: i64, layout: Value) -> Value {
+        json!({"revision":revision,"tabs":[{"id":"layout-test","name":"Layout test","layout":layout,
+            "panes":(1..=3).map(|id| json!({"machineId":"layout-peer","agentId":format!("agent-{id}")})).collect::<Vec<_>>()}]})
+    }
+
+    fn geometry(app: &App) -> String { app.tabs[0].root.as_ref().unwrap().to_tmux() }
+
+    #[test]
+    fn unchanged_remote_layout_does_not_undo_an_unsaved_local_edit() {
+        let mut app = fixture();
+        let chosen = geometry(&app);
+        app.tabs[0].layout["tmux"] = json!(chosen);
+        // A failed save or read-only desk: a rename elsewhere bumps the revision, but this
+        // tab's server layout is still what it was before the local change.
+        app.apply_desk(&desk(2, json!({"presets":{"3":"columns"}})));
+        assert_eq!(geometry(&app), chosen);
+        // An actual subsequent layout choice elsewhere still takes effect.
+        app.apply_desk(&desk(3, json!({"presets":{"3":"rows"}})));
+        assert_ne!(geometry(&app), chosen);
+    }
+
+    #[test]
+    fn fitting_a_shared_layout_does_not_publish_an_edit() {
+        let mut app = fixture();
+        app.notify_changes();
+        app.size = (96, 28);
+        app.fit_panes();
+        assert!(!app.pending_resize_hooks.is_empty());
+        app.notify_changes();
+        assert!(app.pending_resize_hooks.is_empty());
+        assert!(app.desk_layouts.is_empty());
+        // An intentional edit still marks the window for desk synchronization.
+        app.step_layout(0, true);
+        assert!(app.desk_layouts.contains("layout-test"));
+    }
+
+    #[test]
+    fn legacy_acknowledgement_and_queued_input_keep_exact_geometry() {
+        let mut app = fixture();
+        let chosen = geometry(&app);
+        let accepted = json!({"presets":{"3":"mainOverGrid"}});
+        app.tabs[0].layout = accepted.clone();
+        app.tabs[0].layout["tmux"] = json!(chosen);
+        app.desk_acked_layouts.insert("layout-test".into(), accepted.clone());
+        // A preset's fallback proportions differ from tmux's explicit 12-row main pane.
+        app.apply_desk(&desk(2, accepted));
+        assert_eq!(geometry(&app), chosen);
+        assert!(app.desk_acked_layouts.is_empty());
+        // A reply and a key can be drained in one event batch, before save_if_changed.
+        app.desk_layouts.insert("layout-test".into());
+        app.apply_desk(&desk(3, json!({"presets":{"3":"rows"}})));
+        assert_eq!(geometry(&app), chosen);
+        app.desk_layouts.clear();
+        app.apply_desk(&desk(4, json!({"presets":{"3":"columns"}})));
+        assert_ne!(geometry(&app), chosen);
+    }
 }

@@ -572,7 +572,7 @@ void main() {
       });
       await field(tester, 'people');
       expect(find.text('No invited people yet.'), findsOneWidget);
-      expect(find.textContaining('cannot control your agent'), findsOneWidget);
+      expect(find.textContaining('cannot control your harness'), findsOneWidget);
       await tester.enterText(
         find.byType(TextField),
         'KEN@example.com; diego@example.com, ken@example.com',

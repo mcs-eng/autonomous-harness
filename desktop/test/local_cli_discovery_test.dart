@@ -279,6 +279,7 @@ void main() {
     int port,
     File identityFile, {
     Future<void> Function()? spawnCommand,
+    Duration probeTimeout = const Duration(milliseconds: 40),
   }) => LocalCliDiscovery(
     config: AppConfig(
       apiBaseUrl: 'https://harness-api.autonomous.ai',
@@ -292,43 +293,14 @@ void main() {
     // the purposes of these tests; live daemons answer in single digits.
     dio: Dio(
       BaseOptions(
-        connectTimeout: const Duration(milliseconds: 40),
-        receiveTimeout: const Duration(milliseconds: 40),
-        sendTimeout: const Duration(milliseconds: 40),
+        connectTimeout: probeTimeout,
+        receiveTimeout: probeTimeout,
+        sendTimeout: probeTimeout,
       ),
     ),
     identity: LocalMachineIdentity(computerIdFile: identityFile),
     spawnCommand: spawnCommand,
   );
-
-  test('canceling supervision during auth prevents a late spawn', () async {
-    final identity = File('${scratch.path}/computer-id')
-      ..writeAsStringSync('0123456789abcdef0123456789abcdef');
-    final pending = Completer<bool>();
-    final checked = Completer<void>();
-    var spawns = 0;
-    final discovery = discoveryFor(
-      await freePort(),
-      identity,
-      spawnCommand: () async {
-        spawns++;
-      },
-    );
-    final timer = discovery.startSupervising(
-      checkInterval: const Duration(milliseconds: 10),
-      spawnAfter: 1,
-      stillSignedIn: () {
-        if (!checked.isCompleted) checked.complete();
-        return pending.future;
-      },
-    );
-    addTearDown(timer.cancel);
-    await checked.future.timeout(const Duration(seconds: 3));
-    timer.cancel();
-    pending.complete(true);
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    expect(spawns, 0);
-  });
 
   test(
     'reads real working folders from older local status snapshots',
@@ -712,6 +684,8 @@ void main() {
     final probe = await discoveryFor(
       server!.port,
       identityFile,
+      // A live loopback server: a 40 ms probe timeout under suite load reads as 'timed out'.
+      probeTimeout: const Duration(seconds: 2),
       spawnCommand: () async {
         spawned = true;
       },
@@ -1064,7 +1038,7 @@ void main() {
       );
       addTearDown(timer.cancel);
 
-      await Future.delayed(const Duration(milliseconds: 300));
+      await Future.delayed(const Duration(milliseconds: 800));
 
       expect(spawnCount, greaterThan(0));
       expect(
@@ -1133,4 +1107,99 @@ void main() {
       expect(timer.isActive, isTrue);
     },
   );
+
+  // `harness auth status` sat out a refresh lock a dying daemon had left (30s) and threw on the app's
+  // own timeout; the throw skipped the spawn and the local terminals stayed dark (2026-09-28 18:47).
+  for (final (name, check) in <(String, Future<bool> Function())>[
+    (
+      'fails',
+      () async => throw ProcessException(
+        'harness',
+        const [],
+        'did not finish within 30s',
+      ),
+    ),
+    ('never answers', () => Completer<bool>().future),
+  ]) {
+    test('startSupervising still respawns when the auth check $name', () async {
+      const computerId = '0123456789abcdef0123456789abcdef';
+      final identityFile = File('${scratch.path}/computer-id')
+        ..writeAsStringSync(computerId);
+      final probe = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final closedPort = probe.port;
+      await probe.close(force: true);
+
+      var spawnCount = 0;
+      var signedOutCalls = 0;
+      // Windows refuses a closed loopback port slowly; the helper shortens the probe.
+      final discovery = discoveryFor(
+        closedPort,
+        identityFile,
+        spawnCommand: () async {
+          spawnCount++;
+        },
+      );
+
+      final timer = discovery.startSupervising(
+        checkInterval: const Duration(milliseconds: 20),
+        graceStep: const Duration(milliseconds: 10),
+        graceWindow: const Duration(milliseconds: 50),
+        initialBackoff: const Duration(milliseconds: 20),
+        maxBackoff: const Duration(milliseconds: 20),
+        stillSignedIn: check,
+        onSignedOut: () => signedOutCalls++,
+      );
+      addTearDown(timer.cancel);
+
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      expect(spawnCount, greaterThan(0));
+      expect(
+        signedOutCalls,
+        0,
+        reason: 'an auth check with no answer is not a sign-out',
+      );
+    });
+  }
+
+  test('startSupervising spawns without waiting for a slow auth check, and still reports its sign-out', () async {
+    const computerId = '0123456789abcdef0123456789abcdef';
+    final identityFile = File('${scratch.path}/computer-id')
+      ..writeAsStringSync(computerId);
+    final probe = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final closedPort = probe.port;
+    await probe.close(force: true);
+
+    var spawnCount = 0;
+    var signedOutCalls = 0;
+    final answer = Completer<bool>();
+    // Windows refuses a closed loopback port slowly; the helper shortens the probe.
+    final discovery = discoveryFor(
+      closedPort,
+      identityFile,
+      spawnCommand: () async {
+        spawnCount++;
+      },
+    );
+
+    final timer = discovery.startSupervising(
+      checkInterval: const Duration(milliseconds: 20),
+      graceStep: const Duration(milliseconds: 10),
+      graceWindow: const Duration(milliseconds: 50),
+      initialBackoff: const Duration(seconds: 10),
+      maxBackoff: const Duration(seconds: 10),
+      stillSignedIn: () => answer.future,
+      onSignedOut: () => signedOutCalls++,
+    );
+    addTearDown(timer.cancel);
+
+    // Two quiet ticks, each with a loopback probe that takes tens of ms to fail on Windows.
+    await Future.delayed(const Duration(milliseconds: 500));
+    expect(spawnCount, 1, reason: 'the spawn does not wait on the auth check');
+    expect(signedOutCalls, 0);
+
+    answer.complete(false);
+    await Future.delayed(Duration.zero);
+    expect(signedOutCalls, 1, reason: 'a late answer is still told');
+  });
 }

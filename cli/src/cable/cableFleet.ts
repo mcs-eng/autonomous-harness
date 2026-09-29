@@ -70,11 +70,16 @@ export class CableFleet {
       if (this.serials.size && (!serial || !this.serials.has(serial))) continue
       present.set(serial || port.path, port)
     }
+    let removed = false
     for (const [id, entry] of this.entries) {
       if (present.get(id)?.path === entry.port.path) continue
       await entry.session.stop()
       this.entries.delete(id)
+      removed = true
     }
+    // After the deletes, not inside them: a publish mid-loop would name a device this computer has
+    // already stopped talking to.
+    if (removed) this.publish()
     if (this.stopped) return
     for (const [id, port] of present) {
       if (this.entries.has(id)) continue
@@ -88,8 +93,11 @@ export class CableFleet {
       const gone = () => {
         if (!entry.attached) return
         entry.attached = false
-        entry.status = { attached: false }
+        // The session's own {attached:false} carried the mac and the last settings; keep them so the
+        // pane can show this device's rows read-only instead of dropping it off the desk.
+        entry.status = { ...entry.status, id, attached: false, fw: undefined, updating: undefined }
         if (![...this.entries.values()].some(e => e.attached)) this.host.onDialGone?.()
+        this.publish()
       }
       // Bind ordinary host methods to the shared desktop. Only connection life
       // cycle and status are aggregated: losing one dial cannot tear down the
@@ -99,10 +107,8 @@ export class CableFleet {
           if (key === 'onDialAttached') return attached
           if (key === 'onDialGone') return gone
           if (key === 'onDialStatus') return (status: DialStatus) => {
-            entry.status = status
-            const live = [...this.entries.values()].filter(e => e.status.attached)
-            const current = live.find(e => e.status.updating) ?? live[0]
-            this.host.onDialStatus?.(current ? current.status : { attached: false })
+            entry.status = { ...status, id }
+            this.publish()
           }
           if (key === 'log') return (line: string) => this.host.log(`${line} [usb ${id}]`)
           const value = Reflect.get(target, key, target)
@@ -121,6 +127,44 @@ export class CableFleet {
       entry.session = new this.Session(host, new this.Log(join(this.logs, `usb-${id.replace(/[^a-zA-Z0-9_-]/g, '-')}`)), opener)
       this.entries.set(id, entry)
       entry.session.start()
+    }
+  }
+
+  /**
+   * One status out, carrying every device.
+   *
+   * The flat fields name the device a single-device window would have been shown anyway — the one
+   * taking an update if there is one, otherwise the first attached. `devices` is the whole desk, which
+   * is what a settings pane needs: it has to say WHICH robot it is changing, and until this existed the
+   * fleet picked one row and discarded the rest.
+   */
+  private publish(): void {
+    const devices = [...this.entries.values()].map(e => e.status).filter(s => s.attached || s.settings)
+    const live = devices.filter(s => s.attached)
+    const primary = live.find(s => s.updating) ?? live[0]
+    this.host.onDialStatus?.({ ...(primary ?? { attached: false }), devices })
+  }
+
+  /** Every device this computer can see, newest reading. Ordered as they were discovered. */
+  devices(): DialStatus[] {
+    return [...this.entries.values()].map(e => e.status).filter(s => s.attached || s.settings)
+  }
+
+  /**
+   * Change one device's settings. Addressed, not broadcast: every other method here reaches every
+   * device on purpose — they all show the same desktop — but a preference belongs to the glass it is
+   * set on, and sending it to the whole desk would change a robot nobody was looking at.
+   */
+  async setSettings(id: string, patch: Parameters<Surface['setSettings']>[0]): Promise<{ ok: boolean; error?: string }> {
+    const entry = this.entries.get(id)
+    if (!entry) return { ok: false, error: 'That device is not plugged into this computer.' }
+    if (!entry.status.attached) return { ok: false, error: 'That device is unplugged.' }
+    try {
+      await entry.session.setSettings(patch)
+      return { ok: true }
+    } catch (error) {
+      this.host.log(`cable: ${entry.port.path} settings: ${String(error)}`)
+      return { ok: false, error: 'The device did not take the change.' }
     }
   }
 

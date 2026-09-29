@@ -313,6 +313,51 @@ void ui_voice_route_abort(void);
 // One short line from the cabled Mac (a routing refusal, a send that did not land). Releases the routing
 // overlay first, then shows the message for ~2s over whatever is on screen.
 void ui_cable_toast(const char *msg);
+
+/*
+ * THE DEVICE'S SETTINGS, AS THE APP SEES THEM.
+ *
+ * A 466 circle holds four list rows between its chords, so the preferences live in the desktop app and
+ * the glass keeps only actions. The device still OWNS them: NVS is the record, the app proposes, and
+ * every answer is read back from here rather than echoed — the same rule `voicelang` has followed since
+ * it started crossing the cable (config_store.h).
+ *
+ * `round` is not a preference. It is the face, sent so the app can HIDE a row a square has no meaning
+ * for rather than grey out a control for a setting that does not exist there. This firmware only ever
+ * builds round, but the field stays: another device on this protocol may not be.
+ *
+ * Not here, deliberately: `swipe_reversed`. It is stored, and the LVGL build honours it, but habitat's
+ * tab carousel follows the finger by position and never reads it. A row in the app for a setting the
+ * glass ignores is worse than no row.
+ */
+typedef struct {
+    uint8_t brightness;   // 0..100, the number a person reads, not the 0..255 stored
+    uint8_t character;    // ht_character_id_t
+    uint16_t face;        // the glass, in pixels across — named so a support line can read it
+    bool muted, quiet, straight_title, focus_face, scroll_reversed, round;
+    char voicelang[CFG_VLANG_MAX];
+} ui_settings_t;
+
+// Which fields of a ui_settings_t an apply is allowed to touch. Absent means unchanged — a frame that
+// names one row must not quietly restate the other ten.
+enum {
+    UI_SETTING_BRIGHTNESS = 1u << 0, UI_SETTING_MUTED          = 1u << 1,
+    UI_SETTING_CHARACTER  = 1u << 2,
+    UI_SETTING_QUIET      = 1u << 4, UI_SETTING_STRAIGHT_TITLE = 1u << 5,
+    UI_SETTING_FOCUS_FACE = 1u << 6, UI_SETTING_SCROLL         = 1u << 7,
+    UI_SETTING_VOICELANG  = 1u << 8,
+};
+
+// The settings as they stand. Takes the display lock.
+void ui_settings_read(ui_settings_t *out);
+/*
+ * Apply the named fields. False means nothing was written and `error` holds one line to show verbatim;
+ * the caller answers with the settings read back either way, so a refusal still corrects the app.
+ */
+bool ui_settings_apply(const ui_settings_t *want, uint32_t fields, char *error, size_t cap);
+// A local change the app has not heard about yet (a factory reset, a pattern just drawn). Wakes the
+// cable's reporter; safe from any task.
+void ui_settings_changed(void);
 void ui_selection_state(const struct cJSON *payload);
 void ui_draft_state(const struct cJSON *p);
 void ui_voice_draft(const struct cJSON *p);
@@ -337,6 +382,7 @@ void ui_notify_task_done(const char *project_id, const char *name, const char *m
 // first time either is used. The tap's half already travels (cable_client_send_open); this is the
 // return leg. No-op when no row names this agent. Safe from the reader task.
 void ui_notif_seen(const char *project_id);
+void ui_notif_read(const char *project_id, const char *read_token);
 // Replace the WHOLE drawer with what the window still has unread, newest first.
 //
 // Sent once per attach, because that is the one moment this dial is known to have nothing: the rows

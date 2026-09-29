@@ -19,14 +19,20 @@ def function(name, source):
 
 init = function('ui_init', ui)
 load = init[init.index('    memset(&character,'):init.index('    ESP_LOGI("habitat"')]
-save = re.search(r'        case A_CHARACTER_SAVE:.*?\bbreak;', function('worker', ui), re.S).group(0)
+# The character write moved into the worker's one settings case when the preferences moved to the app.
+# Still taken from production source, and still the exact two lines that touch NVS.
+save = re.search(r'            if \(fields & UI_SETTING_CHARACTER[^\n]*\n[^\n]*ui_cable_toast[^\n]*',
+                 function('worker', ui), re.S).group(0)
 code = r'''
 #include "character.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 typedef int nvs_handle_t;
-enum { ESP_OK, NVS_READONLY, NVS_READWRITE, A_CHARACTER_SAVE };
+enum { ESP_OK, NVS_READONLY, NVS_READWRITE };
+// Only the one field the sliced lines read; the real struct lives behind ESP headers.
+enum { UI_SETTING_CHARACTER = 1u << 2 };
+typedef struct { uint8_t character; } ui_settings_t;
 static const char *NS = "pair";
 static bool present, fail_open, fail_get, fail_set, fail_commit, writable;
 static uint8_t stored, staged;
@@ -61,7 +67,10 @@ static void ui_cable_toast(const char *message) {
 code += function('config_load_habitat_character', config) + '\n'
 code += function('config_save_habitat_character', config) + '\n'
 code += 'static void boot(void) {\n' + load + '}\n'
-code += 'static void save(int value) { struct {int kind, value;} a={A_CHARACTER_SAVE,value}; switch(a.kind) {\n' + save + '\n} }\n'
+code += ('static void save(int value) {\n'
+         '    uint32_t fields = UI_SETTING_CHARACTER;\n'
+         '    ui_settings_t want = {.character = (uint8_t)value};\n'
+         + save + '\n}\n')
 code += r'''
 int main(void) {
 #ifdef DEVICE_DEFAULT_CHARACTER_TUX
@@ -94,7 +103,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='harness-character-pref-') as directory:
     out = Path(directory)
     (out / 'test.c').write_text(code)
-    sources = ['character.c', 'character_motion.c', 'character_layout.c', 'tux.c',
+    sources = ['character.c', 'character_motion.c', 'character_layout.c', 'tux.c', 'focus.c',
                'octopus.c', 'octopus_font.c', 'ascii_clip.c', 'terminal.c', 'fonts.c']
     for flags in ([], ['-DDEVICE_DEFAULT_CHARACTER_TUX=1']):
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',

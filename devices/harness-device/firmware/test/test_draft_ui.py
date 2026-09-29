@@ -47,6 +47,7 @@ static bool draft_emit(const ht_draft_command_t *c,void *ctx){(void)c;(void)ctx;
 #define COPY(dst,src) snprintf(dst,sizeof(dst),"%s",src)
 '''
 code += defines('UI_FONT', source=source)
+code += defines('FACE_CX', source=source)
 for name in ['copy','question_rows','draft_page','ui_voice_draft','ui_draft_state']:
     code+=function(name)
 code+=r'''

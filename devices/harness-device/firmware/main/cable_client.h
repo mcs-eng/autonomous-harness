@@ -197,17 +197,22 @@ typedef struct {
 // One row of the window's unread list, as `notif.replace` carries it. `summary` is
 // the finished turn's recap or the question's own words. Match the home preview's
 // byte capacity so an 80-character recap with UTF-8 punctuation arrives intact.
+// Opaque desktop notification identity, including terminator.
+#define CABLE_READ_TOKEN_MAX 64
 typedef struct {
     char agent_id[ID_MAX];
     char name[CABLE_NAME_MAX];
     char machine[CABLE_NAME_MAX];
     char summary[240];
+    char read_token[CABLE_READ_TOKEN_MAX];
     bool question;
     bool failed; // Optional explicit host metadata; never inferred from prose.
     // Local display bookkeeping. Incoming snapshots never supply these values.
     bool read_on_dial;
     uint32_t display_revision;
 } cable_notif_t;
+
+bool cable_client_notification_read(const char *agent_id, const char *read_token);
 
 // The user tapped a swarm. Not answered — see above.
 void cable_client_select_swarm(const char *swarm_id);
@@ -329,3 +334,10 @@ bool cable_client_answer_reviewed(const char *agent_id, const char *request_id, 
                                   const uint8_t *choices, const char drafts[][48], int count);
 
 void cable_client_draft(const char *id, const char *op, uint32_t request, uint32_t revision, int delta);
+
+// ── SETTINGS ────────────────────────────────────────────────────────────────────────────────────────
+// The device's preferences live on the desktop, because a 466 circle has no room for a settings tree.
+// The device still owns them: it reports what it holds with every `hello` and again whenever they
+// change here, and answers a `settings.set` with `settings.state` — on refusal too, carrying the values
+// read back, so a rejected change corrects the app instead of leaving it hopeful.
+void cable_client_report_settings(void);

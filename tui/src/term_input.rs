@@ -11,7 +11,7 @@ mod parse;
 enum InternalEvent { Event(Event), CursorPosition(u16, u16), KeyboardEnhancementFlags(KeyboardEnhancementFlags), PrimaryDeviceAttributes }
 
 #[derive(Debug, PartialEq)]
-enum Item { Input(Event), Terminal(Option<String>) }
+enum Item { Input(Event), Terminal(Option<String>), Background(Option<String>) }
 
 #[derive(Default)]
 struct Decoder { pending: Vec<u8> }
@@ -26,6 +26,15 @@ impl Decoder {
             if p.starts_with(b"\x1bP>|") && p.len() < 4096 {
                 let end = if p.ends_with(b"\x1b\\") { Some(p.len() - 2) } else if p.ends_with(b"\x07") { Some(p.len() - 1) } else { None };
                 if let Some(end) = end { out.push(Item::Terminal(Some(String::from_utf8_lossy(&p[4..end]).into_owned()))); self.pending.clear(); }
+                continue;
+            }
+            // OSC 11 default-background answer from `ask_terminal`, `\x1b]11;rgb:…\x07`
+            // (or `#rrggbb`). Same hold-till-terminator rule as XDA, so a query reply never
+            // becomes a key, and interleaved typeahead stays typeahead.
+            if b"\x1b]11;".starts_with(p) { continue }
+            if p.starts_with(b"\x1b]11;") && p.len() < 4096 {
+                let end = if p.ends_with(b"\x1b\\") { Some(p.len() - 2) } else if p.ends_with(b"\x07") { Some(p.len() - 1) } else { None };
+                if let Some(end) = end { out.push(Item::Background(parse_osc11(&String::from_utf8_lossy(&p[5..end])))); self.pending.clear(); }
                 continue;
             }
             // If the apparent XDA prefix turned out to be Alt-P, replay through the exact
@@ -60,6 +69,39 @@ impl Decoder {
     }
 }
 
+/// The `#rrggbb` from an OSC 11 answer body: `rgb:RRRR/GGGG/BBBB` (an Alacritty- or xterm-style
+/// request joined into a short string as a 24-bit colour) or `#rrggbb`. None when it is a string
+/// a 24-bit answer cannot be (a terminal answers `rgb:0000/0000/0000` only for unset).
+fn parse_osc11(body: &str) -> Option<String> {
+    let body = body.trim();
+    if let Some(hex) = body.strip_prefix('#') {
+        if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let mut h = String::with_capacity(7);
+            h.push('#');
+            for c in hex.bytes() { h.push((c as char).to_ascii_lowercase()); }
+            return Some(h);
+        }
+        return None;
+    }
+    if let Some(rgb) = body.strip_prefix("rgb:") {
+        let parts: Vec<&str> = rgb.split('/').collect();
+        if parts.len() == 3 {
+            let conv = |s: &str| -> Option<u8> {
+                let v = u32::from_str_radix(s, 16).ok()?;
+                let max = (1u32 << (4 * s.len())) - 1;
+                Some(((v * 255) / max) as u8)
+            };
+            let (r, g, b) = (conv(parts[0])?, conv(parts[1])?, conv(parts[2])?);
+            return Some(format!("#{:02x}{:02x}{:02x}", r, g, b));
+        }
+        // `rgb:RRGGBB` (six digits, as some terminals answer) or `rgb:RRRR`-style in one token.
+        if let Some(hex) = parts.first().filter(|s| s.len() == 6 && s.bytes().all(|b| b.is_ascii_hexdigit())) {
+            return Some(format!("#{}", hex.to_lowercase()));
+        }
+    }
+    None
+}
+
 /// Blocking reader thread. The initial queries never delay drawing or shell startup;
 /// terminal replies can arrive after ordinary input and do not become keystrokes.
 pub fn read(keys: tokio::sync::mpsc::UnboundedSender<crate::event::Event>) {
@@ -87,6 +129,10 @@ pub fn read(keys: tokio::sync::mpsc::UnboundedSender<crate::event::Event>) {
                 Item::Terminal(name) => {
                     if !crate::term_out::terminal_answer(name) { continue }
                     crate::event::Event::Apply(Box::new(|app| app.redraw_all = true))
+                }
+                Item::Background(bg) => {
+                    crate::term_out::set_terminal_colours(bg, None);
+                    crate::event::Event::Apply(Box::new(|app| { app.push_theme(); app.redraw_all = true; }))
                 }
             };
             if keys.send(event).is_err() { return }
@@ -132,5 +178,23 @@ mod tests {
         assert_eq!(decoder.escape(), vec![Item::Input(Event::Key(KeyCode::Esc.into()))]);
         assert!(decoder.push(b"\x1bP", true).is_empty());
         assert_eq!(decoder.escape(), vec![Item::Input(Event::Key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT | KeyModifiers::ALT)))]);
+    }
+    #[test]
+    fn osc11_background_answers_become_theme_and_spare_typeahead() {
+        let mut decoder = Decoder::default();
+        let mut items = Vec::new();
+        for b in b"ls\r\x1b]11;rgb:ffff/ffff/ffff\x07echo done" { items.extend(decoder.push(&[*b], true)); }
+        let bgs: Vec<_> = items.iter().filter_map(|i| if let Item::Background(n) = i { Some(n.clone()) } else { None }).collect();
+        assert_eq!(bgs, vec![Some("#ffffff".into())]);
+        let text: String = items.iter().filter_map(|i| match i { Item::Input(Event::Key(k)) => match k.code { KeyCode::Char(c) => Some(c), KeyCode::Enter => Some('\r'), _ => None }, _ => None }).collect();
+        assert_eq!(text, "ls\recho done");
+    }
+    #[test]
+    fn osc11_parses_slash_hex_and_hash_forms() {
+        assert_eq!(parse_osc11("rgb:ffff/0000/ffff"), Some("#ff00ff".into()));
+        assert_eq!(parse_osc11("rgb:00ff00"), Some("#00ff00".into()));
+        assert_eq!(parse_osc11("#1a1A1a"), Some("#1a1a1a".into()));
+        assert_eq!(parse_osc11("rgb:0000/0000/0000"), Some("#000000".into())); // a terminal's black
+        assert_eq!(parse_osc11("garbage"), None);
     }
 }

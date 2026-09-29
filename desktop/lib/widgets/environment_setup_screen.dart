@@ -411,7 +411,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
   );
 
   String _tmuxDetail(EnvironmentReadiness state) {
-    const base = 'Required for every terminal session';
+    const base = 'Required for every harness';
     if (state.windowsHost) {
       return '$base · inside the selected WSL2 distribution';
     }

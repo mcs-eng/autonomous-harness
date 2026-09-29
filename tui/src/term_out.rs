@@ -195,9 +195,11 @@ static TERMINAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static TERMINAL_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Query without waiting: the normal input reader separates replies from typeahead.
+/// OSC 11 (default background) is asked too: hn reports it to each machine's daemon
+/// (`theme_set`) so agent panes are painted to match, exactly as the desktop app does.
 pub fn ask_terminal() {
     let mut out = io::stdout();
-    let _ = out.write_all(b"\x1b[>q\x1b[c");
+    let _ = out.write_all(b"\x1b[>q\x1b[c\x1b]11;?\x07");
     let _ = out.flush();
 }
 
@@ -222,6 +224,50 @@ fn modern_terminal() -> bool {
 static COLOURS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1 << 24);
 
 pub fn set_colours(n: u32) { COLOURS.store(n, std::sync::atomic::Ordering::Relaxed) }
+
+/// The terminal's own default background and foreground, from its OSC 10/11 answers, as
+/// `#rrggbb` (bg, fg). None until the terminal answers. hn starts on top of the terminal, so
+/// these are asked directly and answer reliably; the daemon uses them to paint agent panes.
+static TERMINAL_FG_BG: std::sync::RwLock<Option<(String, String)>> = std::sync::RwLock::new(None);
+
+fn hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let h = hex.trim_start_matches('#');
+    if h.len() != 6 { return None }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some(((v >> 16) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8))
+}
+
+/// A foreground that reads on the background: dark on light, light on dark.
+fn companion_fg(bg: &str) -> String {
+    let Some((r, g, b)) = hex_rgb(bg) else { return "#f5f5f5".into() };
+    let lum = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
+    if lum > 128.0 { "#1a1a1a".into() } else { "#f5f5f5".into() }
+}
+
+/// What the terminal answered for its default colours, (bg, fg) hex, when it answered.
+pub fn terminal_colours() -> Option<(String, String)> {
+    TERMINAL_FG_BG.read().ok()?.clone()
+}
+
+/// Record an OSC 10/11 answer. A half left blank keeps the other (a terminal may answer bg only);
+/// a missing foreground is chosen for contrast on the background.
+pub fn set_terminal_colours(bg: Option<String>, fg: Option<String>) {
+    if let Ok(mut guard) = TERMINAL_FG_BG.write() {
+        let existing = guard.clone();
+        let bg = bg.or(existing.as_ref().map(|(b, _)| b.clone()));
+        let fg = fg.or(existing.as_ref().map(|(_, f)| f.clone()));
+        if let Some(bg) = bg {
+            *guard = Some((bg.clone(), fg.unwrap_or_else(|| companion_fg(&bg))));
+        }
+    }
+}
+
+/// Whether the terminal's background is light, from its OSC 11 answer, when it answered.
+pub fn terminal_is_light() -> Option<bool> {
+    let (bg, _) = terminal_colours()?;
+    let (r, g, b) = hex_rgb(&bg)?;
+    Some(0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64 > 128.0)
+}
 
 /// The terminal's colours from its name and what it says of itself, and what the config says of
 /// it: 24-bit with COLORTERM truecolor or 24bit, a `-direct` terminal, an explicit RGB

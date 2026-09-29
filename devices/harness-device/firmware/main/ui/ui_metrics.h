@@ -13,12 +13,5 @@
 // dial and must be treated as one.
 #pragma once
 
-#include "sdkconfig.h"
-
-#if defined(CONFIG_IDF_TARGET_ESP32P4)
-#include "metrics_square720.h"
-#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+// One board, one face. The fork that chose between this and a 720 square went with the Pro's firmware.
 #include "metrics_round466.h"
-#else
-#error "no screen metrics for this target"
-#endif

@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/core/open_in_browser.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_arrangement.dart';
 import 'package:harness/state/terminal_pane.dart';
@@ -109,7 +110,7 @@ void main() {
 
       await _mountBrowserViewer(tester, app, pane, launch);
       expect(opened, isEmpty);
-      final button = find.byKey(const ValueKey('web-pane-open-browser'));
+      final button = find.byKey(const ValueKey('web-pane-open-in-browser'));
       for (var attempt = 0; attempt < 2; attempt++) {
         await tester.tap(button);
         await tester.pumpAndSettle();
@@ -160,7 +161,7 @@ void main() {
       }
 
       await _mountBrowserViewer(tester, app, pane, launch);
-      final button = find.byKey(const ValueKey('web-pane-open-browser'));
+      final button = find.byKey(const ValueKey('web-pane-open-in-browser'));
       await tester.tap(button);
       await tester.pump();
       expect(tester.widget<TextButton>(button).onPressed, isNull);
@@ -217,7 +218,7 @@ void main() {
       expect(
         tester
             .widget<TextButton>(
-              find.byKey(const ValueKey('web-pane-open-browser')),
+              find.byKey(const ValueKey('web-pane-open-in-browser')),
             )
             .onPressed,
         isNull,
@@ -485,7 +486,19 @@ void main() {
     expect(WebPanePanel.webviewAvailable, isFalse);
     expect(find.byType(WebPanePanel), findsOneWidget);
     expect(find.byKey(const ValueKey('web-pane-placeholder')), findsOneWidget);
-    expect(find.text('http://127.0.0.1:4179/'), findsOneWidget);
+    expect(find.textContaining('http://127.0.0.1:4179/'), findsOneWidget);
+    // With no embedded webview the page opens in the browser instead
+    // (openharness#108 — a Linux desktop, or WSLg, has none today).
+    final opened = <Uri>[];
+    final previousOpener = browserOpener;
+    browserOpener = (url) async {
+      opened.add(url);
+      return true;
+    };
+    addTearDown(() => browserOpener = previousOpener);
+    await tester.tap(find.byKey(const ValueKey('web-pane-open-in-browser')));
+    await tester.pump();
+    expect(opened, [Uri.parse('http://127.0.0.1:4179/')]);
     // Its own close control, and no way to end an agent from it.
     expect(find.byTooltip('Close viewer'), findsOneWidget);
     // Stop remains a command, not a pane-header control. Viewer visibility

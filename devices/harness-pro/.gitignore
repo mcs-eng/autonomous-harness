@@ -1,4 +1,0 @@
-# Design mockups: HTML frames used to agree on a layout BEFORE writing LVGL code. They are a
-# conversation, not a build input — nothing here compiles or ships, and the PNG renders are megabytes.
-# Same rule the dial's firmware keeps for its own mockup/ directory.
-mockup/

@@ -92,7 +92,7 @@ pub fn defaults() -> &'static BTreeMap<String, String> {
         // Each pane's title row: the harness's symbol in its state's colour, the pane's title
         // (the harness's name), [watching — who has it] when another window has the pane to type
         // in, and at the far end, as far as there is room, its project and branch.
-        m.insert("pane-border-format".into(), " #{?pane_agent_icon,#{pane_agent_mark} ,}#{pane_title}#{?pane_watched, #[fg=yellow][watching#{?pane_watcher, — #{pane_watcher} has it,}]#[fg=default],} #[align=right]#{?pane_where,#[dim] #{pane_where} #[nodim],}".into());
+        m.insert("pane-border-format".into(), " #{?pane_agent_icon,#{pane_agent_mark} ,}#{pane_title}#{?pane_watched, #[fg=yellow][watching#{?pane_watcher, — #{pane_watcher} has it,}]#[fg=default],}#{?pane_where, #[dim]· #{pane_where} #[nodim],}".into());
         // The status line: tmux's, with what Harness adds — the name reversed while the prefix
         // waits; on the right, the fleet in counts (#{fleet}: ?2 ✗1 ✓5 ⠹41), the focused pane's machine (a far one, as
         // scp writes it: gpu-box:ml-lab), project and branch (as zsh's robbyrussell prompt writes
@@ -106,9 +106,10 @@ pub fn defaults() -> &'static BTreeMap<String, String> {
         for name in ["window-status-format", "window-status-current-format"] {
             m.insert(name.into(), "#I:#{?window_agent_icon,#{window_agent_icon} ,}#{window_short_name}#{?window_flags,#{window_flags}, }".into());
         }
-        // The terminal's title: the harnesses waiting on you, and the one in front.
+        // The terminal's title: the harnesses waiting on you, and the one in front with its state,
+        // so a terminal tab says what is in it (the status changing in the title as it works).
         m.insert("set-titles".into(), "on".into());
-        m.insert("set-titles-string".into(), "#{?fleet_needs,?#{fleet_needs} ,}#{pane_title} — Harness".into());
+        m.insert("set-titles-string".into(), "#{?fleet_needs,?#{fleet_needs} ,}#{pane_title}#{?pane_agent_state, (#{pane_agent_state}),} — Harness".into());
         // A session is a machine, named as the machine is (tmux's are 0, 1, …): room for its name.
         m.insert("status-left-length".into(), "24".into());
         m.insert("status-right-length".into(), "72".into());
