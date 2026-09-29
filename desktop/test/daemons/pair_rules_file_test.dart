@@ -89,9 +89,11 @@ void main() {
   test('a missing file is written once; an existing one is never touched', () async {
     final dir = await Directory.systemTemp.createTemp('pair-rules');
     addTearDown(() => dir.delete(recursive: true));
-    final env = {'HOME': '/nowhere', 'XDG_CONFIG_HOME': dir.path};
+    // XDG_CONFIG_HOME follows the daemon's POSIX path convention. HOME keeps
+    // this file fixture inside its disposable directory on Windows too.
+    final env = {'HOME': dir.path};
     final file = await ensurePairRules(environment: env);
-    expect(file.path, '${dir.path}/harness/pair.jsonc');
+    expect(file.path, '${dir.path}/.config/harness/pair.jsonc');
     expect(await file.readAsString(), pairRulesTemplate);
     await file.writeAsString('{"rules": [], "model": true}');
     await ensurePairRules(environment: env);
