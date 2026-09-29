@@ -238,8 +238,15 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(WorkspaceWelcome), findsOneWidget);
         expect(find.text('Harness like a boss.'), findsOneWidget);
-        expect(find.text('✓'), findsNothing);
-        expect(find.text('○'), findsNothing);
+        for (final mark in ['✓', '○']) {
+          expect(
+            find.descendant(
+              of: find.byType(WorkspaceWelcome),
+              matching: find.text(mark),
+            ),
+            findsNothing,
+          );
+        }
         expect(app.launches, hasLength(1));
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());

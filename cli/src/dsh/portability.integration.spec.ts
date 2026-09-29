@@ -95,6 +95,8 @@ describe('the whole store × engine matrix', () => {
   }
 })
 
+// Each case runs several real child processes. The 5s unit-test default can expire under a full
+// suite's load even when every child succeeds; keep an explicit bounded integration-test budget.
 for (const engine of PROCESS_ENGINES) it(`${engine}: prepare → spawn → tool → verdict → restart → fork`, async () => {
   const dir = join(root, 'package')
   write(join(dir, 'harness.json'), JSON.stringify({ spec: 1, id: 'test/portable', name: 'Portable', engine: 'claude',
@@ -142,4 +144,4 @@ for (const engine of PROCESS_ENGINES) it(`${engine}: prepare → spawn → tool 
   expect(fork.env.HARNESS_CONTEXT_FILE).not.toBe(launch.env.HARNESS_CONTEXT_FILE)
   expect(readFileSync(join(workspace, 'scene.txt'), 'utf8')).toBe('drawn by test/portable\n')
   expect((await materializeWorkspace(pkg, workspace, {}, engine)).initLines).toEqual([])
-})
+}, 15_000)

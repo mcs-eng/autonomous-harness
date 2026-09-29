@@ -475,7 +475,7 @@ describe('TerminalStreamManager', () => {
       })
       expect(lastResult()).toMatchObject({
         type: 'terminal_chunked_upload_begin_result',
-        payload: { streamId: 'stream-does-not-exist', accepted: false },
+        payload: { streamId: 'stream-does-not-exist', accepted: false, code: 'TERMINAL_STREAM_NOT_FOUND' },
       })
     })
 
@@ -736,8 +736,8 @@ describe('TerminalStreamManager', () => {
       requestId: 'open-2', protocolVersion: 3, agentId: 'agent-2', cols: 100, rows: 30,
     })
 
-    // Observed through a resize rather than a close frame: replacing a stream is deliberately
-    // silent, so the only way to tell a live stream from a dead one is whether it still acts.
+    expect(sent.some((frame) => frame.type === 'terminal_closed')).toBe(false)
+    // The other pane still accepts operations on its original stream.
     const before = stream.sizes.length
     await manager.handleFrame('app-1', 'terminal_resize', {
       streamId: first, resizeSeq: 1, cols: 90, rows: 25,
@@ -745,7 +745,7 @@ describe('TerminalStreamManager', () => {
     expect(stream.sizes.length).toBe(before + 1)
   })
 
-  it('still replaces its own stream when the same terminal is reopened', async () => {
+  it('notifies legacy views when a shared connection reopens the same terminal', async () => {
     await manager.handleFrame('app-1', 'terminal_open', {
       requestId: 'open-1', protocolVersion: 3, agentId: 'agent-1', cols: 100, rows: 30,
     })
@@ -753,7 +753,26 @@ describe('TerminalStreamManager', () => {
 
     await manager.handleFrame('app-1', 'terminal_open', {
       requestId: 'open-2', protocolVersion: 3, agentId: 'agent-1', cols: 100, rows: 30,
+      client: { kind: 'desktop', name: 'Other window' },
     })
+
+    expect(sent.filter((frame) => frame.type === 'terminal_closed')).toEqual([{
+      connId: 'app-1',
+      type: 'terminal_closed',
+      payload: {
+        protocolVersion: 3,
+        streamId: first,
+        reason: 'terminal reopened in another view',
+        code: 'TERMINAL_TAKEN_OVER',
+      },
+    }])
+    expect(sent.at(-1)).toMatchObject({ type: 'terminal_ready', payload: { requestId: 'open-2' } })
+    const replacement = sent.at(-1)!.payload.streamId as string
+    expect(replacement).not.toBe(first)
+    await manager.handleBinary('app-1', {
+      kind: TerminalBinaryKind.input, streamId: replacement, seq: 0, compressed: false, bytes: Buffer.from('new input'),
+    })
+    expect(Buffer.from(stream.writes.at(-1)!).toString()).toBe('new input')
 
     // Two tmux clients on one window is the thing this must never allow.
     const before = stream.sizes.length
@@ -761,6 +780,75 @@ describe('TerminalStreamManager', () => {
       streamId: first, resizeSeq: 1, cols: 90, rows: 25,
     })
     expect(stream.sizes.length).toBe(before)
+  })
+
+  it.each(['agent-1', 'agent-alias'])('keeps relay views independent when watching and taking over %s', async (secondAgent) => {
+    agents.set('agent-alias', session('codex', 'agent-alias'))
+    const handles: FakeStream[] = []
+    terminals.openStream = vi.fn(async () => {
+      const handle = new FakeStream()
+      handles.push(handle)
+      return { state: 'succeeded' as const, value: handle }
+    })
+    const open = async (viewId: string, takeover: boolean, agentId = 'agent-1') => {
+      await manager.handleFrame('shared-relay', 'terminal_open', {
+        requestId: `${viewId}-${handles.length}`, protocolVersion: 3, agentId,
+        cols: 100, rows: 30, viewId, takeover, client: { kind: 'desktop', name: viewId },
+      })
+      return sent.findLast((frame) => frame.type === 'terminal_ready')!.payload
+    }
+    const type = (streamId: unknown, text: string, seq = 0) => manager.handleBinary('shared-relay', {
+      kind: TerminalBinaryKind.input, streamId: streamId as string, seq,
+      compressed: false, bytes: Buffer.from(text),
+    })
+
+    const controller = await open('view-a', true)
+    const watcher = await open('view-b', false, secondAgent)
+    expect(watcher).toMatchObject({ readOnly: true, heldBy: { name: 'view-a' } })
+    expect(handles[0].closed).toBe(false)
+    expect(sent.filter((frame) => frame.type === 'terminal_closed')).toEqual([])
+    await type(controller.streamId, 'still typing')
+    await type(watcher.streamId, 'ignored')
+    expect(Buffer.from(handles[0].writes[0]).toString()).toBe('still typing')
+    expect(handles[1].writes).toEqual([])
+
+    // Reopening the watcher only replaces that view's own stream.
+    const watchingAgain = await open('view-b', false, secondAgent)
+    expect(watchingAgain.readOnly).toBe(true)
+    expect(handles[0].closed).toBe(false)
+    expect(handles[1].closed).toBe(true)
+    expect(sent.filter((frame) => frame.type === 'terminal_closed').map((frame) => frame.payload.streamId))
+      .toEqual([watcher.streamId])
+
+    const nextController = await open('view-b', true, secondAgent)
+    expect(nextController.readOnly).toBe(false)
+    expect(sent.find((frame) => frame.type === 'terminal_closed' && frame.payload.streamId === controller.streamId)?.payload)
+      .toMatchObject({ code: 'TERMINAL_TAKEN_OVER', takenBy: { name: 'view-b' } })
+    expect(handles[0].closed).toBe(true)
+
+    // A displaced client (including the TUI's automatic watch) must never take control back.
+    const displacedWatcher = await open('view-a', false)
+    expect(displacedWatcher).toMatchObject({ readOnly: true, heldBy: { name: 'view-b' } })
+    expect(handles[3].closed).toBe(false)
+    await type(nextController.streamId, 'new owner')
+    await type(displacedWatcher.streamId, 'ignored')
+    expect(Buffer.from(handles[3].writes[0]).toString()).toBe('new owner')
+    expect(handles[4].writes).toEqual([])
+    await manager.handleFrame('shared-relay', 'terminal_close', { streamId: displacedWatcher.streamId })
+    expect((await open('view-c', false)).heldBy).toEqual({ kind: 'desktop', name: 'view-b' })
+    expect(handles[3].closed).toBe(false)
+  })
+
+  it('scopes identical view IDs to their authenticated connection', async () => {
+    for (const connId of ['first', 'second']) {
+      await manager.handleFrame(connId, 'terminal_open', {
+        requestId: connId, protocolVersion: 3, agentId: 'agent-1', cols: 100, rows: 30,
+        viewId: 'same-view-id', takeover: false,
+      })
+    }
+    expect(sent.filter((frame) => frame.type === 'terminal_ready').map((frame) => frame.payload.readOnly))
+      .toEqual([false, true])
+    expect(sent.filter((frame) => frame.type === 'terminal_closed')).toEqual([])
   })
 
   it('uses frequent ACKs rather than the five-second heartbeat for output backpressure', async () => {

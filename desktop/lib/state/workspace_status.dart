@@ -1,4 +1,5 @@
 import '../core/models.dart';
+import '../core/runtime_model_name.dart';
 import '../shared/theme/prompt_style.dart';
 import '../shared/theme/status_line_style.dart';
 import '../widgets/engine_identity.dart';
@@ -140,16 +141,42 @@ class WorkspacePaneContext {
   final String? branch;
   String? get agentId => pane.isWeb ? pane.ownerAgentId : pane.agentId;
   String? get engine => agent?.engine ?? pane.session?.engineId;
+  String get modelLabel => modelLabelWithEffort(
+    provider,
+    agent?.gridModel == null && agent?.modelName != null
+        ? agent?.modelEffort
+        : null,
+  );
   String get suffix => branch == null ? '' : '  ($branch)';
   String get text => '$location$suffix';
-  StatusLineParts format(PromptPrefs prefs) => statusLineParts(
-    provider: '',
-    machine: prefs.machine ? machineName : '',
-    project: prefs.project ? projectName : '',
-    branch: prefs.branch ? branch : null,
-    style: prefs.statusStyle,
-    separateMachine: true,
-  );
+  StatusLineParts format(PromptPrefs prefs) {
+    final note =
+        prefs.branch &&
+            agent?.gitContext != null &&
+            project?.shownBranch == null
+        ? branch
+        : null;
+    final parts = statusLineParts(
+      provider: '',
+      machine: prefs.machine ? machineName : '',
+      project: prefs.project ? projectName : '',
+      branch: prefs.branch && note == null ? branch : null,
+      style: prefs.statusStyle,
+      separateMachine: true,
+    );
+    if (note == null) return parts;
+    return StatusLineParts(parts.style, [
+      ...parts.segments,
+      if (!parts.style.segmented && parts.segments.isNotEmpty)
+        const StatusLineSegment('  '),
+      StatusLineSegment(
+        note,
+        foreground: StatusLineTone.muted,
+        background: parts.style.segmented ? StatusLineTone.black : null,
+        field: StatusLineField.branch,
+      ),
+    ]);
+  }
 
   static WorkspacePaneContext? focused(AppNotifier app) {
     final pane = app.focusedPane;
@@ -170,7 +197,7 @@ class WorkspacePaneContext {
           _ => engineIdentity(engine).label,
         };
     final projectName = project?.label ?? '';
-    final branch = project?.shownBranch;
+    final branch = agent?.gitContext?.branchLabel ?? project?.shownBranch;
     return WorkspacePaneContext(
       pane: pane,
       agent: agent,
@@ -185,8 +212,7 @@ class WorkspacePaneContext {
         if (provider.isNotEmpty) provider,
         machineName,
         if (project != null) 'Project: ${project.label}',
-        if (project != null) project.cwd,
-        ?project?.branchDetail,
+        if (agent?.gitContext case final git?) git.explanation,
       ].join('\n'),
     );
   }

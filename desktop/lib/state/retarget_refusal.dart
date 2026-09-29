@@ -10,8 +10,20 @@
 /// says why. Until this existed, picking a Local model for a Cursor agent simply did nothing.
 library;
 
-String retargetRefusalMessage(String code, {required String engineLabel}) {
+/// A move onto a saved API's model ([api]) is refused in its own words: its `API_UNAVAILABLE` detail
+/// is written for the person (the API's name and what to do), and its models are not Local ones.
+String retargetRefusalMessage(
+  String code, {
+  required String engineLabel,
+  bool api = false,
+  String? detail,
+}) {
   return switch (code) {
+    'API_UNAVAILABLE' => detail ?? "Couldn't use this API. Try again.",
+    'LOCAL_ONLY' when api =>
+      'Saved APIs can run only the harnesses on this computer.',
+    'GRID_ENGINE_UNSUPPORTED' when api =>
+      '$engineLabel can only run on its own login, not an API model.',
     'GRID_ENGINE_UNSUPPORTED' =>
       '$engineLabel can only run on its own login, not a Local model.',
     'GRID_MODEL_REQUIRED' =>

@@ -1,3 +1,4 @@
+#include "ui_metrics.h"
 #include "ui_screens.h"
 #include "carousel_ring.h"
 #include "display.h"
@@ -61,9 +62,6 @@ extern const lv_font_t geist_sem_24;  // largest display: tile agent name + over
 // so nothing reaches the curved edge. 330px is the widest column whose corners never clip; centred
 // text makes the side margins read as intentional. Both axes centred + short content = stays in the
 // circle's safe band (no top/bottom arc clip).
-#define SCREEN_PAD   18
-#define SAFE_CONTENT_W 384       // centred column for readable content — wide, since content sits in the
-                                 // circle's mid band where the usable width is much larger than the inscribed square
 // The Overview's seats (mockup/overview-v3.html, "H · Halo, no ring"). FIXED, not a growing column: nothing
 // moves when the status changes, the words change. Every number is a device pixel on the 466 face; the far
 // corner of every control is inside the 233px rim, above the home-swipe band (y ≥ 400) and below the
@@ -72,29 +70,15 @@ extern const lv_font_t geist_sem_24;  // largest display: tile agent name + over
 // The shape follows what round devices agree on — the centre is one number, the lower arc is for the
 // hand: Inbox · Voice · Settings on one arc, Voice larger and on the axis, wearing the same 44px mic the
 // agent tile wears. Goal and Loop are gone from this face: they are ways of speaking, not things to see.
-#define OV_ROW_Y      118   // "8 agents" on one baseline: the count in the 64px digits face, the word at 38
-#define OV_NUM_H      72    // the row's height — the digit's line box
-#define OV_ROW_GAP    14    // between the digit and the word
-#define OV_STATUS_Y   204   // "N working" / "All idle", Geist 38
-#define OV_SIDE_D     64    // Inbox and Settings: 64px rounds, 30px glyphs, centred on y=340
-#define OV_BELL_X     78
-#define OV_GEAR_X     324
-#define OV_SIDE_Y     308
 // Voice: an 88px round on the axis, no caption (owner: "bỏ chữ Voice luôn, icon là đủ") — the caption's
 // height went to the button — and dropped 50px below the sides (centre y=390; owner, twice: 10 then 30
 // more) so the three follow the bezel the way the old arc did, the middle one nearest the resting thumb.
 // Its lowest point is 434, 201px from the centre, 32px inside the rim. Its lower third is in the home
 // band: a tap there is a tap, and a swipe up that starts on it is the button's, so the home gesture is
 // made from beside it, as it always was with a button on the axis.
-#define OV_VOICE_D    88
-#define OV_VOICE_X    189
-#define OV_VOICE_Y    346
-#define SAFE_W       lv_pct(72)  // ~335px — wrapped text on the side screens stays inside the curve
 // MAX_PROJECTS comes from commander_client.h (shared with app_main's fetch buffers) so the UI tile
 // array and the WS fetch never disagree; the UI keeps only a shell per project + a materialized window.
 #define MAX_EVENTS   1      // tile shows only the latest event (the most recent summary)
-#define TODO_VISIBLE_ROWS 4 // todo checklist shows this many rows; the rest scroll (keeps status on screen)
-#define AGENTS_VISIBLE_ROWS 3 // sub-agent list shows this many rows; the rest scroll (coexists with the tool line)
 #define BUSY_DOTS    3      // "processing" indicator = this many blinking dots (a loading animation)
 #define PREVIEW_BYTES 220   // tile teaser length (bytes, UTF-8 safe) — one card has room for a longer
                             // tease; full text still via tap-to-read
@@ -133,9 +117,6 @@ extern const lv_font_t geist_sem_24;  // largest display: tile agent name + over
 // Settings list geometry (Figma): uniform rows, stacked contiguously, four of them inside the round face.
 // 320 wide only fits the circle between y~64 and y~402 — 338px, i.e. exactly four 84px rows, which is why
 // the fifth has to be scrolled to rather than squeezed in.
-#define SET_ROW_W    320
-#define SET_ROW_H    84
-#define SET_LIST_PAD 65    // first row starts where the design puts it; the list scrolls by one row
 // The label font of a settings row, referenced ONCE so the one-line height pin, the default trailing
 // font and the baseline nudge can never drift from it — they did, and a 32px label ended up pinned
 // into a 28px box.
@@ -143,7 +124,6 @@ extern const lv_font_t geist_sem_24;  // largest display: tile agent name + over
 #define COL_SET_ICON lv_color_hex(0xffffff)   // settings row icon (white, per New Setting Figma)
 #define COL_BRIGHT   lv_color_hex(0x059600)   // brightness fill — the green the Figma track starts from
 
-#define PAIR_W 360
 
 static lv_obj_t *scr_pairing, *scr_connecting, *scr_error, *scr_projects;
 static lv_obj_t *scr_reader, *reader_lbl;   // full-screen scrollable reader for one event's full text
@@ -423,6 +403,21 @@ static void chip_clip(const char *src, char *out, size_t cap, size_t max_glyphs)
 static void tile_changed(lv_event_t *e); // tileview swipe tracker (defined below)
 static void carousel_scroll(lv_event_t *e); // per-frame leading-edge cover for the 1-agent ring (defined below)
 static void rebuild_page_dots(void);     // (re)build the bottom page-indicator dots (defined below)
+#if UI_DESK_GRID
+static void tabline_sync(void);          // show/hide the fixed tab line for the face on screen (defined below)
+static void tabline_rebuild(void);       // …redraw it from the swarm model
+static void tabline_repaint(void);       // …or just move the fill, keeping the buttons and the scroll
+static void desk_rebuild(void);          // the desk's tiles, from the agent model
+// A tab was just picked and the ring for it has not arrived. The grid draws nothing while this holds —
+// see desk_tab_tap. Bounded in time as well as by the ring, so a push that never comes cannot leave an
+// empty face: past DESK_PENDING_MS the grid gives up waiting and draws what it knows.
+static bool      s_desk_pending;
+static uint32_t  s_desk_pending_ms;
+#define DESK_PENDING_MS 1200
+static bool desk_is_open_raw(void);
+static bool desk_has_a_shape(void);      // …and whether a grid of it is worth drawing at all
+static void desk_only_agent(char *out, size_t cap);
+#endif
 static void rebuild_overview_tile(void); // refresh the overview tile's "N agents" label (defined below)
 static void overview_actions_apply(void);// enable/disable the Overview Voice / Goal / Loop actions
 static void overview_working_apply(void);// refresh the "<N> <gerund>…" sub-line from the agents' busy_model flags
@@ -456,7 +451,6 @@ static int find_proj(const char *id);            // index of the project with th
 #define PICK_OWNER_LANG    1   // voice language — local, persisted to NVS
 #define PICK_OWNER_ACTION  2   // Voice / Goal / Loop — starts a turn on the active agent
 // Half the screen minus half a row: what lets the FIRST and LAST row reach the middle of the wheel.
-#define PICK_PAD_V         200
 // The wheel has TWO owners: the per-agent Model/Effort profile, and Settings > Voice language. It once
 // had a third (an auto|goal|loop mode picker) whose flag was removed when the three action buttons
 // replaced it — this brings a flag back, deliberately. The two owners commit to different places
@@ -515,7 +509,7 @@ typedef struct {
     // every machine at once, in the same order the desktop app's rail reads them. `machine_id` is what a
     // machine row uses to find its first agent to land on; `machine` is the name the tile draws.
     char machine_id[48];
-    char machine[NAME_MAX];
+    char machine[CABLE_NAME_MAX];
     char mode[8];        // MODEL: per-agent autonomy for voice turns — "plan" | "" (empty = auto/bypass)
 
     // Runtime model/effort (REMOTE machines). selected_model = opaque runtime-v1:<sid>:<engine>:<model>@<effort>,
@@ -591,8 +585,8 @@ static const char *tile_resting_text(const proj_t *p)
 // LV_SCROLL_SNAP_CENTER + LV_OBJ_FLAG_SCROLL_ONE (exactly what lv_tileview uses internally, so the feel
 // is identical), and each tile is positioned at column*width. carousel_goto centers a column;
 // carousel_col reads which column is centered from the scroll position.
-static int32_t carousel_w(void) { int32_t w = tileview ? lv_obj_get_width(tileview) : 0; return w > 0 ? w : 466; }
-static int32_t carousel_h(void) { int32_t h = tileview ? lv_obj_get_height(tileview) : 0; return h > 0 ? h : 466; }
+static int32_t carousel_w(void) { int32_t w = tileview ? lv_obj_get_width(tileview) : 0; return w > 0 ? w : UI_FACE_W; }
+static int32_t carousel_h(void) { int32_t h = tileview ? lv_obj_get_height(tileview) : 0; return h > 0 ? h : UI_FACE_H; }
 // A REPORT LEAVES THE DIAL ONLY WHEN A FINGER MOVED THE CAROUSEL.
 //
 // Everything that moves it from code — a rebuilt list re-anchoring, the ring count changing, a tile being
@@ -1178,7 +1172,7 @@ static void wave_tick(lv_timer_t *t)
         int32_t h   = (int32_t)s_wave_rest[k] * amp / 1000;
         if (h < 2) h = 2;
         lv_obj_set_height(s_wave[k], h);
-        lv_obj_set_y(s_wave[k], 233 - h / 2);             // stay centred on the midline as it grows/shrinks
+        lv_obj_set_y(s_wave[k], UI_CY - h / 2);             // stay centred on the midline as it grows/shrinks
     }
 }
 // Start/stop the waveform: spin up the shared travelling-phase timer and seed one frame immediately (so nothing
@@ -1327,14 +1321,11 @@ static void busy_dots_tick(lv_timer_t *t)
 // security: a smudge trail on the AMOLED or a shoulder-surf can leak the shape — enough to stop a
 // passer-by poking your agents, not a determined attacker.
 enum { LK_UNLOCK, LK_SET, LK_CONFIRM, LK_DISABLE };
-#define LK_GAP        113      // dot spacing (px) — matches the "Create your pattern" Figma grid
 #define COL_LOCK_DOT   lv_color_hex(0xffffff)   // idle pattern dot (white, per Figma)
 #define COL_LOCK_GREEN lv_color_hex(0x75f958)   // selected dot + line (bright green, per Figma)
 #define LK_HIT        44       // finger hit radius around a dot (< GAP/2 so adjacent dots don't co-trigger)
 #define LK_MIN        4        // minimum dots in a valid pattern
 #define LK_MAX_FAIL   5        // wrong unlock tries → unpair (wipe token + passcode) + reboot to pairing
-#define LK_CX         233      // grid centre x
-#define LK_CY         233      // grid centre y — screen centre (flat, dots-only)
 
 static lv_obj_t *s_lk_overlay;
 static lv_obj_t *s_lk_msg;                 // single message line ABOVE the grid (instruction / error). Empty
@@ -1504,7 +1495,7 @@ static void lk_build(void)
     if (s_lk_overlay) return;
     lv_obj_t *ov = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(ov);
-    lv_obj_set_size(ov, 466, 466);
+    lv_obj_set_size(ov, UI_FACE_W, UI_FACE_H);
     lv_obj_set_pos(ov, 0, 0);
     lv_obj_set_style_bg_color(ov, COL_BG, 0);   // flat black, like the original
     lv_obj_set_style_bg_opa(ov, LV_OPA_COVER, 0);
@@ -1922,7 +1913,7 @@ void ui_init(void)
     s_overview_actions = lv_obj_create(s_overview_tile);
     lv_obj_remove_style_all(s_overview_actions);
     lv_obj_clear_flag(s_overview_actions, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(s_overview_actions, 466, 466);
+    lv_obj_set_size(s_overview_actions, UI_FACE_W, UI_FACE_H);
     lv_obj_set_pos(s_overview_actions, 0, 0);
 
     // A round control: transparent-ish ghost for the two sides, Voice's own green pair for the middle.
@@ -2090,8 +2081,8 @@ void ui_init(void)
         lv_obj_set_style_radius(s_wave[k], LV_RADIUS_CIRCLE, 0);   // rounded caps
         lv_obj_set_style_bg_color(s_wave[k], COL_VOICE, 0);
         lv_obj_set_style_bg_opa(s_wave[k], LV_OPA_COVER, 0);
-        int cx = 233 + (k - 3) * 224 / 10;                        // pitch 22.4px, symmetric about centre
-        lv_obj_set_pos(s_wave[k], cx - 3, 233 - s_wave_rest[k] / 2);
+        int cx = UI_CX + (k - 3) * WAVE_PITCH_X10 / 10;                        // pitch 22.4px, symmetric about centre
+        lv_obj_set_pos(s_wave[k], cx - 3, UI_CY - s_wave_rest[k] / 2);
         lv_obj_remove_flag(s_wave[k], LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(s_wave[k], LV_OBJ_FLAG_HIDDEN);
     }
@@ -2394,19 +2385,51 @@ void ui_init(void)
     lv_obj_set_style_bg_color(s_notif_pill, lv_color_hex(0x006fff), 0);   // Figma blue 🔔 badge
     lv_obj_set_style_bg_opa(s_notif_pill, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(s_notif_pill, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_hor(s_notif_pill, 13, 0);
-    lv_obj_set_style_pad_ver(s_notif_pill, 4, 0);
+    lv_obj_set_style_pad_hor(s_notif_pill, NOTIF_FAB_PAD_H, 0);
+    lv_obj_set_style_pad_ver(s_notif_pill, NOTIF_FAB_PAD_V, 0);
+#if UI_DESK_GRID
+    /*
+     * BOTTOM RIGHT, floating, and only when there is something to say.
+     *
+     * The top band belongs to the tabs. Down here the face had room going spare — an agent tile's
+     * words end around y=560 and the grid's last row is the only thing that comes near — and a control
+     * that appears and disappears is exactly what a corner is for: nothing reserves the space, so there
+     * is no state in which the screen looks like it is missing a piece.
+     */
+    /*
+     * NO min_height. The size comes from the glyphs.
+     *
+     * It was pinned to 64px while the bell inside stayed at montserrat_14 — a 14px mark in a 64px
+     * circle, with 25px of empty blue all round it. That is not a control, it is a hole with a dot in
+     * it (owner, 2026-09-28: "vẽ vòng tròn to đùng, cái icon noti bé tí, nhìn như lỗi UI").
+     *
+     * So the glyphs are sized for this face and the padding is what makes the circle: montserrat_30
+     * for both, 14px of vertical padding, and the box lands at NOTIF_FAB_H on its own — full, and
+     * still the right size for a thumb.
+     */
+    lv_obj_set_style_opa(s_notif_pill, NOTIF_FAB_OPA, 0);
+    lv_obj_set_style_shadow_width(s_notif_pill, NOTIF_FAB_SHADOW, 0);
+    lv_obj_set_style_shadow_opa(s_notif_pill, LV_OPA_40, 0);
+    lv_obj_set_style_shadow_color(s_notif_pill, lv_color_black(), 0);
+    lv_obj_align(s_notif_pill, LV_ALIGN_BOTTOM_RIGHT, -NOTIF_FAB_MARGIN, -NOTIF_FAB_MARGIN);
+#else
     lv_obj_align(s_notif_pill, LV_ALIGN_TOP_MID, 0, 22);
+#endif
     lv_obj_set_style_bg_opa(s_notif_pill, LV_OPA_80, LV_STATE_PRESSED);   // it presses now, so it says so
+#if UI_DESK_GRID
+    // …and at half opacity a background that merely goes to 80% is not a visible press. The whole
+    // control comes UP to full on touch instead: quiet until a thumb is on it, then plainly lit.
+    lv_obj_set_style_opa(s_notif_pill, LV_OPA_COVER, LV_STATE_PRESSED);
+#endif
     lv_obj_set_flex_flow(s_notif_pill, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s_notif_pill, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(s_notif_pill, 6, 0);
+    lv_obj_set_style_pad_column(s_notif_pill, NOTIF_PILL_GAP, 0);
     { lv_obj_t *bell = lv_label_create(s_notif_pill);
-      lv_obj_set_style_text_font(bell, &lv_font_montserrat_14, 0);
+      lv_obj_set_style_text_font(bell, NOTIF_PILL_FONT, 0);
       lv_obj_set_style_text_color(bell, COL_FG, 0);
       lv_label_set_text(bell, LV_SYMBOL_BELL);
       s_notif_pill_lbl = lv_label_create(s_notif_pill);
-      lv_obj_set_style_text_font(s_notif_pill_lbl, &lv_font_montserrat_22, 0);
+      lv_obj_set_style_text_font(s_notif_pill_lbl, NOTIF_PILL_FONT, 0);
       lv_obj_set_style_text_color(s_notif_pill_lbl, COL_FG, 0);
       lv_label_set_text(s_notif_pill_lbl, "0"); }
     lv_obj_add_flag(s_notif_pill, LV_OBJ_FLAG_HIDDEN);
@@ -2428,7 +2451,7 @@ void ui_init(void)
     make_close_pill(s_notif_drawer, notif_bg_tap, 16);
     s_notif_list = lv_obj_create(s_notif_drawer);   // scrollable column of cards (centered band, below the badge)
     lv_obj_remove_style_all(s_notif_list);
-    lv_obj_set_size(s_notif_list, 360, 320);
+    lv_obj_set_size(s_notif_list, NOTIF_LIST_W, NOTIF_LIST_H);
     lv_obj_align(s_notif_list, LV_ALIGN_CENTER, 0, 34);
     lv_obj_set_flex_flow(s_notif_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(s_notif_list, 12, 0);
@@ -2738,6 +2761,13 @@ void ui_land_after_reload(void)
     apply_active_from_col();
     update_content_window();
     rebuild_page_dots();
+#if UI_DESK_GRID
+    // …AND THEN THE DESK, which is what this face lands on. The carousel is still parked on the Overview
+    // underneath, because that is what a back out of the grid and every swipe from here expects to find —
+    // the desk is a face over the ring, not a replacement for it. What changes is which one you are
+    // looking at when the machine's agents have finished arriving: the shape, not the count.
+    ui_desk_open();
+#endif
     display_unlock();
 }
 
@@ -3043,6 +3073,12 @@ static void agent_actions_apply(void)
     // ran. The ‹ › pair stays on a shell — moving on is always safe — so the arc is hidden as a whole
     // only when the tile is not an agent's at all, and Voice alone goes on a shell.
     set_hidden(s_agent_acts, !on);
+#if UI_DESK_GRID
+    // The fixed tab line answers to the same question this does — "what is on the face?" — so it rides
+    // the same apply rather than a timer of its own. Every swipe, every turn edge, every wake and the
+    // 1 Hz tick already reach here.
+    tabline_sync();
+#endif
     if (s_agent_voice_btn) set_hidden(s_agent_voice_btn, !on || is_terminal_tile(&s_proj[s_active_idx]));
     // …and ‹ › only where there is somewhere to go. A tab with ONE agent has no next and no previous, so
     // the pair leaves the arc entirely rather than sitting there greyed (owner, 2026-09-22: "khi tab chỉ
@@ -3111,10 +3147,10 @@ static lv_obj_t *agent_step_glyph(lv_obj_t *parent, int dir)
     return l;
 }
 
-static lv_obj_t *agent_act_btn(int32_t x, int32_t y, lv_event_cb_t cb)
+static lv_obj_t *agent_act_btn(int32_t x, int32_t y, int32_t d, lv_event_cb_t cb)
 {
     lv_obj_t *b = lv_button_create(s_agent_acts);
-    lv_obj_set_size(b, 80, 80);
+    lv_obj_set_size(b, d, d);
     lv_obj_set_pos(b, x, y);
     lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(b, COL_FG, LV_STATE_PRESSED);
@@ -3132,7 +3168,7 @@ static void build_agent_actions(void)
 {
     s_agent_acts = lv_obj_create(scr_projects);
     lv_obj_remove_style_all(s_agent_acts);
-    lv_obj_set_size(s_agent_acts, 466, 466);
+    lv_obj_set_size(s_agent_acts, UI_FACE_W, UI_FACE_H);
     lv_obj_set_pos(s_agent_acts, 0, 0);
     lv_obj_add_flag(s_agent_acts, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_agent_acts, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
@@ -3166,7 +3202,7 @@ static void build_agent_actions(void)
     // still reachable — a still hold on the tile is a Goal capture (touch.c) and the Overview keeps its
     // labelled Goal / Loop buttons. Set AGENT_TILE_GOAL_LOOP to 1 to draw the two marks again.
 #if AGENT_TILE_GOAL_LOOP
-    { lv_obj_t *b = agent_act_btn(79, 322, agent_goal_tap);
+    { lv_obj_t *b = agent_act_btn(ACT_PREV_X, ACT_Y, ACT_BTN_D, agent_goal_tap);
       s_agent_goal_btn = b;
       lv_obj_t *ring = lv_obj_create(b);
       lv_obj_remove_style_all(ring);
@@ -3189,7 +3225,7 @@ static void build_agent_actions(void)
 #endif
     // Voice — the centre of the arc, 31px lower than its neighbours (the ±36° offset). It does NOT move
     // sideways: it is the one under the resting thumb, and the other two spread away from it.
-    { lv_obj_t *b = agent_act_btn(193, 353, agent_voice_tap);
+    { lv_obj_t *b = agent_act_btn(ACT_VOICE_X, ACT_VOICE_Y, ACT_VOICE_D, agent_voice_tap);
       s_agent_voice_btn = b;
       lv_obj_t *ic = lv_image_create(b);
       lv_image_set_src(ic, &icon_act_voice);      // 44px native, colour baked — see the note on the asset
@@ -3197,13 +3233,13 @@ static void build_agent_actions(void)
     // ‹ › — the previous/next pair, on the two arc spots Goal and Loop measured against the bezel
     // (owner, 2026-09-22, mockup option A: "vừa swipe được vừa bấm nút được"). Same 80px circles, same
     // pressed fill; the glyph is a 30px chevron in the muted ink.
-    { lv_obj_t *b = agent_act_btn(79, 322, agent_prev_tap);
+    { lv_obj_t *b = agent_act_btn(ACT_PREV_X, ACT_Y, ACT_BTN_D, agent_prev_tap);
       s_agent_prev_btn = b;
       s_agent_prev_glyph = agent_step_glyph(b, -1);
       lv_obj_add_event_cb(b, agent_step_press, LV_EVENT_PRESSED, s_agent_prev_glyph);
       lv_obj_add_event_cb(b, agent_step_press, LV_EVENT_RELEASED, s_agent_prev_glyph);
       lv_obj_add_event_cb(b, agent_step_press, LV_EVENT_PRESS_LOST, s_agent_prev_glyph); }
-    { lv_obj_t *b = agent_act_btn(307, 322, agent_next_tap);
+    { lv_obj_t *b = agent_act_btn(ACT_NEXT_X, ACT_Y, ACT_BTN_D, agent_next_tap);
       s_agent_next_btn = b;
       s_agent_next_glyph = agent_step_glyph(b, +1);
       lv_obj_add_event_cb(b, agent_step_press, LV_EVENT_PRESSED, s_agent_next_glyph);
@@ -3213,7 +3249,7 @@ static void build_agent_actions(void)
 #if AGENT_TILE_GOAL_LOOP
     // Loop — the exported Figma repeat arrows, the same mark the Overview carries, and the mirror of Goal's
     // 20px push: 287 → 307.
-    { lv_obj_t *b = agent_act_btn(307, 322, agent_loop_tap);
+    { lv_obj_t *b = agent_act_btn(ACT_NEXT_X, ACT_Y, ACT_BTN_D, agent_loop_tap);
       s_agent_loop_btn = b;
       lv_obj_t *ic = lv_image_create(b);
       lv_image_set_src(ic, &icon_act_loop);       // 44px native, colour baked
@@ -3292,6 +3328,27 @@ bool ui_action_hit(uint16_t x, uint16_t y)
 // Rebuilt on snap (tile_changed) + on list changes — never per-frame — so it's cheap and doesn't touch the WS.
 static void rebuild_page_dots(void)
 {
+#if UI_DESK_GRID
+    // THE DESK IS THE HOME on this face, so it has to follow the model — and this is the one call every
+    // path that changes what agents exist already makes. It was the dots' hook when there were dots; the
+    // dots are gone and the grid inherits it rather than growing a second set of call sites that would
+    // drift from these.
+    // …and this IS the ring arriving, so whatever the desk was waiting for after a tab pick is here.
+    s_desk_pending = false;
+    if (desk_is_open_raw()) {
+        if (!desk_has_a_shape()) {
+            // The tab turned out to hold one agent. Close and land on it — and no recursion guard is
+            // needed, because ui_desk_close() clears s_desk_open before ui_focus_project re-enters
+            // here, so the second pass finds the desk shut and does nothing.
+            char id[sizeof(s_proj[0].id)];
+            desk_only_agent(id, sizeof id);
+            ui_desk_close();
+            if (id[0]) ui_focus_project(id);
+        } else {
+            desk_rebuild();
+        }
+    }
+#endif
     // Page-indicator dots removed per design — keep the container empty + hidden. All callers stay no-ops.
     if (!page_dots) return;
     lv_obj_clean(page_dots);
@@ -3457,7 +3514,6 @@ void ui_set_brightness(uint8_t level)
 // Figma "New Setting" (Brightness): the track is 427 wide at y=231, with the title above it at y=151.
 // 306 was the width from when this control was a row squeezed into the settings list; on its own screen
 // it gets the design's full width.
-#define BRIGHT_BOX_W 427
 
 // The fill has a 20% floor: min brightness IS 20%, so the fill bottoms out at 1/5 of the box, never empty.
 #define BRIGHT_FILL_MIN (BRIGHT_BOX_W / 5)
@@ -4523,7 +4579,6 @@ static char *dup_str(const char *s)
 // back without it left the words floating on the black face with nothing holding them. Same surface as
 // before — flat #23252f, 28px radius, a hairline at 20% — with the vertical padding down from 18 to 14:
 // the card holds two pinned lines now instead of a paragraph that could be one.
-#define RECAP_MAX_CHARS   40
 #define RECAP_FONT        (&geist_med_28)
 #define RECAP_LINE_SPACE  3
 #define RECAP_CARD_PAD_H  18
@@ -4532,9 +4587,10 @@ static char *dup_str(const char *s)
 #define RECAP_CARD_PAD_V  19
 /** The text column inside the card: the safe width less the padding and the hairline each side. */
 #define RECAP_TEXT_W      (SAFE_CONTENT_W - 2 * RECAP_CARD_PAD_H - 2)
-/** The card's fixed height: two lines of recap, the space between them, the padding, and the 1px edge
- *  on each side. Fixed so the box does not breathe as the carousel moves between tiles. */
-#define RECAP_CARD_H      (2 * lv_font_get_line_height(RECAP_FONT) + RECAP_LINE_SPACE \
+/** The card's fixed height: RECAP_LINES lines of recap, the spaces between them, the padding, and the
+ *  1px edge on each side. Fixed so the box does not breathe as the carousel moves between tiles. */
+#define RECAP_CARD_H      (RECAP_LINES * lv_font_get_line_height(RECAP_FONT) \
+                           + (RECAP_LINES - 1) * RECAP_LINE_SPACE \
                            + 2 * RECAP_CARD_PAD_V + 2)
 
 static void tile_layout_apply(proj_t *p);   // the tile's two layouts, chosen by state — defined with its macros below
@@ -4588,8 +4644,8 @@ static void render_recap_block(proj_t *p)
     // chips use, for the same reason. The ellipsis is added here rather than by the cutter because only
     // this caller can tell a clip from a recap that was simply short.
     //
-    // The card is pinned to exactly two lines: 40 glyphs cannot need a third at this width, and pinning
-    // it keeps every tile's card the same size, so walking the carousel does not make the box breathe.
+    // The card is pinned to RECAP_LINES, which keeps every tile's card the same size — walking the
+    // carousel must not make the box breathe.
     //
     // THE PIN MOVED FROM THE LABEL TO THE CARD, and that is the whole fix. A label pinned to two lines
     // draws its text from the top, because LVGL labels have no vertical alignment — so a one-line recap
@@ -4600,17 +4656,18 @@ static void render_recap_block(proj_t *p)
     char cut[RECAP_MAX_CHARS * 4 + 8];
     chip_clip(p->m_preview, cut, sizeof(cut) - 4, RECAP_MAX_CHARS);
     bool clipped = strlen(cut) < strlen(p->m_preview);
-    // TWO LINES BY MEASUREMENT, not by glyph count. Forty glyphs "cannot need a third line" only when
-    // the words break kindly; a recap of short words with diacritics wrapped onto three, and the card —
-    // pinned to two — sliced the third through the middle of its glyphs. So the text is laid out at the
-    // card's width and trimmed, a glyph at a time, until it fits in two lines with its "…" on the second.
-    const int32_t two_lines = 2 * lv_font_get_line_height(RECAP_FONT) + RECAP_LINE_SPACE;
+    /* The card is pinned to RECAP_LINES, so the text is trimmed until it fits in exactly that many —
+     * by MEASUREMENT, not by glyph count. A cap of N glyphs "cannot need another line" only when the
+     * words break kindly; a recap of short words with diacritics wrapped one line further and the card,
+     * pinned, sliced the last one through the middle of its glyphs. */
+    const int32_t line_budget = RECAP_LINES * lv_font_get_line_height(RECAP_FONT)
+                              + (RECAP_LINES - 1) * RECAP_LINE_SPACE;
     for (;;) {
         char probe[sizeof(cut) + 4];
         snprintf(probe, sizeof probe, "%s%s", cut, clipped ? "\xE2\x80\xA6" : "");
         lv_point_t sz;
         lv_text_get_size(&sz, probe, RECAP_FONT, 0, RECAP_LINE_SPACE, RECAP_TEXT_W, LV_TEXT_FLAG_NONE);
-        if (sz.y <= two_lines || !cut[0]) break;
+        if (sz.y <= line_budget || !cut[0]) break;
         // Drop the last glyph (UTF-8: back over continuation bytes) and any space it leaves behind.
         size_t n = strlen(cut);
         do { n--; } while (n > 0 && ((unsigned char)cut[n] & 0xC0) == 0x80);
@@ -4662,19 +4719,15 @@ static void render_busy_row(proj_t *p)
 // a mismatch shows up as the tile shifting after every turn. The name sits at the mockup's y=124 — 15px
 // lower than it did, which is what losing the machine line under it paid for.
 // The chip row's own offset is NOT here — it is derived from the chip metrics in ctl_row_y().
-#define TILE_PAD_TOP    119         // 84 → 117 → 112 → 109 → 124 → 109 → 119 (CTL_NAME_GAP: row stays at y=69)
 
 
 // Agent name BOTTOM → card top. The card is 2×28px lines + 14px padding + a hairline = 111px, so 21 puts
 // it at y=191 and ends it at y=302 — 20px clear of the action arc at y=322. It went 27 → 25 → 32 → 16 →
 // 11 → 21 as what sits under the name changed shape and then asked for more air around it.
-#define TILE_NAME_GAP   21
 
 // The action arc — Goal / prev / next / Loop, built at y=322 in agent_actions_apply — and the air the
 // centred layout keeps above it. Named here because tile_center_if_cardless has to know where the
 // bottom of the face stops being free.
-#define TILE_ARC_Y      322
-#define TILE_ARC_GAP    20
 
 // ONE ANCHOR, TWO RESTING PLACES — and which one a tile uses is decided by whether it has a card.
 //
@@ -5765,8 +5818,16 @@ int ui_notif_pull_zone_px(void)
     // ever swallowing presses — including the X at y=16..48 that closes the tile (owner, 2026-09-14:
     // "nút X tắt ở màn hình setting chưa work").
     if (lv_screen_active() == scr_projects && s_settings_active) return 0;
+#if UI_DESK_GRID
+    // ONE DEPTH ON THIS FACE, measured from the floor. The 44 below exists to protect the tab pill that
+    // floats in the dial's top band; here that pill is gone — the fixed tab line carries the tab, and the
+    // band starts underneath it — so there is nothing up there left to protect and no reason for the
+    // agent screen to have the shallower band.
+    return ui_notif_band_top_px() + 90;
+#else
     bool agent_tile = lv_screen_active() == scr_projects && !s_overview_active && !s_settings_active && !s_machines_active;
     return agent_tile ? 44 : 90;   // narrow on agent tiles so the tab pill still gets taps
+#endif
 }
 
 // A FOCUS THE RING COULD NOT HONOUR YET, kept until it can.
@@ -5870,10 +5931,707 @@ static void overview_settings_tap(lv_event_t *e)
 
 // The home gesture is a TOGGLE between the two rings: from an agent it goes to the Overview; from the
 // Overview or Settings it goes back to the agent the strip was on. Nothing else crosses between them.
+#if UI_DESK_GRID
+// ── the desk grid ───────────────────────────────────────────────────────────────────────────────────
+//
+// The tab's agents, drawn in the arrangement the Mac has them in.
+//
+// THE POINT IS THAT YOU DO NOT READ IT. On the Mac, Lich su has been the tall pane on the left all
+// morning; on this glass it is the tall tile on the left, so the hand goes there without the eye
+// stopping to check. A sorted list is better when you are hunting for something; a map is better when
+// you already know which one you mean, and beside a Mac showing the same shape that is most of the time.
+//
+// A tile therefore holds two things and no more: the engine's mark and the agent's name. Everything a
+// tile could also say — the tool it is in, its todos, the seconds — is one tap away on the agent's own
+// screen, where there is room to say it properly. Crowding it in here would cost the one thing this
+// screen is for.
+//
+// The shapes below are the app's own (`desktop/lib/state/pane_preset.dart`), as thousandths so the
+// arithmetic stays integer. The device is not told which shape a tab uses — `cable_swarm_t` carries the
+// pane COUNT and nothing about their arrangement — so it draws the app's DEFAULT for that count. That is
+// right whenever nobody chose otherwise, which is most tabs, and wrong in a mild way when they did: the
+// same agents, differently arranged. Sending the preset id would close the gap; see the mockup.
+
+typedef struct { int16_t x1, y1, x2, y2; } desk_rect_t;   // thousandths of the canvas
+
+// One left, two right (3); quadrants (4); centre-tall (5) — the defaults the app picks unasked.
+static const desk_rect_t DESK_1[] = { {0,0,1000,1000} };
+static const desk_rect_t DESK_2[] = { {0,0,500,1000}, {500,0,1000,1000} };
+// THREE FULL-HEIGHT COLUMNS, not a main-left. The app's PanePreset.defaultFor(3) is `cols3`
+// (desktop/lib/state/pane_preset.dart) — `mainLeft` is one of the shapes the picker OFFERS for three,
+// and offering is not defaulting. Reading the picker's list instead of defaultFor is how this ended up
+// drawing a shape a tab has to be deliberately put into (owner, 2026-09-27: "layout view ko giong app").
+static const desk_rect_t DESK_3[] = { {0,0,333,1000}, {333,0,667,1000}, {667,0,1000,1000} };
+static const desk_rect_t DESK_4[] = { {0,0,500,500}, {500,0,1000,500}, {0,500,500,1000}, {500,500,1000,1000} };
+static const desk_rect_t DESK_5[] = { {0,0,333,500}, {333,0,667,1000}, {667,0,1000,500},
+                                      {0,500,333,1000}, {667,500,1000,1000} };
+
+#define DESK_MAX_TILES 9   // three columns by three rows; a tab with more shows the first nine and "+N"
+
+// Fill `out` with the shape for `n` tiles and return how many it wrote.
+//
+// Every table above is PanePreset.defaultFor(n) resolved through tilesFor(n) — 2 splitLong, 3 cols3,
+// 4 quad, 5 middleMain — and six or more is `auto`, whose column count the app MEASURES from the
+// window's width. The device cannot measure it, so it uses the same fallback the app's own diagrams
+// use when they have no window to measure either (_autoColumnsForDrawing): three up to six, four above.
+static int desk_shape(int n, desk_rect_t *out)
+{
+    if (n <= 0) return 0;
+    if (n > DESK_MAX_TILES) n = DESK_MAX_TILES;
+    const desk_rect_t *fixed = NULL;
+    switch (n) {
+    case 1: fixed = DESK_1; break;
+    case 2: fixed = DESK_2; break;
+    case 3: fixed = DESK_3; break;
+    case 4: fixed = DESK_4; break;
+    case 5: fixed = DESK_5; break;
+    default: break;
+    }
+    if (fixed) { memcpy(out, fixed, (size_t)n * sizeof(*out)); return n; }
+
+    const int cols = n <= 6 ? 3 : 4;
+    const int rows = (n + cols - 1) / cols;
+    for (int i = 0; i < n; i++) {
+        const int r = i / cols, c = i % cols;
+        // Thousandths, computed from the index rather than accumulated, so the last column and the last
+        // row always land exactly on 1000 and no tile is a pixel short of the edge.
+        out[i].x1 = (int16_t)(c * 1000 / cols);
+        out[i].x2 = (int16_t)((c + 1) * 1000 / cols);
+        out[i].y1 = (int16_t)(r * 1000 / rows);
+        out[i].y2 = (int16_t)((r + 1) * 1000 / rows);
+    }
+    return n;
+}
+
+static lv_obj_t *s_desk;        // the grid overlay, on lv_layer_top beside the notification drawer
+static bool      s_desk_open;
+// A tab's grid AS THE WINDOW LAID IT OUT, and WHICH tab it is of. See desk_tiles_usable().
+static cable_tile_t s_tiles[SWARM_TILES_MAX];
+static int          s_tile_count;
+static char         s_tiles_swarm[SWARM_ID_MAX];
+
+/*
+ * WHAT EACH SEAT IS CURRENTLY SHOWING, so a redraw can be a repaint.
+ *
+ * desk_rebuild() runs from rebuild_page_dots(), which has eighteen call sites: every agent that goes
+ * busy, every recap that lands, every carousel settle, every landing. Tearing down thirty objects and
+ * building thirty more on each of those is the single most expensive thing this face does, and almost
+ * every one of those events changes ONE label on ONE tile.
+ *
+ * So the shape is compared first. Same rectangles, same agents in the same seats — and only the tiles
+ * whose name or state actually moved are touched. LVGL then invalidates those labels and nothing else,
+ * which is the difference between redrawing 720x720 and redrawing a word.
+ */
+typedef struct {
+    lv_obj_t  *tile;
+    lv_obj_t  *name_lbl;
+    lv_area_t  area;
+    char       id[ID_MAX];     // empty for a seat with no agent behind it
+    char       name[NAME_MAX];
+    uint32_t   state;          // the border colour, as a plain value so it compares
+    bool       strong;
+} desk_seat_t;
+static desk_seat_t s_seat[DESK_MAX_TILES];
+static int         s_seat_count;
+
+// Which colour the tile's border takes. The same vocabulary as every other screen: green is a person
+// being waited on, orange is work in flight, the muted green is a turn that just landed, grey is quiet —
+// and grey is the neutral the border already wears, so a quiet tile is left exactly as it was.
+//
+// NOT the waveform's COL_VOICE for the question. That green is 0x00ff2f — a pure channel, chosen to be
+// the brightest thing on a face where it appears alone for a second at a time. Here it would sit on the
+// glass permanently, on a grid of up to nine tiles, and a grid with two of them outlined in it reads as
+// an alarm rather than as "these two are waiting on you". The calm green says the same thing.
+static lv_color_t desk_state_color(const proj_t *p, bool *strong)
+{
+    *strong = false;
+    if (notif_is_question(p->id)) { *strong = true; return COL_GREEN; }
+    if (p->busy_model)            { *strong = true; return COL_ORANGE; }
+    if (p->m_preview)             return COL_GREEN;
+    return lv_color_hex(0x2a2a32);
+}
+
+static void desk_tile_tap(lv_event_t *e)
+{
+    const int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i < 0 || i >= s_proj_count) return;
+    // Copy the id before the overlay goes: hiding it does not free the model, but the focus call below
+    // rebuilds the window and this pointer is into an array that reconcile may reorder.
+    char id[sizeof(s_proj[0].id)];
+    snprintf(id, sizeof id, "%s", s_proj[i].id);
+    ui_desk_close();
+    ui_focus_project(id);
+}
+
+static void desk_bg_tap(lv_event_t *e)
+{
+    (void)e;
+    ui_desk_close();
+}
+
+// Build one tile. `d` is the mark's size, chosen from how much room the rectangle has — a full-height
+// tile gets the big pair, a quarter the small one, which is the same emphasis the pane has on the Mac.
+/*
+ * One seat of the grid. `idx` is an index into s_proj, or -1 for a seat the window has and this device
+ * cannot drive — a shell, a viewer. Those still get a tile, because the shape is the window's and a
+ * shape with a seat missing is a different shape: the agent beside the gap would move.
+ *
+ * -1 REACHED &s_proj[-1] FOR ONE BUILD, which read whatever sat below the array and drew a tile named
+ * from it. On the glass that was an agent with no name and no mark — the "…" placeholder — in a tab
+ * that had three real agents (owner, 2026-09-28, photo). Every read of `p` below is guarded now.
+ */
+static void desk_add_tile(int slot, int idx, const lv_area_t *a)
+{
+    proj_t *p = (idx >= 0 && idx < s_proj_count) ? &s_proj[idx] : NULL;
+    const int32_t w = a->x2 - a->x1, h = a->y2 - a->y1;
+    const bool large  = w >= DESK_GRID_W * 45 / 100 && h >= DESK_GRID_H * 70 / 100;
+    const bool medium = !large && (w >= DESK_GRID_W * 45 / 100 || h >= DESK_GRID_H * 45 / 100);
+    const int32_t mark_d = large ? DESK_MARK_LG : medium ? DESK_MARK_MD : DESK_MARK_SM;
+    const lv_font_t *font = large ? &geist_med_38 : medium ? &geist_med_32 : &geist_reg_25;
+
+    lv_obj_t *t = lv_button_create(s_desk);
+    lv_obj_remove_style_all(t);
+    lv_obj_set_pos(t, a->x1, a->y1);
+    lv_obj_set_size(t, w, h);
+    lv_obj_set_style_bg_color(t, COL_CARD, 0);
+    lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(t, lv_color_hex(0x23252f), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(t, 18, 0);
+    lv_obj_set_style_border_width(t, 1, 0);
+    lv_obj_set_style_border_color(t, lv_color_hex(0xa6a6a6), 0);
+    lv_obj_set_style_border_opa(t, LV_OPA_20, 0);
+    lv_obj_set_style_pad_all(t, 14, 0);
+    lv_obj_set_flex_flow(t, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(t, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(t, large ? 16 : 12, 0);
+    lv_obj_clear_flag(t, LV_OBJ_FLAG_SCROLLABLE);
+    // Only a seat with an agent behind it goes anywhere. A pane is drawn so the shape is right; there
+    // is nothing on this device to show for it.
+    if (p) lv_obj_add_event_cb(t, desk_tile_tap, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
+
+    // NO RAIL. There was one — six pixels of state colour down the left edge — and on the glass it read
+    // as two neon stripes rather than as a fact about two agents (owner, 2026-09-27: "2 cái line xanh lá
+    // cây là gì vậy"). A signal a person has to be told the meaning of is not a signal, and the app this
+    // grid mirrors does not draw one, so the tile is the icon, the name, and nothing else.
+    //
+    // The state is not dropped, only quieted: it tints the tile's own hairline border, which is already
+    // there on every tile and so changes nothing about the shape of the grid.
+    bool strong = false;
+    const lv_color_t state = p ? desk_state_color(p, &strong) : lv_color_hex(0x2a2a32);
+    if (strong) { lv_obj_set_style_border_color(t, state, 0); lv_obj_set_style_border_opa(t, LV_OPA_40, 0); }
+
+    bool recolor = false;
+    const lv_image_dsc_t *mark = p ? engine_mark(p->engine, &recolor) : NULL;
+    if (mark) {
+        lv_obj_t *ic = lv_image_create(t);
+        lv_obj_clear_flag(ic, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_image_set_src(ic, mark);
+        // Scaled from the 20px asset, the same way the chip row does it (ctl_mark_scale). This screen is
+        // static between changes, so the transform runs on a redraw and not on every frame.
+        lv_image_set_scale(ic, (int32_t)(256 * mark_d / CTL_MARK_SRC));
+        lv_obj_set_style_image_recolor(ic, COL_CLAUDE, 0);
+        lv_obj_set_style_image_recolor_opa(ic, recolor ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    }
+
+    lv_obj_t *nm = lv_label_create(t);
+    lv_obj_set_style_text_font(nm, font, 0);
+    lv_obj_set_style_text_color(nm, p ? COL_FG : COL_MUTED, 0);
+    lv_obj_set_style_text_align(nm, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(nm, w - 28);
+    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(nm, lv_font_get_line_height(font));   // one line, dots after — see swarm_lbl
+    // A seat with nothing behind it says what it is rather than pretending to be an agent: it is a
+    // pane in the window, and naming it "…" would read as an agent still loading.
+    lv_label_set_text(nm, !p ? "pane" : (p->name[0] ? p->name : "…"));
+
+    // …and record it, so the next redraw can be a repaint. See desk_seat_t.
+    desk_seat_t *st = &s_seat[slot];
+    st->tile = t;
+    st->name_lbl = nm;
+    st->area = *a;
+    snprintf(st->id, sizeof st->id, "%s", p ? p->id : "");
+    snprintf(st->name, sizeof st->name, "%s", lv_label_get_text(nm));
+    st->state = lv_color_to_u32(state);
+    st->strong = strong;
+}
+
+static void desk_tab_tap(lv_event_t *e)
+{
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_swarm_count) return;
+    char id[SWARM_ID_MAX];
+    snprintf(id, sizeof id, "%s", s_swarms[idx].id);
+    // Re-picking the one you are on is a no-op the window would also treat as one; skip the round trip.
+    if (strcmp(id, s_swarm_selected) == 0) return;
+    ESP_LOGI(TAG, "desk: tab → %s", id);
+    cable_client_select_swarm(id);
+
+    /*
+     * LIGHT IT HERE, NOT WHEN THE WIRE SAYS SO.
+     *
+     * The fill used to wait for the `swarms` frame the window pushes back after it switches. The daemon
+     * answers in about 7ms, but the frame is applied on this device between 60 and 700ms later — and
+     * measured on the desk on 2026-09-27, two of five taps produced no apply at all inside a second. A
+     * tab that does not light when it is pressed is a tab that reads as not pressed, so the person
+     * presses it again, which is what "bấm tab qua lại vẫn ko mượt" was.
+     *
+     * Nothing is being guessed: the device is the one that decided, and the push that follows carries
+     * the same selection and simply agrees. If the window refuses, its push says so and moves the fill
+     * back — the state still comes from the window, it is just no longer what DRAWS.
+     */
+    snprintf(s_swarm_selected, sizeof(s_swarm_selected), "%s", id);
+    tabline_repaint();
+
+    // …AND THE GRID BELONGS TO THE OLD TAB UNTIL THE NEW RING LANDS. Leaving it up under a freshly lit
+    // tab says those agents are in this tab, which they are not; the agent list arrives on refresh_task's
+    // own tick, up to a second later. So the tiles go now and come back with the ring.
+    s_desk_pending = true;
+    s_desk_pending_ms = lv_tick_get();
+    ui_desk_open();
+}
+
+/*
+ * The tab line, drawn the way the app draws it: ONLY THE SELECTED TAB HAS A FILL, and every tab keeps
+ * its number, because the number is how a person says which one they mean out loud — it is the same
+ * ⌘1…⌘9 they use on the Mac (desktop/lib/widgets/workspace_bar_control.dart).
+ *
+ * NO STATE DOT, though the design asked for one. A dot saying "something in that tab is working, or
+ * blocked" needs to know the agents of tabs you are NOT on, and the device does not: `cable_swarm_t`
+ * carries a name, an agent COUNT and a pane count, and the count is explicit that it is "drawn as a
+ * count, never as members". Drawing a dot from what is known here would light only the current tab,
+ * which is the one you can already see. It needs a field on the swarms frame first.
+ */
+static lv_obj_t *s_tabline;     // the tab line, and it NEVER leaves the glass — see tabline_sync()
+static uint32_t  s_tabline_sig; // what the line was last BUILT from: the tabs, not which one is picked
+
+static bool tabline_shows(int i);
+
+// FNV-1a over the BUTTONS the line would have: each shown row's index, id and name. Not over which one
+// is filled — that is a repaint, and telling the two apart is the whole point of this.
+//
+// It does have to run the same filter the build does, because the filter reads the selection: an empty
+// tab is hidden unless it is the one you are on, so moving onto or off one really does change which
+// buttons exist, and that case must come out as a rebuild rather than as a repaint of a stale line.
+static uint32_t tabline_sig(void)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < s_swarm_count; i++) {
+        if (!tabline_shows(i)) continue;
+        h ^= (uint32_t)i; h *= 16777619u;
+        for (const char *q = s_swarms[i].id; *q; q++)   { h ^= (uint8_t)*q; h *= 16777619u; }
+        h ^= 0xffu; h *= 16777619u;
+        for (const char *q = s_swarms[i].name; *q; q++) { h ^= (uint8_t)*q; h *= 16777619u; }
+        h ^= 0xffu; h *= 16777619u;
+    }
+    return h ? h : 1u;   // 0 means "never built"
+}
+
+/*
+ * THE TAB LINE IS CHROME, NOT A SCREEN.
+ *
+ * It lives on the top layer, above whatever the body is showing, and it is the same object whether you
+ * are looking at the grid of a tab's agents or at one agent inside it. That is the whole difference from
+ * the dial, where the tab's name is a pill that belongs to the agent tile and goes away with it: here the
+ * line is the one fixed thing, so "which tab am I in" is never a question the screen stops answering, and
+ * changing tab is always one tap from wherever you are.
+ */
+// An untouched welcome tab is not a place the dial can go, and is not one here either — except the one
+// on screen, whatever it is called. Same rule as swarm_picker_rebuild().
+static bool tabline_shows(int i)
+{
+    if (i < 0 || i >= s_swarm_count) return false;
+    return s_swarms[i].panes != 0 || strcmp(s_swarms[i].id, s_swarm_selected) == 0;
+}
+
+static void tabline_rebuild(void)
+{
+    if (!s_tabline) return;
+    lv_obj_clean(s_tabline);
+
+    for (int i = 0; i < s_swarm_count; i++) {
+        const cable_swarm_t *w = &s_swarms[i];
+        const bool here = strcmp(w->id, s_swarm_selected) == 0;
+        if (!tabline_shows(i)) continue;
+
+        lv_obj_t *t = lv_button_create(s_tabline);
+        lv_obj_remove_style_all(t);
+        lv_obj_set_size(t, LV_SIZE_CONTENT, DESK_TAB_H);
+        lv_obj_set_style_pad_hor(t, 16, 0);
+        lv_obj_set_style_radius(t, 14, 0);
+        // The selected tab is told apart by a FILL and by its text being brighter — not by an outline in
+        // the accent. A saturated blue border on the one thing that is always on screen reads as an alert
+        // every time the eye passes it, which is exactly what chrome must not do.
+        lv_obj_set_style_bg_color(t, lv_color_hex(0x1c1e24), 0);
+        lv_obj_set_style_bg_opa(t, here ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(t, here ? 1 : 0, 0);
+        lv_obj_set_style_border_color(t, lv_color_hex(0x2e323b), 0);
+        lv_obj_set_flex_flow(t, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(t, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(t, 9, 0);
+        lv_obj_clear_flag(t, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_user_data(t, (void *)(intptr_t)i);   // …and on the button, for tabline_repaint()
+        lv_obj_add_event_cb(t, desk_tab_tap, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *num = lv_label_create(t);
+        lv_obj_set_style_text_font(num, &geist_reg_20, 0);
+        lv_obj_set_style_text_color(num, here ? COL_MUTED : COL_INK_LOW, 0);
+        lv_label_set_text_fmt(num, "%d", i + 1);
+
+        lv_obj_t *nm = lv_label_create(t);
+        lv_obj_set_style_text_font(nm, CTL_CHIP_FONT, 0);
+        lv_obj_set_style_text_color(nm, here ? COL_FG : COL_MUTED, 0);
+        lv_obj_set_style_max_width(nm, DESK_TAB_NAME_MAX, 0);
+        lv_obj_set_height(nm, lv_font_get_line_height(CTL_CHIP_FONT));  // one line, dots after
+        lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+        lv_label_set_text(nm, w->name[0] ? w->name : "New Harness");
+
+        // Keep the tab you are on in view when the strip is longer than the face.
+        if (here) lv_obj_scroll_to_view(t, LV_ANIM_OFF);
+    }
+    s_tabline_sig = tabline_sig();
+}
+
+/*
+ * MOVE THE FILL. Do not rebuild the line.
+ *
+ * Changing tab changes exactly one thing about this strip — which button is filled — and rebuilding it
+ * to say that deletes and recreates every button, which loses the strip's sideways scroll and makes a
+ * tap look like the whole line jumped (owner, 2026-09-27: "bấm tab qua lại vẫn ko mượt"). Walk what is
+ * already there and restyle it.
+ */
+static void tabline_repaint(void)
+{
+    if (!s_tabline) return;
+    const uint32_t n = lv_obj_get_child_count(s_tabline);
+    for (uint32_t k = 0; k < n; k++) {
+        lv_obj_t *t = lv_obj_get_child(s_tabline, k);
+        const int i = (int)(intptr_t)lv_obj_get_user_data(t);
+        if (i < 0 || i >= s_swarm_count) continue;
+        const bool here = strcmp(s_swarms[i].id, s_swarm_selected) == 0;
+        lv_obj_set_style_bg_opa(t, here ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(t, here ? 1 : 0, 0);
+        lv_obj_t *num = lv_obj_get_child(t, 0);
+        lv_obj_t *nm  = lv_obj_get_child(t, 1);
+        if (num) lv_obj_set_style_text_color(num, here ? COL_MUTED : COL_INK_LOW, 0);
+        if (nm)  lv_obj_set_style_text_color(nm, here ? COL_FG : COL_MUTED, 0);
+        if (here) lv_obj_scroll_to_view(t, LV_ANIM_ON);
+    }
+}
+
+static bool desk_is_open_raw(void) { return s_desk_open; }
+
+/*
+ * MAY THE PUSHED SHAPE BE DRAWN RIGHT NOW?
+ *
+ * Only when it is a shape OF THE TAB ON SCREEN. The window sends the rectangles of ITS active tab, and
+ * this device lights a tab the instant it is pressed — before the window has switched, and sometimes
+ * before it agrees at all. In that gap `s_tiles` describes the tab you just left, and drawing it puts
+ * this tab's agents into the other tab's seats: three agents laid out in two panes, which is exactly
+ * what came back off the glass (owner, 2026-09-28: "harness repo có 3 agent, mà device hiển thị ntn").
+ *
+ * Mismatch is not an error and not worth a log line — it is the ordinary state for the half second
+ * between a press and the push that answers it. The derived shape covers it, as it did before any
+ * window sent rectangles at all.
+ */
+static bool desk_tiles_usable(void)
+{
+    if (s_tile_count <= 0 || !s_tiles_swarm[0]) return false;
+    if (strcmp(s_tiles_swarm, s_swarm_selected) != 0) return false;
+
+    /*
+     * …AND EVERY NAMED SEAT MUST BE AN AGENT THIS DEVICE ACTUALLY HOLDS.
+     *
+     * The shape arrives on the `swarms` frame and is applied the instant it lands. The roster does not:
+     * `agents.end` raises a flag and refresh_task drains it on its own second-long tick, so for up to a
+     * second after a tab change s_proj[] still holds the PREVIOUS tab's agents. Resolving this tab's
+     * seats against that roster misses every one of them, and a miss used to draw the seat as "pane" —
+     * so a tab with three agents came up as three boxes all labelled "pane" (owner, 2026-09-28, photo),
+     * and it was the truthful-looking answer to the wrong question: those seats are agents, this device
+     * just has not been handed them yet.
+     *
+     * An EMPTY id is different and stays a pane: that is a shell or a viewer, and the window is telling
+     * us there is no agent there at all.
+     *
+     * Failing the whole shape rather than the seat is deliberate. A half-resolved grid is a picture that
+     * is wrong in a way nobody can see is wrong; the derived shape is at least self-consistent, and this
+     * heals itself on the very next rebuild_page_dots() — which is exactly what the arriving roster
+     * calls.
+     */
+    for (int i = 0; i < s_tile_count; i++)
+        if (s_tiles[i].agent_id[0] && find_proj(s_tiles[i].agent_id) < 0) return false;
+    return true;
+}
+
+/*
+ * A TAB WITH ONE AGENT HAS NO SHAPE TO SHOW.
+ *
+ * The grid exists so an agent can be found by WHERE it is among the others. With one tile there is no
+ * "among the others" and no where: the grid becomes a full-screen button whose only purpose is to be
+ * pressed once, and every road into the tab costs a tap that could not have gone anywhere else.
+ *
+ * ZERO agents still gets the grid, and that is not an oversight — "No agents in this tab" is the one
+ * thing on the device that says so, and a tab you have just opened and found empty has to say it.
+ */
+static bool desk_has_a_shape(void)
+{
+    // SEATS, not agents, whenever the window has told us its seats. A tab holding one agent beside two
+    // shells has a real arrangement to show, and skipping to the agent would hide the two panes that
+    // are the reason the tab looks the way it does. Without a pushed shape there is nothing but the
+    // agent count to go on, which is the old test.
+    return (desk_tiles_usable() ? s_tile_count : s_proj_count) != 1;
+}
+
+// The single agent's id, copied out before anything can reorder the model. Empty when there is not
+// exactly one.
+static void desk_only_agent(char *out, size_t cap)
+{
+    if (s_proj_count == 1) snprintf(out, cap, "%s", s_proj[0].id);
+    else if (cap) out[0] = '\0';
+}
+
+/*
+ * WHERE THE LINE IS, AND WHERE IT IS NOT.
+ *
+ * It belongs to the two faces that are inside a tab — the desk, and an agent of that tab — because on
+ * both of them "which tab" is a live fact the person is acting on. It does NOT belong on Settings, the
+ * Machines list, the Overview, a chooser wheel, the pattern lock, the pairing screen or under the open
+ * notification drawer: none of those are in a tab, and a tab line over them would be an offer to switch
+ * away from a screen that has its own job. Sitting on lv_layer_top it would otherwise cover all of them.
+ */
+static void tabline_sync(void)
+{
+    /*
+     * THE OVERVIEW IS IN A TAB TOO, and used to be on the hidden list with Settings and Machines.
+     *
+     * That was wrong on its own terms — the Overview names the machine whose window owns these very
+     * tabs — and it became visibly wrong the moment the bottom-edge swipe started landing there: the
+     * line vanished and, if nothing re-armed a landing, never came back. Which is exactly how it looks
+     * from the outside: plug the device into another computer, plug it back, and the tabs are gone
+     * (owner, 2026-09-28).
+     *
+     * Settings, Machines and the pickers stay hidden. Those are not in a tab, and a tab line over them
+     * is an offer to leave a screen that has its own job.
+     */
+    const bool want = !display_is_asleep() && !s_notif_open && s_swarm_count > 0 &&
+                      (s_desk_open ||
+                       (lv_screen_active() == scr_projects &&
+                        !s_settings_active && !s_machines_active));
+    if (!want) { set_hidden(s_tabline, true); return; }
+
+    if (!s_tabline) {
+        s_tabline = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(s_tabline);
+        lv_obj_set_pos(s_tabline, DESK_STRIP_X, DESK_STRIP_Y);
+        lv_obj_set_size(s_tabline, DESK_STRIP_W, DESK_STRIP_H);
+        lv_obj_set_flex_flow(s_tabline, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(s_tabline, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(s_tabline, 6, 0);
+        lv_obj_set_scroll_dir(s_tabline, LV_DIR_HOR);
+        lv_obj_set_scrollbar_mode(s_tabline, LV_SCROLLBAR_MODE_OFF);
+        // NOT clickable itself: a tap between two tabs must fall through to whatever is behind — the
+        // desk's background close, or the tile. Only the tabs take presses.
+        lv_obj_clear_flag(s_tabline, LV_OBJ_FLAG_CLICKABLE);
+        tabline_rebuild();
+    }
+    lv_obj_clear_flag(s_tabline, LV_OBJ_FLAG_HIDDEN);
+    // In front of the desk, which is also on this layer and is moved to the front when it opens.
+    lv_obj_move_foreground(s_tabline);
+}
+
+// WHERE THE NOTIFICATION PULL-DOWN MAY START, on a face whose top belongs to the tab line.
+//
+// The band is a top-edge zone ~90px deep, and the tab line sits at y 24..76 — inside it. Captured from
+// press-down, the band swallowed every tap on the tabs and answered it with "nothing" on release, which
+// is a tab strip that cannot be tapped at all (owner, 2026-09-27: "click chuyen tab rat kho").
+//
+// The bell's way out — exempt the control's rectangle — does not work here: lv_obj_hit_test refuses an
+// object that is not CLICKABLE, and this container deliberately is not, so a tap in the gap between two
+// tabs falls through to the tile behind. So the band gets a FLOOR instead: it starts where the line
+// ends. There is still ~90px of it, just lower down, and a pull that begins on a tab is a tab press.
+int ui_notif_band_top_px(void)
+{
+    return DESK_STRIP_Y + DESK_STRIP_H;
+}
+
+// Rebuild the whole grid from the model. Cheap enough to do on every open: a tab is a handful of tiles,
+// and rebuilding is what keeps this from having to track which agent moved where.
+static void desk_rebuild(void)
+{
+    if (!s_desk) return;
+    if (s_desk_pending && lv_tick_elaps(s_desk_pending_ms) >= DESK_PENDING_MS) s_desk_pending = false;
+    if (s_desk_pending) {         // the tab moved; its agents are on their way
+        if (s_seat_count) { lv_obj_clean(s_desk); s_seat_count = 0; }
+        return;
+    }
+
+    /*
+     * THE WINDOW'S OWN RECTANGLES FIRST, the derived shape second.
+     *
+     * With `tiles` on the wire this grid is the window's grid — every preset, `auto` at whatever column
+     * count it measured, and a hand-dragged resize, all of them, because none of it is re-derived here.
+     * Without it (an older daemon, an older app) the guess from PanePreset.defaultFor is still behind,
+     * which is exactly how this behaved before the field existed.
+     */
+    desk_rect_t r[DESK_MAX_TILES];
+    int seat[DESK_MAX_TILES];      // index into s_proj, or -1 for a pane this device cannot drive
+    int n = 0, total;
+
+    if (desk_tiles_usable()) {
+        total = s_tile_count;
+        for (int i = 0; i < s_tile_count && n < DESK_MAX_TILES; i++) {
+            r[n].x1 = s_tiles[i].x1; r[n].y1 = s_tiles[i].y1;
+            r[n].x2 = s_tiles[i].x2; r[n].y2 = s_tiles[i].y2;
+            seat[n] = s_tiles[i].agent_id[0] ? find_proj(s_tiles[i].agent_id) : -1;
+            n++;
+        }
+    } else {
+        total = s_proj_count;
+        n = desk_shape(total, r);
+        for (int i = 0; i < n; i++) seat[i] = i;
+    }
+
+    if (n == 0) {
+        lv_obj_clean(s_desk);
+        s_seat_count = 0;
+        lv_obj_t *empty = lv_label_create(s_desk);
+        lv_obj_set_style_text_font(empty, &geist_reg_25, 0);
+        lv_obj_set_style_text_color(empty, COL_MUTED, 0);
+        lv_label_set_text(empty, "No agents in this tab");
+        lv_obj_center(empty);
+        return;
+    }
+
+    lv_area_t area[DESK_MAX_TILES];
+    for (int i = 0; i < n; i++) {
+        area[i].x1 = DESK_GRID_X + (int32_t)r[i].x1 * DESK_GRID_W / 1000;
+        area[i].y1 = DESK_GRID_Y + (int32_t)r[i].y1 * DESK_GRID_H / 1000;
+        area[i].x2 = DESK_GRID_X + (int32_t)r[i].x2 * DESK_GRID_W / 1000 - DESK_GRID_GAP;
+        area[i].y2 = DESK_GRID_Y + (int32_t)r[i].y2 * DESK_GRID_H / 1000 - DESK_GRID_GAP;
+    }
+
+    /*
+     * SAME SHAPE, SAME AGENTS? THEN REPAINT.
+     *
+     * The seats have to match by rectangle AND by which agent sits in each one — a tab whose agents
+     * merely re-ordered is a different picture even though every rectangle is where it was. When they
+     * all match, only a name or a state can have moved, and those are two style writes on one label.
+     */
+    bool same = (n == s_seat_count);
+    for (int i = 0; same && i < n; i++) {
+        const desk_seat_t *st = &s_seat[i];
+        const proj_t *pp = (seat[i] >= 0 && seat[i] < s_proj_count) ? &s_proj[seat[i]] : NULL;
+        same = st->tile && lv_obj_is_valid(st->tile) &&
+               st->area.x1 == area[i].x1 && st->area.y1 == area[i].y1 &&
+               st->area.x2 == area[i].x2 && st->area.y2 == area[i].y2 &&
+               strcmp(st->id, pp ? pp->id : "") == 0;
+    }
+
+    if (same) {
+        for (int i = 0; i < n; i++) {
+            desk_seat_t *st = &s_seat[i];
+            proj_t *pp = (seat[i] >= 0 && seat[i] < s_proj_count) ? &s_proj[seat[i]] : NULL;
+
+            const char *want = !pp ? "pane" : (pp->name[0] ? pp->name : "…");
+            if (strcmp(st->name, want) != 0) {
+                lv_label_set_text(st->name_lbl, want);
+                snprintf(st->name, sizeof st->name, "%s", want);
+            }
+
+            bool strong = false;
+            const lv_color_t c = pp ? desk_state_color(pp, &strong) : lv_color_hex(0x2a2a32);
+            if (lv_color_to_u32(c) != st->state || strong != st->strong) {
+                lv_obj_set_style_border_color(st->tile, strong ? c : lv_color_hex(0xa6a6a6), 0);
+                lv_obj_set_style_border_opa(st->tile, strong ? LV_OPA_40 : LV_OPA_20, 0);
+                st->state = lv_color_to_u32(c);
+                st->strong = strong;
+            }
+        }
+        return;
+    }
+
+    // The shape really moved. Everything goes and everything comes back.
+    lv_obj_clean(s_desk);
+    s_seat_count = 0;
+    for (int i = 0; i < n; i++) desk_add_tile(i, seat[i], &area[i]);
+    s_seat_count = n;
+
+    // A tab deeper than the grid says so rather than silently dropping the rest.
+    if (total > n) {
+        lv_obj_t *more = lv_label_create(s_desk);
+        lv_obj_set_style_text_font(more, &geist_reg_20, 0);
+        lv_obj_set_style_text_color(more, COL_MUTED, 0);
+        lv_label_set_text_fmt(more, "+%d more", total - n);
+        lv_obj_align(more, LV_ALIGN_TOP_RIGHT, -DESK_GRID_X, DESK_GRID_Y - 32);
+    }
+}
+
+bool ui_desk_is_open(void) { return s_desk_open; }
+
+void ui_desk_open(void)
+{
+    display_lock();
+    // Straight through to the agent when the tab holds one. NOT while a pick is pending: the model
+    // still belongs to the tab you just left, so "one agent" would be a fact about the wrong tab —
+    // the ring lands a moment later and rebuild_page_dots makes the same decision on the right one.
+    if (!s_desk_pending && !desk_has_a_shape()) {
+        char id[sizeof(s_proj[0].id)];
+        desk_only_agent(id, sizeof id);
+        ui_desk_close();          // no-op unless it was already up
+        display_unlock();
+        if (id[0]) ui_focus_project(id);
+        return;
+    }
+    if (!s_desk) {
+        s_desk = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(s_desk);
+        lv_obj_set_size(s_desk, lv_pct(100), lv_pct(100));
+        lv_obj_set_pos(s_desk, 0, 0);
+        lv_obj_set_style_bg_color(s_desk, COL_BG, 0);
+        lv_obj_set_style_bg_opa(s_desk, LV_OPA_COVER, 0);
+        lv_obj_add_flag(s_desk, LV_OBJ_FLAG_CLICKABLE);   // a tap on the gaps closes it
+        lv_obj_add_event_cb(s_desk, desk_bg_tap, LV_EVENT_CLICKED, NULL);
+        lv_obj_clear_flag(s_desk, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    desk_rebuild();
+    lv_obj_clear_flag(s_desk, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_desk);
+    s_desk_open = true;
+    tabline_sync();
+    ESP_LOGI(TAG, "face: desk (%d agents)", s_proj_count);
+    display_unlock();
+}
+
+void ui_desk_close(void)
+{
+    if (!s_desk_open) return;
+    display_lock();
+    s_desk_open = false;
+    if (s_desk) lv_obj_add_flag(s_desk, LV_OBJ_FLAG_HIDDEN);
+    tabline_sync();
+    display_unlock();
+}
+#else
+bool ui_desk_is_open(void) { return false; }
+void ui_desk_open(void) { }
+void ui_desk_close(void) { }
+#endif  /* UI_DESK_GRID */
+
 void ui_home_overview(void)
 {
     if (s_bright_dragging) return;   // a brightness-slider drag on Settings is not a home swipe (mirror ui_swipe_*)
     ui_notif_close();   // no-op if closed; takes/releases the lock itself (must not nest inside our lock)
+#if UI_DESK_GRID
+    // THE BOTTOM-EDGE SWIPE MEANS THE OVERVIEW ON BOTH FACES.
+    //
+    // It used to open the desk here, on the reading that a face with room for the shape should make the
+    // shape its home. The desk IS still where this board lands and what back goes to — but that is not
+    // the same as owning this gesture, and giving it away left the Overview with no way in at all: the
+    // desk covers the carousel, so the one screen that names the machine and carries Settings and the
+    // fleet count could only be reached by leaving the grid sideways (owner, 2026-09-28).
+    //
+    // The desk has its own way back (pinch, or the back key) and does not need this one too.
+    ui_desk_close();
+#endif
     display_lock();
     swarm_picker_close();
     if (s_ring != RING_AGENTS && lv_screen_active() == scr_projects) {
@@ -5973,8 +6731,16 @@ static void notif_badge_apply(void)
     }
     // The Overview has its own bell on the lower arc, with the count as a badge; the top-edge pill is
     // for the agent tiles, which have no seat for one.
+#if UI_DESK_GRID
+    // The same rule the tab line keeps: everywhere you are inside a tab, which now includes the
+    // Overview and the desk. In the corner it collides with nothing, so the reasons it used to be
+    // hidden on those two — a top band it had to share — are gone with the seat.
+    bool show = n > 0 && !display_is_asleep() && lv_screen_active() == scr_projects
+                && !s_settings_active && !s_machines_active && !s_notif_open;
+#else
     bool show = n > 0 && !display_is_asleep() && lv_screen_active() == scr_projects
                 && !s_settings_active && !s_machines_active && !s_notif_open && !s_overview_active;
+#endif
     set_hidden(s_notif_pill, !show);
     if (show && s_notif_pill_lbl) { char b[8]; snprintf(b, sizeof b, "%d", n); lv_label_set_text(s_notif_pill_lbl, b); }
     if (s_overview_bell_badge) {
@@ -6213,6 +6979,14 @@ static void notif_pill_tap(lv_event_t *e) { (void)e; ui_notif_open(); }
 static void swarm_line_paint(proj_t *p)
 {
     if (!p || !p->ctl_row || !p->swarm_lbl) return;
+#if UI_DESK_GRID
+    // THE FIXED TAB LINE HAS ALREADY SAID THIS, and says it in the same band — the pill floats at
+    // y≈62 and the line occupies 24..76. Two names for the same tab, one on top of the other. The pill
+    // was the round face's only way to carry the fact, because there the line has nowhere to live; here
+    // it is furniture, and the tap it offered (open the tab picker) is what the line itself now is.
+    lv_obj_add_flag(p->ctl_row, LV_OBJ_FLAG_HIDDEN);
+    return;
+#endif
     const cable_swarm_t *sel = NULL;
     for (int i = 0; i < s_swarm_count; i++) if (strcmp(s_swarms[i].id, s_swarm_selected) == 0) { sel = &s_swarms[i]; break; }
     if (!sel) { lv_obj_add_flag(p->ctl_row, LV_OBJ_FLAG_HIDDEN); return; }
@@ -6226,6 +7000,57 @@ static void swarm_lines_repaint(void)
     for (int i = 0; i < s_proj_count; i++) if (s_proj[i].content_live) swarm_line_paint(&s_proj[i]);
 }
 
+void ui_tiles_replace(const cable_tile_t *tiles, int count, const char *swarm_id)
+{
+#if !UI_DESK_GRID
+    // A ROUND FACE HAS NOWHERE TO PUT A SHAPE. 466px of circle carries one tile, and one tile is what
+    // the carousel already is — there is no arrangement to mirror, so the window's rectangles are a
+    // fact this device has no use for. Taken and dropped rather than refused: the daemon sends the
+    // same frame to both boards, and a dial that treated the field as an error would be a dial that
+    // stopped reading swarms the day the window learned to send it.
+    (void)tiles; (void)count; (void)swarm_id;
+    return;
+#else
+    display_lock();
+    if (count < 0) count = 0;
+    if (count > SWARM_TILES_MAX) count = SWARM_TILES_MAX;
+
+    /*
+     * AND REDRAW, BECAUSE NOTHING ELSE WILL.
+     *
+     * The grid is rebuilt from rebuild_page_dots(), which every path that changes the AGENT model
+     * calls — and re-arranging a tab changes no agent at all. Same tab, same members, same order, new
+     * rectangles: the push arrived, s_tiles was updated, and the glass went on showing the old shape
+     * until a tab change forced an agents push through. Which is exactly what it looked like from the
+     * outside (owner, 2026-09-27: "đổi trên app, device ko tự thay đổi theo, phải chọn tab khác quay
+     * lại mới thay đổi").
+     *
+     * On CHANGE only. This frame rides every swarms push — every tab switch, every pane opened — and
+     * a rebuild that tears down and recreates every tile is not something to do when nothing moved.
+     */
+    const bool moved = count != s_tile_count ||
+                       strcmp(s_tiles_swarm, swarm_id ? swarm_id : "") != 0 ||
+                       (count && memcmp(s_tiles, tiles, (size_t)count * sizeof(*tiles)) != 0);
+    if (count) memcpy(s_tiles, tiles, (size_t)count * sizeof(*tiles));
+    s_tile_count = count;
+    snprintf(s_tiles_swarm, sizeof(s_tiles_swarm), "%s", swarm_id ? swarm_id : "");
+    if (moved) {
+        // The first seat's id is printed because "which tab" and "how many" were never the question:
+        // every seat came back unnamed, and the only two ways that happens are an id that never left
+        // the window and an id this device does not hold. One line tells the two apart.
+        int named = 0;
+        for (int k = 0; k < count; k++) if (s_tiles[k].agent_id[0] && find_proj(s_tiles[k].agent_id) >= 0) named++;
+        ESP_LOGI(TAG, "desk: shape → %d tiles on %s · %d named · [0]='%s'",
+                 count, s_tiles_swarm[0] ? s_tiles_swarm : "-", named,
+                 count ? s_tiles[0].agent_id : "");
+        // Not while a tab pick is in flight: the grid is deliberately blank until its agents land, and
+        // desk_rebuild() honours that itself — this would only redraw the same blank.
+        if (s_desk_open) desk_rebuild();
+    }
+    display_unlock();
+#endif
+}
+
 void ui_swarms_replace(const cable_swarm_t *rows, int count, const char *selected)
 {
     display_lock();
@@ -6235,6 +7060,13 @@ void ui_swarms_replace(const cable_swarm_t *rows, int count, const char *selecte
     s_swarm_count = count;
     snprintf(s_swarm_selected, sizeof(s_swarm_selected), "%s", selected ? selected : "");
     swarm_lines_repaint();
+#if UI_DESK_GRID
+    // Rebuild only when the TABS changed. A push whose only news is which one is selected — every push
+    // that follows a tap — moves the fill and leaves the buttons, and the strip keeps its scroll.
+    if (s_tabline && tabline_sig() == s_tabline_sig) tabline_repaint();
+    else                                             tabline_rebuild();
+    tabline_sync();
+#endif
     no_agents_apply();   // the empty tab's eyebrow is the tab's name
     if (s_swarm_screen && !lv_obj_has_flag(s_swarm_screen, LV_OBJ_FLAG_HIDDEN)) swarm_picker_rebuild();
     display_unlock();
@@ -6391,7 +7223,7 @@ void ui_notif_open(void)
     lv_anim_t a; lv_anim_init(&a);   // slide down from off-top (position anim — no snapshot layer)
     lv_anim_set_var(&a, s_notif_drawer);
     lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
-    lv_anim_set_values(&a, -466, 0);
+    lv_anim_set_values(&a, -UI_FACE_W, 0);
     lv_anim_set_duration(&a, 220);
     lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
     lv_anim_start(&a);
@@ -7203,7 +8035,7 @@ static EXT_RAM_BSS_ATTR struct {
     bool active;
     char request_id[80];
     char who[64];                // the asker's name, from the frame — it may be on a tab the dial does not hold
-    char machine[NAME_MAX];      // and its machine's name, shown when it is not the cabled computer
+    char machine[CABLE_NAME_MAX];      // and its machine's name, shown when it is not the cabled computer
     char project[48];
     qitem_t q[Q_MAX];
     char answer[Q_MAX][256];     // chosen label(s) or transcript, per question
@@ -7346,10 +8178,10 @@ static void q_render(void)
         int ai = s_q.who[0] ? -1 : find_proj(s_q.project);
         const char *nm = s_q.who[0] ? s_q.who : (ai >= 0 && s_proj[ai].name[0]) ? s_proj[ai].name : "Agent";
         const char *here = cable_client_machine_name();
-        static char who[64 + NAME_MAX + 4];
+        static char who[64 + CABLE_NAME_MAX + 4];
         char nmf[64]; utf8_filter(nm, nmf, sizeof(nmf));
         if (s_q.machine[0] && strcmp(s_q.machine, here ? here : "") != 0) {
-            char mf[NAME_MAX]; utf8_filter(s_q.machine, mf, sizeof(mf));
+            char mf[CABLE_NAME_MAX]; utf8_filter(s_q.machine, mf, sizeof(mf));
             snprintf(who, sizeof who, "%s \xC2\xB7 %s", nmf, mf);
         } else {
             snprintf(who, sizeof who, "%s", nmf);
@@ -7634,7 +8466,6 @@ void ui_question_show(const char *project_id, const char *agent_name, const char
 
 // ── Machine picker (Settings → Machines) ──────────────────────────────────────────────────────────────
 static void machine_row_tap(lv_event_t *e);   // fwd
-#define MACHINE_ROW_W 427
 #define MACHINE_ROW_H 84
 
 // Machines center-focus WHEEL (smartwatch style): fixed-height rows; the one snapped to the middle is enlarged
@@ -7686,6 +8517,17 @@ static void machine_toast(const char *msg)
 // The cabled Mac has one short thing to say — a routing refusal, a delivery that did not land. It arrives
 // as the answer to a wait, so the loading overlay comes down FIRST and the message is shown over whatever
 // is on screen; leaving the overlay up behind a toast would say "still working" next to "it failed".
+void ui_voice_error(const char *msg) { ui_cable_toast(msg); }
+
+void ui_selection_state(const struct cJSON *payload) { (void)payload; }
+void ui_draft_state(const cJSON *p) { (void)p; }
+void ui_voice_draft(const cJSON *p) { (void)p; }
+void ui_voice_question(const cJSON *p) { (void)p; }
+void ui_voice_form(const cJSON *p) { (void)p; }
+void ui_form_state(const struct cJSON *payload) { (void)payload; }
+void ui_carry_state(const struct cJSON *payload) { (void)payload; }
+void ui_visit_state(const struct cJSON *payload) { (void)payload; }
+
 void ui_cable_toast(const char *msg)
 {
     ui_voice_route_abort();
@@ -7938,9 +8780,14 @@ static void no_agents_apply(void)
     // tab has panes or it does not. Each is a different thing to do next, and the screen says that one
     // thing in the app's own words.
     //
-    // A: not connected — nothing is talking to us; the only move is to run the app on the computer.
-    //    Also the shape for "connected, no window": the daemon is up but the app is shut, and the one
-    //    thing to do is the same. The badge at the top says which of the two it is.
+    // A: not connected — nothing is talking to us; the only move is to start Harness on the computer.
+    // A′: connected but no window — Harness IS running (it is answering this very cable) and the app
+    //    has not attached. These used to share A's sentence, on the reading that the thing to do was the
+    //    same. It is not, and worse, it is a LIE the device can see is a lie: it says "Run Harness on
+    //    your computer" while holding an open session with that computer (owner, 2026-09-27: "rõ ràng
+    //    là app đang run, mà device lại hiện màn hình Run OpenHarness"). Measured on the desk: the app
+    //    was up for 4m46s before its local client attached, and the device spent all of it saying the
+    //    app was not running.
     // B′: connected, window open, no agents ANYWHERE — name the machine, offer Cmd N.
     // T: connected, window open, agents elsewhere, this tab empty — the tab's name, Cmd N, and a nudge
     //    that the other tabs are a tap away (the eyebrow opens the TABS picker on the tiles; here it is
@@ -7950,9 +8797,14 @@ static void no_agents_apply(void)
         set_hidden(s_na_eyebrow, true);   // absent, not "Machine": the row is for a name
         if (pill) set_hidden(pill, true);
         if (s_na_marks) set_hidden(s_na_marks, true);
-        lv_label_set_text(s_na_title, "Run OpenHarness\non your computer");
+        // The title states what is TRUE from here, and the hint says what to do about it. `s_connected`
+        // is the whole difference: it is this device holding a live session with that computer, so when
+        // it is set the computer is demonstrably there and only the app is missing.
+        lv_label_set_text(s_na_title, s_connected
+            ? "Waiting for\nOpenHarness"
+            : "Run OpenHarness\non your computer");
         lv_label_set_text(s_no_agents_hint_lbl, s_connected
-            ? "The dial follows the app.\nIt shows what the app shows."
+            ? "Your computer is here.\nOpen the app to see your agents."
             : "The dial follows the app.\nIt connects on its own.");
         return;
     }
@@ -8540,6 +9392,17 @@ void ui_boot_pressed(void)
     // While a question is shown, BOOT means "back" (cancel voice / dismiss the question). Otherwise, if
     // the visible project is WORKING, pop a "Cancel task?" confirm (a running turn is always shown on
     // the projects screen) so an accidental press can't kill it. Nothing running → ignore.
+#if UI_DESK_GRID
+    // THE DESK IS HOME on this face, so back means "up to the desk": on an agent it goes there, and on
+    // the desk there is nothing above it, exactly as back on the dial's Overview does nothing. A WORKING
+    // agent still gets its "Cancel task?" confirm first — that is what the press means while a turn is
+    // in flight, and leaving the tile is not.
+    if (ui_desk_is_open()) return;
+#else
+    // The desk first: it is the topmost thing on the glass when it is up, and "back" means the thing on
+    // top, not the thing underneath. Same rule the question already follows below.
+    if (ui_desk_is_open()) { ui_desk_close(); return; }
+#endif
     display_lock();
     bool q = s_q.active;
     int idx = (s_active_idx >= 0 && s_active_idx < s_proj_count) ? s_active_idx : 0;
@@ -8550,7 +9413,14 @@ void ui_boot_pressed(void)
         lv_obj_clear_flag(s_cancel_confirm, LV_OBJ_FLAG_HIDDEN);
         overlay_raise(s_cancel_confirm);
     } else {
+#if UI_DESK_GRID
+        display_unlock();
+        ESP_LOGI(TAG, "BOOT → desk");
+        ui_desk_open();
+        return;
+#else
         ESP_LOGI(TAG, "BOOT → no working task, ignored");
+#endif
     }
     display_unlock();
 }
@@ -8841,3 +9711,10 @@ void ui_log_state_if_changed(void)
         }
     }
 }
+
+void ui_question_state(const cJSON *p) { (void)p; }
+void ui_answer_receipt(const cJSON *p) { (void)p; }
+
+void ui_voice_search(const cJSON *p) { (void)p; }
+
+void ui_workspace_applied(const char *tab, uint32_t generation) { (void)tab; (void)generation; }

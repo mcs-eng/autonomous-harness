@@ -117,6 +117,26 @@ describe('what the person asked, and what they did not', () => {
     expect(open?.ask).toBe('now flash it')
   })
 
+  it("keeps only the request from what the Codex app and editors send around it", () => {
+    const turns = new TurnCollector(0)
+    turns.feed([ask('# Files mentioned by the user:\n\n## dial.png: /Users/you/Desktop/dial.png\n\n## My request for Codex:\nwhy does the dial scroll jump?\nit skips two rows')], 0, null)
+    turns.feed([ask('# In app browser:\n- Current page: http://localhost:3000/\n\n## My request for Codex:\nmake the header sticky')], 10, null)
+    turns.feed([ask('# Context from my IDE setup:\n\n## Active file: src/dial.ts\n\n## Open tabs:\n- dial.ts: src/dial.ts\n\n## My request for Codex:\nrename it')], 20, null)
+    // Newer versions head the request `## My request:`, and one message can hold two.
+    turns.feed([ask('# Files mentioned by the user:\n\n## shot.png: /tmp/shot.png\n\n## My request:\nlook at this\n\n# In app browser:\n- Current page: http://localhost:3000/\n\n## My request:\nand this page')], 25, null)
+    turns.feed([ask('# In app browser:\n- Current page: http://localhost:3000/\n\nno request heading, so all of it is the ask')], 28, null)
+    turns.feed([ask('# My plan\n\nno request heading, so all of it is the ask')], 30, null)
+    const { closed, open } = turns.finish()
+    expect(closed.map((turn) => turn.ask)).toEqual([
+      'why does the dial scroll jump?\nit skips two rows',
+      'make the header sticky',
+      'rename it',
+      'look at this\n\nand this page',
+      '# In app browser:\n- Current page: http://localhost:3000/\n\nno request heading, so all of it is the ask',
+    ])
+    expect(open?.ask).toBe('# My plan\n\nno request heading, so all of it is the ask')
+  })
+
   it('counts a hand-back announced twice as one turn', () => {
     const turns = new TurnCollector(0)
     const report = 'Another Claude session sent a message: the audit is done'

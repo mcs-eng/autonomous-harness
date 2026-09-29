@@ -1,4 +1,6 @@
 #include "touch.h"
+#include "touch_ctrl.h"
+#include "ui_metrics.h"
 
 #include "cable_client.h"
 #include "board_pins.h"
@@ -6,10 +8,9 @@
 #include "board.h"
 #include "display.h"
 #include "ui_screens.h"   // ui_swipe_begin/end for the circular edge-swipe
-#include "driver/i2c_master.h"
+/* No controller header here any more: which chip this is, and how to open it, is touch_ctrl.h's — and
+ * the CST drivers do not exist for the Pro's target at all, so including them would break that build. */
 #include "esp_lcd_panel_io.h"
-#include "esp_lcd_touch_cst816s.h"
-#include "esp_lcd_touch_cst9217.h"
 #include "esp_log.h"
 #include "lvgl.h"
 #include <stdlib.h>
@@ -97,17 +98,27 @@ static bool double_tap(bool pressed, uint16_t x, uint16_t y)
 #define SCROLL_EVERY_MS 50     // ...or this long, whichever comes first
 // Ceiling on the reported speed, px/s. One jittery sample across a 4ms window reads as thousands of pixels
 // a second; with no lid that lands on the far side as a fling to the end of the scrollback. ~6000 is well
-// past anything a hand does on a 466px face and still finite.
+// past anything a hand does on either face and still finite — a speed, so it is the hand's again.
 #define SCROLL_V_MAX    6000
 
+// ⚠️ THESE ARE PHYSICAL DISTANCES, AND THAT IS WHY THEY DO NOT CHANGE WITH THE FACE.
+//
+// It is tempting to scale a pixel threshold when the screen grows from 466 to 720, and it would be
+// wrong. The two panels are 10.48 and 10.01 pixels per millimetre — within 5% — so 55px is about 5.3mm
+// on both, and what this number decides is whether a FINGER moved far enough to have meant it. That
+// judgement is about the hand, not the glass. Scaling it would make the bigger screen need a longer
+// drag for the same intent.
+//
+// The edge bands are the opposite case and do scale (UI_HOME_EDGE_Y, ui_metrics.h): they describe where
+// on the face a gesture STARTS, which is a fact about the face.
 #define SWIPE_MIN_PX 55
 #define TAP_MAX_MS   700   // a near-still press shorter than this = a tap (not a hold/long-press)
 // Home gesture: an upward swipe must START at/below this y (panel is 466 tall) to count as a bottom-edge
 // swipe → Overview. Bottom ~14% band; well below where mid-tile "swipe-up = open detail" gestures begin.
-#define BOTTOM_EDGE_PX 400
+#define BOTTOM_EDGE_PX UI_HOME_EDGE_Y
 // On the detail reader the ONLY non-scroll vertical gesture is a tight bottom-edge up-swipe → Overview, so it
 // uses a much narrower band than the carousel screens: a swipe that STARTS within the bottom ~20px (panel 466).
-#define READER_HOME_EDGE_PX 446
+#define READER_HOME_EDGE_PX UI_READER_HOME_EDGE_Y
 // A single tap toggles the detail reader (open on projects / close on the reader), but a double-tap
 // starts voice. They're indistinguishable until the double-tap window passes, so DEFER the tap's action
 // by DOUBLE_TAP_MS and cancel it if a 2nd tap arrives (that's a start-voice). A tap while RECORDING is
@@ -252,17 +263,32 @@ static void swipe_track(bool pressed, uint16_t x, uint16_t y)
         int home_edge = reader ? READER_HOME_EDGE_PX : BOTTOM_EDGE_PX;
         // HOME gesture: an upward swipe that STARTED at the bottom edge → jump to Overview. (y grows downward;
         // the driver already applies the panel mirror, so sy near y_max = the physical bottom.)
+        // THE DESK OWNS THE GLASS WHILE IT IS UP — with ONE exception.
+        //
+        // Everything this classifier would do while the grid is up acts on the carousel UNDERNEATH: a
+        // sideways swipe walks agents on a screen that is not showing them, and the deferred tap belongs
+        // to the tile behind. Both stay refused. (The grid's own tiles are pressed through LVGL's indev,
+        // not through here, which is why refusing them costs nothing.)
+        //
+        // The exception is the bottom-edge swipe up. It is the way to the Overview from anywhere, and
+        // swallowing it here left that screen — the one that names the machine and carries Settings and
+        // the fleet count — with no way in at all while the grid was up (owner, 2026-09-28).
+#if UI_DESK_GRID
+        const bool desk_holds = !voice && ui_desk_is_open();
+#else
+        const bool desk_holds = false;
+#endif
         if (!voice && sy >= home_edge && dy < -SWIPE_MIN_PX && abs(dy) > abs(dx)) {
             ESP_LOGI(TAG, "gesture: home (dy=%d)", dy);
             ui_home_overview();
-        } else if (!voice && (dx > SWIPE_MIN_PX || dx < -SWIPE_MIN_PX) && abs(dx) > abs(dy)) {
+        } else if (!voice && !desk_holds && (dx > SWIPE_MIN_PX || dx < -SWIPE_MIN_PX) && abs(dx) > abs(dy)) {
             ESP_LOGI(TAG, "gesture: swipe %+d (dx=%d dy=%d)", dx > 0 ? 1 : -1, dx, dy);
             ui_swipe_end(dx > 0 ? 1 : -1);         // reader → back to the agent; carousel screens → wrap next/prev
         }
         // A vertical drag is NOT classified here any more — it went out as it happened (above). One
         // gesture cannot mean two things: while it also opened the detail reader, every scroll ended by
         // opening a screen nobody asked for. Tapping the recap card opens it, which is the route it kept.
-        else if (abs(dx) < LONG_MOVE_PX && abs(dy) < LONG_MOVE_PX
+        else if (!desk_holds && abs(dx) < LONG_MOVE_PX && abs(dy) < LONG_MOVE_PX
                  && lv_tick_elaps(t0) < TAP_MAX_MS) {   // near-still TAP
             // A tap while RECORDING always stops the voice — on EVERY screen, including the reader (this is the
             // only touch way to end a turn started by double-tap there). The deferred open/close tap, however,
@@ -293,11 +319,66 @@ static void swipe_track(bool pressed, uint16_t x, uint16_t y)
 
 // LVGL reads the latest touch point. Marshalled by LVGL's own task; reading the
 // CST9217 over I2C from here is fine (LVGL task holds no conflicting lock).
-static bool touch_open(void);
 static void touch_reinit(void);
-static const char *touch_chip_name(void)
+// The board's own, so a new controller needs no case here (touch_ctrl.h).
+#define touch_chip_name() touch_ctrl_name()
+
+/*
+ * PINCH IN — two fingers closing — means "out one level".
+ *
+ * The grid is the fleet seen from above and an agent is the fleet seen from inside, so closing the hand
+ * goes out and there is nothing else it could mean. It is also the only gesture left that collides with
+ * nothing: one finger sideways walks the siblings, one finger up and down scrolls the agent's lists, and
+ * a pull from the top edge is the drawer.
+ *
+ * WHY THIS LIVES HERE AND NOT IN LVGL. An `lv_indev` of type POINTER carries ONE point, by design — there
+ * is nowhere in it to put a second finger. The controller has them: esp_lcd_touch_get_coordinates() fills
+ * as many as you ask for and the GT911 reports five. So this file reads two, recognises the shape itself,
+ * and hands LVGL the first point exactly as it always did. LVGL never learns that the second finger
+ * existed, which is what keeps every screen's buttons behaving the same way.
+ *
+ * The thresholds are deliberately loose. A pinch on a device lying flat on a desk is a thumb and one
+ * finger, not a precise two-handed gesture, and the cost of missing one is that the person pinches again
+ * — while the cost of firing on a stray second contact is a screen that leaves under their hand.
+ */
+#define PINCH_MIN_START_PX  120   // the fingers must START this far apart, or it is a fumbled single touch
+#define PINCH_CLOSE_RATIO   60    // …and end at most this % of that distance
+#define PINCH_MIN_TRAVEL_PX 60    // …having actually closed by this much, so a slow drift is not a pinch
+
+static int32_t s_pinch_start_d;   // distance when the second finger landed, 0 when not tracking
+static bool    s_pinch_fired;     // once per two-finger press
+
+static int32_t touch_span(const uint16_t *xs, const uint16_t *ys)
 {
-    return board()->touch == TOUCH_CST816S ? "CST816S" : board()->touch == TOUCH_CST9217 ? "CST9217" : "no-touch";
+    const int32_t dx = (int32_t)xs[0] - (int32_t)xs[1];
+    const int32_t dy = (int32_t)ys[0] - (int32_t)ys[1];
+    // Manhattan rather than Euclidean: no sqrt on the LVGL task, and for "did they close" the difference
+    // between the two is a constant factor that the thresholds above already absorb.
+    return (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+}
+
+// Returns true when this sample completes a pinch-in. Fed every read, with however many points the
+// controller gave us.
+static bool pinch_track(uint8_t count, const uint16_t *xs, const uint16_t *ys)
+{
+    // Nothing to go out TO on a face with no desk (UI_DESK_GRID), so the gesture is not merely inert
+    // there — it is not tracked at all. Left tracking, a stray second contact on the dial would swallow
+    // the press that carried it and the finger would land on nothing.
+    if (!UI_DESK_GRID) return false;
+    if (count < 2) { s_pinch_start_d = 0; s_pinch_fired = false; return false; }
+    const int32_t d = touch_span(xs, ys);
+    if (s_pinch_start_d == 0) {
+        // The second finger has just landed. Remember how far apart they were; a pair that starts close
+        // together cannot pinch, which is what stops a palm resting on the glass from navigating.
+        s_pinch_start_d = d > PINCH_MIN_START_PX ? d : -1;
+        return false;
+    }
+    if (s_pinch_start_d < 0 || s_pinch_fired) return false;
+    if (s_pinch_start_d - d < PINCH_MIN_TRAVEL_PX) return false;
+    if (d * 100 > s_pinch_start_d * PINCH_CLOSE_RATIO) return false;
+    s_pinch_fired = true;
+    ESP_LOGI(TAG, "gesture: pinch in (%d → %d px) → out one level", (int)s_pinch_start_d, (int)d);
+    return true;
 }
 
 static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
@@ -312,7 +393,10 @@ static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
-    uint16_t x = 0, y = 0, strength = 0;
+    // TWO points, not one. The extra is only ever read by pinch_track(); everything below this line
+    // uses xs[0]/ys[0] and behaves exactly as it did when one was all that was fetched.
+    uint16_t xs[2] = { 0, 0 }, ys[2] = { 0, 0 }, ss[2] = { 0, 0 };
+    uint16_t x = 0, y = 0;
     uint8_t cnt = 0;
     esp_err_t rc = esp_lcd_touch_read_data(s_tp);
     bool pressed;
@@ -320,8 +404,8 @@ static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
     if (rc == ESP_OK) {
         s_read_fail_run = 0;
         s_noack_run = 0;
-        pressed = esp_lcd_touch_get_coordinates(s_tp, &x, &y, &strength, &cnt, 1) && cnt > 0;
-        if (pressed) ok_reads++;
+        pressed = esp_lcd_touch_get_coordinates(s_tp, xs, ys, ss, &cnt, 2) && cnt > 0;
+        if (pressed) { x = xs[0]; y = ys[0]; ok_reads++; }
     } else if (rc == ESP_ERR_INVALID_RESPONSE && board()->touch == TOUCH_CST9217) {
         // CST9217 ONLY. The CST816S driver answers ESP_OK on every idle read (measured on that board, 30/30)
         // and clears its own point table, so this rule would have nothing to do there — and must not run
@@ -338,7 +422,8 @@ static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
         // Three misses in a row (~100ms) before the finger is declared gone, so one dropped sample
         // mid-drag cannot split a stroke in two.
         s_read_fail_run = 0;
-        pressed = esp_lcd_touch_get_coordinates(s_tp, &x, &y, &strength, &cnt, 1) && cnt > 0;
+        pressed = esp_lcd_touch_get_coordinates(s_tp, xs, ys, ss, &cnt, 2) && cnt > 0;
+        if (pressed) { x = xs[0]; y = ys[0]; }
         if (pressed && ++s_noack_run >= NOACK_RELEASE_READS) {
             ESP_LOGW(TAG, "release inferred: no ACK for %u reads while held at (%u,%u) — the chip's release frame was missed",
                      (unsigned)s_noack_run, x, y);
@@ -365,6 +450,20 @@ static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
             touch_reinit();
         }
     }
+    /*
+     * The second finger, before anything else looks at the first.
+     *
+     * Acted on HERE rather than at release, for the same reason the BOOT press is: a pinch is finished
+     * the moment the fingers have closed, and waiting for them to lift would leave the screen sitting
+     * there after the hand had already said what it meant. The rest of the press is then swallowed, so
+     * the fingers coming apart again cannot be read as a swipe on the screen that just arrived.
+     */
+    if (pinch_track(cnt, xs, ys)) {
+        s_swallow_until_release = true;
+        scroll_abort();
+        if (!display_is_asleep()) ui_desk_open();   // takes the lock itself
+    }
+
     if (pressed && !activity_prev) {
         s_activity_gen++;
         s_presses++;
@@ -430,9 +529,23 @@ static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
             // top of the face, inside a 90px band this would otherwise swallow whole, so the one control
             // that leaves the screen could never be pressed. A modal chooser also has no business
             // offering a pull-to-notifications on top of itself.
+            // …and, on the Pro, not on its fixed tab line, which sits inside this band by design: it is
+            // the first thing on the glass, so the band would swallow every tap on the one control that
+            // is always there. Same exemption as the bell, immediately above.
+            //
+            // #if, not a runtime `if`: the round face has no such line and this is the dial's own touch
+            // path, which must come out of the compiler unchanged — the whole square port is held to that.
             s_band_drag = !display_is_asleep() && !ui_reader_is_open() && !ui_switch_is_open() &&
                     !ui_picker_is_open() && !ui_notif_pill_hit(x, y) &&
+#if UI_DESK_GRID
+                    /* …and, on the Pro, below the fixed tab line: the band's depth overlaps it, and a
+                     * press it captures is a tab press that never happens. The floor applies only to
+                     * STARTING one — an open drawer still owns the whole face, as it must to be closed. */
+                    (ui_notif_is_open() ||
+                     (y >= ui_notif_band_top_px() && y < ui_notif_pull_zone_px()));
+#else
                     (ui_notif_is_open() || y < ui_notif_pull_zone_px());
+#endif
             ndy0 = ndyl = y; ncap = s_band_drag;
             if (s_band_drag) ESP_LOGI(TAG, "band: captured at y=%u (drawer %s)", y, ui_notif_is_open() ? "open" : "closed");
         } else if (pressed && s_band_drag) {
@@ -523,52 +636,6 @@ static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
 
 // Bring the touch controller up on the shared bus — whichever one this dial has (board.h). Everything
 // that can fail, logs and leaves s_tp NULL.
-static bool touch_open(void)
-{
-    i2c_master_bus_handle_t bus = board_i2c_get();
-    if (!bus) {
-        ESP_LOGW(TAG, "shared i2c bus unavailable — touch disabled");
-        return false;
-    }
-    const board_t *b = board();
-    if (b->touch == TOUCH_NONE) {
-        ESP_LOGW(TAG, "no touch controller answered on the bus — touch disabled");
-        return false;
-    }
-
-    esp_lcd_panel_io_i2c_config_t io_cfg = b->touch == TOUCH_CST816S
-        ? (esp_lcd_panel_io_i2c_config_t)ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG()
-        : (esp_lcd_panel_io_i2c_config_t)ESP_LCD_TOUCH_IO_I2C_CST9217_CONFIG();
-    io_cfg.scl_speed_hz = BSP_I2C_FREQ_HZ;
-    if (esp_lcd_new_panel_io_i2c(bus, &io_cfg, &s_tp_io) != ESP_OK) {
-        ESP_LOGW(TAG, "touch panel io failed — touch disabled");
-        s_tp_io = NULL;
-        return false;
-    }
-
-    esp_lcd_touch_config_t tp_cfg = {
-        .x_max = 466,
-        .y_max = 466,
-        .rst_gpio_num = b->touch_rst,
-        .int_gpio_num = BSP_TOUCH_INT,
-        // The CST9217 is mounted 180° relative to the CO5300 on its board, so BOTH axes are reversed vs
-        // the display (horizontal swipe and vertical scroll/taps). The CST816S reports panel-aligned
-        // coordinates — measured: mirrored, a touch landed 180° from the finger.
-        .flags = { .swap_xy = 0, .mirror_x = b->touch_mirror, .mirror_y = b->touch_mirror },
-    };
-    esp_err_t err = b->touch == TOUCH_CST816S
-        ? esp_lcd_touch_new_i2c_cst816s(s_tp_io, &tp_cfg, &s_tp)
-        : esp_lcd_touch_new_i2c_cst9217(s_tp_io, &tp_cfg, &s_tp);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "%s init failed (%s) — touch disabled", touch_chip_name(), esp_err_to_name(err));
-        s_tp = NULL;
-        esp_lcd_panel_io_del(s_tp_io);
-        s_tp_io = NULL;
-        return false;
-    }
-    return true;
-}
-
 // Tear the controller down and bring it back. Runs on the LVGL task (the indev read), where the driver's
 // own I2C use already lives, so nothing else can be mid-transaction with it. The first real FIX in this
 // file rather than a description: a controller that stopped answering gets a reset and a fresh init, and
@@ -577,7 +644,7 @@ static void touch_reinit(void)
 {
     if (s_tp) { esp_lcd_touch_del(s_tp); s_tp = NULL; }
     if (s_tp_io) { esp_lcd_panel_io_del(s_tp_io); s_tp_io = NULL; }
-    if (touch_open()) ESP_LOGI(TAG, "%s back after reinit", touch_chip_name());
+    if (touch_ctrl_open(&s_tp_io, &s_tp)) ESP_LOGI(TAG, "%s back after reinit", touch_chip_name());
     else ESP_LOGW(TAG, "%s reinit failed — retrying in %ds", touch_chip_name(), REINIT_RETRY_MS / 1000);
 }
 
@@ -593,7 +660,7 @@ void touch_stats(touch_stats_t *out)
 
 void touch_init(void)
 {
-    if (!touch_open()) return;
+    if (!touch_ctrl_open(&s_tp_io, &s_tp)) return;
 
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);

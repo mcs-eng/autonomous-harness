@@ -30,6 +30,7 @@ class ModelSearchEntry {
     required this.status,
     this.local,
     this.api,
+    this.apiModel,
     this.subscription,
     this.node,
     this.searchAliases = const [],
@@ -43,6 +44,10 @@ class ModelSearchEntry {
   final String? node;
   final LocalModel? local;
   final ApiConnection? api;
+
+  /// One of [api]'s chat models: a row a harness can run on through that API ([api] is its API).
+  /// Null on the API's own row.
+  final ApiModel? apiModel;
   final Map<String, Object?>? subscription;
   final List<String> searchAliases;
   final ModelManagerController? controller;
@@ -77,6 +82,7 @@ class ModelSearchEntry {
   late final destination = SwarmDestination(
     id: id,
     modelId: id,
+    // An API's model is listed under its API's row, so it is named alone.
     title: sharedBy?.isNotEmpty == true ? '$name · $sharedBy' : name,
     detail: [source, node, status].whereType<String>().join(' · '),
     swarmId: null,
@@ -89,10 +95,16 @@ class ModelSearchEntry {
       status,
       local?.id,
       api?.host,
+      api?.name,
+      apiModel?.name,
       ...searchAliases,
     ],
   );
 }
+
+/// The row id of [modelId] on the API saved as [connectionId].
+String apiModelRowId(String connectionId, String modelId) =>
+    'model:apimodel:$connectionId:$modelId';
 
 class ModelSearchCatalog extends ChangeNotifier {
   ModelSearchCatalog(
@@ -118,6 +130,7 @@ class ModelSearchCatalog extends ChangeNotifier {
   void setVisible(bool visible) {
     if (_visible == visible) return;
     _visible = visible;
+    manager.apis.loadModels(wanted: visible);
     _machinesChanged();
     for (final controller in _hosts.values) {
       controller.setPanelVisible(visible);
@@ -160,6 +173,7 @@ class ModelSearchCatalog extends ChangeNotifier {
 
   Future<void> refresh({bool force = false}) async {
     _machinesChanged();
+    if (_visible) manager.apis.loadModels(reread: force);
     await Future.wait([
       manager.refresh(force: force),
       for (final controller in _hosts.values) controller.refresh(force: force),
@@ -251,6 +265,8 @@ class ModelSearchCatalog extends ChangeNotifier {
                 words.subtitle ??
                 (manager.models?.reachable == false
                     ? 'Unavailable'
+                    : section.own
+                    ? 'Suggested'
                     : 'Available'),
           ),
         );
@@ -271,8 +287,13 @@ class ModelSearchCatalog extends ChangeNotifier {
     local.sort((a, b) {
       final state = rank(a.owner, a.model).compareTo(rank(b.owner, b.model));
       if (state != 0) return state;
-      final name = a.model.name.compareTo(b.model.name);
-      if (name != 0) return name;
+      // Preserve the daemon's grid-ranking order (the order the catalog
+      // service returned), not an alphabetised re-sort — so the top models
+      // match `grid catalog` / `list` instead of listing alphabetical first.
+      final aIndex = a.owner.localModels.indexOf(a.model);
+      final bIndex = b.owner.localModels.indexOf(b.model);
+      final order = aIndex.compareTo(bIndex);
+      if (order != 0) return order;
       final host = (a.owner.machine?.machine.displayName ?? '').compareTo(
         b.owner.machine?.machine.displayName ?? '',
       );
@@ -315,7 +336,7 @@ class ModelSearchCatalog extends ChangeNotifier {
           status: '${row['status'] ?? 'Usage unavailable'}',
           subscription: row,
         ),
-      for (final api in manager.apis.connections)
+      for (final api in manager.apis.connections) ...[
         ModelSearchEntry(
           id: 'model:api:${api.id}',
           name: api.name,
@@ -323,6 +344,18 @@ class ModelSearchCatalog extends ChangeNotifier {
           status: api.host,
           api: api,
         ),
+        // Straight after their API, in the API's order: the list keeps a section's rows as built.
+        for (final model
+            in manager.apis.models[api.id]?.models ?? const <ApiModel>[])
+          ModelSearchEntry(
+            id: apiModelRowId(api.id, model.id),
+            name: model.id,
+            source: 'API',
+            status: api.name,
+            api: api,
+            apiModel: model,
+          ),
+      ],
     ];
     final order = {for (final (index, entry) in all.indexed) entry.id: index};
     all.sort((a, b) {
@@ -355,7 +388,29 @@ class ModelSearchCatalog extends ChangeNotifier {
         ? 'Running'
         : model.downloaded
         ? 'Downloaded'
-        : 'Available';
+        : 'Suggested';
+  }
+
+  /// The inline status word for a list row: a short word with no progress
+  /// percentage (the percentage lives in the pane/detail). Operation and pending
+  /// states map to their bare label so the row never repeats the "42%".
+  String localStatusWord(LocalModel model, {ModelManagerController? controller}) {
+    final owner = controller ?? manager;
+    final operation = owner.operationFor(model);
+    if (operation?.active == true) return operation!.label;
+    if (owner.pendingId == model.id) {
+      return owner.pendingDownload
+          ? 'Downloading'
+          : owner.pendingStart
+          ? 'Starting'
+          : 'Stopping';
+    }
+    if (operation?.failed == true) return 'Failed';
+    return model.running
+        ? 'Running'
+        : model.downloaded
+        ? 'Downloaded'
+        : 'Suggested';
   }
 
   @override

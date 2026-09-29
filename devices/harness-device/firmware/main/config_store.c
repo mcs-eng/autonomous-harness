@@ -140,6 +140,70 @@ void config_save_brightness(uint8_t level)
     ESP_LOGI(TAG, "save_brightness 0x%02x: %s", level, ok ? "ok" : "FAILED");
 }
 
+bool config_load_muted(void)
+{
+    nvs_handle_t h;
+    // The prototype starts quiet; a stock build keeps its previous default.
+#ifdef DEVICE_HABITAT
+    uint8_t muted = 1;
+#else
+    uint8_t muted = 0;
+#endif
+    if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "muted", &muted);
+        nvs_close(h);
+    }
+    return muted != 0;
+}
+
+bool config_save_muted(bool muted)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    bool ok = nvs_set_u8(h, "muted", muted ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    ESP_LOGI(TAG, "save_muted %d: %s", (int)muted, ok ? "ok" : "FAILED");
+    return ok;
+}
+
+uint8_t config_load_habitat_options(void)
+{
+    nvs_handle_t h;
+    uint8_t options = 0; // Curved title; straight scrolling; reactions enabled
+    if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "habitat", &options);
+        nvs_close(h);
+    }
+    return options & 15;
+}
+bool config_save_habitat_options(uint8_t options)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    bool ok = nvs_set_u8(h, "habitat", options & 15) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+
+uint8_t config_load_habitat_character(uint8_t fallback)
+{
+    nvs_handle_t h;
+    uint8_t value = fallback;
+    if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "habitat_char", &value);
+        nvs_close(h);
+    }
+    return value;
+}
+bool config_save_habitat_character(uint8_t character)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    bool ok = nvs_set_u8(h, "habitat_char", character) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+
 // --- scroll direction ---------------------------------------------------------------------------
 // Which way a drag moves the window's scrollback. A habit, not a fact about the hardware: some hands
 // expect the text to follow the finger, others expect the VIEW to follow it, and neither is wrong.

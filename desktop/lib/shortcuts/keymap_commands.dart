@@ -19,6 +19,7 @@ class HarnessCommand {
     this.context = KeymapContext.workspace,
     this.repeatable = false,
     this.hidden = false,
+    this.daemon = false,
   });
   final String id, label;
   final ShortcutGroup group;
@@ -28,23 +29,30 @@ class HarnessCommand {
   /// Workspace defaults come from the live shortcut table. A command cannot
   /// quietly propose different keys from the ones the user already uses.
   List<String> get keys {
-    if (id == 'navigation.commands' &&
+    if (!kIsWeb &&
+        id == 'navigation.commands' &&
         defaultTargetPlatform == TargetPlatform.linux) {
       return const ['ctrl+shift+p'];
     }
-    if (id == 'harnesses.list' &&
+    if (!kIsWeb &&
+        id == 'harnesses.list' &&
         defaultTargetPlatform == TargetPlatform.linux) {
       return const ['ctrl+p'];
     }
-    if (id == 'models.list' && defaultTargetPlatform == TargetPlatform.linux) {
+    if (!kIsWeb &&
+        id == 'models.list' &&
+        defaultTargetPlatform == TargetPlatform.linux) {
       return const ['ctrl+i', 'cmd+i'];
     }
-    if (id == 'picker.complete' &&
+    if (!kIsWeb &&
+        id == 'picker.complete' &&
         defaultTargetPlatform == TargetPlatform.linux) {
       // Ctrl-I opens Models on Linux, including from another picker scope.
       return const ['tab'];
     }
-    return action == null ? extraKeys : _workspaceKeys[action] ?? const [];
+    return action == null
+        ? extraKeys.map(platformWorkspaceBinding).toList(growable: false)
+        : _workspaceKeys[action] ?? const [];
   }
 
   final ShortcutAction? action;
@@ -54,7 +62,21 @@ class HarnessCommand {
 
   /// Review commands still use the shared keymap, but stay out of normal help.
   final bool hidden;
+
+  /// One of the daemon's (daemons/README.md): it exists only while this
+  /// window has daemons ([daemonCommandsActive]).
+  final bool daemon;
 }
+
+/// Whether the daemon's commands exist in this window: only while daemons are
+/// on (daemons/README.md, "Off switches"). Off, they are not bound at all:
+/// their keys (⌘⌥T) reach the pane as they did before daemons existed, and
+/// they are in no list, no help and no native keymap. The workspace sets it.
+final daemonCommandsActive = ValueNotifier<bool>(false);
+
+/// Whether [id] is a command this window has now.
+bool harnessCommandActive(String id) =>
+    harnessCommandById[id]?.daemon != true || daemonCommandsActive.value;
 
 final _workspaceKeysByPlatform =
     <TargetPlatform, Map<ShortcutAction, List<String>>>{};
@@ -333,12 +355,27 @@ final harnessCommands = <HarnessCommand>[
     nativeAction: 'newAgent',
   ),
   const HarnessCommand('agent.rename', 'Rename Harness', ShortcutGroup.actions),
+  const HarnessCommand(
+    'agent.work',
+    'Branches and pull requests',
+    ShortcutGroup.actions,
+    keywords: [
+      'branch',
+      'branches',
+      'pull requests',
+      'git',
+      'worktree',
+      'history',
+    ],
+  ),
   const HarnessCommand('agent.stop', 'Stop Harness', ShortcutGroup.actions),
   const HarnessCommand('agent.fork', 'Fork Harness', ShortcutGroup.actions),
   const HarnessCommand(
     'agent.share',
     'Share Harness',
     ShortcutGroup.actions,
+    action: ShortcutAction.shareAgent,
+    keywords: ['link', 'public', 'private', 'invite', 'collaborate'],
     nativeAction: 'shareAgent',
   ),
   const HarnessCommand(
@@ -456,6 +493,22 @@ final harnessCommands = <HarnessCommand>[
     action: ShortcutAction.orchestrate,
   ),
   const HarnessCommand(
+    'team.open',
+    'Swarm conversation: view this tab’s collaboration',
+    ShortcutGroup.actions,
+    action: ShortcutAction.team,
+    keywords: [
+      'communicate',
+      'collaborate',
+      'message',
+      'question',
+      'reply',
+      'inbox',
+      'swarm',
+      'channel',
+    ],
+  ),
+  const HarnessCommand(
     'app.customize',
     'Customize Harness',
     ShortcutGroup.actions,
@@ -470,11 +523,38 @@ final harnessCommands = <HarnessCommand>[
     nativeAction: 'store',
   ),
   const HarnessCommand(
+    'app.daemon',
+    'Daemon',
+    ShortcutGroup.actions,
+    keywords: ['hatch', 'egg', 'zoo', 'pair', 'nap', 'buddy', 'companion'],
+    nativeAction: 'daemon',
+    daemon: true,
+  ),
+  // ⌘⌥Space is macOS's Finder search; ⌘⌥ plus y, n, s or g answers the
+  // daemon's line. T for talk.
+  const HarnessCommand(
+    'app.daemon_talk',
+    'Talk to daemon',
+    ShortcutGroup.actions,
+    extraKeys: ['cmd+alt+t'],
+    keywords: ['ask', 'pair', 'daemon', 'chat', 'autonomy', 'lessons'],
+    daemon: true,
+  ),
+  const HarnessCommand(
     'app.settings',
     'Open Settings',
     ShortcutGroup.actions,
     action: ShortcutAction.showSettings,
     nativeAction: 'settings',
+  ),
+  // Harness ▸ Add Phone…, beside Settings in the app menu. No default keys:
+  // it is a once-per-phone errand, not a chord worth learning.
+  const HarnessCommand(
+    'app.add_phone',
+    'Add phone',
+    ShortcutGroup.actions,
+    keywords: ['iphone', 'mobile', 'pair', 'qr', 'scan', 'connect'],
+    nativeAction: 'addPhone',
   ),
   const HarnessCommand(
     'keyboard.help',
@@ -768,10 +848,10 @@ ResolvedKeymap get harnessDefaultKeymap =>
     );
 
 List<String> describeKeyStrokeKeys(KeyStroke stroke) => [
-  if (stroke.control) '⌃',
-  if (stroke.alt) '⌥',
-  if (stroke.shift) '⇧',
-  if (stroke.command) '⌘',
+  if (stroke.control) kIsWeb ? 'Ctrl' : '⌃',
+  if (stroke.alt) kIsWeb ? 'Alt' : '⌥',
+  if (stroke.shift) kIsWeb ? 'Shift' : '⇧',
+  if (stroke.command) kIsWeb ? 'Cmd' : '⌘',
   const {
         'left': '←',
         'right': '→',
@@ -800,6 +880,6 @@ List<String> describeKeyStrokeKeys(KeyStroke stroke) => [
       stroke.key.toUpperCase(),
 ];
 String describeKeyStroke(KeyStroke stroke) =>
-    describeKeyStrokeKeys(stroke).join();
+    describeKeyStrokeKeys(stroke).join(kIsWeb ? '+' : '');
 String describeKeyBinding(KeyBinding binding) =>
     binding.keys.map(describeKeyStroke).join(' ');

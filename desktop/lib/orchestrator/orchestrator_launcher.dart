@@ -3,6 +3,7 @@ import 'dart:async';
 import '../shared/widgets/labeled_field.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -39,7 +40,12 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
   bool _starting = false, _automatic = false, _advanced = false;
   Map<String, dynamic>? _attempt;
   List<Map<String, dynamic>> _recent = [];
-  String? get _machine => widget.notifier.localMachineState?.machine.machineId;
+  String? _machineId;
+  String? get _machine =>
+      _machineId ??= widget.notifier.ownedActionMachine?.machine.machineId;
+  String get _host =>
+      widget.notifier.stateOf(_machine ?? '')?.machine.displayName ??
+      'a connected machine';
 
   @override
   void initState() {
@@ -74,7 +80,7 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
     if (_starting || _prompt.text.trim().isEmpty) return;
     final machine = _machine;
     if (machine == null) {
-      setState(() => _error = 'Connect this computer’s Harness daemon first.');
+      setState(() => _error = 'Connect a machine before starting a project.');
       return;
     }
     _attempt ??= {
@@ -154,8 +160,11 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
           padding: const EdgeInsets.all(28),
           child: CallbackShortcuts(
             bindings: {
-              const SingleActivator(LogicalKeyboardKey.enter, meta: true):
-                  _start,
+              const SingleActivator(
+                LogicalKeyboardKey.enter,
+                meta: !kIsWeb,
+                alt: kIsWeb,
+              ): _start,
             },
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -254,7 +263,7 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
                         _starting
                             ? 'Starting…'
                             : _attempt == null
-                            ? 'Start creating  ⌘↵'
+                            ? 'Start creating  ${kIsWeb ? 'Alt+↵' : '⌘↵'}'
                             : 'Check launch',
                       ),
                     ),
@@ -287,7 +296,7 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
                 ],
                 const SizedBox(height: 18),
                 Text(
-                  'Runs on this computer with installed harnesses. Each specialist gets its own folder; no automatic installs.',
+                  'Runs on $_host with installed harnesses. Each specialist gets its own folder; no automatic installs.',
                   style: grid.AppType.body(
                     color: grid.AppPalette.textSecondary,
                   ),

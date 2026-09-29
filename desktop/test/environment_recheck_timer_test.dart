@@ -7,6 +7,8 @@ import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/settings/config_store.dart';
 import 'package:harness/state/app_state.dart';
 
+import 'support/guest_app.dart';
+
 class _FakeCliLogin extends CliLogin {
   @override
   Future<CliAuthStatus> checkStatus() async =>
@@ -26,28 +28,6 @@ class _FakeKeyValueStore implements LocalKeyValueStore {
 
   @override
   Future<void> delete(String key) async => values.remove(key);
-}
-
-/// A window that never reaches for a real daemon.
-///
-/// A signed-out DESKTOP window (`viewer == null`) now lands on the guest desk
-/// past the daemon gate instead of stopping at a login wall — see
-/// `_continueAfterEnvironmentReady`. A unit test must not shell out to a real
-/// `harness` daemon to get there.
-class _GuestApp extends AppNotifier {
-  _GuestApp({
-    required super.config,
-    required super.authSession,
-    super.configStore,
-    super.cliLogin,
-    super.environmentProvisioner,
-  });
-
-  @override
-  Future<void> ensureCliDaemonReady() async {}
-
-  @override
-  Future<bool> refreshMachines() async => true;
 }
 
 class _ScriptedProvisioner extends EnvironmentProvisioner {
@@ -119,7 +99,7 @@ void main() {
       ),
     );
     final provisioner = _ScriptedProvisioner([review, waiting, failed]);
-    final app = AppNotifier(
+    final app = GuestTestApp(
       config: AppConfig.dev,
       authSession: AuthSession(),
       configStore: null,
@@ -162,7 +142,7 @@ void main() {
       mode: EnvironmentSetupMode.automatic,
     );
     final provisioner = _ScriptedProvisioner([review, waiting, ready]);
-    final app = _GuestApp(
+    final app = GuestTestApp(
       config: AppConfig.dev,
       authSession: AuthSession(),
       configStore: ConfigStore(storage: _FakeKeyValueStore()),
@@ -182,8 +162,6 @@ void main() {
     expect(provisioner.installCalls, [false, true, false]);
     expect(app.environmentReadiness.isReady, isTrue);
     expect(app.environmentRecheckPending, isFalse);
-    // A signed-out DESKTOP window lands on the guest desk (local mode), not a
-    // login wall.
     expect(app.status, AppStatus.authenticated);
     expect(app.isGuest, isTrue);
     app.dispose();

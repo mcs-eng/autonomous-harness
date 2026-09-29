@@ -65,93 +65,104 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
       builder: (context, _) => Material(
         color: grid.AppPalette.swarmTabBar,
         child: FocusTraversalGroup(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-                child: Row(
-                  children: [
-                    Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // Too short for the footer notes: keep the controls and the list.
+              final roomy = constraints.maxHeight >= 300;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Projects',
+                            style: TextStyle(
+                              color: grid.AppPalette.textPrimary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        // Upstream's Machines Manager: every machine, its state,
+                        // and link, rename, password and delete. The fork's own
+                        // machine tree gave way to it with the 2026-09-23 sync.
+                        AppIconButton(
+                          key: const ValueKey('project-sidebar-machines'),
+                          icon: Icons.dns_outlined,
+                          tooltip: 'Machines',
+                          onPressed: widget.onShowMachines,
+                        ),
+                        AppIconButton(
+                          icon: Icons.chevron_left,
+                          tooltip: 'Hide sidebar',
+                          onPressed: widget.onCollapse,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: TextField(
+                      key: const ValueKey('project-filter'),
+                      controller: _filter,
+                      decoration: const InputDecoration(
+                        hintText: 'Find project or session',
+                        prefixIcon: Icon(Icons.search, size: 18),
+                        isDense: true,
+                      ),
+                      onChanged: (value) =>
+                          setState(() => _query = value.trim().toLowerCase()),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                    child: Wrap(
+                      spacing: 4,
+                      children: [
+                        TextButton.icon(
+                          style: TextButton.styleFrom(
+                            foregroundColor: grid.AppPalette.accentOnSurface,
+                          ),
+                          onPressed: widget.onAddProject,
+                          icon: const Icon(
+                            Icons.create_new_folder_outlined,
+                            size: 16,
+                          ),
+                          label: const Text('Add folder'),
+                        ),
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            foregroundColor: grid.AppPalette.accentOnSurface,
+                          ),
+                          onPressed: widget.onNewProject,
+                          child: const Text('New project'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(child: _projectList()),
+                  if (roomy)
+                    Padding(
+                      padding: const EdgeInsets.all(12),
                       child: Text(
-                        'Projects',
+                        'Closing a view keeps its agent running.',
                         style: TextStyle(
-                          color: grid.AppPalette.textPrimary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
+                          color: grid.AppPalette.textSecondary,
+                          fontSize: 11,
                         ),
                       ),
                     ),
-                    // Upstream's Machines Manager: every machine, its state,
-                    // and link, rename, password and delete. The fork's own
-                    // machine tree gave way to it with the 2026-09-23 sync.
-                    AppIconButton(
-                      key: const ValueKey('project-sidebar-machines'),
-                      icon: Icons.dns_outlined,
-                      tooltip: 'Machines',
-                      onPressed: widget.onShowMachines,
-                    ),
-                    AppIconButton(
-                      icon: Icons.chevron_left,
-                      tooltip: 'Hide sidebar',
-                      onPressed: widget.onCollapse,
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: TextField(
-                  key: const ValueKey('project-filter'),
-                  controller: _filter,
-                  decoration: const InputDecoration(
-                    hintText: 'Find project or session',
-                    prefixIcon: Icon(Icons.search, size: 18),
-                    isDense: true,
-                  ),
-                  onChanged: (value) =>
-                      setState(() => _query = value.trim().toLowerCase()),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                child: Wrap(
-                  spacing: 4,
-                  children: [
-                    TextButton.icon(
-                      style: TextButton.styleFrom(
-                        foregroundColor: grid.AppPalette.accentOnSurface,
-                      ),
-                      onPressed: widget.onAddProject,
-                      icon: const Icon(
-                        Icons.create_new_folder_outlined,
-                        size: 16,
-                      ),
-                      label: const Text('Add folder'),
-                    ),
-                    TextButton(
-                      style: TextButton.styleFrom(
-                        foregroundColor: grid.AppPalette.accentOnSurface,
-                      ),
-                      onPressed: widget.onNewProject,
-                      child: const Text('New project'),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(child: _projectList()),
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  'Closing a view keeps its agent running.',
-                  style: TextStyle(
-                    color: grid.AppPalette.textSecondary,
-                    fontSize: 11,
-                  ),
-                ),
-              ),
-              if (widget.app.isGuest) _LocalModeLine(onSignIn: widget.onSignIn),
-            ],
+                  if (roomy && widget.app.isGuest)
+                    _LocalModeLine(onSignIn: widget.onSignIn),
+                ],
+              );
+            },
           ),
         ),
       ),

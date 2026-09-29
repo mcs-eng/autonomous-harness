@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { basename, join, dirname } from 'path'
 import { homedir } from 'os'
 import { fileURLToPath } from 'url'
+import { cursorConfigDir, cursorDataDir } from '../engines/cursor/home.js'
 import { env } from '../config/env.js'
 import { VERSION } from '../version.js'
 import { hermesConfigHomes } from '../engines/hermes/home.js'
@@ -16,7 +17,7 @@ import { managedNodePath } from './nodeRuntime.js'
 
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json')
 const GROK_HOOKS_PATH = join(env.GROK_HOME, 'hooks', 'harness.json')
-const CURSOR_HOOKS_PATH = join(process.env.CURSOR_HOME || join(homedir(), '.cursor'), 'hooks.json')
+const CURSOR_HOOKS_PATH = join(cursorConfigDir(), 'hooks.json')
 // agy reads hooks from its SHARED customization root (~/.gemini/config), not from its own state dir —
 // the CLI's changelog records the move, "ensuring hooks remain synchronized between the TUI and the
 // backend". Verified live: a hooks.json placed there fires for `agy` in a pane.
@@ -80,7 +81,7 @@ function command(
     '--claude-projects-dir', shellQuote(env.CLAUDE_PROJECTS_DIR),
     '--codex-home', shellQuote(codexHome),
     '--grok-home', shellQuote(env.GROK_HOME),
-    '--cursor-home', shellQuote(env.CURSOR_HOME),
+    '--cursor-home', shellQuote(cursorDataDir()),
     '--hermes-home', shellQuote(hermesHome),
     '--commandcode-home', shellQuote(env.COMMANDCODE_HOME),
     '--devin-home', shellQuote(env.DEVIN_HOME),
@@ -423,9 +424,8 @@ export const MachineRegister = async ({ directory, worktree, project }) => {
   const seen = new Set()
   const post = async (sessionID) => {
     const pane = process.env.TMUX_PANE
-    const herdrPane = process.env.HERDR_PANE_ID
     const token = hookToken()
-    if ((!pane && !herdrPane) || !token || !sessionID || seen.has(sessionID)) return
+    if (!pane || !token || !sessionID || seen.has(sessionID)) return
     seen.add(sessionID)
     try {
       await fetch("http://127.0.0.1:${port}/api/hook/session-start", {
@@ -440,7 +440,6 @@ export const MachineRegister = async ({ directory, worktree, project }) => {
           callerPid: process.pid,
           runtimeHints: [
             ...(pane ? [{ backend: "tmux", paneId: pane }] : []),
-            ...(herdrPane ? [{ backend: "herdr", paneId: herdrPane, sessionName: process.env.HERDR_SESSION, socketPath: process.env.HERDR_SOCKET_PATH }] : []),
           ],
         }),
       })
@@ -726,10 +725,9 @@ export default function (pi: ExtensionAPI) {
 
   const register = async (ctx: any) => {
     const pane = process.env.TMUX_PANE;
-    const herdrPane = process.env.HERDR_PANE_ID;
     let token = "";
     try { token = readFileSync(${JSON.stringify(join(env.ADAPTER_DATA_DIR, 'hook-credential'))}, "utf8").trim(); } catch {}
-    if ((!pane && !herdrPane) || !token) return;
+    if (!pane || !token) return;
     // Pi knows the session file path immediately but only WRITES it once the first assistant message
     // lands. Sending a path that isn't on disk yet is rejected by the daemon (it validates the file),
     // so announce without one first and attach the real path on a later turn.
@@ -752,7 +750,6 @@ export default function (pi: ExtensionAPI) {
           callerPid: process.pid,
           runtimeHints: [
             ...(pane ? [{ backend: "tmux", paneId: pane }] : []),
-            ...(herdrPane ? [{ backend: "herdr", paneId: herdrPane, sessionName: process.env.HERDR_SESSION, socketPath: process.env.HERDR_SOCKET_PATH }] : []),
           ],
         }),
       });
@@ -840,8 +837,7 @@ const SESSIONS_DIR = ${JSON.stringify(sessionsDir)}
 
 export default function (amp: any) {
   const pane = process.env.TMUX_PANE
-  const herdrPane = process.env.HERDR_PANE_ID
-  if (!pane && !herdrPane) return
+  if (!pane) return
 
   // NOT \`process.cwd()\`: Bun runs a plugin with the PLUGIN's directory as its cwd, so that reports
   // \`<project>/.amp/plugins\` (measured). \`PWD\` is inherited from the shell that launched plain Amp.
@@ -895,7 +891,6 @@ export default function (amp: any) {
           callerPid: process.pid,
           runtimeHints: [
             ...(pane ? [{ backend: 'tmux', paneId: pane }] : []),
-            ...(herdrPane ? [{ backend: 'herdr', paneId: herdrPane, sessionName: process.env.HERDR_SESSION, socketPath: process.env.HERDR_SOCKET_PATH }] : []),
           ],
         }),
       })

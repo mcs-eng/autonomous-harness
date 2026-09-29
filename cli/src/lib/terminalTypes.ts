@@ -1,6 +1,6 @@
 import type { AgentEngine } from '../engines/types.js'
 
-export type TerminalBackendName = 'tmux' | 'herdr'
+export type TerminalBackendName = 'tmux'
 
 /** PID reuse-safe identity for the process that owns a Harness agent. */
 export interface ProcessIdentity {
@@ -14,23 +14,10 @@ export interface TmuxRuntimeRef {
   paneId: string
 }
 
-export interface HerdrRuntimeRef {
-  backend: 'herdr'
-  /** Stable configured-target identifier. Never contains the socket path. */
-  endpointId: string
-  sessionName: string
-  /** Stable within one Herdr endpoint, including across pane moves. */
-  terminalId: string
-  /** Mutable public route, scoped to endpointId. */
-  paneId: string
-}
+export type TerminalRuntimeRef = TmuxRuntimeRef
 
-export type TerminalRuntimeRef = TmuxRuntimeRef | HerdrRuntimeRef
-
-/** Untrusted route hints from hooks. Herdr socket paths are lookup hints, never connection authority. */
-export type HookTerminalHint =
-  | { backend: 'tmux'; paneId: string }
-  | { backend: 'herdr'; paneId: string; sessionName?: string; socketPath?: string }
+/** Untrusted route hints from hooks. */
+export type HookTerminalHint = { backend: 'tmux'; paneId: string }
 
 export interface TerminalRootObservation {
   runtime: TerminalRuntimeRef

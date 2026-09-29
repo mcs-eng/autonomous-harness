@@ -12,6 +12,7 @@ import 'package:harness/state/new_harness.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/terminal/terminal_text.dart';
 import 'package:harness/widgets/delete_agent_dialog.dart';
+import 'package:harness/widgets/harness_activity_mark.dart';
 import 'package:harness/widgets/new_harness_form.dart';
 import 'package:harness/widgets/pane_header_actions.dart';
 import 'package:harness/widgets/swarm_dialogs.dart';
@@ -136,6 +137,7 @@ void main() {
                     widget.key == const ValueKey('workspace-status-bar') ||
                     widget.key == const ValueKey('terminal-pane-title') ||
                     widget.key == const ValueKey('viewer-pane-title') ||
+                    widget is ActivityMark ||
                     widget is PaneHeaderActions,
               ),
               matching: find.byWidget(element.widget),

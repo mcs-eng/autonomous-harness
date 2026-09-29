@@ -1,4 +1,5 @@
 import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../logging/debug_surface.dart';
@@ -14,6 +15,7 @@ enum SettingsSection {
   usage(LucideIcons.chartNoAxesColumn300, 'Usage'),
   customize(LucideIcons.palette300, 'Customize'),
   notifications(LucideIcons.bell300, 'Notifications'),
+  experimental(LucideIcons.flaskConical300, 'Experimental'),
   devices(LucideIcons.zap300, 'Autonomous robots'),
   shortcuts(LucideIcons.keyboard300, 'Keyboard shortcuts'),
   debug(LucideIcons.bug300, 'Debug'),
@@ -61,7 +63,8 @@ List<SettingsGroup> get settingsGroups =>
 @visibleForTesting
 List<SettingsGroup> settingsGroupsFor({required bool debugSurface}) {
   bool visible(SettingsSection section) =>
-      debugSurface || !_kDeveloperSections.contains(section);
+      (!kIsWeb || section != SettingsSection.devices) &&
+      (debugSurface || !_kDeveloperSections.contains(section));
   return [
     for (final group in _kSettingsGroups)
       if (group.sections.any(visible))
@@ -91,6 +94,7 @@ const _kSettingsGroups = [
     // the app looks; a sound is not a look, and somebody turning one off does not think to look
     // under Appearance for it.
     SettingsSection.notifications,
+    SettingsSection.experimental,
     SettingsSection.devices,
     SettingsSection.account,
   ]),

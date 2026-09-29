@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/api/api_client.dart';
 import 'package:harness/auth/auth_session.dart';
@@ -11,9 +12,10 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_layout_store.dart';
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/terminal/terminal_session.dart';
-import 'package:harness/viewer/viewer_key_store.dart';
-import 'package:harness/viewer/viewer_services.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
+import 'package:harness/viewer/viewer_services.dart';
+import 'package:harness/viewer/viewer_key_store.dart';
+import 'package:harness/viewer/direct_auth_api.dart';
 
 import 'swarm_screen_test.dart' show terminal;
 import 'swarm_state_test.dart' show MemoryStore;
@@ -53,6 +55,7 @@ class _Api extends ApiClient {
         session: AuthSession(storage: MemoryStore()),
       );
   var inventoryRequests = 0;
+  Object? inventoryFailure;
   @override
   Future<Map<String, dynamic>?> me() async => {
     'user': {'id': 'fixture-account', 'email': 'fixture@example.invalid'},
@@ -60,16 +63,11 @@ class _Api extends ApiClient {
   @override
   Future<List<Machine>> machines() async {
     inventoryRequests++;
+    if (inventoryFailure case final error?) throw error;
     return [];
   }
 }
 
-/// Fork: a VIEWER, explicitly. These are the flows where a sign-out or an
-/// expired session ends on the login screen, which in upstream's current model
-/// only a viewer has: a desktop window stays on its desk as a guest (the fork's
-/// local mode; see local_mode_test.dart). Upstream runs this file as a viewer
-/// on Windows implicitly (its `kViewerMode` includes Windows); this fork's
-/// Windows build is a desktop, so the viewer is named here.
 class WorkspaceAccountFixture extends AppNotifier {
   WorkspaceAccountFixture(MemoryStore storage, this.cli)
     : super(
@@ -77,23 +75,25 @@ class WorkspaceAccountFixture extends AppNotifier {
         authSession: AuthSession(storage: MemoryStore()),
         cliLogin: cli,
         localCliDiscovery: _Discovery(),
-        paneLayoutStore: PaneLayoutStore(storage: storage),
+        // A browser must clear its workspace on sign-out/expiry. Native desktop deliberately
+        // keeps a guest workspace now; guest_window_test.dart covers that separate contract.
         viewer: ViewerServices(
           config: AppConfig.dev,
           session: AuthSession(storage: MemoryStore()),
           keys: ViewerKeyStore(storage: MemoryStore()),
         ),
+        paneLayoutStore: PaneLayoutStore(storage: storage),
       ) {
     api = _Api();
     status = AppStatus.authenticated;
   }
   final WorkspaceAccountLogin cli;
   int get inventoryRequests => (api as _Api).inventoryRequests;
+  @override
+  Future<void> ensureCliDaemonReady() async {}
 
   Future<void> expire() async {
-    // Fork: a viewer probes no daemon, so the session ends the way a viewer
-    // meets it, at runtime, rather than through `ensureCliDaemonReady`.
-    signedOutAtRuntimeForTest();
+    handleAuthFailureForTest('You were signed out. Sign in again.');
   }
 }
 
@@ -127,6 +127,30 @@ Future<void> arrangeAccountWorkspace(WorkspaceAccountFixture app) async {
 }
 
 void main() {
+  test('REST expiry returns an unconnected browser to sign-in', () async {
+    final app = WorkspaceAccountFixture(MemoryStore(), WorkspaceAccountLogin());
+    addTearDown(app.dispose);
+    (app.api as _Api).inventoryFailure = DioException(
+      requestOptions: RequestOptions(path: '/api/machines'),
+      error: const DirectAuthException('Expired', signedOut: true),
+    );
+    expect(app.machineStates, isEmpty);
+    expect(await app.refreshMachines(), false);
+    expect(app.status, AppStatus.unauthenticated);
+  });
+
+  test('REST outage keeps the browser signed in and retryable', () async {
+    final app = WorkspaceAccountFixture(MemoryStore(), WorkspaceAccountLogin());
+    addTearDown(app.dispose);
+    (app.api as _Api).inventoryFailure = DioException(
+      requestOptions: RequestOptions(path: '/api/machines'),
+      type: DioExceptionType.connectionError,
+      error: const DirectAuthException('Sign-in service unavailable'),
+    );
+    await expectLater(app.refreshMachines(), throwsA(isA<DioException>()));
+    expect(app.status, AppStatus.authenticated);
+  });
+
   for (final expires in [false, true]) {
     test(
       '${expires ? 'expiry' : 'sign-out'} restores all tabs and their arrangement on sign-in',
@@ -184,10 +208,7 @@ void main() {
       expect(app.machineStates, isEmpty);
       expect(app.machinesAreStale, isFalse);
       expect(app.closedHistory, isEmpty);
-      expect(
-        app.lastError,
-        matches(RegExp('sign in again', caseSensitive: false)),
-      );
+      expect(app.lastError, contains('Sign in again'));
     },
   );
 

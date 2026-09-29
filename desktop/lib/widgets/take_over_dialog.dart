@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../shortcuts/app_keymap.dart';
+import '../state/swarm_navigation.dart' show externalEngineName;
 import '../state/take_over.dart';
 import '../terminal/terminal_text.dart';
 import 'box_chrome.dart';
@@ -62,11 +63,7 @@ class _TakeOverPromptState extends State<_TakeOverPrompt> {
 
   void _pick(TakeOver? choice) => Navigator.pop(context, choice);
 
-  String get _engineName => switch (widget.engine) {
-    'claude' => 'Claude Code',
-    'codex' => 'Codex',
-    final other => other,
-  };
+  String get _engineName => externalEngineName(widget.engine);
 
   @override
   Widget build(BuildContext context) {
@@ -113,8 +110,11 @@ class _TakeOverPromptState extends State<_TakeOverPrompt> {
                     const SizedBox(height: 8),
                     Text(
                       busy
-                          ? 'Wait moves it here when this turn ends. '
-                                'Take Over Now stops the turn and tells it to continue.'
+                          ? engineResumesWithMessage.contains(widget.engine)
+                                ? 'Wait moves it here when this turn ends. '
+                                      'Take Over Now stops the turn and tells it to continue.'
+                                : 'Wait moves it here when this turn ends. '
+                                      'Take Over Now stops the turn; it picks up when you ask.'
                           : 'The conversation is kept.',
                       style: boxMonoStyle(color: kBoxFaint),
                     ),

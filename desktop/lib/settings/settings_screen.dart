@@ -5,10 +5,12 @@ import '../analytics/analytics.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
 import '../widgets/harness_customize_pane.dart';
+import 'experimental_features.dart';
 import 'sections/about_section.dart';
 import 'sections/account_section.dart';
 import 'sections/debug_section.dart';
 import 'sections/devices_section.dart';
+import 'sections/experimental_section.dart';
 import 'sections/shortcuts_section.dart';
 import 'sections/tracking_section.dart';
 import 'sections/usage_section.dart';
@@ -31,6 +33,7 @@ Future<void> showSettingsScreen(
   BuildContext context,
   AppNotifier notifier, {
   SettingsSection? initialSection,
+  ExperimentalFeaturesStore? experimentalFeatures,
   // Which door opened Settings — see [AnalyticsEvents.screenView]. `required`,
   // because a pane reachable several ways is close to meaningless as a bare
   // count.
@@ -47,6 +50,7 @@ Future<void> showSettingsScreen(
       pageBuilder: (context, animation, _) => SettingsScreen(
         notifier: notifier,
         initialSection: initialSection,
+        experimentalFeatures: experimentalFeatures,
         source: source,
       ),
       transitionDuration: Duration.zero,
@@ -66,6 +70,7 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.notifier,
     this.initialSection,
+    this.experimentalFeatures,
     this.source = 'unknown',
   }) : assert(
          initialSection != SettingsSection.customize,
@@ -73,6 +78,7 @@ class SettingsScreen extends StatefulWidget {
        );
 
   final AppNotifier notifier;
+  final ExperimentalFeaturesStore? experimentalFeatures;
 
   /// The door that opened this screen, reported with the first `screen_view`.
   /// Defaulted only for tests that build the screen directly; every app door
@@ -162,6 +168,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: _SettingsBody(
                 section: _section,
                 notifier: widget.notifier,
+                experimentalFeatures: widget.experimentalFeatures,
               ),
             ),
           ],
@@ -176,10 +183,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
 /// Switch immediately, disposing the previous section instead of retaining it
 /// for a cross-fade while the new section starts its work.
 class _SettingsBody extends StatelessWidget {
-  const _SettingsBody({required this.section, required this.notifier});
+  const _SettingsBody({
+    required this.section,
+    required this.notifier,
+    this.experimentalFeatures,
+  });
 
   final SettingsSection section;
   final AppNotifier notifier;
+  final ExperimentalFeaturesStore? experimentalFeatures;
 
   @override
   Widget build(BuildContext context) {
@@ -190,6 +202,10 @@ class _SettingsBody extends StatelessWidget {
         'Customization opens over the workspace.',
       ),
       SettingsSection.notifications => const NotificationsSection(),
+      SettingsSection.experimental => ExperimentalSection(
+        store: experimentalFeatures ?? notifier.experimentalFeatures,
+        controller: notifier.swarmSettings,
+      ),
       SettingsSection.devices => const DevicesSection(),
       SettingsSection.shortcuts => const ShortcutsSection(),
       SettingsSection.debug => const DebugSection(),

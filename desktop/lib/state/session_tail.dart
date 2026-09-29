@@ -86,7 +86,12 @@ class SessionTail {
           (reply['external'] as Map)['open'] == true,
       openIn: switch (reply['external']) {
         {'openIn': final String where}
-            when where == 'terminal' || where == 'app' =>
+            when const {
+              'terminal',
+              'app',
+              'harness',
+              'maybe',
+            }.contains(where) =>
           where,
         _ => null,
       },

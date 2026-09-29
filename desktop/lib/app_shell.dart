@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart'
+    show kIsWeb, LicenseRegistry, LicenseEntryWithLineBreaks;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'analytics/analytics_lifecycle.dart';
 import 'core/crash_log.dart';
@@ -29,6 +32,8 @@ import 'shortcuts/keyboard_practice.dart';
 import 'widgets/shortcuts_sheet.dart';
 import 'widgets/update_notice.dart';
 import 'widgets/window_chrome.dart';
+import 'sharing/shared_agent_location.dart';
+import 'sharing/shared_agent_page.dart';
 
 /// The screen an app puts up once someone is signed in — the desktop's swarm of
 /// panes, or the phone's one-agent-at-a-time shell. It is the only thing the two
@@ -51,14 +56,22 @@ Future<void> startHarness({
   /// [TerminalTransportPlugin]); the desktop passes none.
   TerminalTransportPluginFactory? transportPlugins,
 }) async {
+  // Share links and OAuth own the browser URL. Flutter's default hash routing would
+  // erase the share's pinned identity on the first navigation or window resize.
+  if (kIsWeb) setUrlStrategy(null);
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks([
+      'Roboto Mono',
+    ], await rootBundle.loadString('assets/fonts/roboto-mono/OFL.txt'));
+  });
   harnessTransportPlugins = transportPlugins;
   // Before anything else can fail. The file sinks come first so CrashLog's own
   // install has somewhere to mirror to — see CrashLog.record.
   installFileLogs();
   CrashLog.install();
   appLog.info('app', 'launched');
-  final keymap = AppKeymap(store: AppKeymap.fileStore());
+  final keymap = AppKeymap(store: kIsWeb ? null : AppKeymap.fileStore());
   // Keyboard configuration has its own file and watchers. It can load beside
   // the appearance, but both must be ready before the window becomes usable.
   await Future.wait([loadPersistedSettings(), keymap.start()]);
@@ -91,6 +104,8 @@ class HarnessApp extends StatelessWidget {
     grid.AppTheme.palette.value = prefs.palette;
     return MaterialApp(
       title: 'Harness',
+      // OAuth callback paths are consumed by the sign-in adapter during boot.
+      initialRoute: '/',
       themeAnimationDuration: Duration.zero,
       // Flutter's DEBUG ribbon stays on a debug build: it is how a locally built
       // app is told apart from the installed release at a glance (owner,
@@ -165,10 +180,12 @@ class RootShell extends ConsumerStatefulWidget {
 class _RootShellState extends ConsumerState<RootShell>
     with WidgetsBindingObserver {
   bool _menuDialogOpen = false;
+  SharedAgentLocation? _sharedLocation;
 
   @override
   void initState() {
     super.initState();
+    if (kIsWeb) _sharedLocation = SharedAgentLocation.parse(Uri.base);
     WidgetsBinding.instance.addObserver(this);
     _appMenuChannel.setMethodCallHandler(_onAppMenu);
   }
@@ -237,7 +254,7 @@ class _RootShellState extends ConsumerState<RootShell>
     return ListenableBuilder(
       listenable: app,
       builder: (context, _) {
-        final Widget screen;
+        Widget screen;
         switch (app.status) {
           case AppStatus.bootstrapping:
             // `bootstrapping` covers two unrelated moments: the app starting
@@ -270,6 +287,12 @@ class _RootShellState extends ConsumerState<RootShell>
             screen = LoginScreen(notifier: app);
           case AppStatus.authenticated:
             screen = widget.authenticatedScreen(app);
+        }
+        // Preserve the fragment pin while dialogs navigate; an OAuth callback can restore it later.
+        if (kIsWeb) _sharedLocation ??= SharedAgentLocation.parse(Uri.base);
+        final shared = _sharedLocation;
+        if (shared != null) {
+          screen = SharedAgentPage(app: app, location: shared);
         }
         // Only the home shell carries its own drag handle and traffic-light
         // clearance (the rail's head). Every other screen fills the window

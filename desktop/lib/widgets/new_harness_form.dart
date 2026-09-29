@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +13,7 @@ import '../terminal/terminal_text.dart';
 import '../terminal/terminal_theme.dart';
 import '../terminal/terminal_theme_store.dart';
 import '../state/new_harness.dart';
+import '../state/device_form.dart';
 import 'box_chrome.dart' show kTerminalCornerRadius, terminalPaneBorder;
 import 'dsh_install_panel.dart' show describeInstallFailure;
 
@@ -28,6 +30,7 @@ class NewHarnessForm extends StatefulWidget {
     this.onStore,
     this.onLinkProfile,
     this.onNeedsForm,
+    this.devicePort,
   });
 
   final NewHarnessController controller;
@@ -35,6 +38,7 @@ class NewHarnessForm extends StatefulWidget {
   final VoidCallback onCreated;
   final FutureOr<void> Function()? onBrowse;
   final VoidCallback? onStore, onLinkProfile, onNeedsForm;
+  final DeviceFormPort? devicePort;
 
   @override
   State<NewHarnessForm> createState() => _NewHarnessFormState();
@@ -91,6 +95,7 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
     super.initState();
     _observedField = box.field;
     box.addListener(_onBox);
+    widget.devicePort?.attach(_deviceSnapshot, _deviceAction);
     // The pane colours can change under an open dialog; it wears them too.
     terminalThemeStore.addListener(_onBox);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -103,6 +108,7 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
 
   @override
   void dispose() {
+    widget.devicePort?.detach();
     box.removeListener(_onBox);
     terminalThemeStore.removeListener(_onBox);
     _inputFocus.dispose();
@@ -223,6 +229,125 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
     _Row.profile => box.profileLabel ?? 'Default',
     _Row.start => box.checking ? 'Check status' : _label(row),
   };
+
+  // These leave this form for a native sheet, account flow or another route.
+  // Until those surfaces have a semantic remote, keep them explicit on desktop.
+  static const _desktopDoors = {
+    NewHarnessController.browseId,
+    NewHarnessController.linkProfileId,
+    NewHarnessController.storeId,
+    NewHarnessController.manageModelsId,
+  };
+
+  // Names in existing lists, never a shell command, folder path or repository
+  // URL. Speaking filters; choosing and creating remain distinct gestures.
+  static const _voiceSearchFields = {
+    NewHarnessField.harness, NewHarnessField.agent, NewHarnessField.projectMenu,
+    NewHarnessField.machine, NewHarnessField.model, NewHarnessField.branch,
+    NewHarnessField.profile, NewHarnessField.mode,
+  };
+
+  Map<String, dynamic> _deviceSnapshot() {
+    final option = _picking ? box.selected : null;
+    final rows = _rows;
+    final index = _picking ? box.cursor : rows.indexOf(_row);
+    final count = _picking ? box.options.length : rows.length;
+    String at(int i) => i < 0 || i >= count
+        ? ''
+        : _picking
+        ? box.options[i].title
+        : _label(rows[i]);
+    final blocked = _blocked(_row);
+    final desktop = option != null && _desktopDoors.contains(option.id);
+    return {
+      'active': true,
+      'title': _picking ? _label(_row) : 'New Harness',
+      'label': _picking ? option?.title ?? 'No matches' : _label(_row),
+      'detail': _picking
+          ? option?.detail ?? ''
+          : _row == _Row.start
+          ? '${box.launchAgentLabel}\n${box.launchProjectLabel}'
+          : _value(_row),
+      'previous': at(index - 1),
+      'next': at(index + 1),
+      'position': index < 0 ? 0 : index + 1,
+      'total': count,
+      'busy': box.busy || box.linkingProfile,
+      'canQuery': !box.locked && !_isComposing() && _fieldOf(_row) != null &&
+          blocked == null && _voiceSearchFields.contains(box.field),
+      'query': box.query,
+      'enabled':
+          !box.busy &&
+          !box.linkingProfile &&
+          blocked == null &&
+          !desktop &&
+          (!_picking || option?.enabled == true),
+      'action': _picking
+          ? 'choose'
+          : _row == _Row.start
+          ? box.checking
+                ? 'check status'
+                : 'start'
+          : _row == _Row.worktree || _row == _Row.advanced
+          ? 'toggle'
+          : 'open',
+      'error':
+          box.error ??
+          (desktop
+              ? 'Continue on desktop for this choice.'
+              : blocked ?? (option?.enabled == false ? option?.why : null)) ??
+          '',
+      'status': box.status ?? '',
+      // Full identities and launch settings stay in the revision guard. A
+      // short device label cannot authorize a different same-named project.
+      'guard': jsonEncode([
+        box.field.name,
+        option?.id,
+        option?.machineId,
+        option?.project?.folder,
+        option?.project?.repository?.url,
+        option?.project?.name,
+        box.machineId,
+        box.engine,
+        box.harnessId,
+        box.project.folder,
+        box.project.repository?.url,
+        box.project.name,
+        box.mode,
+        box.model?.id,
+        box.model?.grid,
+        box.model?.node,
+        box.draft.profile?.path,
+        box.branchRef,
+        box.branchRowLabel,
+        box.worktree,
+        box.task,
+      ]),
+    };
+  }
+
+  void _deviceAction(String op, int delta, String? text) {
+    if (!mounted || _isComposing()) return;
+    if (op == 'back') {
+      _cancel();
+    } else if (op == 'close') {
+      if (box.requestDismiss()) widget.onClose();
+    } else if (op == 'move') {
+      if (!box.locked) _picking ? _stepMatch(delta) : _moveRow(delta);
+    } else if (op == 'activate') {
+      if (_deviceSnapshot()['enabled'] == true) _confirm();
+    } else if (op == 'query' && _deviceSnapshot()['canQuery'] == true && text != null) {
+      // A recognizer often adds a final period to a spoken name. Preserve the
+      // name, Unicode and internal punctuation; never interpret it as a command.
+      final query = text.replaceAll(RegExp(r'[\r\n]+'), ' ').trim()
+          .replaceFirst(RegExp(r'[.!?。！？]+$'), '').trim();
+      if (query.isNotEmpty) _onTyped(query);
+    }
+    if (mounted) {
+      _focusEditor();
+      _revealRow();
+    }
+  }
 
   /// Focusing a row focuses the field it edits, so the controller's option
   /// list — and therefore ← and → — is already the right one.
@@ -533,6 +658,8 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
     WidgetsBinding.instance.scheduleFrame();
   }
 
+  bool _checkingLaunch = false;
+
   Future<void> _start() async {
     if (box.busy) return;
     if (box.requiredChoice case final choice?) {
@@ -543,6 +670,7 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
       _revealRow();
       return;
     }
+    _checkingLaunch = box.checking;
     final outcome = await box.create();
     if (!mounted) return;
     switch (outcome) {
@@ -1057,13 +1185,16 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
   /// The launch action uses plain text on the label column and the same
   /// single-row highlight as the fields. It is selected when the form opens.
   Widget _buildButton() {
-    final on = _row == _Row.start && !_picking;
-    final label = _value(_Row.start);
+    final on = box.busy || (_row == _Row.start && !_picking);
+    final label = box.busy
+        ? (_checkingLaunch ? 'Checking...' : 'Starting...')
+        : _value(_Row.start);
     return Semantics(
       key: const ValueKey('new-harness-field-start'),
       container: true,
       button: true,
       label: label,
+      liveRegion: box.busy,
       excludeSemantics: true,
       selected: on,
       enabled: !box.busy && !box.linkingProfile && box.requiredChoice == null,
@@ -1085,17 +1216,19 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
             padding: EdgeInsets.symmetric(horizontal: _margin),
             height: _rowHeight,
             alignment: Alignment.centerLeft,
-            child: Text(
-              label,
-              maxLines: 1,
-              softWrap: false,
-              overflow: TextOverflow.clip,
-              style: _ink(
-                box.requiredChoice != null || _picking
-                    ? _faint
-                    : _theme.foreground,
-              ),
-            ),
+            child: box.busy
+                ? _LaunchProgress(label: label, style: _ink(_theme.foreground))
+                : Text(
+                    label,
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.clip,
+                    style: _ink(
+                      box.requiredChoice != null || _picking
+                          ? _faint
+                          : _theme.foreground,
+                    ),
+                  ),
           ),
         ),
       ),
@@ -1257,6 +1390,8 @@ class _NewHarnessFormState extends State<NewHarnessForm> {
                     : 'The first install takes a few minutes.',
                 color: _faint,
               ),
+              SizedBox(height: _rowHeight),
+              _buildButton(),
             ],
           ),
         ),
@@ -1697,4 +1832,51 @@ class _ElapsedState extends State<_Elapsed> {
       style: widget.style,
     );
   }
+}
+
+/// Animate only the busy action, at terminal speed, without rebuilding the form.
+class _LaunchProgress extends StatefulWidget {
+  const _LaunchProgress({required this.label, required this.style});
+
+  final String label;
+  final TextStyle style;
+
+  @override
+  State<_LaunchProgress> createState() => _LaunchProgressState();
+}
+
+class _LaunchProgressState extends State<_LaunchProgress> {
+  static const _frames = ['|', '/', '-', '\\'];
+  Timer? _timer;
+  int _frame = 0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context) ||
+        !TickerMode.valuesOf(context).enabled) {
+      _timer?.cancel();
+      _timer = null;
+    } else {
+      _timer ??= Timer.periodic(const Duration(milliseconds: 160), (_) {
+        setState(() => _frame = (_frame + 1) % _frames.length);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(
+    '${_frames[_frame]} ${widget.label}',
+    key: const ValueKey('new-harness-progress'),
+    maxLines: 1,
+    softWrap: false,
+    overflow: TextOverflow.clip,
+    style: widget.style,
+  );
 }

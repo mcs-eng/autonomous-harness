@@ -93,10 +93,31 @@ its consumer is now the `harness` installer rather than this app.
 
 ## Architecture
 
-### The app talks only to the local `harness` CLI
+### One Flutter UI, native and browser transports
 
-This is the single most important thing to know. The desktop app **never** dials the cloud backend or
-holds an SSO token:
+`flutter build web` builds the same `lib/main.dart` and workspace as desktop.
+Do not fork screens or create a second frontend. `kViewerMode` is true on the web:
+the browser owns its OAuth session, peer links, and end-to-end relay encryption.
+`viewer/browser_login.dart` validates the same-tab callback against the backend's
+PKCE transaction; conditional adapters handle storage and native-only services.
+`platform_auth_web.dart` serializes shared login/refresh/logout with Web Locks
+and reloads other tabs when the account changes. Auth and E2EE keys persist in
+origin-local storage; only the OAuth transaction is in session storage.
+Shared sessions use `ObserverRelayCodec` and `/api/observer-ws`, verifying the
+owner and permitting only observation and authenticated comments. `/s/:id#key=…`
+opens `SharedAgentPage` without restoring the visitor's workspace. Public links
+allow anonymous viewing; private links require an invited account. Preserve the
+fragment identity pin through sign-in and reload: `startHarness` disables Flutter
+hash routing, while the sign-in adapter owns the callback and return URL.
+The owner daemon stores comments and enforces link/invitation access on every
+request. Reuse `ShareHarnessDialog` and `HarnessComments` for both app targets.
+See [README.md](README.md#web-development) for origin setup, browser storage
+lifetime, capability limits, and Chrome checks. Browser tests must set
+`--dart-define=HARNESS_TEST=true` so no production pollers or analytics run.
+
+### Native desktop talks to the local `harness` CLI
+
+The native desktop target uses the CLI for cloud access and SSO tokens:
 
 - **Auth** lives in the CLI. `lib/auth/cli_login.dart` shells out to `harness auth status --json` and
   drives `harness login --json` (NDJSON event stream); `cli_link.dart` wraps `harness link create/import/list`.
@@ -137,7 +158,7 @@ holds an SSO token:
   socket file exists, so a daemon restart does not strand the app on TCP. Windows and paths over 96
   bytes have no socket. The CLI, engine hooks and the dashboard stay on TCP. Under `flutter test`
   `LocalDaemonTransport.detect` finds no socket, so tests never reach a real daemon.
-- The **only** direct-to-backend path is `LocalManualFixture` (`lib/main_local_manual.dart`), a
+- Besides viewer builds, a direct-to-backend test path is `LocalManualFixture` (`lib/main_local_manual.dart`), a
   compile-time-gated dev entrypoint fed by `scripts/start-terminal-local-manual.sh`. It fails closed
   unless every `--dart-define` is present.
 
@@ -196,6 +217,14 @@ Widgets receive `notifier` explicitly and rebuild via `ListenableBuilder`; River
 injection point (`main_local_manual.dart` overrides it). `bootstrap()` → `_prepareEnvironment()` →
 `cliLogin.checkStatus()` → `_finishBootstrapSignedIn()` (restore pane layout, create `WsPool`, ensure
 the daemon, `api.me()`, `refreshMachines()`).
+
+Experimental switches are account state. `AppNotifier.experimentalFeatures` binds after `api.me()`
+identifies the account, clears on sign-out/account change, and rejects stale responses. It uses
+`/api/experimental-settings`, refreshes on account invalidations and a 30-second fallback poll, and
+shows changes only after server acknowledgement. Do not restore the old unscoped local keys at startup.
+Swarm collaboration keeps its existing account settings RPC. The creature switch opens the account's
+`ZooController` collection; disabling it hides the creature without deleting eggs, individuals or progress.
+Window-only preview collections are test/render fixtures, not a user setting.
 
 Per-machine runtime state is `MachineState` (connection status, transport mode, agents, `nodeOnline`
 from `node_status` pushes — distinct from our own socket status, pending offline agent, turn activity).
@@ -256,8 +285,8 @@ its headless debug timings do not establish native display or network latency.
   `grid.AppTheme.brightness`, which `_GridTokenScope` in `main.dart` sets from `Theme.of(context)`.
   Chrome widgets call `grid.AppTheme.watch(context)` at the top of `build` so `const` subtrees still
   repaint on a theme flip.
-- The [workspace status bar](design/workspace-status-bar.md) places compact numbered tabs on the left
-  and focused-pane context on the right. Automatic names use the strongest shared harness type,
+- The [workspace status bar](design/workspace-status-bar.md) places compact numbered tabs and global actions at the top,
+  with focused machine/repo/branch/PR at the bottom left and the model at the bottom right. Automatic names use the strongest shared harness type,
   project, or machine, preferring traits that distinguish tabs and excluding dependent viewers.
   The context follows a viewer's owner and uses the compact project label, never a worktree path
   or marker. User-renamed tabs always retain their saved name. Customize Harness → Status

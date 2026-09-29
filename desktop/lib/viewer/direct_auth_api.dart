@@ -1,16 +1,18 @@
 import 'package:dio/dio.dart';
 
 import '../api/api_client.dart';
+import '../api/access_token_source.dart';
 import '../core/config.dart';
 import '../logging/http_log.dart';
 
 /// A sign-in or refresh that produced no usable session.
-class DirectAuthException implements Exception {
+class DirectAuthException implements AccessTokenFailure {
   const DirectAuthException(this.message, {this.signedOut = false});
 
   final String message;
 
   /// The session is gone for good: retrying cannot help, only signing in again.
+  @override
   final bool signedOut;
 
   @override
@@ -78,13 +80,39 @@ class DirectAuthApi {
     final data = unwrapApiResponse(
       await _dio.post(
         '/api/auth/authorize-native',
-        data: {'redirectUri': redirectUri, 'autonomousEnv': config.autonomousEnv},
+        data: {
+          'redirectUri': redirectUri,
+          'autonomousEnv': config.autonomousEnv,
+        },
       ),
     );
     final url = data is Map ? data['authorizeUrl'] : null;
     final tx = data is Map ? data['tx'] : null;
     if (url is! String || url.isEmpty || tx is! String || tx.isEmpty) {
-      throw const DirectAuthException('The server did not return a sign-in page.');
+      throw const DirectAuthException(
+        'The server did not return a sign-in page.',
+      );
+    }
+    return (authorizeUrl: url, tx: tx);
+  }
+
+  Future<({String authorizeUrl, String tx})> authorizeWeb(String origin) async {
+    final data = unwrapApiResponse(
+      await _dio.post(
+        '/api/auth/authorize',
+        data: {
+          'origin': origin,
+          'next': '/',
+          'autonomousEnv': config.autonomousEnv,
+        },
+      ),
+    );
+    final url = data is Map ? data['authorizeUrl'] : null;
+    final tx = data is Map ? data['tx'] : null;
+    if (url is! String || url.isEmpty || tx is! String || tx.isEmpty) {
+      throw const DirectAuthException(
+        'The server did not return a sign-in page.',
+      );
     }
     return (authorizeUrl: url, tx: tx);
   }

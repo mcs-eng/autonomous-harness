@@ -74,6 +74,18 @@ const CODEX_BASE_URL = /model_providers\.[A-Za-z0-9_-]+\.base_url=(?:"([^"]+)"|(
 const ARGV_MODEL = /(?:^|\s)-m\s+(\S+)/
 
 /**
+ * Endpoints of the APIs saved on this computer (`apiModels.ts`), in both forms an engine is handed
+ * (`relayBaseUrl` and `anthropicBaseUrl`). An agent the person moved onto one of them was sent there
+ * deliberately, so it reports that model like a grid agent does. Only added to: an agent left on an
+ * API after its connection is removed is still on it.
+ */
+const apiBases = new Set<string>()
+
+export function rememberApiBase(baseUrl: string): void {
+  for (const form of [relayBaseUrl(baseUrl), anthropicBaseUrl(baseUrl)]) apiBases.add(form)
+}
+
+/**
  * A base URL that is not a grid is not an assignment.
  *
  * An agent can be pointed somewhere else entirely — OpenRouter through `ori`, a corporate proxy, a
@@ -81,6 +93,7 @@ const ARGV_MODEL = /(?:^|\s)-m\s+(\S+)/
  * away from a place the user deliberately sent it.
  */
 function isGridUrl(value: string): boolean {
+  if (apiBases.has(value.trim().replace(/\/+$/, ''))) return true
   try {
     // The relay always lives under `/relay`, whatever host serves it — that is the one part of the
     // shape the control plane and both CLIs agree on (`<grid>/relay` for Messages, `/relay/v1` for

@@ -1,7 +1,7 @@
 // The dial's own settings, in NVS.
 //
-// Four things, and that is the whole list: screen brightness, the voice language, the screen-lock pattern,
-// and nothing else. Everything this file used to hold — the WiFi networks, the backend URL, the device
+// Local display, sound, gesture, voice-language and screen-lock preferences. Everything this file
+// used to hold — the WiFi networks, the backend URL, the device
 // token, the SDS provisioning blob, the E2EE identity and its pinned peers, the last-selected machine —
 // existed so the device could find a network and prove who it was to a backend. A cable answers both, and
 // the account lives on the computer at the other end of it.
@@ -19,6 +19,19 @@ void config_store_init(void);
 // Screen brightness, 0..100. The dim overlay is applied by the UI; this only remembers the level.
 uint8_t config_load_brightness(void);
 void    config_save_brightness(uint8_t level);
+
+// Habitat starts muted. The saved preference survives firmware updates.
+bool config_load_muted(void);
+bool config_save_muted(bool muted);
+
+// Local Habitat experiments: bit 0 = legacy focus face, bit 1 = rim scroll,
+// bit 2 = quiet reactions, bit 3 = straight title (default: curved).
+uint8_t config_load_habitat_options(void);
+bool config_save_habitat_options(uint8_t options);
+
+// Stable character id. Missing values use the image's default; the UI validates ids.
+uint8_t config_load_habitat_character(uint8_t fallback);
+bool config_save_habitat_character(uint8_t character);
 
 // The voice language the dial captures in. The daemon PROPOSES one from the computer's locale on every
 // `welcome`; once the user has picked here, this wins — the person holding the dial may well speak

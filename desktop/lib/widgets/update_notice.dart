@@ -301,6 +301,7 @@ Future<void> showUpdateCheckDialog(
   AppNotifier notifier,
   ManualUpdateCheck result,
 ) {
+  Future<String>? installedVersion;
   return showAppDialog<void>(
     context: context,
     builder: (dialogContext) {
@@ -355,11 +356,16 @@ Future<void> showUpdateCheckDialog(
           }
           final update = current.update;
           if (update == null) {
-            return const _UpdateDialog(
-              icon: LucideIcons.circleCheck300,
-              tone: _DialogTone.ok,
-              title: 'You’re up to date',
-              body: 'This copy of Harness already has the latest version.',
+            return FutureBuilder<String>(
+              future: installedVersion ??= runningAppVersion(),
+              builder: (context, snapshot) => _UpdateDialog(
+                icon: LucideIcons.circleCheck300,
+                tone: _DialogTone.ok,
+                title: 'You’re up to date',
+                body: snapshot.hasData
+                    ? 'Harness ${snapshot.data} is the latest version.'
+                    : 'This copy of Harness already has the latest version.',
+              ),
             );
           }
           return PopScope(

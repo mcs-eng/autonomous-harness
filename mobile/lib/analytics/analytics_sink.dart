@@ -117,52 +117,6 @@ class MutedAnalytics implements Analytics {
   Future<void> close() async {}
 }
 
-/// What the Tracking screen's header card reports: where events go, whether
-/// they are going at all, and the two ids they are filed under.
-@immutable
-class AnalyticsStreamStatus {
-  const AnalyticsStreamStatus({
-    required this.endpoint,
-    required this.offReason,
-    required this.deviceId,
-    required this.sessionId,
-  });
-
-  final Uri endpoint;
-
-  /// Why nothing is being sent, or null when the stream is live.
-  final String? offReason;
-
-  final String deviceId;
-
-  /// Empty until the first event of a launch has been tracked.
-  final String sessionId;
-
-  bool get enabled => offReason == null;
-}
-
-/// Reads the live configuration and the ids on disk.
-///
-/// Injected into the Tracking screen the way `probeDebugEnvironment` is into
-/// Settings ▸ Debug, and for the same reason: this reads a real `~/.harness`,
-/// which a test must not.
-///
-/// The opt-out is checked here as well as in [_build] — a card that said
-/// "Reporting" over a stream the user switched off would be the dishonest
-/// label this screen exists to prevent.
-AnalyticsStreamStatus probeAnalyticsStatus() {
-  final config = AnalyticsConfig.resolve();
-  final store = AnalyticsIdentityStore();
-  final ids = store.peek();
-  final optedOut = store.optedOut ? kAnalyticsOptedOutReason : null;
-  return AnalyticsStreamStatus(
-    endpoint: config.endpoint,
-    offReason: config.offReason ?? optedOut,
-    deviceId: ids.pseudoId,
-    sessionId: ids.sessionId,
-  );
-}
-
 /// Who events are filed under.
 ///
 /// `AppNotifier` writes it when sign-in resolves and clears it on sign-out; the

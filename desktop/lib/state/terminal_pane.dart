@@ -74,6 +74,9 @@ class TerminalPane {
   bool claimOnFirstAttach = false;
 
   TerminalSession? session;
+
+  /// Browser viewer input, installed only while its renderer is mounted.
+  bool Function()? focusViewerInput;
   SharedHarness? sharedHarness;
   String? sharedOwnerName;
 

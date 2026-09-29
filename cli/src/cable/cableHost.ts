@@ -12,13 +12,18 @@ import { join } from 'node:path'
 
 import { AuthSessionManager, readAuthSession } from '../lib/authSession.js'
 import { registry, projectDisplayName, type RegisteredSession } from '../lib/registry.js'
-import { fetchRelease, loadImage, shouldOffer } from './fwPush.js'
+import { fetchRelease, loadImage, otaKeyForBoard, shouldOffer } from './fwPush.js'
 import { routeVoiceTask, type RouterAgent, type RouterContinuity } from '../lib/voiceRouter.js'
 import { env } from '../config/env.js'
+import { extendShortRecap } from '../lib/deviceRecap.js'
 
-import type { AppSwarms, CableAgent, CableHost, CableMachine, CableMachineSource, CableSwarm, DialStatus, OpenReason, RouteDecision } from './cableSession.js'
+import type { AppSwarms, CableAgent, CableHost, CableMachine, CableMachineSource, CableSwarm, CableTile, DialStatus, OpenReason, RouteDecision } from './cableSession.js'
 import type { WindowRoute } from './windowRoute.js'
+import type { SelectionCommand, SelectionResult } from './windowSelection.js'
+import type { VisitCommand, VisitResult } from './windowVisit.js'
+import type { FormCommand, FormResult } from './windowForm.js'
 import { FleetError, type FleetMachine, type MachineFleet } from './machineFleet.js'
+import type { ReviewedAnswer, AnswerReceipt } from './questionInbox.js'
 
 /** One completed turn's recap, as the mirror keeps them. */
 
@@ -30,6 +35,8 @@ export interface RecentTurn {
 }
 
 export interface CableHostWiring {
+  /** Exact live terminal footer for a local agent; absent when no footer is visible. */
+  activityText?: (agentId: string) => Promise<string | null>
   /** The person's own last questions to a LOCAL agent, newest first. */
   recentAsks: (agentId: string) => string[]
   machineName: () => string
@@ -44,6 +51,7 @@ export interface CableHostWiring {
   sendTurn: (agentId: string, text: string) => void
   stopTurn: (agentId: string) => void
   answer: (agentId: string, requestId: string, answers: Record<string, string>) => void
+  answerReviewed?: (answer: ReviewedAnswer) => Promise<boolean>
   /** Recaps of an agent's last `n` completed turns — for routing, and for redrawing a reattached dial. */
   recent: (agentId: string, n: number) => RecentTurn[]
   /** The opaque runtime-v1 profile, which is where the dial's Model/Effort chips come from. */
@@ -70,6 +78,12 @@ export interface CableHostWiring {
   dialStatus?: (status: DialStatus) => void
   /** Offer a spoken task to the desktop window's palette. Omitted when there is no window plumbing. */
   routeInWindow?: (text: string, cmd?: string) => Promise<WindowRoute>
+  selectPassage?: (command: SelectionCommand) => Promise<SelectionResult>
+  clearSelection?: () => void
+  visit?: (command: VisitCommand) => Promise<VisitResult>
+  clearVisit?: () => void
+  form?: (command: FormCommand) => Promise<FormResult>
+  clearForm?: () => void
   log: (line: string) => void
 }
 
@@ -259,6 +273,9 @@ export class DaemonCableHost implements CableHost {
    * a screen that is not there.
    */
   onDialGone(): void {
+    this.wiring.clearSelection?.()
+    this.wiring.clearVisit?.()
+    this.wiring.clearForm?.()
     this.fleet?.release(true)
   }
 
@@ -275,6 +292,10 @@ export class DaemonCableHost implements CableHost {
 
   currentDialStatus(): DialStatus {
     return this.dialStatusNow
+  }
+
+  selectPassage(command: SelectionCommand): Promise<SelectionResult> {
+    return this.wiring.selectPassage?.(command) ?? Promise.resolve({ ok: false, error: 'Update Harness to select text.' })
   }
 
   machineName(): string {
@@ -392,12 +413,13 @@ export class DaemonCableHost implements CableHost {
     return this.unread
   }
 
-  listSwarms(): { selected: string; swarms: CableSwarm[] } {
+  listSwarms(): { selected: string; swarms: CableSwarm[]; tiles: CableTile[] } {
     const app = this.swarms
-    if (!app) return { selected: '', swarms: [] }
+    if (!app) return { selected: '', swarms: [], tiles: [] }
     return {
       selected: app.active,
       swarms: app.swarms.map((s) => ({ id: s.id, name: s.name, agents: s.agentIds.length, panes: s.panes })),
+      tiles: app.tiles,
     }
   }
 
@@ -427,21 +449,29 @@ export class DaemonCableHost implements CableHost {
    *                                          is held from `knownAgents` (see listAgentsFlat).
    */
   async listAgents(): Promise<CableAgent[]> {
+    return (await this.listAgentSnapshot()).agents
+  }
+
+  async listAgentSnapshot(): Promise<{ agents: CableAgent[]; tab: string; total: number }> {
     const flat = await this.listAgentsFlat()
     const byId = new Map(flat.map((a) => [a.id, a]))
-    const out = this.swarms === null
-      ? []
-      : this.desk.map((id) => byId.get(id)).filter((a): a is CableAgent => !!a)
+    // app_panes and app_swarms are separate messages. Never label the new panes
+    // with the previous tab (or vice versa) between those two arrivals. The
+    // swarm announcement already contains membership in the same tile order.
+    const app = this.swarms
+    const tab = app?.active ?? ''
+    const ids = app?.swarms.find(s => s.id === tab)?.agentIds ?? []
+    const out = ids.map(id => byId.get(id)).filter((a): a is CableAgent => !!a)
     // One line per CHANGE. The failure this catches is silent by nature: tiles whose ids this daemon does
     // not know drop out of the list, which looks exactly like the window never having opened them.
-    const shape = this.swarms === null
+    const shape = app === null
       ? '(no window)'
       : out.length ? out.map((a) => a.id.slice(0, 4)).join(' ') : '(empty tab)'
     if (shape !== this.deskShape) {
       this.deskShape = shape
       this.wiring.log(`cable: tab ${shape} · ${flat.length} in all`)
     }
-    return out
+    return { agents: out, tab, total: this.flatCount }
   }
 
   /** How many agents the account has across every machine — the overview's number, sent beside the
@@ -470,6 +500,11 @@ export class DaemonCableHost implements CableHost {
     const machineId = this.seenOn.get(agentId)
     const machine = machineId ? this.machineNames.get(machineId) ?? '' : ''
     return machineId ? { name: '', engine: '', machine } : undefined
+  }
+
+  async activityText(agentId: string): Promise<string | null> {
+    if (!this.isLocalAgent(agentId)) return null
+    return await this.wiring.activityText?.(agentId) ?? null
   }
 
   /**
@@ -567,6 +602,17 @@ export class DaemonCableHost implements CableHost {
     }
     this.wiring.log(`cable: open ${machineId}/${agentId} (${reason ?? 'notification'})`)
     this.wiring.opened?.(machineId, agentId, reason)
+  }
+
+  form(command: FormCommand): Promise<FormResult> {
+    return this.wiring.form?.(command) ?? Promise.resolve({ ok: false, active: false, error: 'Update Harness for New Harness.' })
+  }
+
+  visit(command: VisitCommand): Promise<VisitResult> {
+    const machineId = command.agentId ? this.machineOf(command.agentId) : undefined
+    if ((command.op === 'open' || command.op === 'latest') && !machineId) return Promise.resolve({ ok: false, active: false, error: 'That agent is no longer available.' })
+    return this.wiring.visit?.({ ...command, machineId }) ??
+      Promise.resolve({ ok: false, active: false, error: 'Update Harness to visit an alert.' })
   }
 
   /**
@@ -731,6 +777,33 @@ export class DaemonCableHost implements CableHost {
     this.wiring.stopTurn(agentId)
   }
 
+  canSpeakQuestion(agentId: string): boolean {
+    // Remote receiver capabilities are not negotiated yet; no free-text fallback.
+    return this.knows(agentId) && this.isLocalAgent(agentId) && !!this.wiring.answerReviewed
+  }
+
+  async answerReviewed(answer: ReviewedAnswer): Promise<AnswerReceipt> {
+    if (answer.freeTextKeys?.length && !this.canSpeakQuestion(answer.agentId))
+      return { ok: false, error: 'Use the terminal to type this answer.' }
+    if (!this.isLocalAgent(answer.agentId)) {
+      const machineId = this.machineOf(answer.agentId)
+      if (!machineId || !this.fleet || this.fleet.reachable?.(machineId)?.ok === false) {
+        return { ok: false, error: 'That machine is unavailable. Check its connection.' }
+      }
+      // Older remote drivers split multi-select labels on commas. Do not lose
+      // a selected label when that receiver cannot prove support for exact arrays.
+      if (answer.questions.some(q => q.multi && answer.selections[q.key]?.some(label => label.includes(',')))) {
+        return { ok: false, error: 'Use the terminal for this multi-select answer.' }
+      }
+      if (this.fleet.answerReviewed) this.fleet.answerReviewed(machineId, answer)
+      else this.fleet.answer(machineId, answer.agentId, answer.requestId, answer.answers)
+      return { ok: true, pending: true } // Handoff only; the dialog's close is authoritative.
+    }
+    if (!this.wiring.answerReviewed) return { ok: false, error: 'Update Harness to answer this question.' }
+    const ok = await this.wiring.answerReviewed(answer)
+    return ok ? { ok: true } : { ok: false, error: 'Could not confirm the answer. Check the terminal.' }
+  }
+
   answer(agentId: string, requestId: string, answers: Record<string, string>): void {
     if (!this.isLocalAgent(agentId)) { this.fleet!.answer(this.machineOf(agentId), agentId, requestId, answers); return }
     this.wiring.answer(agentId, requestId, answers)
@@ -802,7 +875,7 @@ export class DaemonCableHost implements CableHost {
       ? this.wiring.recent(agentId, 3)
       : await this.fleet!.recentSummaries(this.machineOf(agentId), agentId)
     return raw
-      .map((r) => ({ recap: r?.recap ?? '', text: r?.text ?? '', ask: r?.ask ?? '' }))
+      .map((r) => ({ recap: extendShortRecap(r?.recap ?? '', r?.text ?? ''), text: r?.text ?? '', ask: r?.ask ?? '' }))
       .filter((s) => s.recap || s.text || s.ask)
   }
 
@@ -831,13 +904,24 @@ export class DaemonCableHost implements CableHost {
   /**
    * The image to offer, or null for "nothing to do".
    *
-   * Null covers three different situations on purpose, because the dial reacts to all of them the same
-   * way — by carrying on: the dial is current, it is running a dev build that must not be touched, or the
-   * manifest is unreachable. An update is an opportunity here, never a condition of working.
+   * Null covers four different situations on purpose, because the device reacts to all of them the same
+   * way — by carrying on: it is current, it is running a dev build that must not be touched, the manifest
+   * is unreachable, or WE DO NOT KNOW WHICH BOARD THIS IS. An update is an opportunity here, never a
+   * condition of working.
+   *
+   * That fourth case is the one with teeth. The manifest has always been per-board, but this call used to
+   * take the default key and so always resolved the round dial's entry — harmless while a dial was the
+   * only thing that could plug in, and a brick the moment a Pro could: its ESP32-P4 cannot run an
+   * ESP32-S3 image, and the cable that would let us put it right is the firmware that just stopped.
    */
-  async firmwareFor(runningVersion: string): Promise<{ version: string; image: Buffer; sha256: string } | null> {
+  async firmwareFor(runningVersion: string, hw?: string): Promise<{ version: string; image: Buffer; sha256: string } | null> {
     if (env.CABLE_FW_DISABLE) return null
-    const release = await fetchRelease(env.CABLE_FW_MANIFEST_URL)
+    const key = otaKeyForBoard(hw)
+    if (!key) {
+      this.log(`cable: not offering firmware — unknown board "${hw}"`)
+      return null
+    }
+    const release = await fetchRelease(env.CABLE_FW_MANIFEST_URL, key)
     if (!release || !shouldOffer(runningVersion, release.version)) return null
     const image = await loadImage(release, join(env.ADAPTER_DATA_DIR, 'firmware'))
     if (!image) return null
@@ -943,10 +1027,17 @@ export class DaemonCableHost implements CableHost {
       // `failedToken` is what makes this one refresh rather than a loop: the manager only refreshes when
       // the token that failed is still the current one, so two callers racing a stale token do not each
       // burn a refresh.
-      token = await auth.accessToken({ failedToken: token })
+      await res.body?.cancel()
+      token = await auth.accessToken({ force: true, failedToken: token })
       res = await post(token)
     }
-    if (!res.ok) throw new Error(`Transcription failed (HTTP ${res.status})`)
+    if (!res.ok) {
+      const failure = await transcriptionFailure(res)
+      // Keep the backend error category and edge request id, never the audio, transcript, token or raw
+      // response. A bare 403 previously disappeared into a device toast with no way to diagnose it.
+      this.wiring.log(`cable: stt HTTP ${res.status} code=${failure.code} kind=${failure.kind} request=${failure.request}`)
+      throw new Error(failure.message)
+    }
 
     const json = (await res.json()) as { success?: boolean; data?: { transcript?: string }; error?: { message?: string } }
     if (!json.success) throw new Error(json.error?.message ?? 'Transcription failed')
@@ -961,6 +1052,33 @@ export class DaemonCableHost implements CableHost {
   log(line: string): void {
     this.wiring.log(line)
   }
+}
+
+/** Turn known service failures into short device instructions without reflecting response contents. */
+async function transcriptionFailure(res: Response): Promise<{ message: string; code: string; kind: string; request: string }> {
+  const contentType = res.headers.get('content-type') ?? ''
+  const kind = res.headers.get('cf-mitigated') === 'challenge' ? 'challenge'
+    : contentType.includes('application/json') ? 'json' : contentType.includes('text/html') ? 'html' : 'other'
+  let code = 'unknown'
+  if (contentType.includes('application/json')) {
+    const body = await res.json().catch(() => null) as { error?: { code?: unknown } } | null
+    const candidate = body?.error?.code
+    if (typeof candidate === 'string' && [
+      'AUTONOMOUS_ENV_MISMATCH', 'AUTONOMOUS_ENV_NOT_ALLOWED', 'UNAUTHORIZED',
+      'AUTH_SERVICE_UNAVAILABLE', 'STT_FAILED', 'BAD_REQUEST',
+    ].includes(candidate)) code = candidate
+  } else {
+    await res.body?.cancel()
+  }
+  const ray = res.headers.get('cf-ray') ?? ''
+  const request = /^[a-f0-9]{16}-[A-Z]{3,8}$/.test(ray) ? ray : 'unknown'
+  const message = res.status === 401 || code === 'AUTONOMOUS_ENV_MISMATCH' || code === 'AUTONOMOUS_ENV_NOT_ALLOWED'
+    ? 'Sign in again on your computer to use voice'
+    : res.status === 403 ? 'Voice service rejected upload (403). Try again'
+    : res.status === 429 ? 'Voice service busy. Try again shortly'
+    : res.status >= 500 ? 'Voice service unavailable. Try again'
+    : `Transcription failed (HTTP ${res.status})`
+  return { message, code, kind, request }
 }
 
 /**

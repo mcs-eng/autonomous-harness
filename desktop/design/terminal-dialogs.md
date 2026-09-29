@@ -140,8 +140,14 @@ models first, followed by models served on the user's machines. Keep the
 undownloaded catalog collapsed behind **[ Get models ]**; Enter expands it in
 place and selects the first catalog row. **[ Hide catalog ]** collapses it.
 Explicit searches also include matching catalog models. Shared rows show only
-the model and sharing machine's label, separated by ` · `. Filtering preserves
-the groups.
+the model and sharing machine's label, separated by ` · `. An API heads its models:
+`▸`/`▾` before its name says whether they are listed, and the end of its row says
+how many (`378 models`) or `Tools` for one no harness can run on. Its models
+stay folded until Enter on its row, and explicit searches include matching ones,
+always under their own API and never interleaved with another's. Model rows are
+indented under the API's name, show only the model, and say **Use** for a
+harness on this computer. Filtering
+preserves the groups.
 
 A plain right-aligned **Use** identifies a model the current pane can use;
 **Get** identifies a model that can be downloaded. Other model rows are dimmed,
@@ -169,7 +175,10 @@ uses it, on a Get row gets it, on a machine enters management, and on a harness
 opens it. Arrow keys walk controls while the right pane owns focus; they must
 not change the resource behind them. Left/Right retain normal cursor movement
 in text fields, and move between adjacent buttons. Enter/Space activate focused
-buttons. Escape backs out of an inline form, then returns to search while
+buttons. An inline form with text fields (Cmd-P's API editor) is the one place
+Tab stays inside the pane: it walks the fields, then reaches the buttons, and
+the next Tab leaves for the list; Shift-Tab walks back and leaves from the
+first field. Escape backs out of an inline form, then returns to search while
 preserving the query and selection. Hints use the live keymap. Only the active
 pane shows a selection highlight.
 Typing selects the first match and replaces the hints with its preview. Arrows
@@ -269,6 +278,22 @@ Keep lists virtualized and retain cached row controls. Arrow movement updates
 the old and new highlights; it should not rebuild the editor or whole catalog.
 Calculate reveal and paging from the actual measured item extent.
 
+## Share an agent
+
+Share follows the Cmd-N form: the agent name, aligned Access and People fields,
+collapsed Options, and Copy link selected. Access opens Private/Public choices
+beside the form. Browsing choices never changes access; accepting one applies it
+and returns to Copy link. People owns an email editor and the existing invitations.
+Options reveals invitation expiry, Comments, and Stop sharing. Expiry applies
+to new email invitations, not to the public link. Keep online guidance visible.
+Up/Down move within a pane, Tab switches panes, Enter accepts, and Escape backs
+out or dismisses. Narrow windows replace the form with the active chooser.
+Opening or cancelling the form alone never changes permissions or creates a link.
+
+![Compact Share form, rendered with synthetic data](images/share-form-compact.png)
+
+![Public and private choices beside the same form](images/share-form-access.png)
+
 ## Review a dialog change
 
 Check the result with the user's terminal font and colors, an alternate scheme,
@@ -289,6 +314,9 @@ Reuse the relevant existing checks:
   preview navigation and narrow layouts.
 - [`keymap_runtime_test.dart`](../test/keymap_runtime_test.dart): shortcut
   routing and focus ownership.
+- [`share_harness_test.dart`](../test/share_harness_test.dart) and
+  [`share_toolbar_test.dart`](../test/share_toolbar_test.dart): sharing flows,
+  cell layout, responsive draft preservation, shortcuts, and focused-agent scope.
 
 When checking a native build, restart into the rebuilt app before judging the
 result. An existing process does not pick up a new build automatically.

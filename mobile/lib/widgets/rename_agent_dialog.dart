@@ -162,7 +162,13 @@ class _RenameAgentDialogState extends State<_RenameAgentDialog> {
       widget.agentId,
       _controller.text,
     );
-    if (!mounted) return;
+    // ⚠️ `mounted` is not "still open". Cancel, the veil and Escape all stay
+    // live while Save spins, and a dialog closed that way is still mounted for
+    // the length of its fade — so an answer landing inside those 140ms found
+    // `mounted` true and popped again. The dialog was already going; the route
+    // that pop took was the terminal page under it. Only a route that is still
+    // in the navigator's history is this dialog's to close.
+    if (!mounted || !(ModalRoute.of(context)?.isActive ?? false)) return;
     if (result == null) {
       Navigator.of(context).pop();
       return;

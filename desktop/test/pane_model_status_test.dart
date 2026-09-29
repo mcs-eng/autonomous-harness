@@ -102,11 +102,11 @@ void main() {
     tester,
   ) async {
     await pane(tester, {'model': 'Qwen3.5-4B', 'webSearch': 'on'});
-    // The header as it was drawn before this ticket, nothing added — its order is main's since
-    // #329, which put the model after the machine.
-    expect(textsUnder(tester), ['Desktop', 'Test host', 'Qwen3.5-4B']);
+    // An ordinary model adds no startup label. The trailing activity mark is
+    // offline because this fixture's machine is not connected.
+    expect(textsUnder(tester), ['Desktop', '⊘', 'Test host', 'Qwen3.5-4B']);
     await event(tester, 'turn_started', payload: {'userMessage': 'hi'});
-    expect(textsUnder(tester), ['Desktop', 'Test host', 'Qwen3.5-4B']);
+    expect(textsUnder(tester), ['Desktop', '⊘', 'Test host', 'Qwen3.5-4B']);
     await settle(tester);
   });
 

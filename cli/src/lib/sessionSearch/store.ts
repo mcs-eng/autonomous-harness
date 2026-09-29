@@ -16,7 +16,8 @@ import { chmodSync, existsSync, rmSync } from 'node:fs'
 import { builtinSqlite } from '../sqliteRead.js'
 import type { IndexedTurn } from './turns.js'
 
-const SCHEMA_VERSION = '8'
+// Rebuild schema 10's external-engine index with Codex app/editor context removed from asks.
+const SCHEMA_VERSION = '11'
 
 /** The row that holds a session's name, title and folder: searchable beside its turns. */
 export const HEADER_TURN = -1
@@ -65,8 +66,10 @@ export interface ExternalHit {
   origin: string
   /** Open in a running process elsewhere (a terminal, the engine's app): not to be opened twice. */
   open?: boolean
-  /** Where it is open: a terminal, which Harness can take it over from, or an app, which it cannot. */
-  openIn?: 'terminal' | 'app'
+  /** Where it is open: a terminal, which Harness can take it over from; an app, which it cannot; or
+   *  one of Harness's own panes, an agent the daemon is still binding; or `maybe` a terminal whose
+   *  process was started on it and may have moved on. */
+  openIn?: 'terminal' | 'app' | 'harness' | 'maybe'
 }
 
 export interface SearchHit {

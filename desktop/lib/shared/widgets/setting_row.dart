@@ -16,12 +16,16 @@ class SettingRow extends StatelessWidget {
     required this.title,
     this.detail,
     required this.control,
+    this.footer,
     this.alignTop = false,
   });
 
   final String title;
   final String? detail;
   final Widget control;
+
+  /// Guidance or feedback that belongs inside this setting's block.
+  final Widget? footer;
 
   /// Align taller controls with the title; compact controls stay centered.
   final bool alignTop;
@@ -62,24 +66,31 @@ class SettingRow extends StatelessWidget {
       padding: detail == null
           ? const EdgeInsets.symmetric(vertical: 8)
           : const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: LayoutBuilder(
-        builder: (context, constraints) =>
-            constraints.maxWidth <
-                MediaQuery.textScalerOf(context).scale(_stackBelow)
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [text, const SizedBox(height: 10), control],
-              )
-            : Row(
-                crossAxisAlignment: alignTop
-                    ? CrossAxisAlignment.start
-                    : CrossAxisAlignment.center,
-                children: [
-                  Expanded(child: text),
-                  const SizedBox(width: 20),
-                  control,
-                ],
-              ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          LayoutBuilder(
+            builder: (context, constraints) =>
+                constraints.maxWidth <
+                    MediaQuery.textScalerOf(context).scale(_stackBelow)
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [text, const SizedBox(height: 10), control],
+                  )
+                : Row(
+                    crossAxisAlignment: alignTop
+                        ? CrossAxisAlignment.start
+                        : CrossAxisAlignment.center,
+                    children: [
+                      Expanded(child: text),
+                      const SizedBox(width: 20),
+                      control,
+                    ],
+                  ),
+          ),
+          if (footer case final footer?) ...[const SizedBox(height: 8), footer],
+        ],
       ),
     );
   }

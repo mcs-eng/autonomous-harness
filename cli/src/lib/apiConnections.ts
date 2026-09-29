@@ -44,6 +44,12 @@ export class ApiConnectionError extends Error {}
 const message = (value: string): never => { throw new ApiConnectionError(value) }
 const publicConnection = (value: StoredConnection): ApiConnection => metadata.parse(value)
 
+/** Whether coding agents can run on this API's models. Every engine authenticates to a custom
+ * endpoint as `Authorization: Bearer <key>` and takes no other header or prefix (`gridLaunch.ts`). */
+export function servesModels(connection: Pick<ApiConnection, 'authHeader' | 'authPrefix'>): boolean {
+  return connection.authHeader.toLowerCase() === 'authorization' && connection.authPrefix.toLowerCase() === 'bearer'
+}
+
 export class ApiConnections {
   private readonly dir: string
   private readonly file: string
@@ -124,6 +130,14 @@ export class ApiConnections {
 
   private connection(connectionId: string): StoredConnection {
     return this.read().find(row => row.id === connectionId) ?? message('This API is not saved. Add it in Models → APIs.')
+  }
+
+  /** The settings and key a model launch needs (`apiModels.ts`). The key goes only into the one
+   * engine process the person moved onto this API, never into argv, a log line or a reply. */
+  modelAccess(connectionId: string): { connection: ApiConnection; apiKey: string } {
+    const connection = this.connection(connectionId)
+    if (!servesModels(connection)) return message(`${connection.name} does not take a Bearer key, so coding agents cannot run on it.`)
+    return { connection: publicConnection(connection), apiKey: connection.apiKey }
   }
 
   /** Never merge this into an agent's global environment: a vendor key can override its subscription.

@@ -253,17 +253,21 @@ describe('SessionSearchStore', () => {
     expect(store.search('alpha', { now: NOW })).toHaveLength(1)
   })
 
-  it('rebuilds an index written by another schema version', () => {
+  it.each(['0', '8', '9', '10'])('rebuilds an index written by schema %s', (version) => {
     const dir = mkdtempSync(join(tmpdir(), 'session-search-'))
     dirs.push(dir)
     const path = join(dir, 'index.db')
     const first = open(path)
     first.writeSession(session('s', 'S', NOW), 0, [turn(0, 'alpha')])
-    ;(first as unknown as { db: { exec(sql: string): void } }).db.exec("UPDATE meta SET value = '0' WHERE key = 'schema'")
+    ;(first as unknown as { db: { exec(sql: string): void } }).db.exec(`UPDATE meta SET value = '${version}' WHERE key = 'schema'`)
     first.close()
     stores.splice(stores.indexOf(first), 1)
+    expect(SessionSearchStore.openReader(path)).toBe('outdated')
     const second = open(path)
     expect(second.counts()).toEqual({ sessions: 0, turns: 0 })
+    second.writeSession(session('s', 'S', NOW), 0, [turn(0, 'rebuilt conversation')])
+    expect(second.search('alpha', { now: NOW })).toEqual([])
+    expect(second.search('rebuilt', { now: NOW })).toHaveLength(1)
   })
 })
 

@@ -141,6 +141,153 @@ class ApiClient {
     return unwrapApiResponse(res) as Map<String, dynamic>?;
   }
 
+  // -- account-wide Experimental preferences --
+  Future<Map<String, dynamic>> experimentalSettings() async {
+    final res = await _dio.get('/api/experimental-settings');
+    return Map<String, dynamic>.from(unwrapApiResponse(res) as Map);
+  }
+
+  Future<Map<String, dynamic>> setExperimentalSetting(
+    String accountId,
+    String feature,
+    bool enabled,
+  ) async {
+    final res = await _dio.patch(
+      '/api/experimental-settings',
+      data: {'accountId': accountId, 'feature': feature, 'enabled': enabled},
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    return Map<String, dynamic>.from(unwrapApiResponse(res) as Map);
+  }
+
+  /// The account's collection; null when disabled or signed out. A failed read throws.
+  Future<Map<String, dynamic>?> zoo() async {
+    final res = await _dio.get('/api/zoo');
+    if (res.statusCode == 404 || res.statusCode == 401) return null;
+    return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
+  /// Apply [ops] in order; answers `{revision, zoo, hatched}`. Null under the same two
+  /// conditions as [zoo].
+  Future<Map<String, dynamic>?> zooOps(List<Map<String, dynamic>> ops) async {
+    final res = await _dio.post(
+      '/api/zoo/ops',
+      data: {'ops': ops},
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    if (res.statusCode == 404 || res.statusCode == 401) return null;
+    return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
+  // -- pairing a phone (Harness ▸ Add Phone…) --
+
+  /// `POST /api/pair` — hand THIS computer's daemon the one-time code the Add
+  /// Phone QR is showing, so it runs the end-to-end-encryption handshake with
+  /// the phone that scanned it. The same call `harness pair <code>` makes
+  /// (cli.ts `pairCommand`, hookServer.ts `/api/pair`).
+  ///
+  /// Answers the HTTP status and the daemon's own body, untouched: this route
+  /// does NOT speak the `{success, data, error}` envelope [unwrapApiResponse]
+  /// reads — it answers `{label, fingerprint}` on success and `{error: CODE}`
+  /// otherwise — so the caller (`widgets/add_phone_dialog.dart`) reads the
+  /// code itself. A transport failure still throws its [DioException].
+  ///
+  /// ⚠️ A LONG POLL, hence its own receive timeout. With no phone waiting the
+  /// daemon answers at once (`NO_INTENT`); with one, it holds the request
+  /// until the handshake is over, which its own round timers bound at 15 s a
+  /// round. The client's shared 30 s would cut a slow-but-healthy handshake
+  /// off in the middle and report a timeout for a pairing that then succeeds.
+  Future<({int status, Map<String, dynamic> body})> pair(
+    String code, {
+    CancelToken? cancelToken,
+  }) async {
+    final res = await _dio.post(
+      '/api/pair',
+      data: {'code': code},
+      cancelToken: cancelToken,
+      // A write, so the daemon's CSRF gate wants the local header — as it
+      // does for renaming a machine.
+      options: Options(
+        headers: {'x-adapter-local': '1'},
+        receiveTimeout: const Duration(seconds: 60),
+        // 409 is "no phone yet" (NO_INTENT / EXPIRED / BUSY), asked every
+        // 1.5 s while the dialog is open: not a failure worth a log line.
+        extra: {
+          httpLogRoutineStatusesKey: const <int>{409},
+        },
+      ),
+    );
+    final body = res.data;
+    return (
+      status: res.statusCode ?? 0,
+      body: body is Map ? Map<String, dynamic>.from(body) : <String, dynamic>{},
+    );
+  }
+
+  /// A one-time code that signs a phone in to this account: the Add Phone
+  /// QR's `h=`, which the phone redeems for a session of its own instead of
+  /// asking for an emailed code (backend `lib/harnessSession.ts`).
+  ///
+  /// Minted by the backend against the daemon's own session, and the daemon
+  /// hands it out over its owner-only socket and nowhere else — a code that
+  /// signs a device in is a credential. So null is an ordinary answer: an
+  /// older daemon or backend, this app on the TCP fallback, the backend down.
+  /// The QR then goes without it and the phone falls back to the email code.
+  Future<({String code, Duration ttl})?> phoneSignInCode() async {
+    try {
+      final res = await _dio.post(
+        '/api/auth/handoff',
+        data: const <String, Object?>{},
+        options: Options(headers: {'x-adapter-local': '1'}),
+      );
+      final data = unwrapApiResponse(res);
+      final code = data is Map ? data['code'] : null;
+      final expiresIn = data is Map ? data['expiresIn'] : null;
+      if (code is! String || code.isEmpty) return null;
+      return (
+        code: code,
+        ttl: Duration(
+          seconds: expiresIn is int && expiresIn > 0 ? expiresIn : 60,
+        ),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// What this computer trusts to read and drive its terminals — every phone
+  /// paired by QR or password, and every computer linked to it — as the
+  /// daemon keeps them (`GET /api/pairs`, the list `harness pairings` prints).
+  /// Null when the daemon cannot say; the dialog then shows no list.
+  Future<List<PairedDevice>?> pairedDevices() async {
+    try {
+      final res = await _dio.get('/api/pairs');
+      final data = res.data;
+      final pairs = data is Map ? data['pairs'] : null;
+      if (res.statusCode != 200 || pairs is! List) return null;
+      return [for (final raw in pairs) ?PairedDevice.fromJson(raw)];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Take [fingerprint]'s trust away: it can no longer read or drive this
+  /// computer, and any session it has open is dropped (`POST /api/revoke`,
+  /// what `harness unpair` sends). True when the daemon did it.
+  Future<bool> removePairedDevice(String fingerprint) async {
+    try {
+      final res = await _dio.post(
+        '/api/revoke',
+        data: {'id': fingerprint},
+        options: Options(headers: {'x-adapter-local': '1'}),
+      );
+      final data = res.data;
+      return res.statusCode == 200 && !(data is Map && data['error'] != null);
+    } catch (_) {
+      return false;
+    }
+  }
+
   // -- the Harness Store: ratings and reviews (control plane, proxied by the local CLI) --
   Future<Map<String, dynamic>?> storeRatings() async {
     final res = await _dio.get('/api/store/ratings');
@@ -278,7 +425,11 @@ class ApiException implements Exception {
 }
 
 bool isUnauthorizedError(Object error) =>
-    error is DioException && error.response?.statusCode == 401 ||
+    error is AccessTokenFailure && error.signedOut ||
+    error is DioException &&
+        (error.response?.statusCode == 401 ||
+            error.error is AccessTokenFailure &&
+                (error.error as AccessTokenFailure).signedOut) ||
     error is ApiException && error.status == 401;
 
 /// Unwraps the backend's `{success, data, error}` envelope, which both legs
@@ -345,4 +496,48 @@ String describeApiError(Object error) {
     }
   }
   return '$error';
+}
+
+/// One entry of [ApiClient.pairedDevices].
+class PairedDevice {
+  const PairedDevice({
+    required this.fingerprint,
+    required this.label,
+    required this.pairedAt,
+    required this.online,
+  });
+
+  final String fingerprint;
+
+  /// What the device called itself ("Dee's iPhone"). An older phone, or a
+  /// computer linked with `harness link connect`, is `harness link` — which
+  /// says nothing, so [name] says "Linked device" for it instead.
+  final String label;
+  final DateTime pairedAt;
+  final bool online;
+
+  String get name {
+    final trimmed = label.trim();
+    return trimmed.isEmpty || trimmed == 'harness link' || trimmed == 'browser'
+        ? 'Linked device'
+        : trimmed;
+  }
+
+  /// A `web` pairing: a phone or another computer. The dial (`device`) has
+  /// its own place, in Settings.
+  static PairedDevice? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final fingerprint = raw['fingerprint'], label = raw['label'];
+    final pairedAt = raw['pairedAt'], role = raw['role'];
+    if (fingerprint is! String || fingerprint.isEmpty) return null;
+    if (role != null && role != 'web') return null;
+    return PairedDevice(
+      fingerprint: fingerprint,
+      label: label is String ? label : '',
+      pairedAt: pairedAt is num
+          ? DateTime.fromMillisecondsSinceEpoch(pairedAt.toInt())
+          : DateTime.fromMillisecondsSinceEpoch(0),
+      online: raw['online'] == true,
+    );
+  }
 }

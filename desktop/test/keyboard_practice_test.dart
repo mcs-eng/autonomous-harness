@@ -78,7 +78,9 @@ void main() {
         for (final binding in map.current.bindingsFor(context)) {
           if (binding.command == 'navigation.command_bar' ||
               binding.command == 'app.debug' ||
-              harnessCommandById[binding.command]?.hidden == true) {
+              harnessCommandById[binding.command]?.hidden == true ||
+              // The daemon's exist only while daemons are on (off here).
+              !harnessCommandActive(binding.command!)) {
             continue;
           }
           expect(
@@ -96,6 +98,15 @@ void main() {
         lessons.any((l) => l.command == 'agent.stop' && l.bindings.isEmpty),
         isTrue,
       );
+      expect(lessons.any((l) => l.command == 'app.daemon_talk'), isFalse);
+      daemonCommandsActive.value = true;
+      addTearDown(() => daemonCommandsActive.value = false);
+      expect(
+        keyboardLessons(map).any((l) => l.command == 'app.daemon_talk'),
+        isTrue,
+        reason: 'with daemons on, ⌘⌥T is practised too',
+      );
+      daemonCommandsActive.value = false;
       expect(
         lessons.any((l) => l.command == 'navigation.command_bar'),
         isFalse,

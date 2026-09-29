@@ -536,6 +536,7 @@ void main() {
             findsNothing,
           );
           expect(find.byKey(const ValueKey('project-sidebar-toggle')), findsOneWidget);
+          expect(find.byTooltip('Harnesses'), findsNothing);
           expect(
             find.byKey(const ValueKey('swarm-new-harness-button')),
             findsNothing,

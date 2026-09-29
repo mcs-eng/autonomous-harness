@@ -7,9 +7,6 @@ import { terminalRouteKey } from './terminalRuntime.js'
 import type { TerminalRuntimeRef } from './terminalTypes.js'
 
 const tmux: TerminalRuntimeRef = { backend: 'tmux', paneId: '%1' }
-const herdr: TerminalRuntimeRef = {
-  backend: 'herdr', endpointId: 'endpoint-a', sessionName: 'default', terminalId: 'terminal-a', paneId: 'w1:p1',
-}
 const identity = { pid: 42, executable: 'claude', startMarker: 'Sat Aug 15 10:00:00 2026' }
 
 function session(runtimes: TerminalRuntimeRef[] = [tmux]): RegisteredSession {
@@ -39,7 +36,7 @@ describe('composite terminal reconciliation', () => {
     const current = { ...session([tmux]), active: false }
     const onTerminalAvailability = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant: vi.fn(), onRemoved: vi.fn(),
       onTerminalAvailability,
       probe: async () => probe([
@@ -57,7 +54,7 @@ describe('composite terminal reconciliation', () => {
     const onTerminalAvailability = vi.fn()
     const onProbeStatus = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant: vi.fn(), onRemoved: vi.fn(),
       onTerminalAvailability, onProbeStatus,
       probe: async () => ({
@@ -81,7 +78,7 @@ describe('composite terminal reconciliation', () => {
       return probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }])
     })
     const reconciler = new TerminalAgentReconciler({
-      current: () => [], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant: vi.fn(), onRemoved: vi.fn(), probe: probed,
     })
     let started = false
@@ -94,14 +91,14 @@ describe('composite terminal reconciliation', () => {
     reconciler.stop()
   })
 
-  it('does not count an unavailable endpoint as a confirmed miss', async () => {
-    const current = session([herdr])
+  it('does not count an unavailable backend as a confirmed miss', async () => {
+    const current = session([tmux])
     const onDormant = vi.fn()
     const onRemoved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['herdr'], herdrSessionOrder: ['default'],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant, onRemoved,
-      probe: async () => probe([{ instanceId: 'herdr:endpoint-a', result: { state: 'unavailable', reason: 'stopped' } }]),
+      probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'unavailable', reason: 'stopped' } }]),
     })
     await reconciler.trigger()
     await reconciler.trigger()
@@ -109,41 +106,15 @@ describe('composite terminal reconciliation', () => {
     expect(onRemoved).not.toHaveBeenCalled()
   })
 
-  it('refreshes configured targets before every cycle so an initially stopped Herdr session can recover', async () => {
-    const current = session([herdr])
-    const onObserved = vi.fn()
-    const onRemoved = vi.fn()
-    let available = false
-    const beforeProbe = vi.fn(async () => { available = beforeProbe.mock.calls.length > 1 })
-    const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['herdr'], herdrSessionOrder: ['default'],
-      onDiscovered: vi.fn(), onObserved, onDormant: vi.fn(), onRemoved, beforeProbe,
-      probe: async () => available
-        ? probe(
-          [{ instanceId: 'herdr:endpoint-a', result: { state: 'available', roots: [{ runtime: herdr, rootPid: 1, cwd: '/work' }] } }],
-          [observed([herdr])],
-        )
-        : probe([{ instanceId: 'herdr:endpoint-a', result: { state: 'unavailable', reason: 'stopped' } }]),
-    })
-
-    await reconciler.trigger()
-    expect(onObserved).not.toHaveBeenCalled()
-    await reconciler.trigger()
-
-    expect(beforeProbe).toHaveBeenCalledTimes(2)
-    expect(onObserved).toHaveBeenCalledWith(expect.objectContaining({ runtimes: [herdr] }), current)
-    expect(onRemoved).not.toHaveBeenCalled()
-  })
-
   it('removes only after two successful negative inventories', async () => {
-    const current = session([herdr])
+    const current = session([tmux])
     const onRemoved = vi.fn()
     const validate = vi.fn(async () => ({ state: 'gone' as const, reason: 'process exited' }))
-    const backend = { instanceId: 'herdr:endpoint-a', validate } as unknown as TerminalBackend
+    const backend = { instanceId: 'tmux:default', validate } as unknown as TerminalBackend
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [backend], backendOrder: ['herdr'], herdrSessionOrder: ['default'],
+      current: () => [current], backends: [backend], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant: vi.fn(), onRemoved,
-      probe: async () => probe([{ instanceId: 'herdr:endpoint-a', result: { state: 'available', roots: [] } }]),
+      probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }]),
     })
     await reconciler.trigger()
     expect(onRemoved).not.toHaveBeenCalled()
@@ -159,7 +130,7 @@ describe('composite terminal reconciliation', () => {
     const validate = vi.fn(async () => ({ state: 'alive' as const }))
     const backend = { instanceId: 'tmux:default', validate } as unknown as TerminalBackend
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [backend], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [backend], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant, onRemoved,
       probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }]),
     })
@@ -181,7 +152,7 @@ describe('composite terminal reconciliation', () => {
     const validate = vi.fn(async () => ({ state: 'unknown' as const, reason: 'process table timed out' }))
     const backend = { instanceId: 'tmux:default', validate } as unknown as TerminalBackend
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [backend], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [backend], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant, onRemoved,
       probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }]),
     })
@@ -193,38 +164,6 @@ describe('composite terminal reconciliation', () => {
     expect(onRemoved).not.toHaveBeenCalled()
   })
 
-  it('refreshes a moved Herdr route on the same process without changing agent ownership', async () => {
-    const current = session([herdr])
-    const moved = { ...herdr, paneId: 'w2:p4' }
-    const onObserved = vi.fn()
-    const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['herdr'], herdrSessionOrder: ['default'],
-      onDiscovered: vi.fn(), onObserved, onDormant: vi.fn(), onRemoved: vi.fn(),
-      probe: async () => probe(
-        [{ instanceId: 'herdr:endpoint-a', result: { state: 'available', roots: [{ runtime: moved, rootPid: 1, cwd: '/work' }] } }],
-        [observed([moved])],
-      ),
-    })
-    await reconciler.trigger()
-    expect(onObserved).toHaveBeenCalledWith(expect.objectContaining({ runtimes: [moved] }), current)
-  })
-
-  it('keeps a healthy locator active when another backend is unavailable', async () => {
-    const current = session([tmux, herdr])
-    const onObserved = vi.fn()
-    const onDormant = vi.fn()
-    const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux', 'herdr'], herdrSessionOrder: ['default'],
-      onDiscovered: vi.fn(), onObserved, onDormant, onRemoved: vi.fn(),
-      probe: async () => probe([
-        { instanceId: 'tmux:default', result: { state: 'available', roots: [{ runtime: tmux, rootPid: 1, cwd: '/work' }] } },
-        { instanceId: 'herdr:endpoint-a', result: { state: 'unavailable', reason: 'stopped' } },
-      ], [observed([tmux])]),
-    })
-    await reconciler.trigger()
-    expect(onObserved).toHaveBeenCalledWith(expect.objectContaining({ runtimes: [herdr, tmux] }), current)
-    expect(onDormant).not.toHaveBeenCalled()
-  })
 })
 
 describe('restart route hold', () => {
@@ -238,7 +177,7 @@ describe('restart route hold', () => {
     const validate = vi.fn(async () => ({ state: 'alive' as const }))
     const backend = { instanceId: 'tmux:default', validate } as unknown as TerminalBackend
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [backend], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [backend], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant, onRemoved,
       probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }]),
     })
@@ -262,7 +201,7 @@ describe('restart route hold', () => {
     const onDiscovered = vi.fn()
     const onObserved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered, onObserved, onDormant: vi.fn(), onRemoved: vi.fn(),
       probe: async () => probe(
         [{ instanceId: 'tmux:default', result: { state: 'available', roots: [{ runtime: tmux, rootPid: 1, cwd: '/work' }] } }],
@@ -285,7 +224,7 @@ describe('restart route hold', () => {
     const validate = vi.fn(async () => ({ state: 'alive' as const }))
     const backend = { instanceId: 'tmux:default', validate } as unknown as TerminalBackend
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [backend], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [backend], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant, onRemoved: vi.fn(),
       probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }]),
     })
@@ -317,7 +256,7 @@ describe('verified process adoption', () => {
       return await apply()
     }
     const reconciler = new TerminalAgentReconciler({
-      current: () => current, backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => current, backends: [], backendOrder: ['tmux'],
       onDiscovered, onObserved: vi.fn(), onDormant: vi.fn(), onRemoved: vi.fn(),
       probe: probeSnapshot, transaction,
     })
@@ -337,7 +276,7 @@ describe('verified process adoption', () => {
     const onDiscovered = vi.fn()
     const onObserved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [existing], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [existing], backends: [], backendOrder: ['tmux'],
       onDiscovered, onObserved, onDormant: vi.fn(), onRemoved: vi.fn(),
     })
 
@@ -361,7 +300,7 @@ describe('verified process adoption', () => {
     const onDiscovered = vi.fn()
     const onRemoved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered, onObserved, onDormant: vi.fn(), onRemoved,
       probe: async () => probe(
         [{ instanceId: 'tmux:default', result: { state: 'available', roots: [{ runtime: tmux, rootPid: 1, cwd: '/work' }] } }],
@@ -383,7 +322,7 @@ describe('verified process adoption', () => {
     const validate = vi.fn(async () => ({ state: 'alive' as const }))
     const backend = { instanceId: 'tmux:default', validate } as unknown as TerminalBackend
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [backend], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [backend], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant: vi.fn(), onRemoved: vi.fn(),
       probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }]),
     })
@@ -407,7 +346,7 @@ describe('verified process adoption', () => {
     }
     const onObserved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved, onDormant: vi.fn(), onRemoved: vi.fn(),
       probe: async () => probe(
         [{ instanceId: 'tmux:default', result: { state: 'available', roots: [{ runtime: tmux, rootPid: 1, cwd: '/work' }] } }],
@@ -431,7 +370,7 @@ describe('verified process adoption', () => {
       processIdentity: { pid: 999, executable: 'claude', startMarker: 'Tue Sep 24 09:00:00 2026' },
     }
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved, onDormant: vi.fn(), onRemoved: vi.fn(),
       probe: async () => probe(
         [{ instanceId: 'tmux:default', result: { state: 'available', roots: [{ runtime: tmux, rootPid: 1, cwd: '/work' }] } }],
@@ -447,7 +386,7 @@ describe('verified process adoption', () => {
   it('reports no adopted agent when the registry callback rejects the process', async () => {
     const onDiscovered = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [], backends: [], backendOrder: ['tmux'],
       onDiscovered, onObserved: vi.fn(), onDormant: vi.fn(), onRemoved: vi.fn(),
     })
 
@@ -469,7 +408,7 @@ describe('start()', () => {
         return probe([])
       })
       const reconciler = new TerminalAgentReconciler({
-        current: () => [], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+        current: () => [], backends: [], backendOrder: ['tmux'],
         onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant: vi.fn(), onRemoved: vi.fn(),
         probe: scan,
       })
@@ -495,7 +434,7 @@ describe('a terminal pane (engine `terminal`)', () => {
     const onDormant = vi.fn()
     const onRemoved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant, onRemoved,
       probe: async () => probe(live),
     })
@@ -510,7 +449,7 @@ describe('a terminal pane (engine `terminal`)', () => {
     const onObserved = vi.fn()
     const claude = observed([tmux])
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered, onObserved, onDormant: vi.fn(), onRemoved: vi.fn(),
       probe: async () => probe(live, [claude]),
     })
@@ -526,7 +465,7 @@ describe('a terminal pane (engine `terminal`)', () => {
     const onDormant = vi.fn()
     const onRemoved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant, onRemoved,
       probe: async () => probe(live),
     })
@@ -541,7 +480,7 @@ describe('a terminal pane (engine `terminal`)', () => {
     const current = terminal()
     const onRemoved = vi.fn()
     const reconciler = new TerminalAgentReconciler({
-      current: () => [current], backends: [], backendOrder: ['tmux'], herdrSessionOrder: [],
+      current: () => [current], backends: [], backendOrder: ['tmux'],
       onDiscovered: vi.fn(), onObserved: vi.fn(), onDormant: vi.fn(), onRemoved,
       probe: async () => probe([{ instanceId: 'tmux:default', result: { state: 'available', roots: [] } }]),
     })
