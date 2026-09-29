@@ -15,10 +15,19 @@ import '../../shared/widgets/setting_row.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../../shared/theme/app_theme.dart' as grid;
 import '../../shared/widgets/section_scaffold.dart';
+import '../../state/dial_status.dart';
+import 'cabled_device_card.dart';
 
 class DevicesSection extends StatefulWidget {
-  const DevicesSection({super.key, this.cli});
+  const DevicesSection({super.key, this.cli, this.dial, this.onDeviceSettings});
   final AutonomousDeviceCli? cli;
+
+  /// The robots on a cable at THIS desk. Null in a build with no daemon behind it (and in the tests
+  /// that drive only the paired half of this pane).
+  final DialState? dial;
+
+  /// Send one robot a settings patch. See AppNotifier.setDeviceSettings.
+  final void Function(String id, Map<String, Object?> patch)? onDeviceSettings;
   @override
   State<DevicesSection> createState() => _DevicesSectionState();
 }
@@ -278,6 +287,16 @@ class _DevicesSectionState extends State<DevicesSection> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // The robot on the cable comes first: it is the one on the desk, and it is the only one
+            // whose settings this pane owns. Everything below it is paired over the network.
+            if (widget.dial case final dial?)
+              ListenableBuilder(
+                listenable: dial,
+                builder: (context, _) => CabledDeviceCard(
+                  devices: dial.devices,
+                  onChanged: widget.onDeviceSettings ?? (_, _) {},
+                ),
+              ),
             if (_loading)
               SkeletonBlock(
                 child: Container(

@@ -62,6 +62,62 @@ function fixture() {
 }
 
 describe('USB dial fleet', () => {
+  it('names every device on the desk, and changes the settings of ONE of them', async () => {
+    /*
+     * Before this the fleet picked a row and threw the rest away, so the app drew one robot however
+     * many were plugged in — and a preference had nowhere to be addressed to.
+     *
+     * Every other command here broadcasts ON PURPOSE: both devices show the same desktop. A setting
+     * does not, because it belongs to the glass it was set on.
+     */
+    const f = fixture()
+    try {
+      await f.start()
+      const settings = {
+        brightness: 60, character: 0, face: 466, muted: false, quiet: false, straightTitle: false,
+        focusFace: false, scrollReversed: false, round: true, voiceLang: 'vi',
+      }
+      for (const port of f.ports) {
+        port.say({ t: 'hello', product: 'harness', mac: port.path, fw: 'fixture', proto: 3, settings })
+      }
+      await vi.waitFor(() => expect(f.fleet.devices().filter(d => d.settings)).toHaveLength(2))
+      expect(f.fleet.devices().map(d => d.id)).toEqual(['AA:01', 'BB:02'])
+      expect(f.fleet.devices().map(d => d.mac)).toEqual(['/dev/tim', '/dev/tux'])
+      for (const device of f.fleet.devices()) expect(device.settings).toEqual(settings)
+      // The whole desk rides on the status a window receives, with one row repeated flat.
+      expect(f.host.onDialStatus).toHaveBeenLastCalledWith(
+        expect.objectContaining({ attached: true, devices: expect.arrayContaining([expect.objectContaining({ id: 'BB:02' })]) }))
+
+      for (const port of f.ports) port.sent.length = 0
+      expect(await f.fleet.setSettings('BB:02', { brightness: 20 })).toEqual({ ok: true })
+      await vi.waitFor(() => expect(f.ports[1].sent).toContainEqual({ t: 'settings.set', brightness: 20 }))
+      expect(f.ports[0].sent).toHaveLength(0)   // the other robot was not touched
+
+      expect(await f.fleet.setSettings('ZZ:99', { muted: true }))
+        .toEqual({ ok: false, error: 'That device is not plugged into this computer.' })
+    } finally { await f.fleet.stop() }
+  })
+
+  it('keeps an unplugged device on the desk, with what it last held', async () => {
+    // A pane that emptied the moment a cable was pulled would be a pane nobody could read their own
+    // settings out of. Read-only is the app's job; keeping the row is this one's.
+    const f = fixture()
+    try {
+      await f.start()
+      const settings = {
+        brightness: 40, character: 1, face: 466, muted: true, quiet: true, straightTitle: true,
+        focusFace: false, scrollReversed: true, round: false, voiceLang: 'en',
+      }
+      f.ports[0].say({ t: 'hello', product: 'harness', mac: '/dev/tim', fw: 'fixture', proto: 3, settings })
+      await vi.waitFor(() => expect(f.fleet.devices()[0]?.settings).toEqual(settings))
+      await f.ports[0].close('unplugged')
+      await vi.waitFor(() => expect(f.fleet.devices()[0]?.attached).toBe(false))
+      expect(f.fleet.devices()[0]).toMatchObject({ id: 'AA:01', attached: false, settings })
+      expect(await f.fleet.setSettings('AA:01', { muted: false }))
+        .toEqual({ ok: false, error: 'That device is unplugged.' })
+    } finally { await f.fleet.stop() }
+  })
+
   it('connects both dials, broadcasts work, and keeps the remaining dial attached', async () => {
     const f = fixture()
     try {
@@ -82,7 +138,7 @@ describe('USB dial fleet', () => {
       f.setPorts([]); await f.fleet['scan']()
       expect(f.fleet.isConnected).toBe(false)
       expect(f.host.onDialGone).toHaveBeenCalledTimes(1)
-      expect(f.host.onDialStatus).toHaveBeenLastCalledWith({ attached: false })
+      expect(f.host.onDialStatus).toHaveBeenLastCalledWith({ attached: false, devices: [] })
     } finally { await f.fleet.stop() }
   })
 

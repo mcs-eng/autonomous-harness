@@ -365,3 +365,16 @@ standalone compact terminals.
 The Windows and WSL paths, local mode, the projects sidebar, and the account
 screen remain. This is a source change; it does not update an installed desktop
 or daemon.
+
+## September 29 source refresh
+
+This source snapshot incorporates upstream `249e0f9` (73 commits since `805d3deb`)
+and fork main `b4b3b1f`. Upstream's project names taken from the first task,
+per-computer tab profiles (Settings ▸ Profiles), light mode and terminal
+hyperlinks arrive unchanged. The viewer fallback keeps the fork's checked address
+and failure message and opens the page through upstream's launcher, which is
+unchanged on native Windows. The daemon supervisor now respawns the local daemon
+without waiting on the sign-in check, as upstream does. Some of upstream's new
+desktop tests assume macOS or Linux fonts and colours; those that fail on Windows
+also fail on plain upstream and are listed in the pull request. This is a source
+change; it does not update an installed desktop or daemon.

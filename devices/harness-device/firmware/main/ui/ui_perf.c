@@ -5,9 +5,7 @@
 #include "display.h"
 #include "touch.h"
 #include "audio_probe.h"
-#ifdef DEVICE_HABITAT
 #include "habitat/runtime.h"
-#endif
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -94,10 +92,8 @@ static void run_case(const char *name, int kind)
                                          : "What should we explore next?");
         uint32_t b0, f0, b1, f1;
         int64_t done, ignored;
-#ifdef DEVICE_HABITAT
         habitat_perf_t before, after;
         habitat_perf_get(&before);
-#endif
         counters(&b0, &f0, &ignored);
         int64_t t = esp_timer_get_time();
         if (kind == 0)
@@ -127,22 +123,16 @@ static void run_case(const char *name, int kind)
         samples[i].visible = done > t ? (uint32_t)(done - t) : 0;
         samples[i].bytes = b1 - b0;
         samples[i].flushes = f1 - f0;
-#ifdef DEVICE_HABITAT
         habitat_perf_get(&after);
         samples[i].frames = after.frames - before.frames;
-#else
-        samples[i].frames = 0;
-#endif
     }
     cJSON_Delete(qs);
     report(name, samples, 40);
-#ifdef DEVICE_HABITAT
     for (int i = 0; i < 40; i++)
         if (samples[i].visible > 10000 || !samples[i].visible || samples[i].frames > 1)
             ESP_LOGI("PERF", "detail case=%s i=%d frames=%lu bytes=%lu visible_us=%lu", name, i,
                      (unsigned long)samples[i].frames, (unsigned long)samples[i].bytes,
                      (unsigned long)samples[i].visible);
-#endif
     touch_stats_t touch;
     touch_stats(&touch);
     ESP_LOGI("PERF", "touch presses=%lu inferred=%lu failures=%lu held=%d",
@@ -156,11 +146,7 @@ void ui_perf_run(void) { octopus_perf_run(); }
 #else
 void ui_perf_run(void)
 {
-#ifdef DEVICE_HABITAT
     const char *renderer = "habitat-direct-c";
-#else
-    const char *renderer = "0.0.86-lvgl";
-#endif
     ESP_LOGI("PERF", "BEGIN renderer=%s cpu_mhz=240 panel_qspi_mhz=40 samples=40 settle_ms=160",
              renderer);
     ui_enter_boot_loading();

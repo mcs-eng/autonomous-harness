@@ -583,7 +583,7 @@ void main() {
             ),
           );
           expect(tester.takeException(), isNull);
-          final tab = find.text('⌘Y  New Tab');
+          final tab = find.text('⌘Y  New Swarm');
           expect(tab, findsOneWidget);
           await tester.tap(tab);
           expect(

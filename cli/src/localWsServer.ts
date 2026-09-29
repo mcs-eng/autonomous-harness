@@ -1,6 +1,7 @@
 import { SharingEndedError, type HarnessShareRelay } from './sharing/relay.js'
 import { randomUUID } from 'node:crypto'
 import type { AppSwarms } from './cable/cableSession.js'
+import { notificationReadToken, type UnreadNotification } from './cable/notificationRead.js'
 import type http from 'node:http'
 import type { Socket } from 'node:net'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
@@ -68,9 +69,9 @@ export interface LocalWsServerOptions {
   /** Every agent the window currently has a tile for, across all its machines. */
   onAppPanes?: (agentIds: string[], foreground: boolean) => void
   /** The window has looked at this harness — see the `agent_seen` case below. */
-  onAgentSeen?: (agentId: string) => void
+  onAgentSeen?: (agentId: string, readToken?: string) => void
   /** Everything the window still has unread, newest first — see the `app_unread` case below. */
-  onAppUnread?: (items: Array<{ agentId: string; machineId: string; question: boolean; text: string }>) => void
+  onAppUnread?: (items: UnreadNotification[]) => void
   /**
    * The window's swarms — its named groups of agents, one of them on screen. The whole list each time,
    * and `null` when the window goes away, so the daemon never keeps describing tabs nobody can see.
@@ -95,6 +96,14 @@ export interface LocalWsServerOptions {
   onRouteSend?: (agentId: string, text: string) => { ok: true } | { ok: false; machine: string; reason: string }
   /** The dial right now, sent to a window the moment it connects — it may have missed the announcement. */
   dialStatus?: () => { attached: boolean; fw?: string; updating?: string }
+  /**
+   * A window changed a device's settings. `id` names which device on this desk; the rest of the payload
+   * is the patch, and an absent field is a setting the window is not changing.
+   *
+   * There is no reply frame. The device answers its own `settings.set` with what it now holds, and that
+   * arrives as an ordinary `dial_status` — which is also what corrects a window whose change was refused.
+   */
+  onDialSettings?: (id: string, patch: Record<string, unknown>) => void
   /** Questions still waiting on the user, as the `commander_question` frames that announced them. A window
    *  that connects after one was asked is handed them, so a terminal opened late still sees who is blocked. */
   openQuestions?: () => Frame[]
@@ -521,7 +530,11 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
         if (!isBinary && options.onAgentSeen) {
           if (parsed?.type === 'agent_seen') {
             const agentId = (parsed.payload as Record<string, unknown> | undefined)?.agentId
-            if (typeof agentId === 'string' && agentId) options.onAgentSeen(agentId)
+            const rawToken = (parsed.payload as Record<string, unknown> | undefined)?.readToken
+            const readToken = notificationReadToken(rawToken)
+            // Invalid versioned receipts must not become unversioned clears.
+            if (rawToken !== undefined && !readToken) return
+            if (typeof agentId === 'string' && agentId) options.onAgentSeen(agentId, readToken)
             return
           }
         }
@@ -541,7 +554,8 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
                   const machineId = item?.machineId
                   const text = typeof item?.text === 'string' ? item.text : ''
                   return typeof agentId === 'string' && agentId && typeof machineId === 'string'
-                    ? [{ agentId, machineId, question: item?.question === true, text }]
+                    ? [{ agentId, machineId, question: item?.question === true, text,
+                        ...(notificationReadToken(item?.readToken) ? { readToken: notificationReadToken(item?.readToken) } : {}) }]
                     : []
                 })
               : []
@@ -690,6 +704,16 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
           }
         }
 
+        // A device on THIS desk, named by the fleet's id. Like app_focus it is answered here and never
+        // forwarded: a robot plugged into this computer is nothing a remote machine can act on, and the
+        // reply is the ordinary `dial_status` the device's own answer produces.
+        if (parsed?.type === 'dial_settings') {
+          const payload = (parsed.payload ?? {}) as Record<string, unknown>
+          const id = typeof payload.id === 'string' ? payload.id : ''
+          options.onDialSettings?.(id, payload)
+          return
+        }
+
         if (relay) {
           // The relay now terminates E2EE itself (lib/remoteRelay.ts) — every frame past this point is
           // already plaintext going in and out, so binary frames use the SAME local wire format as this
@@ -722,6 +746,8 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
     const heartbeat = watchSocketLiveness(ws, {
       deadlineMs: LOCAL_IDLE_DEADLINE_MS,
       onIdle: (idleMs) => console.log(`[local-ws] ${connId} no traffic for ${Math.round(idleMs / 1000)}s — terminating`),
+      // The app is on this computer and slept with us: a wake re-probes it, it never ends the socket.
+      onWake: (sleptMs) => console.log(`[local-ws] ${connId} woke after ${Math.round(sleptMs / 1000)}s asleep — re-probing`),
     })
 
     const cleanup = (): void => {

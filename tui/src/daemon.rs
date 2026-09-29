@@ -45,12 +45,20 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SocketIo fo
 
 type Pending = Arc<Mutex<HashMap<String, (String, oneshot::Sender<(String, Value)>)>>>;
 
+// Clear requests on every exit, including cancellation and failures before selection.
+// Otherwise RPC clones can keep their own waiters alive until the full request deadline.
+struct PendingGuard(Pending);
+impl Drop for PendingGuard {
+    fn drop(&mut self) { self.0.lock().unwrap().clear(); }
+}
+
 #[derive(Clone)]
 pub struct Link {
     #[allow(dead_code)]
     pub machine_id: String,
     tx: mpsc::UnboundedSender<Out>,
     pending: Pending,
+    task: tokio::task::AbortHandle,
     /// Bumped per connection so the app can tell a stale link's events from the live one's.
     #[allow(dead_code)]
     pub generation: u64,
@@ -61,9 +69,12 @@ impl Link {
     pub fn spawn(port: u16, machine_id: &str, generation: u64, sink: mpsc::UnboundedSender<Event>) -> Link {
         let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let link = Link { machine_id: machine_id.to_string(), tx, pending: pending.clone(), generation };
+        let guard = PendingGuard(pending.clone());
+        let requests = pending.clone();
         let id = machine_id.to_string();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            let pending = requests;
             let emit = |event: MachineEvent| {
                 let _ = sink.send(Event::Machine { machine_id: id.clone(), generation, event });
             };
@@ -186,11 +197,12 @@ impl Link {
                     }
                 }
             }
-            // Anyone still waiting learns the socket is gone.
-            pending.lock().unwrap().clear();
         });
-        link
+        Link { machine_id: machine_id.to_string(), tx, pending, task: task.abort_handle(), generation }
     }
+
+    /// Close a failed route even when in-flight RPCs still hold clones of this link.
+    pub fn close(&self) { self.task.abort(); }
 
     pub fn send(&self, ty: &str, payload: Value) -> bool {
         self.tx.send(Out::Text(json!({ "type": ty, "payload": payload }).to_string())).is_ok()
@@ -271,4 +283,59 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
         at += size + 2;
     }
     out
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancel_closes_socket_and_releases_rpc_clones() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sink, mut events) = mpsc::unbounded_channel();
+        let (requested, request_seen) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _select = ws.next().await.unwrap().unwrap();
+            ws.send(Message::text(json!({"type":"connected", "payload":{}}).to_string())).await.unwrap();
+            let mut requested = Some(requested);
+            while let Some(Ok(message)) = ws.next().await {
+                if let Message::Text(text) = message {
+                    if text.contains("terminal_open") { if let Some(tx) = requested.take() { let _ = tx.send(()); } }
+                }
+            }
+        });
+        let link = Link::spawn(port, "test-peer", 1, sink);
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap(), Some(Event::Machine { event: MachineEvent::Connected, .. })));
+        let clone = link.clone();
+        let rpc = tokio::spawn(async move { clone.request("terminal_open", json!({}), Duration::from_secs(45)).await });
+        tokio::time::timeout(Duration::from_secs(2), request_seen).await.unwrap().unwrap();
+        link.close();
+        link.close(); // repeated cancellation is harmless
+        let result = tokio::time::timeout(Duration::from_secs(2), rpc).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err().code, "DISCONNECTED");
+        assert!(link.pending.lock().unwrap().is_empty());
+        tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+        assert!(!link.send("terminal_alive", json!({})));
+    }
+
+    #[tokio::test]
+    async fn selection_failure_releases_pending_requests_immediately() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sink, _events) = mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _select = ws.next().await;
+            ws.send(Message::text(json!({"type":"machine_select_error", "payload":{"error":"NO_PEER_LINK"}}).to_string())).await.unwrap();
+        });
+        let link = Link::spawn(port, "test-peer", 1, sink);
+        let result = tokio::time::timeout(Duration::from_secs(2), link.request("agents_list", json!({}), Duration::from_secs(20))).await.unwrap();
+        assert_eq!(result.unwrap_err().code, "DISCONNECTED");
+        assert!(link.pending.lock().unwrap().is_empty());
+        server.await.unwrap();
+    }
 }

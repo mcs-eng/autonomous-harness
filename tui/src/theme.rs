@@ -409,6 +409,19 @@ pub const MUTED: Color = Color::Indexed(8);
 pub const SOFT: Color = Color::Indexed(7);
 pub const TEXT: Color = Color::Reset;
 
+/// hn's chrome from the terminal's OSC 10/11 answer: `(background, foreground, is_light)`.
+/// Every piece of hn's chrome — the status bar, the message line, the pane borders — takes its
+/// colours from this one palette, so none of it disagrees with the theme. The foreground is made
+/// readable on the background; a deterministic dark default holds until the terminal answers.
+pub fn palette() -> (Color, Color, bool) {
+    let (bg, fg) = crate::term_out::terminal_colours()
+        .unwrap_or_else(|| ("#201f26".to_string(), "#f5f5f5".to_string()));
+    let light = crate::term_out::terminal_is_light().unwrap_or(false);
+    let bg = crate::tmuxconf::colour(&bg).unwrap_or(Color::Reset);
+    let fg = crate::tmuxconf::colour(&fg).unwrap_or(Color::Reset);
+    (bg, fg, light)
+}
+
 /// fzf's colours — its dark256 default, or what `--color=light|16|bw` in `$FZF_DEFAULT_OPTS` asks
 /// for (and bw under NO_COLOR), so a list here looks like fzf does on this terminal.
 #[derive(Clone)]
@@ -517,7 +530,14 @@ fn fzf_base() -> &'static Fzf {
             i += 1;
         }
         // No base named: the renderer's own — 256 colours, or the 16 on a terminal without them.
-        let base = base.unwrap_or(if depth() < 256 { DEFAULT16 } else { DARK256 });
+        // The terminal's own background (when it answered) chooses light over dark, so a light
+        // terminal gets the light palette rather than the stock dark one.
+        let base = base.unwrap_or_else(|| {
+            if let Some(light) = crate::term_out::terminal_is_light() {
+                return if light { LIGHT256 } else { DARK256 };
+            }
+            if depth() < 256 { DEFAULT16 } else { DARK256 }
+        });
         if black { theme.bg.col = Col::Idx(0) }
         let pal = init(theme, base, bold);
         let fg = |p: P| p.style().fg.unwrap_or(Color::Reset);
@@ -1036,7 +1056,14 @@ pub const TMUX_DISPLAY_PANES_ACTIVE: Color = Color::Red;
 
 pub fn fg(color: Color) -> Style {
     match color {
-        MUTED | SOFT => Style::default().add_modifier(Modifier::DIM),
+        MUTED | SOFT if no_color() => Style::default().add_modifier(Modifier::DIM),
+        // MUTED/SOFT are emphasis (the theme's dim), so they dim the theme's own readable text —
+        // not the terminal's raw default foreground, which can disagree with the theme (the mixed
+        // colour source that made hn's chrome read teal on some terminals).
+        MUTED | SOFT => {
+            let (_, fg, _) = palette();
+            Style::default().fg(depth_fit(fg)).add_modifier(Modifier::DIM)
+        }
         _ if no_color() => Style::default(),
         c => Style::default().fg(depth_fit(c)),
     }
@@ -1195,5 +1222,40 @@ mod opts_tests {
         assert_eq!(parse_label_pos("3:bottom"), (3, true));
         assert_eq!(parse_label_pos("-2"), (-2, false));
         assert_eq!(parse_label_pos("bottom"), (0, true));
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::palette;
+    use ratatui::style::Color;
+
+    /// The schema: a dark terminal answers a dark background and a light text; the palette must
+    /// keep them, mark the terminal dark, and the readable text must come back as the light one.
+    /// A light terminal inverts both. This is the invariant every piece of chrome uses, so none
+    /// of it disagrees with the theme.
+    #[test]
+    fn palette_follows_the_terminal_answer() {
+        crate::term_out::set_terminal_colours(Some("#201f26".into()), Some("#f5f5f5".into()));
+        let (bg, fg, light) = palette();
+        assert_eq!(bg, Color::Rgb(0x20, 0x1f, 0x26), "dark bg must map to the terminal's rgb");
+        assert_eq!(fg, Color::Rgb(0xf5, 0xf5, 0xf5), "the readable text on dark is light");
+        assert!(!light, "a dark background must not read as light");
+
+        // MUTED/SOFT are emphasis, so they must dim the theme's readable text (the palette fg), never
+        // dip into the terminal's raw default foreground — the mixed colour source that made hn's
+        // chrome read as teal on some terminals while the status bar was light.
+        for c in [super::MUTED, super::SOFT] {
+            let s = super::fg(c);
+            assert_eq!(s.fg, Some(super::depth_fit(fg)), "{c:?} carries the theme's foreground, not the terminal default");
+            assert!(s.add_modifier.contains(ratatui::style::Modifier::DIM), "{c:?} stays emphasis (dim)");
+        }
+
+        // A light terminal, in the same thread.
+        crate::term_out::set_terminal_colours(Some("#f7f7f7".into()), Some("#1a1a1a".into()));
+        let (bg, fg, light) = palette();
+        assert_eq!(bg, Color::Rgb(0xf7, 0xf7, 0xf7));
+        assert_eq!(fg, Color::Rgb(0x1a, 0x1a, 0x1a));
+        assert!(light, "a light background reads as light");
     }
 }

@@ -24,6 +24,7 @@ VER_FILE="$HERE/version.txt"
 # A DEDICATED prod build dir + DEVICE_FORCE_PROD so a published binary is always production (ignores any
 # local provisioned_config.h) WITHOUT moving the header, and without clobbering the interactive `build/`
 # dir — both stay warm (with ccache, near-instant rebuilds). Override BUILD_DIR via env if needed.
+BUILD_DIR_FROM_ENV="${BUILD_DIR:-}"
 BUILD_DIR="${BUILD_DIR:-$HERE/build-prod}"
 BIN="$BUILD_DIR/interns_commander.bin"
 
@@ -46,6 +47,13 @@ OTA_KEY="${OTA_KEY:-commander}"   # must match DEVICE_OTA_KEY in main/config_sto
 # problem one step later. The pair moves together: OTA_KEY names the manifest entry, and this names
 # the chip whose image goes in it.
 IDF_TARGET_BOARD="${IDF_TARGET_BOARD:-esp32s3}"
+
+# THE VERSION STAYS A PLAIN NUMBER, and that is load-bearing.
+#
+# fwPush.ts only offers a version matching ^v?\d+\.\d+\.\d+$, and fw_update.c compares the offered
+# string to the image's own esp_app_desc.version. A suffix — `0.0.94-habitat` was one, left in a build
+# directory's CMake cache and shipped to a device on 2026-09-29 — is therefore neither offered nor
+# installed, and the device holding it can never be updated over the cable again.
 
 next_firmware_version() {
   local current="$1" major minor patch
