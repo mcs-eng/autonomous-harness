@@ -176,6 +176,12 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
 
   Widget _projectList() {
     final groups = swarmProjects(widget.app, widget.projects.projects);
+    // Discovery also returns stopped conversations for the resume picker. Keep
+    // them there without bringing a stopped session back into this sidebar.
+    for (final group in groups) {
+      group.agents.removeWhere((entry) => entry.agent.isStopped);
+    }
+    groups.removeWhere((group) => group.saved == null && group.agents.isEmpty);
     final headings = _headings(groups);
     final grouped = {
       for (final g in groups)
@@ -183,7 +189,10 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     };
     final other = swarmAgents(widget.app)
         .where(
-          (a) => !grouped.contains((a.machineId, a.agent.id)) && _matches(a),
+          (a) =>
+              !a.agent.isStopped &&
+              !grouped.contains((a.machineId, a.agent.id)) &&
+              _matches(a),
         )
         .toList();
     final visible = groups

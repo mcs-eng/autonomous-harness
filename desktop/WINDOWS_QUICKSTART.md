@@ -60,11 +60,17 @@ Right-click a session, long-press it, or press Menu or Shift+F10 on it (a **...*
 button also appears on hover) for **Stop harness…** (**Stop terminal…** for a
 plain terminal). It opens the same confirmation as the pane header, and once you
 confirm, the session ends and leaves the list; project files and saved history are
-kept. Sessions on a shared machine are view-only. A project you saved with
+kept. Stopped sessions stay in history for resuming and do not return to this
+sidebar after a refresh. Sessions on a shared machine are view-only. A project you saved with
 **Add folder** or **New project** has a **...** button on its title row, and the same
 right-click menu, with **Remove from sidebar**. That forgets only the saved entry:
 the folder is untouched, and any sessions in it keep running and stay listed under
 the project.
+
+Windows tabs also have a visible **x**. It closes that tab's views while its
+harnesses keep running, and the existing reopen action restores the tab. It works
+on background tabs without switching away from your current tab. Tab and Enter
+can activate the close control; middle-click and remapped shortcuts still work.
 
 Sessions are listed by what they are. A row shows the session's own name or
 title, otherwise its harness or engine (**Grid**, **Codex**); the clock-stamped

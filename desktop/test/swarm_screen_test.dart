@@ -90,6 +90,54 @@ TerminalSession terminal(String id, List<TerminalBinaryFrame> input) =>
       ..streamId = 'stream-$id';
 
 void main() {
+  for (final keyboard in [false, true]) {
+    testWidgets(
+      'Windows tab close keeps sessions and can reopen (keyboard=$keyboard)',
+      (tester) async {
+        final app = createApp(connected: true);
+        final first = app.activeSwarm;
+        app.renameSwarm(first.id, 'First tab');
+        await app.addAgentToSwarm('m', 'a0');
+        app.newSwarm(name: 'Second tab');
+        final second = app.activeSwarm;
+        await app.addAgentToSwarm('m', 'a1');
+        await mount(tester, app);
+
+        // Closing a background tab must neither select it nor stop its agent.
+        final close = find.byKey(ValueKey('tab-close:${first.id}'));
+        expect(close.hitTestable(), findsOneWidget);
+        if (keyboard) {
+          final glyph = find.descendant(of: close, matching: find.text('x'));
+          Focus.of(tester.element(glyph)).requestFocus();
+          await tester.pump();
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        } else {
+          await tester.tap(close);
+        }
+        await tester.pumpAndSettle();
+        expect(app.swarms.map((swarm) => swarm.id), [second.id]);
+        expect(app.activeSwarmId, second.id);
+        expect(app.stateOf('m')!.agents.any((a) => a.id == 'a0'), isTrue);
+
+        app.reopenClosedSwarm();
+        await tester.pumpAndSettle();
+        expect(app.activeSwarmId, first.id);
+        expect(app.activeSwarm.name, 'First tab');
+        expect(app.activeSwarm.panes.single.agentId, 'a0');
+
+        // The same control closes the active tab without ending its session.
+        await tester.tap(find.byKey(ValueKey('tab-close:${first.id}')));
+        await tester.pumpAndSettle();
+        expect(app.activeSwarmId, second.id);
+        expect(app.tabStripFocused, isTrue);
+        expect(app.stateOf('m')!.agents.any((a) => a.id == 'a0'), isTrue);
+        await tester.pumpWidget(const SizedBox());
+        app.dispose();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.windows),
+    );
+  }
+
   testWidgets(
     'tabs omit close buttons and redundant hints; Command-W closes the active tab',
     (tester) async {

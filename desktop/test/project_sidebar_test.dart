@@ -83,6 +83,44 @@ Future<void> mountSidebar(
 }
 
 void main() {
+  testWidgets('stopped inventory stays out of the sidebar after refresh', (
+    tester,
+  ) async {
+    final app = projectApp();
+    addTearDown(app.dispose);
+    final machine = app.machineStates['m']!;
+    // Cover both a discovered project and a session without project metadata.
+    machine.localProjects = {...machine.localProjects}..remove('a1');
+    await mountSidebar(tester, app);
+    expect(find.byKey(const ValueKey('project-agent:m:a0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('project-agent:m:a1')), findsOneWidget);
+
+    // The daemon retains stopped conversations and returns them in its next
+    // includeStopped inventory. Search/history must still be able to resume them.
+    machine.agents = [
+      for (final agent in machine.agents) agent.copyWith(status: 'stopped'),
+    ];
+    await mountSidebar(tester, app);
+    expect(swarmAgents(app), hasLength(2));
+    expect(find.byKey(const ValueKey('project-agent:m:a0')), findsNothing);
+    expect(find.byKey(const ValueKey('project-agent:m:a1')), findsNothing);
+    expect(find.text('Notebook'), findsNothing);
+
+    // Saved folders stay available for starting another session.
+    final projects = SwarmProjectStore();
+    addTearDown(projects.dispose);
+    projects.projects.add(
+      const SavedSwarmProject(
+        machineId: 'm',
+        path: '/work/notebook',
+        name: 'Notebook',
+      ),
+    );
+    await mountSidebar(tester, app, projects: projects);
+    expect(find.text('Notebook'), findsOneWidget);
+    expect(find.byKey(const ValueKey('project-agent:m:a0')), findsNothing);
+  });
+
   testWidgets(
     'an unavailable session exposes its reason without creating an agent',
     (tester) async {
