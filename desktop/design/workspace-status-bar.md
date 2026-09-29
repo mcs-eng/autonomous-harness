@@ -40,8 +40,10 @@ for dragging the window; adding tabs fills that space one by one. Tabs never
 stretch to fill the row. Scroll overflow when needed, revealing the selected
 tab on keyboard navigation. An exceptionally narrow viewport may show a smaller
 tab, preserving activity marks before truncating names.
-There is no close button or reserved close-button space. Cmd-W closes the active
-tab; preserve remapped shortcuts, native menu access, and middle-click closing.
+Windows tabs reserve three cells for a visible `x` close control because the OS
+uses Meta-W for Widgets. It closes the tab's views and keeps its harnesses running.
+Other targets keep no close button or reserved close-button space. Cmd-W closes
+the active tab; preserve remapped shortcuts, native menu access, and middle-click closing.
 Preserve reorder, rename, keyboard focus, and terminal sessions. Cmd-T opens a
 swarm. Cmd-O opens the shared picker with `#` for projects; Cmd-P opens it directly
 on harnesses. Cmd-Shift-P opens commands (`>`). The projects list has

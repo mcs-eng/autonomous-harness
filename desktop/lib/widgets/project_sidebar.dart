@@ -1,14 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/models.dart';
 import '../core/project_folder.dart';
 import '../shared/layouts/widgets/sidebar_item.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/widgets/app_icon_button.dart';
+import '../shared/widgets/app_menu.dart';
 import '../state/app_state.dart';
 import '../state/project_navigation.dart';
 import '../state/swarm_catalog.dart';
 import 'agent_drag.dart';
+import 'delete_agent_dialog.dart';
 import 'engine_identity.dart';
 
 /// A view of the existing project catalog. Expanding a project has no terminal
@@ -171,6 +176,12 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
 
   Widget _projectList() {
     final groups = swarmProjects(widget.app, widget.projects.projects);
+    // Discovery also returns stopped conversations for the resume picker. Keep
+    // them there without bringing a stopped session back into this sidebar.
+    for (final group in groups) {
+      group.agents.removeWhere((entry) => entry.agent.isStopped);
+    }
+    groups.removeWhere((group) => group.saved == null && group.agents.isEmpty);
     final headings = _headings(groups);
     final grouped = {
       for (final g in groups)
@@ -178,7 +189,10 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     };
     final other = swarmAgents(widget.app)
         .where(
-          (a) => !grouped.contains((a.machineId, a.agent.id)) && _matches(a),
+          (a) =>
+              !a.agent.isStopped &&
+              !grouped.contains((a.machineId, a.agent.id)) &&
+              _matches(a),
         )
         .toList();
     final visible = groups
@@ -212,19 +226,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     return ListView(
       children: [
         for (final group in visible) ...[
-          SidebarItem(
-            key: ValueKey('project:${group.id}'),
-            label: headings[group.id]!,
-            icon: _collapsed.contains(group.id)
-                ? Icons.chevron_right
-                : Icons.expand_more,
-            tooltip: headings[group.id] == group.name
-                ? '${group.name} · ${group.agents.length} sessions'
-                : '${headings[group.id]}\n${group.name} · ${group.agents.length} sessions',
-            onTap: () => setState(() {
-              if (!_collapsed.remove(group.id)) _collapsed.add(group.id);
-            }),
-          ),
+          _groupHeader(group, headings[group.id]!),
           if (!_collapsed.contains(group.id) || _query.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(left: 12, right: 8),
@@ -304,6 +306,9 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
       for (final (i, location) in locations.indexed) ...[
         _location(
           location,
+          // One location: its "+" sits on the project's title row. Several: each
+          // keeps its own beside its host and folder, which say which is which.
+          actions: locations.length > 1,
           showHost: hosts.length > 1,
           // A folder line only when it tells the locations apart or differs
           // from the heading; the whole path when two end the same way.
@@ -323,17 +328,121 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     ];
   }
 
-  Widget _location(
-    ProjectLocation location, {
-    required bool showHost,
-    required String? folder,
-  }) {
+  /// The connection-details and "New agent here" buttons for one location.
+  List<Widget> _locationActions(ProjectLocation location) {
     final machine = widget.app.stateOf(location.machineId);
     final available =
         machine != null &&
         !machine.machine.isShared &&
         machine.nodeOnline != false &&
         machine.connectionStatus == ConnectionStatus.connected;
+    final host = widget.app.projectMachineLabel(location.machineId);
+    return [
+      if (machine == null ||
+          machine.needsLink ||
+          machine.nodeOnline == false ||
+          machine.connectionStatus != ConnectionStatus.connected)
+        AppIconButton(
+          icon: Icons.info_outline,
+          tooltip: 'Machine connection details',
+          onPressed: () => _showRecovery(location.machineId),
+        ),
+      AppIconButton(
+        key: ValueKey(
+          'new-project-agent:${location.machineId}:${location.folder}',
+        ),
+        icon: Icons.add,
+        tooltip: available
+            ? 'New agent here\n$host\n${location.folder}'
+            : machine?.machine.isShared == true
+            ? 'Cannot create agents on a shared machine'
+            : 'Connect this machine to create an agent',
+        onPressed: available ? () => widget.onNewAgent(location) : null,
+      ),
+    ];
+  }
+
+  /// A project's title row. With one location its "+" (and, when the machine
+  /// needs attention, its details button) sit at the right end of the row; a
+  /// saved project also gets a menu to take it off the sidebar.
+  Widget _groupHeader(SwarmProjectGroup group, String heading) {
+    final locations = projectLocations(group);
+    final saved = group.saved;
+    Widget item(MenuController? menu) {
+      final actions = [
+        if (locations.length == 1) ..._locationActions(locations.single),
+        if (saved != null && menu != null)
+          AppIconButton(
+            key: ValueKey('project-menu:${group.id}'),
+            icon: Icons.more_horiz,
+            tooltip: 'Folder actions',
+            onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+          ),
+      ];
+      return SidebarItem(
+        key: ValueKey('project:${group.id}'),
+        label: heading,
+        icon: _collapsed.contains(group.id)
+            ? Icons.chevron_right
+            : Icons.expand_more,
+        tooltip: heading == group.name
+            ? '${group.name} · ${group.agents.length} sessions'
+            : '$heading\n${group.name} · ${group.agents.length} sessions',
+        onTap: () => setState(() {
+          if (!_collapsed.remove(group.id)) _collapsed.add(group.id);
+        }),
+        trailing: actions.isEmpty
+            ? null
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: actions,
+              ),
+        trailingWidth: 24.0 * actions.length,
+        trailingAlwaysVisible: true,
+      );
+    }
+
+    if (saved == null) return item(null);
+    return _ActionMenu(
+      key: ValueKey('project-menu-host:${group.id}'),
+      menu: (controller) => _folderMenu(controller, group, saved),
+      builder: (context, controller) => item(controller),
+    );
+  }
+
+  List<Widget> _folderMenu(
+    MenuController controller,
+    SwarmProjectGroup group,
+    SavedSwarmProject saved,
+  ) {
+    final sessions = group.agents.length;
+    return [
+      AppMenuItem(
+        icon: Icons.playlist_remove,
+        label: 'Remove from sidebar',
+        detail: sessions == 0
+            ? 'The folder itself is not touched.'
+            : 'Its ${sessions == 1 ? 'session keeps' : '$sessions sessions keep'} '
+                  'running and stay${sessions == 1 ? 's' : ''} listed. '
+                  'The folder is not touched.',
+        onPressed: () {
+          controller.close();
+          unawaited(widget.projects.remove(saved.id));
+        },
+      ),
+    ];
+  }
+
+  Widget _location(
+    ProjectLocation location, {
+    required bool actions,
+    required bool showHost,
+    required String? folder,
+  }) {
+    // A single location says nothing of its own beyond the heading: its "+"
+    // lives on the title row, so there is no row left to draw.
+    if (!actions && !showHost && folder == null) return const SizedBox.shrink();
     final host = widget.app.projectMachineLabel(location.machineId);
     final where = '$host\n${location.folder}';
     return Padding(
@@ -373,27 +482,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
             )
           else
             const Spacer(),
-          if (machine == null ||
-              machine.needsLink ||
-              machine.nodeOnline == false ||
-              machine.connectionStatus != ConnectionStatus.connected)
-            AppIconButton(
-              icon: Icons.info_outline,
-              tooltip: 'Machine connection details',
-              onPressed: () => _showRecovery(location.machineId),
-            ),
-          AppIconButton(
-            key: ValueKey(
-              'new-project-agent:${location.machineId}:${location.folder}',
-            ),
-            icon: Icons.add,
-            tooltip: available
-                ? 'New agent here\n$host\n${location.folder}'
-                : machine?.machine.isShared == true
-                ? 'Cannot create agents on a shared machine'
-                : 'Connect this machine to create an agent',
-            onPressed: available ? () => widget.onNewAgent(location) : null,
-          ),
+          if (actions) ..._locationActions(location),
         ],
       ),
     );
@@ -407,7 +496,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     final selected =
         widget.app.focusedPane?.machineId == row.machineId &&
         widget.app.focusedPane?.agentId == row.agent.id;
-    final entry = Column(
+    Widget entry(MenuController menu) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SidebarItem(
@@ -415,6 +504,19 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
           label: shown,
           selected: selected,
           leading: EngineMark.forAgent(row.agent, size: 16),
+          // Revealed on hover, like the rest of the rail's row actions. Kept out
+          // of the tab order: an invisible stop is worse than none, and the
+          // keyboard reaches the same menu with Menu or Shift+F10 on the row.
+          trailing: ExcludeFocus(
+            child: AppIconButton(
+              key: ValueKey(
+                'project-agent-menu:${row.machineId}:${row.agent.id}',
+              ),
+              icon: Icons.more_horiz,
+              tooltip: 'Session actions',
+              onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+            ),
+          ),
           tooltip: [
             shown,
             if (shown != row.agent.name) row.agent.name,
@@ -441,27 +543,81 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         ),
       ],
     );
-    // A session without a terminal cannot fill a tile, so it cannot be dragged
-    // to one either: the grid would answer a deliberate gesture with nothing.
-    if (!row.agent.terminalAvailable) return entry;
     final drag = AgentDragRef(
       machineId: row.machineId,
       agentId: row.agent.id,
       name: shown,
     );
-    // Onto a tile or the grid's empty slot, as the machine tree this sidebar
-    // replaced allowed. Horizontal only: the list scrolls vertically, and the
-    // tiles are to the right.
-    return Draggable<AgentDragRef>(
-      data: drag,
-      affinity: Axis.horizontal,
-      dragAnchorStrategy: pointerDragAnchorStrategy,
-      onDragStarted: () => agentDrag.value = drag,
-      onDragEnd: (_) => agentDrag.value = null,
-      onDraggableCanceled: (_, _) => agentDrag.value = null,
-      feedback: _DragChip(label: shown, agent: row.agent),
-      childWhenDragging: Opacity(opacity: 0.4, child: entry),
-      child: entry,
+    return _ActionMenu(
+      key: ValueKey('session-menu:${row.machineId}:${row.agent.id}'),
+      menu: (controller) => _sessionMenu(controller, row),
+      builder: (context, controller) {
+        final content = entry(controller);
+        // A session without a terminal cannot fill a tile, so it cannot be
+        // dragged to one either: the grid would answer a deliberate gesture
+        // with nothing.
+        if (!row.agent.terminalAvailable) return content;
+        // Onto a tile or the grid's empty slot, as the machine tree this
+        // sidebar replaced allowed. Horizontal only: the list scrolls
+        // vertically, and the tiles are to the right.
+        return Draggable<AgentDragRef>(
+          data: drag,
+          affinity: Axis.horizontal,
+          dragAnchorStrategy: pointerDragAnchorStrategy,
+          onDragStarted: () => agentDrag.value = drag,
+          onDragEnd: (_) => agentDrag.value = null,
+          onDraggableCanceled: (_, _) => agentDrag.value = null,
+          feedback: _DragChip(label: shown, agent: row.agent),
+          childWhenDragging: Opacity(opacity: 0.4, child: content),
+          child: content,
+        );
+      },
+    );
+  }
+
+  /// The one action a session row offers: the same stop-and-remove
+  /// confirmation the pane header opens, so nothing new can end an agent.
+  List<Widget> _sessionMenu(MenuController controller, SwarmAgentRef row) {
+    final reason = widget.app.stateOf(row.machineId)?.machine.isShared == true
+        ? 'Shared harnesses are view-only.'
+        : null;
+    final terminal = isTerminalEngine(row.agent.engine);
+    final item = AppMenuItem(
+      icon: Icons.delete_outline,
+      label: terminal ? 'Stop terminal…' : 'Stop harness…',
+      danger: reason == null,
+      detail:
+          'Ends it and removes it from this list. Project files and saved '
+          'history are kept.',
+      onPressed: () {
+        controller.close();
+        if (reason == null) _stopAgent(row);
+      },
+    );
+    if (reason == null) return [item];
+    return [
+      Tooltip(
+        message: reason,
+        child: IgnorePointer(child: Opacity(opacity: 0.5, child: item)),
+      ),
+    ];
+  }
+
+  void _stopAgent(SwarmAgentRef row) {
+    final machine = widget.app.stateOf(row.machineId);
+    final agent = machine?.agents
+        .where((agent) => agent.id == row.agent.id)
+        .firstOrNull;
+    if (agent == null || machine!.machine.isShared) return;
+    unawaited(
+      confirmDeleteAgent(
+        context,
+        widget.app,
+        row.machineId,
+        agent.id,
+        agent.displayName,
+        engine: agent.engine,
+      ),
     );
   }
 
@@ -538,6 +694,55 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     if (!mounted) return;
     if (action == 'machines') widget.onShowMachines();
     if (action == 'refresh') await widget.app.reloadMachineData(machineId);
+  }
+}
+
+/// A menu on a sidebar row, opened by a right click, a long press, or Menu /
+/// Shift+F10 with the row focused. [builder] receives the controller so the row
+/// can also open it from a button of its own.
+class _ActionMenu extends StatefulWidget {
+  const _ActionMenu({super.key, required this.menu, required this.builder});
+
+  final List<Widget> Function(MenuController controller) menu;
+  final Widget Function(BuildContext context, MenuController controller)
+  builder;
+
+  @override
+  State<_ActionMenu> createState() => _ActionMenuState();
+}
+
+class _ActionMenuState extends State<_ActionMenu> {
+  final _controller = MenuController();
+
+  void _open([Offset? position]) {
+    if (_controller.isOpen) _controller.close();
+    _controller.open(position: position);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.contextMenu): _open,
+        const SingleActivator(LogicalKeyboardKey.f10, shift: true): _open,
+      },
+      child: MenuAnchor(
+        controller: _controller,
+        menuChildren: widget.menu(_controller),
+        // A row's own tooltip claims a long press by default, so a touch user
+        // would get the tooltip and never the menu. Hover still shows it.
+        child: TooltipTheme(
+          data: TooltipTheme.of(context)
+              .copyWith(triggerMode: TooltipTriggerMode.manual),
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onSecondaryTapUp: (details) => _open(details.localPosition),
+            onLongPressStart: (details) => _open(details.localPosition),
+            child: widget.builder(context, _controller),
+          ),
+        ),
+      ),
+    );
   }
 }
 

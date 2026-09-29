@@ -246,6 +246,41 @@ class SwarmProjectStore extends ChangeNotifier {
     return operation;
   }
 
+  /// Forgets a saved project. Only the saved entry goes: its folder and any
+  /// sessions running in it are untouched, so a project that still has live
+  /// sessions keeps its group.
+  Future<bool> remove(String id) {
+    final operation = _writeTail.then((_) async {
+      await load();
+      if (_disposed || !_loaded) return false;
+      if (!projects.any((item) => item.id == id)) return true;
+      final next = [
+        for (final item in projects)
+          if (item.id != id) item,
+      ];
+      try {
+        await storage?.write(
+          'swarm_projects_v1',
+          jsonEncode(next.map((p) => p.toJson()).toList()),
+        );
+      } catch (_) {
+        if (_disposed) return false;
+        error = 'Could not remove this project. Try again.';
+        notifyListeners();
+        return false;
+      }
+      if (_disposed) return false;
+      projects
+        ..clear()
+        ..addAll(next);
+      error = null;
+      notifyListeners();
+      return true;
+    });
+    _writeTail = operation.then((_) {});
+    return operation;
+  }
+
   void dismissError() {
     error = null;
     notifyListeners();
