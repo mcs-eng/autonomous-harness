@@ -279,6 +279,7 @@ void main() {
     int port,
     File identityFile, {
     Future<void> Function()? spawnCommand,
+    Duration probeTimeout = const Duration(milliseconds: 40),
   }) => LocalCliDiscovery(
     config: AppConfig(
       apiBaseUrl: 'https://harness-api.autonomous.ai',
@@ -292,9 +293,9 @@ void main() {
     // the purposes of these tests; live daemons answer in single digits.
     dio: Dio(
       BaseOptions(
-        connectTimeout: const Duration(milliseconds: 40),
-        receiveTimeout: const Duration(milliseconds: 40),
-        sendTimeout: const Duration(milliseconds: 40),
+        connectTimeout: probeTimeout,
+        receiveTimeout: probeTimeout,
+        sendTimeout: probeTimeout,
       ),
     ),
     identity: LocalMachineIdentity(computerIdFile: identityFile),
@@ -683,6 +684,8 @@ void main() {
     final probe = await discoveryFor(
       server!.port,
       identityFile,
+      // A live loopback server: a 40 ms probe timeout under suite load reads as 'timed out'.
+      probeTimeout: const Duration(seconds: 2),
       spawnCommand: () async {
         spawned = true;
       },
@@ -1035,7 +1038,7 @@ void main() {
       );
       addTearDown(timer.cancel);
 
-      await Future.delayed(const Duration(milliseconds: 300));
+      await Future.delayed(const Duration(milliseconds: 800));
 
       expect(spawnCount, greaterThan(0));
       expect(
