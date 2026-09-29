@@ -185,13 +185,13 @@ void main() {
         {'terminal_theme'},
       ]);
       expect(appearanceStorage.requests, [
-        // The appearance batch reads the start-background preference too;
-        // the POSIX baseline predates that key.
+        // Keep the full appearance batch, including both background keys.
         {
           'app_ui_font_family',
           'app_ui_font_size',
           'app_color_palette',
           'harness_start_background',
+          'harness_custom_background',
           'workspace_prompt_v1',
         },
       ]);

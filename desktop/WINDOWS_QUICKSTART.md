@@ -378,3 +378,8 @@ without waiting on the sign-in check, as upstream does. Some of upstream's new
 desktop tests assume macOS or Linux fonts and colours; those that fail on Windows
 also fail on plain upstream and are listed in the pull request. This is a source
 change; it does not update an installed desktop or daemon.
+
+New Harness accepts a first task for Hermes, matching the CLI's existing support.
+Windows validation now keeps its rules-file fixture in a disposable home
+directory and checks the complete appearance settings batch, including the
+custom-background key.
