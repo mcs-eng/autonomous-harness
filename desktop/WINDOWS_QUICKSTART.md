@@ -421,3 +421,12 @@ checks. The Windows application code and tests are unchanged by this sync.
 
 The inherited release workflows remain outside the Windows packaging path.
 Source integration does not replace an installed desktop or restart its daemon.
+
+## September 30 terminal copy
+
+In a terminal pane on Windows, Ctrl+C now copies while output is selected and
+interrupts the agent only when nothing is selected, as Windows Terminal does. The
+copy clears the selection, so a second Ctrl+C is the interrupt. Ctrl+Shift+C,
+right-click, and Ctrl+V are unchanged, and macOS and Linux keep their existing
+copy chords. The shortcuts list shows the Windows chords. This is a source
+change; it does not update an installed desktop or daemon.

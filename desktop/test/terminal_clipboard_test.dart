@@ -296,6 +296,125 @@ void main() {
     );
   }
 
+  Future<TerminalController> mountSelectedHello(
+    WidgetTester tester,
+    AppNotifier app,
+    TerminalSession session, {
+    bool readOnly = false,
+  }) async {
+    await session.handleBinary(
+      TerminalBinaryFrame(
+        kind: TerminalBinaryKind.keyframe,
+        streamId: session.streamId!,
+        seq: 0,
+        compressed: false,
+        cols: 80,
+        rows: 24,
+        bytes: utf8.encode('hello world'),
+      ),
+    );
+    await mount(tester, app, session, readOnly: readOnly);
+    final controller = tester
+        .widget<TerminalView>(find.byType(TerminalView))
+        .controller!;
+    controller.setSelection(
+      session.terminal.buffer.createAnchor(0, 0),
+      session.terminal.buffer.createAnchor(5, 0),
+    );
+    return controller;
+  }
+
+  onPlatform(
+    TargetPlatform.windows,
+    'Windows Ctrl+C copies selected output and interrupts only with nothing selected',
+    (tester) async {
+      final app = createApp();
+      final frames = <TerminalBinaryFrame>[];
+      final session = liveSession('a0', frames);
+      final controller = await mountSelectedHello(tester, app, session);
+      await key(tester, LogicalKeyboardKey.keyC, ctrl: true);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(clipboard, 'hello');
+      expect(
+        controller.selection,
+        isNull,
+        reason: 'A copy clears the selection',
+      );
+      expect(
+        input(frames),
+        isEmpty,
+        reason: 'A selected Ctrl+C is not an interrupt',
+      );
+      await key(tester, LogicalKeyboardKey.keyC, ctrl: true);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(input(frames).codeUnits, [
+        3,
+      ], reason: 'Nothing selected: interrupt');
+      expect(clipboard, 'hello');
+      clipboard = 'other';
+      controller.setSelection(
+        session.terminal.buffer.createAnchor(6, 0),
+        session.terminal.buffer.createAnchor(11, 0),
+      );
+      await key(tester, LogicalKeyboardKey.keyC, ctrl: true, shift: true);
+      expect(clipboard, 'world', reason: 'Ctrl+Shift+C still copies');
+      expect(input(frames).codeUnits, [3]);
+      expect(
+        kTerminalOwnedKeys.firstWhere((item) => item.label == 'Copy').chord,
+        ['⌃', '⇧', 'C'],
+      );
+      expect(
+        kTerminalOwnedKeys
+            .firstWhere(
+              (item) => item.label == 'Copy selection, else interrupt',
+            )
+            .chord,
+        ['⌃', 'C'],
+      );
+      await tester.pumpWidget(const SizedBox());
+      session.dispose();
+      app.dispose();
+    },
+  );
+
+  onPlatform(
+    TargetPlatform.windows,
+    'Windows Ctrl+C copies selected output in a read-only pane and sends nothing',
+    (tester) async {
+      final app = createApp();
+      final frames = <TerminalBinaryFrame>[];
+      final session = liveSession('a0', frames);
+      await mountSelectedHello(tester, app, session, readOnly: true);
+      await key(tester, LogicalKeyboardKey.keyC, ctrl: true);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(clipboard, 'hello');
+      expect(frames, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+      session.dispose();
+      app.dispose();
+    },
+  );
+
+  for (final platform in [TargetPlatform.macOS, TargetPlatform.linux]) {
+    onPlatform(
+      platform,
+      '$platform Ctrl+C with output selected is still the interrupt',
+      (tester) async {
+        final app = createApp();
+        final frames = <TerminalBinaryFrame>[];
+        final session = liveSession('a0', frames);
+        await mountSelectedHello(tester, app, session);
+        await key(tester, LogicalKeyboardKey.keyC, ctrl: true);
+        await tester.pump(const Duration(milliseconds: 20));
+        expect(input(frames).codeUnits, [3]);
+        expect(clipboard, 'clipboard text');
+        await tester.pumpWidget(const SizedBox());
+        session.dispose();
+        app.dispose();
+      },
+    );
+  }
+
   onPlatform(
     TargetPlatform.macOS,
     'older daemons retain bracketed paste and clear the old selection',

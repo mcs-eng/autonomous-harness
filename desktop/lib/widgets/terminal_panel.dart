@@ -1680,15 +1680,18 @@ class _TerminalPanelState extends State<TerminalPanel>
     _lastInertiaMicros = null;
   }
 
-  Future<void> _copyOrPaste() async {
-    final terminal = widget.session.terminal;
+  /// Copies the selected output and clears the selection. False when nothing was selected.
+  Future<bool> _copySelection() async {
     final selection = _controller.selection;
-    if (selection != null) {
-      final text = terminal.buffer.getText(selection);
-      _controller.clearSelection();
-      await Clipboard.setData(ClipboardData(text: text));
-      return;
-    }
+    if (selection == null) return false;
+    final text = widget.session.terminal.buffer.getText(selection);
+    _controller.clearSelection();
+    await Clipboard.setData(ClipboardData(text: text));
+    return true;
+  }
+
+  Future<void> _copyOrPaste() async {
+    if (await _copySelection()) return;
     await _paste();
   }
 
@@ -1806,7 +1809,8 @@ class _TerminalPanelState extends State<TerminalPanel>
   }
 
   /// ⌘V (Ctrl+V off Apple) — taken from xterm so the fallthrough above applies. ⌘⌫ joins it here,
-  /// for the reason spelled out on [_onDeleteToLineStart].
+  /// for the reason spelled out on [_onDeleteToLineStart]. On Windows Ctrl+C is taken too, but only
+  /// while output is selected (see [_copiesOnCtrlC]).
   ///
   /// xterm binds paste itself, but only ever to its text-only action. `onKeyEvent`
   /// is the one hook that runs BEFORE its shortcut map (terminal_view.dart), so
@@ -1845,6 +1849,10 @@ class _TerminalPanelState extends State<TerminalPanel>
         event.logicalKey == LogicalKeyboardKey.backspace) {
       return _onDeleteToLineStart();
     }
+    if (_copiesOnCtrlC(event)) {
+      unawaited(_copySelection());
+      return KeyEventResult.handled;
+    }
     if (event is! KeyDownEvent || event.logicalKey != LogicalKeyboardKey.keyV) {
       return KeyEventResult.ignored;
     }
@@ -1863,6 +1871,24 @@ class _TerminalPanelState extends State<TerminalPanel>
     if (!pasting) return KeyEventResult.ignored;
     unawaited(_paste());
     return KeyEventResult.handled;
+  }
+
+  /// Windows Terminal's rule: Ctrl+C copies while output is selected and interrupts otherwise, so
+  /// a stray Ctrl+C on a selection cannot kill the engine. The copy clears the selection, which
+  /// makes the next Ctrl+C the interrupt again. Elsewhere Ctrl+C stays the program's: macOS copies
+  /// with ⌘C and Linux with Ctrl+Shift+C, both xterm defaults.
+  bool _copiesOnCtrlC(KeyEvent event) {
+    if (defaultTargetPlatform != TargetPlatform.windows ||
+        event is! KeyDownEvent ||
+        event.logicalKey != LogicalKeyboardKey.keyC ||
+        _controller.selection == null) {
+      return false;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    return keyboard.isControlPressed &&
+        !keyboard.isShiftPressed &&
+        !keyboard.isAltPressed &&
+        !keyboard.isMetaPressed;
   }
 
   /// A key that would have put something into the terminal: a character, or

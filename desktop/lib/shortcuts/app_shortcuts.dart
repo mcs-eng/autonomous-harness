@@ -668,6 +668,10 @@ List<TerminalKey> get kTerminalOwnedKeys => [
     TerminalKey(['⌃', '⇧', 'C'], 'Copy'),
     TerminalKey(['⌃', '⇧', 'V'], 'Paste'),
     TerminalKey(['⌃', '⇧', 'A'], 'Select all'),
+  ] else if (defaultTargetPlatform == TargetPlatform.windows) ...const [
+    TerminalKey(['⌃', '⇧', 'C'], 'Copy'),
+    TerminalKey(['⌃', 'V'], 'Paste'),
+    TerminalKey(['⌃', 'A'], 'Select all'),
   ] else ...const [
     TerminalKey(['⌘', 'C'], 'Copy'),
     TerminalKey(['⌘', 'V'], 'Paste'),
@@ -681,7 +685,13 @@ List<TerminalKey> get kTerminalOwnedKeys => [
   // ⌘⌫ is taken in the pane on Apple only — elsewhere ⌘ is Super and stays the app's.
   if (defaultTargetPlatform != TargetPlatform.linux)
     const TerminalKey(['⌘', '⌫'], "Delete to the line's start"),
-  const TerminalKey(['⌃', 'C'], 'Cancel / interrupt in the agent'),
+  // On Windows ⌃C copies while output is selected; the interrupt is what it does with nothing selected.
+  TerminalKey(
+    const ['⌃', 'C'],
+    defaultTargetPlatform == TargetPlatform.windows
+        ? 'Copy selection, else interrupt'
+        : 'Cancel / interrupt in the agent',
+  ),
 ];
 
 /// Turns the declared shortcuts into the map [CallbackShortcuts] wants.
