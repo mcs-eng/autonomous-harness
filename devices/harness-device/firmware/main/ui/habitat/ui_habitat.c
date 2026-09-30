@@ -1592,9 +1592,11 @@ static bool question_answer(void)
     if (!q->selected) return false;
     q->answer[0]=0; size_t used=0;
     for (int i=0;i<q->count;i++) if (q->selected & (1u<<i)) {
-        int n=snprintf(q->answer+used,sizeof q->answer-used,"%s%s",used ? "\n\n" : "",q->options[i]);
-        if (n<0 || (size_t)n>=sizeof q->answer-used) return false;
-        used+=(size_t)n;
+        size_t n=strlen(q->options[i]), separator=used ? 2 : 0;
+        if (n+separator>=sizeof q->answer-used) return false;
+        if (separator) { memcpy(q->answer+used,"\n\n",separator); used+=separator; }
+        memmove(q->answer+used,q->options[i],n+1);
+        used+=n;
     }
     return used>0;
 }

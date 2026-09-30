@@ -17,6 +17,7 @@ def function(name):
     return match.group(0) + '\n'
 
 code = r'''
+#define _POSIX_C_SOURCE 200809L
 #include "terminal.h"
 #include <stdbool.h>
 #include <stdint.h>
