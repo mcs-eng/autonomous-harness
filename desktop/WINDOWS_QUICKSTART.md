@@ -433,8 +433,8 @@ change; it does not update an installed desktop or daemon.
 
 ## September 30 test stability
 
-The connection tests for token refresh, transport drop and the machine pool now
-wait for the connection they depend on instead of a fixed interval. They passed on
-an idle machine and failed in a full run on a busy one. The application code and
-the assertions are unchanged. This is a test change; it does not update an
-installed desktop or daemon.
+The connection tests in `ws_conn_test.dart` now wait for the connection they
+depend on instead of a fixed interval. They passed on an idle machine and failed
+in a full run on a busy one. The application code is unchanged, and so are the
+outcomes the tests check. This is a test change; it does not update an installed
+desktop or daemon.
