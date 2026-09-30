@@ -260,6 +260,8 @@ class _TerminalPanelState extends State<TerminalPanel>
   bool _followTail = true;
   TerminalStyle _terminalFont = terminalFontStore.value;
   bool _observingLinkModifiers = false;
+  // True from a Ctrl+C that copied until that key comes up, so its auto-repeats stay swallowed.
+  bool _ctrlCCopyHeld = false;
   late final RemoteMediaDownloader _mediaDownloader;
   MediaDownloadCancellation? _previewCancellation;
   RemoteMediaProgress? _previewProgress;
@@ -1680,11 +1682,17 @@ class _TerminalPanelState extends State<TerminalPanel>
     _lastInertiaMicros = null;
   }
 
+  /// The selected output, or null when nothing is selected.
+  String? _selectedText() {
+    final selection = _controller.selection;
+    if (selection == null) return null;
+    return widget.session.terminal.buffer.getText(selection);
+  }
+
   /// Copies the selected output and clears the selection. False when nothing was selected.
   Future<bool> _copySelection() async {
-    final selection = _controller.selection;
-    if (selection == null) return false;
-    final text = widget.session.terminal.buffer.getText(selection);
+    final text = _selectedText();
+    if (text == null) return false;
     _controller.clearSelection();
     await Clipboard.setData(ClipboardData(text: text));
     return true;
@@ -1849,7 +1857,20 @@ class _TerminalPanelState extends State<TerminalPanel>
         event.logicalKey == LogicalKeyboardKey.backspace) {
       return _onDeleteToLineStart();
     }
+    if (event.logicalKey == LogicalKeyboardKey.keyC) {
+      if (event is KeyDownEvent) {
+        _ctrlCCopyHeld = false;
+      } else if (_ctrlCCopyHeld) {
+        // A held Ctrl+C repeats. The copy already cleared the selection, so a repeat that reached
+        // xterm would be the interrupt the copy was there to avoid.
+        if (event is KeyUpEvent) _ctrlCCopyHeld = false;
+        return event is KeyUpEvent
+            ? KeyEventResult.ignored
+            : KeyEventResult.handled;
+      }
+    }
     if (_copiesOnCtrlC(event)) {
+      _ctrlCCopyHeld = true;
       unawaited(_copySelection());
       return KeyEventResult.handled;
     }
@@ -1875,13 +1896,14 @@ class _TerminalPanelState extends State<TerminalPanel>
 
   /// Windows Terminal's rule: Ctrl+C copies while output is selected and interrupts otherwise, so
   /// a stray Ctrl+C on a selection cannot kill the engine. The copy clears the selection, which
-  /// makes the next Ctrl+C the interrupt again. Elsewhere Ctrl+C stays the program's: macOS copies
-  /// with ⌘C and Linux with Ctrl+Shift+C, both xterm defaults.
+  /// makes the next Ctrl+C the interrupt again. A selection of nothing but blank cells is not
+  /// something anyone means to copy, so it leaves the interrupt alone. Elsewhere Ctrl+C stays the
+  /// program's: macOS copies with ⌘C and Linux with Ctrl+Shift+C, both xterm defaults.
   bool _copiesOnCtrlC(KeyEvent event) {
     if (defaultTargetPlatform != TargetPlatform.windows ||
         event is! KeyDownEvent ||
         event.logicalKey != LogicalKeyboardKey.keyC ||
-        _controller.selection == null) {
+        _selectedText()?.trim().isNotEmpty != true) {
       return false;
     }
     final keyboard = HardwareKeyboard.instance;

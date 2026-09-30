@@ -358,6 +358,7 @@ void main() {
       );
       await key(tester, LogicalKeyboardKey.keyC, ctrl: true, shift: true);
       expect(clipboard, 'world', reason: 'Ctrl+Shift+C still copies');
+      expect(controller.selection, isNotNull);
       expect(input(frames).codeUnits, [3]);
       expect(
         kTerminalOwnedKeys.firstWhere((item) => item.label == 'Copy').chord,
@@ -371,6 +372,69 @@ void main() {
             .chord,
         ['⌃', 'C'],
       );
+      expect(
+        kTerminalOwnedKeys.any(
+          (item) => item.label.startsWith('Delete to the line'),
+        ),
+        isFalse,
+        reason: 'Only Apple panes take ⌘⌫',
+      );
+      await tester.pumpWidget(const SizedBox());
+      session.dispose();
+      app.dispose();
+    },
+  );
+
+  onPlatform(
+    TargetPlatform.windows,
+    'Windows held Ctrl+C copies once and its repeats never interrupt',
+    (tester) async {
+      final app = createApp();
+      final frames = <TerminalBinaryFrame>[];
+      final session = liveSession('a0', frames);
+      await mountSelectedHello(tester, app, session);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(clipboard, 'hello');
+      expect(input(frames), isEmpty, reason: 'A held copy is not an interrupt');
+      await key(tester, LogicalKeyboardKey.keyC, ctrl: true);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(input(frames).codeUnits, [3], reason: 'A fresh press interrupts');
+      await tester.pumpWidget(const SizedBox());
+      session.dispose();
+      app.dispose();
+    },
+  );
+
+  onPlatform(
+    TargetPlatform.windows,
+    'Windows Ctrl+C ignores a blank selection and AltGr+C',
+    (tester) async {
+      final app = createApp();
+      final frames = <TerminalBinaryFrame>[];
+      final session = liveSession('a0', frames);
+      final controller = await mountSelectedHello(tester, app, session);
+      controller.setSelection(
+        session.terminal.buffer.createAnchor(20, 0),
+        session.terminal.buffer.createAnchor(25, 0),
+      );
+      await key(tester, LogicalKeyboardKey.keyC, ctrl: true);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(input(frames).codeUnits, [3], reason: 'Blank cells: interrupt');
+      expect(clipboard, 'clipboard text');
+      controller.setSelection(
+        session.terminal.buffer.createAnchor(0, 0),
+        session.terminal.buffer.createAnchor(5, 0),
+      );
+      await key(tester, LogicalKeyboardKey.keyC, ctrl: true, alt: true);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(clipboard, 'clipboard text', reason: 'AltGr reports Ctrl+Alt');
+      expect(controller.selection, isNotNull);
       await tester.pumpWidget(const SizedBox());
       session.dispose();
       app.dispose();
@@ -408,6 +472,12 @@ void main() {
         await tester.pump(const Duration(milliseconds: 20));
         expect(input(frames).codeUnits, [3]);
         expect(clipboard, 'clipboard text');
+        expect(
+          kTerminalOwnedKeys.any(
+            (item) => item.label.startsWith('Delete to the line'),
+          ),
+          platform == TargetPlatform.macOS,
+        );
         await tester.pumpWidget(const SizedBox());
         session.dispose();
         app.dispose();

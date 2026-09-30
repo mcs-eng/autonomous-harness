@@ -683,7 +683,8 @@ List<TerminalKey> get kTerminalOwnedKeys => [
   // past thirty characters takes a second line to itself.
   const TerminalKey(['⌥', '⌫'], 'Delete the previous word'),
   // ⌘⌫ is taken in the pane on Apple only — elsewhere ⌘ is Super and stays the app's.
-  if (defaultTargetPlatform != TargetPlatform.linux)
+  if (defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.iOS)
     const TerminalKey(['⌘', '⌫'], "Delete to the line's start"),
   // On Windows ⌃C copies while output is selected; the interrupt is what it does with nothing selected.
   TerminalKey(
