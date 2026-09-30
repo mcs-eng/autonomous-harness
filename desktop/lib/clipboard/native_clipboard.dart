@@ -86,6 +86,7 @@ class NativeClipboard {
   /// native side could not decode/write the bytes — callers should treat that as "could not do
   /// the local shortcut" rather than surfacing a crash.
   static Future<bool> writeImagePng(Uint8List pngBytes) async {
+    if (writeImagePngForTest case final write?) return write(pngBytes);
     if (!RuntimePlatform.isMacOS && !RuntimePlatform.isLinux) return false;
     try {
       final wrote = await _channel.invokeMethod<bool>(
@@ -99,4 +100,9 @@ class NativeClipboard {
       return false;
     }
   }
+
+  /// Allows pane-delivery fixtures to exercise clipboard success independently
+  /// of the host's native clipboard capability, without changing its contents.
+  @visibleForTesting
+  static Future<bool> Function(Uint8List pngBytes)? writeImagePngForTest;
 }

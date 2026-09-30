@@ -443,12 +443,14 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                       builder: (context, entryConstraints) {
                         // Reserve the footer before laying out search, keeping
                         // both its top edge and the device still as results open.
+                        // Short workspaces give up decorative top padding before
+                        // compressing the results below the search field.
                         final open = (constraints.maxHeight * 0.21)
                             .clamp(72.0, 220.0)
                             .clamp(
                               0.0,
                               (entryConstraints.maxHeight - 320).clamp(
-                                24.0,
+                                0.0,
                                 220.0,
                               ),
                             );
@@ -463,7 +465,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                     140.0 *
                                         MediaQuery.textScalerOf(context)
                                             .scale(1.0);
-                        final top = showResume ? 24.0 : open;
+                        final top = showResume ? open.clamp(0.0, 24.0) : open;
                         return Padding(
                           padding: EdgeInsets.only(top: top),
                           child: Column(

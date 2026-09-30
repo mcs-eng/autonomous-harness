@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/clipboard/native_clipboard.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 
 import 'swarm_screen_test.dart' show mount, terminal;
@@ -37,24 +39,46 @@ void drop(DropTarget target, DropItem file) {
 }
 
 void main() {
-  const clipboard = MethodChannel('harness/clipboard_image');
+  var writes = 0;
+  Uint8List? written;
+  setUp(() {
+    writes = 0;
+    written = null;
+    NativeClipboard.writeImagePngForTest = (bytes) async {
+      writes++;
+      written = bytes;
+      return true;
+    };
+  });
+  tearDown(() => NativeClipboard.writeImagePngForTest = null);
+
+  if (Platform.isWindows) {
+    testWidgets('native Windows declines image writes without an override', (
+      tester,
+    ) async {
+      NativeClipboard.writeImagePngForTest = null;
+      const channel = MethodChannel('harness/clipboard_image');
+      var calls = 0;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        _,
+      ) async {
+        calls++;
+        return true;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      expect(await NativeClipboard.writeImagePng(_png), isFalse);
+      expect(calls, 0);
+    });
+  }
 
   testWidgets('one image drop reaches only the visible pane across tabs', (
     tester,
   ) async {
-    var writes = 0;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(clipboard, (
-      _,
-    ) async {
-      writes++;
-      return true;
-    });
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        clipboard,
-        null,
-      ),
-    );
     final app = createApp(connected: true);
     app.machineStates['m']!.localOnly = true;
     final firstInput = <TerminalBinaryFrame>[];
@@ -76,6 +100,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
     expect(writes, 1);
+    expect(written, orderedEquals(_png));
     expect(firstInput, isEmpty);
     expect(secondInput, hasLength(1));
     expect(app.focusedPane, same(second));
@@ -97,20 +122,6 @@ void main() {
     testWidgets('an image still being read cannot cross a $change change', (
       tester,
     ) async {
-      var writes = 0;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        clipboard,
-        (_) async {
-          writes++;
-          return true;
-        },
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          clipboard,
-          null,
-        ),
-      );
       final app = createApp(connected: true);
       app.machineStates['m']!.localOnly = true;
       final input = <TerminalBinaryFrame>[];

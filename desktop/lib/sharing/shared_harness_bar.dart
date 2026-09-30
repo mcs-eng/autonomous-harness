@@ -95,7 +95,17 @@ class SharedHarnessBar extends StatelessWidget {
           return Column(
             children: [
               row(identity),
-              row([const Spacer(), ...actions]),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    for (final action in actions)
+                      SizedBox(height: height, child: action),
+                  ],
+                ),
+              ),
             ],
           );
         },

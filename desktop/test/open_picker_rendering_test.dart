@@ -10,6 +10,7 @@ import 'package:harness/shortcuts/app_keymap.dart';
 import 'package:harness/state/new_harness.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/terminal/terminal_text.dart';
+import 'package:harness/terminal/terminal_theme.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
 import 'package:harness/widgets/search_result_text.dart';
 import 'package:harness/widgets/new_harness_form.dart';
@@ -25,9 +26,12 @@ import 'swarm_screen_test.dart' show terminal;
 import 'swarm_search_preview_test.dart' show seedPreviews;
 import 'swarm_state_test.dart' show createApp;
 
+TerminalTheme get _chromeTheme =>
+    terminalThemeFor(grid.AppTheme.palette.value, terminalThemeStore.value);
+
 void main() {
   testWidgets(
-    'terminal dialogs follow the live pane theme without losing focus',
+    'terminal dialogs follow live chrome colors and pane font without losing focus',
     (tester) async {
       final originalPalette = grid.AppTheme.palette.value;
       final originalTheme = terminalThemeStore.value;
@@ -85,6 +89,14 @@ void main() {
 
       void checkAppearance() {
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
+        final chrome = _chromeTheme;
+        expect(
+          pane.theme.background,
+          terminalScreenThemeFor(
+            grid.AppTheme.palette.value,
+            terminalThemeStore.value,
+          ).background,
+        );
         final field = tester.widget<TextField>(input);
         final editor = tester.widget<EditableText>(
           find.descendant(of: input, matching: find.byType(EditableText)),
@@ -92,14 +104,14 @@ void main() {
         final panel = tester.widget<Material>(
           find.byKey(const ValueKey('swarm-search-results')),
         );
-        expect(panel.color, pane.theme.background);
-        expect(field.style!.color, pane.theme.foreground);
-        expect(field.cursorColor, pane.theme.cursor);
-        expect(editor.selectionColor, pane.theme.selection);
+        expect(panel.color, chrome.background);
+        expect(field.style!.color, chrome.foreground);
+        expect(field.cursorColor, chrome.cursor);
+        expect(editor.selectionColor, chrome.selection);
         final row = find.byKey(
           ValueKey('swarm-search-line:${search.selected!.id}'),
         );
-        expect(tester.widget<Container>(row).color, pane.theme.selection);
+        expect(tester.widget<Container>(row).color, chrome.selection);
         final cell = terminalCellSizeOf(tester.element(input));
         expect(tester.getSize(row).height, closeTo(cell.height, .01));
         expect(
@@ -120,8 +132,8 @@ void main() {
           expect(
             title.style.color,
             search.canSubmit(row)
-                ? pane.theme.foreground
-                : pane.theme.foreground.withValues(alpha: .28),
+                ? chrome.foreground
+                : chrome.foreground.withValues(alpha: .28),
           );
         }
         final previewText = tester.widgetList<Text>(
@@ -201,10 +213,7 @@ void main() {
       final waiting = tester.widget<Text>(find.text('Needs your input'));
       expect(waiting.style!.fontSize, 18);
       expect(waiting.style!.height, 1.4);
-      expect(
-        waiting.style!.color,
-        tester.widget<TerminalView>(find.byType(TerminalView)).theme.yellow,
-      );
+      expect(waiting.style!.color, _chromeTheme.yellow);
       await key(tester, LogicalKeyboardKey.escape);
       expect(find.byKey(const ValueKey('swarm-search-results')), findsNothing);
 
@@ -221,6 +230,14 @@ void main() {
 
       void checkSetupAppearance() {
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
+        final chrome = _chromeTheme;
+        expect(
+          pane.theme.background,
+          terminalScreenThemeFor(
+            grid.AppTheme.palette.value,
+            terminalThemeStore.value,
+          ).background,
+        );
         final field = tester.widget<TextField>(setupInput);
         final editor = tester.widget<EditableText>(
           find.descendant(of: setupInput, matching: find.byType(EditableText)),
@@ -231,17 +248,17 @@ void main() {
                 find.byKey(const ValueKey('new-harness-surface')),
               )
               .color,
-          pane.theme.background,
+          chrome.background,
         );
-        expect(field.style!.color, pane.theme.foreground);
-        expect(field.cursorColor, pane.theme.cursor);
-        expect(editor.selectionColor, pane.theme.selection);
+        expect(field.style!.color, chrome.foreground);
+        expect(field.cursorColor, chrome.cursor);
+        expect(editor.selectionColor, chrome.selection);
         expect(
           tester
               .widgetList<Container>(
                 find.descendant(of: setup, matching: find.byType(Container)),
               )
-              .where((container) => container.color == pane.theme.selection),
+              .where((container) => container.color == chrome.selection),
           hasLength(1),
         );
         for (final style in [
@@ -289,7 +306,7 @@ void main() {
             .widget<Text>(find.byKey(const ValueKey('new-harness-status')))
             .style!
             .color,
-        tester.widget<TerminalView>(find.byType(TerminalView)).theme.red,
+        _chromeTheme.red,
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();

@@ -6745,10 +6745,22 @@ class _SwarmScreenState extends State<SwarmScreen> {
           !kIsWeb && defaultTargetPlatform == TargetPlatform.windows ? 3 : 0;
       final closeWidth = closeCells * cell.width;
       final prefs = appearancePrefsStore.value.prompt;
+      final minimumTabWidths = [
+        for (var i = 0; i < labels.length; i++)
+          activities[i] == null
+              ? closeWidth
+              : ('${i + 1}:'.length + 4 + closeCells) * cell.width,
+      ];
+      final minimumTabWidth = minimumTabWidths.fold(0.0, math.max);
       final storeWidth = math.min(
         WorkspaceStoreButton.widthOf(context),
         // 48: the fork's projects toggle at the start of this row.
-        math.max(0.0, constraints.maxWidth - cell.width * 14 - 48),
+        // Keep one complete tab revealable; the optional Store label truncates
+        // before the tab's number, activity mark, or close control is clipped.
+        math.max(
+          0.0,
+          constraints.maxWidth - cell.width * 14 - 48 - minimumTabWidth,
+        ),
       );
       final leadingWidth = chrome?.leadingWidth(context) ?? 0.0;
       final tabBudget = math.max(
@@ -6763,9 +6775,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       _tabWidths = [
         for (var i = 0; i < labels.length; i++)
           math.max(
-            activities[i] == null
-                ? closeWidth
-                : ('${i + 1}:'.length + 4 + closeCells) * cell.width,
+            minimumTabWidths[i],
             math.min(
               math.min(
                     labels[i].characters.length +
