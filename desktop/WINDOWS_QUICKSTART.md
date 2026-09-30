@@ -430,3 +430,11 @@ copy clears the selection, so a second Ctrl+C is the interrupt. Ctrl+Shift+C,
 right-click, and Ctrl+V are unchanged, and macOS and Linux keep their existing
 copy chords. The shortcuts list shows the Windows chords. This is a source
 change; it does not update an installed desktop or daemon.
+
+## September 30 test stability
+
+The connection tests in `ws_conn_test.dart` now wait for the connection they
+depend on instead of a fixed interval. They passed on an idle machine and failed
+in a full run on a busy one. The application code is unchanged, and so are the
+outcomes the tests check. This is a test change; it does not update an installed
+desktop or daemon.
