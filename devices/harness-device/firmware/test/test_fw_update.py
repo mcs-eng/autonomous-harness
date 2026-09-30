@@ -13,6 +13,7 @@ main = Path(__file__).resolve().parent / '../main'
 source = Path(os.environ.get('FW_UPDATE_SOURCE', str(main / 'fw_update.c'))).read_text()
 source = re.sub(r'^#include .*\n', '', source, flags=re.M)
 code = r'''
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>

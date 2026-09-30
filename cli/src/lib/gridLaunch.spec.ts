@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   anthropicBaseUrl,
   buildGridEngineLaunch,
@@ -832,23 +832,31 @@ describe('web search status — what the app is told about the launch it got', (
     }
   })
 
-  it('says on exactly when the launch it describes names the server — for every engine, both machines', () => {
+  it('says on exactly when the launch carries the MCP URL — for every engine, both machines', () => {
     // "The engine wired it" is not taken on trust from the contract that reports it: the launch
-    // either carries the `harness` server (in argv or in a file it writes) or it does not, and the
+    // either carries the supplied MCP URL (in argv or in a file it writes) or it does not, and the
     // status must agree with that. A future contract that took a url and forgot to wire it, or
     // wired it and reported otherwise, fails here.
-    const names = (launch: ReturnType<typeof launchOf>): string =>
+    const config = (launch: ReturnType<typeof launchOf>): string =>
       [...launch.args, ...(launch.configDir?.files.map((f) => f.content) ?? [])].join('\n')
-    for (const machine of [PLAIN_MACHINE, { hermesSystemManaged: true }]) {
-      for (const engine of gridCapableEngines()) {
-        for (const override of [WITH_MCP, WITH_MODEL]) {
-          const built = buildGridEngineLaunch(engine, override, machine)
-          if (!built.ok) continue // copilot without a model — refused, nothing to describe
-          const wired = names(built.launch).includes('harness')
-          expect(built.launch.webSearch === 'on', `${engine} · mcpUrl ${!!override.mcpUrl} · pinned ${machine.hermesSystemManaged}`)
-            .toBe(wired)
+    // Pi's skill path can contain "harness" without declaring any MCP server.
+    vi.stubEnv('HOME', '/fixture/harness-home')
+    vi.stubEnv('USERPROFILE', 'C:/fixture/harness-home')
+    try {
+      expect(config(launchOf('pi', WITH_MCP))).toContain('harness-home')
+      for (const machine of [PLAIN_MACHINE, { hermesSystemManaged: true }]) {
+        for (const engine of gridCapableEngines()) {
+          for (const override of [WITH_MCP, WITH_MODEL]) {
+            const built = buildGridEngineLaunch(engine, override, machine)
+            if (!built.ok) continue // copilot without a model — refused, nothing to describe
+            const wired = config(built.launch).includes(MCP_URL)
+            expect(built.launch.webSearch === 'on', `${engine} · mcpUrl ${!!override.mcpUrl} · pinned ${machine.hermesSystemManaged}`)
+              .toBe(wired)
+          }
         }
       }
+    } finally {
+      vi.unstubAllEnvs()
     }
   })
 })

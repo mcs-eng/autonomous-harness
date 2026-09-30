@@ -118,7 +118,7 @@ static bool native_glyph(const ht_font_t *font, uint32_t cp)
     cp = cell_alias(cp);
     return cp >= face->first && cp <= face->last;
 }
-static const char *display_fallback(uint32_t cp, char scratch[12])
+static const char *display_fallback(uint32_t cp, char scratch[13])
 {
     // Styling/joining controls carry no ink. Unknown text itself is never lost.
     if ((cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef)) return "";
@@ -143,7 +143,7 @@ static const char *display_fallback(uint32_t cp, char scratch[12])
     }
     // An explicit, lossless identifier is preferable to inventing a meaning or
     // showing '?' (which could be part of the author's actual message).
-    snprintf(scratch, 12, "[U+%04lX]", (unsigned long)cp);
+    snprintf(scratch, 13, "[U+%04lX]", (unsigned long)cp);
     return scratch;
 }
 typedef struct {
@@ -151,7 +151,7 @@ typedef struct {
     size_t bytes;
     unsigned cells;
     bool fraction, digit, space;
-    char scratch[12];
+    char scratch[13];
 } display_token_t;
 static void display_token(const char **cursor, const ht_font_t *font, display_token_t *t)
 {

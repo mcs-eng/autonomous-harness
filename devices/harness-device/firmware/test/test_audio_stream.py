@@ -97,7 +97,7 @@ code += function('capture') + function('send_audio')
 code += r'''
 int main(void) {
     static uint8_t guarded[BUFFER_BYTES+16];
-    for(unsigned round=0;round<100;round++)for(mode=0;mode<MODES;mode++) {
+    for(volatile unsigned round=0;round<100;round++)for(mode=0;mode<MODES;mode++) {
         memset(guarded,0xa5,sizeof guarded);voice_buffer_init(&buffer,guarded+8,BUFFER_BYTES);
         if(round&1) {atomic_store(&buffer.head,UINT32_MAX-255);atomic_store(&buffer.tail,UINT32_MAX-255);}
         active=recording=true;stop_requested=abort_requested=capture_done=heard=false;
