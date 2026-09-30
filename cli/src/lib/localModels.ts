@@ -169,8 +169,30 @@ export function withoutCopiesOfOwned(models: LocalModel[]): LocalModel[] {
 }
 
 /** The speed a coding agent can work at: an agent waits on every token it writes, and below this the
- * catalog's estimate for this machine reads as a model that crawls. */
-export const USABLE_TOK_S = 15
+ * catalog's estimate for this machine reads as a model that crawls. On a bandwidth-bound Mac this is
+ * what separates an MoE (35-80 tok/s on an M1 Max) from a dense model of its size (9-17). */
+export const USABLE_TOK_S = 20
+
+/** The share of a machine's memory one model may fill — weights, a coding agent's context and the
+ * engine's overhead together, as the catalog fits them. The rest stays for everything else the person
+ * runs: on a 64 GB Mac, a 45 GB model with its context left the editor, the browser and the agents
+ * themselves fighting over what remained. */
+export const MODEL_MEMORY_SHARE = 0.5
+
+/** The budget the catalog fits models to: what the machine can spare ([MODEL_MEMORY_SHARE] of its
+ * memory), never more than grid says it has free. Undefined when grid reports neither.
+ *
+ * Only where a model shares its memory with everything else — an Apple Silicon Mac's unified memory,
+ * or system RAM on a machine with no usable GPU. An NVIDIA card's VRAM is the model's own: grid
+ * reports what is free on it now (total less what is already in use, the desktop's share included),
+ * and all of that goes to the catalog, whose fit keeps its own 10% margin. Capping it at half the
+ * system RAM would have held a 24 GB card in a 32 GB PC to 16 GB. */
+export function modelBudget(device: Record<string, any>): number | undefined {
+  const usable = num(device.usable_bytes), total = num(obj(device.memory).total_gb)
+  if (usable === undefined) return undefined
+  if (device.backend === 'cuda' || total === undefined) return usable
+  return Math.min(usable, Math.floor(total * GiB * MODEL_MEMORY_SHARE))
+}
 
 /** Catalog models that are not for running an agent on: safety classifiers such as gpt-oss-safeguard
  * or Llama Guard, which answer "safe"/"unsafe" rather than code. */
@@ -202,26 +224,51 @@ export function baseModel(name: string): string {
   }
 }
 
+/** A quant under this many bits per weight (Q2, IQ2, IQ1) trades too much of the model away: a
+ * 2-bit 122B is not the better model than a 4-bit 35B beside it. */
+const MIN_FAITHFUL_BITS = 3
+
+/** The shape a model's name gives an MoE, `35B-A3B` — shared by its fine-tunes under other names
+ * (`Qwen-AgentWorld-35B-A3B` is Qwen3.6-35B-A3B retrained). Null for a name that gives none. */
+function moeShape(name: string): string | null {
+  const shape = /(?:^|[-_])(\d+(?:\.\d+)?)B-A(\d+(?:\.\d+)?)B(?:[-_.]|$)/i.exec(name)
+  return shape ? `${shape[1]}b-a${shape[2]}b` : null
+}
+
+/** Two catalog rows with the same parameter count, the same file size and the same speed estimate are
+ * one architecture: the estimate is the machine's bandwidth over the bytes a token reads, which only
+ * the same geometry at the same quant repeats. That is how a fine-tune under a name of its own
+ * (Ornith-1.0-35B beside Qwen3.6-35B-A3B: 20.6 GB, 78.2 tok/s both) reads as the model it is. */
+function sameArchitecture(a: Candidate, b: Candidate): boolean {
+  return Math.round(paramsOf(a)) === Math.round(paramsOf(b)) && Math.abs(a.size - b.size) <= 0.03 * b.size &&
+    !!a.estTokS && !!b.estTokS && Math.abs(a.estTokS - b.estTokS) <= 0.02 * b.estTokS
+}
+
 /** The order the Get list offers a machine's downloads in. Every candidate already fits the machine
- * with a coding agent's context ([compatibleModels]); among them:
- *  1. fast enough to work with first — the catalog's estimate for this machine at [USABLE_TOK_S] or
+ * with a coding agent's context, within its [MODEL_MEMORY_SHARE] ([compatibleModels]); among them:
+ *  1. a faithful quant first — under [MIN_FAITHFUL_BITS] a model goes after every model at one;
+ *  2. fast enough to work with first — the catalog's estimate for this machine at [USABLE_TOK_S] or
  *     more. That is what preferring MoE models on a bandwidth-bound Mac comes to, read per machine, and
  *     it lets dense models in on a machine fast enough for them;
- *  2. then bigger first, the better model;
- *  3. then the catalog's own order, which is popularity among what fits.
- * And one version of each base model ([baseModel]) before any second one, so MTP, QAT and pruned
- * copies of one model never fill the top of the list: they follow every other model, in this order. */
+ *  3. then bigger first, the better model;
+ *  4. then the catalog's own order, which is popularity among what fits.
+ * And one version of each model before any second one, so its MTP, QAT and pruned variants
+ * ([baseModel]), its fine-tunes sharing its MoE shape ([moeShape]) or its architecture
+ * ([sameArchitecture]) never fill the top of the list: they follow every other model, in this order. */
 export function rankForCoding<T extends Candidate>(candidates: T[]): T[] {
+  const faithful = (candidate: Candidate): number => bitsPerWeight(candidate.quant) >= MIN_FAITHFUL_BITS ? 1 : 0
   const fast = (candidate: Candidate): number => (candidate.estTokS ?? 0) >= USABLE_TOK_S ? 1 : 0
   const sorted = candidates.map((candidate, index) => ({ candidate, index })).sort((a, b) =>
+    faithful(b.candidate) - faithful(a.candidate) ||
     fast(b.candidate) - fast(a.candidate) ||
     Math.round(paramsOf(b.candidate)) - Math.round(paramsOf(a.candidate)) ||
     a.index - b.index).map(({ candidate }) => candidate)
   const seen = new Set<string>(), first: T[] = [], again: T[] = []
   for (const candidate of sorted) {
-    const base = baseModel(candidate.name)
-    ;(seen.has(base) ? again : first).push(candidate)
-    seen.add(base)
+    const names = [baseModel(candidate.name), moeShape(candidate.name)].filter((name): name is string => !!name)
+    const repeat = names.some(name => seen.has(name)) || first.some(leader => sameArchitecture(candidate, leader))
+    ;(repeat ? again : first).push(candidate)
+    for (const name of names) seen.add(name)
   }
   return [...first, ...again]
 }
@@ -281,10 +328,17 @@ export class LocalModels {
     // Match `grid catalog`/`list` (cli/models.py `_fetch_pullable`): browse the
     // catalog service's first page of ranked "popular" models for this device,
     // not every compatible row across all pages — the picker shows one page.
+    // ⚠️ The machine's measured memory bandwidth and compute go too: the service estimates speed
+    // from them (grid_cli/catalog/ranking.py) and, without them, assumes 150 GB/s and 4 TFLOPS for
+    // any Mac — an M1 Max's 400 GB/s read as 2.7x slower than it is, and the models whose prompt it
+    // then judged too slow to process were not offered at all.
+    const bandwidth = num(device.mem_bandwidth_gbps), compute = num(device.compute_gflops)
+    const budget = modelBudget(device)
     const response = await this.request(url, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ browse: true, page: 1, page_size: 50, device: {
-        device_class: device.device_class, usable_bytes: device.usable_bytes, backend: device.backend,
+        device_class: device.device_class, usable_bytes: budget ?? device.usable_bytes, backend: device.backend,
+        ...(bandwidth ? { mem_bandwidth_gbps: bandwidth } : {}), ...(compute ? { compute_gflops: compute } : {}),
       } }), signal: AbortSignal.timeout(20_000), redirect: 'error',
     })
     if (!response.ok) throw new Error('Compatible models are unavailable. Try again.')

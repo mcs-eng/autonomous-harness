@@ -403,3 +403,15 @@ New Harness accepts a first task for Hermes, matching the CLI's existing support
 Windows validation now keeps its rules-file fixture in a disposable home
 directory and checks the complete appearance settings batch, including the
 custom-background key.
+
+## September 29 upstream follow-up
+
+This source snapshot incorporates upstream `7debeb17` (nine commits after
+`249e0f9a`). It takes the TUI's pane focus, filled surfaces, narrow headings and
+layout checks, the local-model catalog's machine budget and candidate ranking,
+and the device's Focus and question presentation updates. The prior fork-only
+TUI title assertions give way to upstream's explicit pane creation and focus
+checks. The Windows application code and tests are unchanged by this sync.
+
+The inherited release workflows remain outside the Windows packaging path.
+Source integration does not replace an installed desktop or restart its daemon.

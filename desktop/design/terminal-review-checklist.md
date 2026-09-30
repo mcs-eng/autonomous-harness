@@ -194,8 +194,9 @@ Escape or Cmd-Shift-J closes the experimental prompt.
     the running sessions. Cmd-I opens Models in Cmd-P with `:` already entered.
     Models have Subscriptions, APIs, Your models, the downloads (headed
     `Get for this Mac · 64 GB`) and Shared with you sections, with downloaded
-    models first in Your models. The top five downloads are listed — fast
-    enough (~15 tok/s or more) first, then bigger, one version per model; the rest
+    models first in Your models. Downloads fit half of shared memory (all of
+    an NVIDIA card's free VRAM) with a 64K context; the top five are listed — 3-bit quants or better, fast enough
+    (~20 tok/s or more) first, then bigger, one version per model; the rest
     appear when expanding [ More models (N) ] or searching explicitly;
     [ Show fewer ] collapses them. No download is another quantization of a
     model already there. Rows line up size and speed columns; usable rows say

@@ -214,16 +214,22 @@ fn is_vim_command(cmd: &str) -> bool {
 /// percentage): the size and whether it is a percentage, or tmux's error ("size invalid").
 fn split_size(app: &App, words: &Words) -> Result<Option<(u16, bool)>, String> {
     let fit = |n: i64| n.min(u16::MAX as i64) as u16;
+    // args_percentage_and_expand uses format_expand, not format_expand_time. In particular,
+    // musl strftime rejects a trailing percent sign and turns an ordinary size into "".
+    let expand_size = |value: &str| match app.current() {
+        Some((w, p)) => crate::format::expand(app, value, w, Some(p), false),
+        None => crate::format::expand(app, value, app.active, None, false),
+    };
     if let Some(l) = opt(words, "-l") {
         // args_percentage_and_expand: no "empty" here — an empty size is an invalid number.
-        let l = expand(app, &l);
+        let l = expand_size(&l);
         return match l.strip_suffix('%') {
             Some(n) => strtonum(n, 0, 100).map(|n| Some((fit(n), true))),
             None => strtonum(&l, 0, i32::MAX as i64).map(|n| Some((fit(n), false))),
         }.map_err(|e| format!("size {e}"));
     }
     match opt(words, "-p") {
-        Some(p) => strtonum(&expand(app, &p), 0, 100).map(|n| Some((fit(n), true))).map_err(|e| format!("size {e}")),
+        Some(p) => strtonum(&expand_size(&p), 0, 100).map(|n| Some((fit(n), true))).map_err(|e| format!("size {e}")),
         None => Ok(None),
     }
 }
@@ -1235,6 +1241,7 @@ fn run_words(app: &mut App, words: &[String]) {
 /// hn keeps outside the store — the prefix, the mouse, a window's synchronize-panes …
 fn after_set(app: &mut App, name: &str, now: Option<String>, global: bool, tab: Option<usize>) {
     let name = name.to_string();
+    if name == "@hn-look" { app.redraw_all = true; app.fit_panes(); app.push_theme(); }
     // alerts_reset_all: every window's silence timer starts again.
     if name == "monitor-silence" { for t in app.tabs.iter_mut() { t.last_output = std::time::Instant::now() } }
     if name.starts_with('@') && now.is_none() { app.opts.user.remove(&name); return }
@@ -3619,6 +3626,18 @@ mod tests {
         assert_eq!(split("display-menu Swap l { swap-window -t :-1 } '' Kill X { kill-window }"), vec![vec!["display-menu", "Swap", "l", "swap-window -t :-1", "", "Kill", "X", "kill-window"]]);
         for yes in ["vim", "nvim", "vi", "view", "gvim", "vimdiff", "nvimdiff", "lvim", "fzf", "/usr/bin/nvim", "vimx"] { assert!(is_vim_command(yes), "{yes}") }
         for no in ["zsh", "bash", "claude", "node", "vite", "vim-server", "less"] { assert!(!is_vim_command(no), "{no}") }
+    }
+
+    #[tokio::test]
+    async fn split_percentages_expand_formats_without_strftime() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(19789, sink, (80, 24));
+        let size = |flag: &str, value: &str| split_size(&app, &Words::plain(vec!["split-window".into(), flag.into(), value.into()]));
+        assert_eq!(size("-l", "35%"), Ok(Some((35, true))));
+        assert_eq!(size("-l", "#{client_width}%"), Ok(Some((80, true))));
+        assert_eq!(size("-l", "35"), Ok(Some((35, false))));
+        assert_eq!(size("-p", "35"), Ok(Some((35, true))));
+        for flag in ["-l", "-p"] { assert_eq!(size(flag, "%H"), Err("size invalid".into())); }
     }
 
     #[test]

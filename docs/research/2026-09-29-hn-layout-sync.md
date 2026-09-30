@@ -45,3 +45,19 @@ is not a production-account or separate-physical-computer test.
 An old backend still cannot store the exact tmux geometry for a future client. This change keeps
 that geometry stable in the current client; full native layout persistence requires a backend
 that supports `layout.tmux`. No release or installed hn binary is changed by these tests.
+
+## Desktop round-trip follow-up
+
+A further two-pane regression reproduced a reset after a desktop layout save. Desktop's
+serializer retains presets and sizes but omits `layout.tmux`; hn previously treated that omission
+as a new remote layout. It also reacted to metadata for unrelated pane counts. Reconciliation now
+compares the native layout when supplied, otherwise the effective preset for the current pane
+count. Metadata-only round-trips preserve the current geometry, including unequal divider sizes.
+
+C-b Space and every named layout use the same publication path. Where desktop has a matching
+shape, hn publishes a valid preset for that pane count alongside its native geometry. Queued
+choices survive reconciliation; resizing after a genuine remote choice keeps that remote preset.
+The regression covers modern and legacy schemas, read-only mode, and real two-pane prefix input.
+The isolated real daemon/backend test also drops native geometry as desktop serialization does,
+then verifies both preservation and a deliberate subsequent remote change. All 148 Rust tests,
+the layout suite, pane UI, local shell lifecycle, complete e2e and real-stack checks pass locally.

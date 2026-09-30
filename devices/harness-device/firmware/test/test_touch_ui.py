@@ -29,6 +29,7 @@ code = r'''
 #include "draft.h"
 #include "octopus.h"
 #include "character.h"
+#include "focus.h"
 #include "workspace.h"
 #include "command_face.h"
 #include "arc_geometry.inc"
@@ -125,7 +126,8 @@ static char target[64];
 #include "theme.h"
 static uint16_t color(unsigned rgb);
 static unsigned preview_brightness = 100;
-#define BG color(HT_THEME_CANVAS)
+// Kept in step with ui_habitat.c by hand: the Focus skin stands on its own black ground.
+#define BG color(character.id == HT_CHARACTER_FOCUS ? HT_THEME_FOCUS_CANVAS : HT_THEME_CANVAS)
 #define FG color(HT_THEME_TEXT)
 #define DIM color(HT_THEME_SECONDARY)
 #define ACCENT color(HT_THEME_ACCENT)
@@ -1716,9 +1718,40 @@ int main(int argc, char **argv) {
      * the footer and registers the rect itself. Every row of that rect has to answer — a button whose
      * top half works reads as a broken button, not as a small one.
      */
-    for (int y = 392; y <= 436; y += 4) {
+    // The Focus SKIN's home face, footer and all — the "focus" portrait above is the legacy
+    // focus-face option on the default character, which draws no microphone.
+    reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take(); portrait(dir, "focus-skin");
+    // A question's card on Focus: the engine badge, the "?" and the name, then the prompt — the whole
+    // of what a question puts on the glass. It is answered in the app.
+    reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+    {
+        cable_notif_t asked={.question=true,.summary="Which database should the retry queue use?"};
+        COPY(asked.agent_id, s.agents[0].id); COPY(asked.name, "Kinh T\u1ebf");
+        ui_notif_replace(&asked,1); ui_notif_open(); scene_take(); portrait(dir, "focus-question");
+        assert(s.view == INBOX);
+    }
+    for (int y = 366; y < HT_HEIGHT; y += 4) {
+        // Inside the round glass only: a target row whose centre is off the panel is not a row.
+        if ((y - 233) * (y - 233) >= 230 * 230) continue;
         reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
         tap(1000, 233, y);
+        assert(starts == 1);
+    }
+    /*
+     * AND THE ROLL DOWNWARD, which is how this button was actually failing.
+     *
+     * The drift case below moves down by half its drift from y 410 and so never leaves the old
+     * 389..439 rect. A thumb pressing the LOWER half of the mark on a circle held in the hand rolls
+     * further than that, and the old rect ended one pixel above the mark's own last row — so the
+     * contact left the target with nothing below it to land on. It is the press that matters, not
+     * just the release: pressed_action is read from the first sample, so a DOWN one row low turned
+     * the whole contact into a terminal scroll.
+     */
+    for (int y = 424; y <= 448; y += 8) for (int roll = 0; roll <= 16; roll += 8) {
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
+        habitat_touch(true, 233, y, 1000);
+        habitat_touch(true, 233, y + roll, 1400);
+        habitat_touch(false, 233, y + roll, 1800);
         assert(starts == 1);
     }
     /*
@@ -1739,11 +1772,12 @@ int main(int argc, char **argv) {
     habitat_touch(false, 233, 300, 1200);
     assert(!starts);   // dragged off the button; a press that leaves is not a press
 
-    // And the middle of the glass, which every skin has always answered with speech.
+    // And NOT the middle of the glass. The creature skins start speech from anywhere on the creature;
+    // Focus has a button for it, and the middle is the recap being read.
     for (int y = 120; y <= 360; y += 40) {
         reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
         tap(1000, 233, y);
-        assert(starts == 1);
+        assert(!starts);
     }
     reset(); s.straight_title=true; scene_take(); portrait(dir,"straight-title");
     reset(); s.nap=true; scene_take(); portrait(dir,"asleep");

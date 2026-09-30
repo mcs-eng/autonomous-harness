@@ -609,12 +609,16 @@ static void fill(uint16_t *p, size_t n, uint16_t c)
     for (size_t i = 0; i < n; i++)
         p[i] = c;
 }
-static uint16_t blend(uint16_t fg, uint16_t bg, unsigned alpha)
+uint16_t ht_blend(uint16_t fg, uint16_t bg, unsigned alpha)
 {
     unsigned r = (((fg >> 11) * alpha + (bg >> 11) * (3 - alpha)) + 1) / 3;
     unsigned g = ((((fg >> 5) & 63) * alpha + ((bg >> 5) & 63) * (3 - alpha)) + 1) / 3;
     unsigned b = (((fg & 31) * alpha + (bg & 31) * (3 - alpha)) + 1) / 3;
-    return panel16((r << 11) | (g << 5) | b);
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+static uint16_t blend(uint16_t fg, uint16_t bg, unsigned alpha)
+{
+    return panel16(ht_blend(fg, bg, alpha));
 }
 
 // The small ASCII artwork uses only a handful of characters. Expand each used

@@ -24,6 +24,12 @@ void ht_character_layout(ht_scene_t *s, const ht_character_face_t *f, uint8_t fr
 // Text-only inbox, deliberately distinct from the companion's home recap.
 void ht_inbox_card(ht_scene_t *scene, const char *mark, const char *name,
                    const char *message, uint16_t foreground, uint16_t status_ink);
+// The same card with the agent's engine badge (an ht_engine glyph) leading its title line, as the
+// Focus skin's design draws it. `badge` NULL is exactly ht_inbox_card; "" keeps the badge's run and
+// draws nothing, for an agent whose engine this dial does not know.
+void ht_inbox_card_badged(ht_scene_t *scene, const char *mark, const char *name,
+                          const char *message, uint16_t foreground, uint16_t status_ink,
+                          const char *badge, uint16_t badge_ink);
 void ht_notification_bell(ht_scene_t *scene, unsigned count, uint16_t ink);
 /*
  * The same badge, placed.

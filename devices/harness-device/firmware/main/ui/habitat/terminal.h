@@ -40,6 +40,14 @@ extern const uint8_t ht_right_20_ink[1][4];
 #define HT_WAVE_LEVELS 16
 extern const ht_font_t ht_bell_20, ht_bell_28;
 extern const ht_font_t ht_bell_footer, ht_done_28, ht_failed_28, ht_mic_footer;
+// The Focus tab pill's outline in five pieces — left cap (two cells), body, right cap (two cells).
+extern const ht_font_t ht_pill;
+#define HT_PILL_LEFT  "\xee\x81\x80\xee\x81\x81"
+#define HT_PILL_BODY  "\xee\x81\x82"
+#define HT_PILL_RIGHT "\xee\x81\x83\xee\x81\x84"
+// The colour a glyph pixel at coverage `alpha` (0..3) takes between `fg` and `bg`, exactly as the
+// rasteriser computes it. For a run that has to sit seamlessly on another run's coverage level.
+uint16_t ht_blend(uint16_t fg, uint16_t bg, unsigned alpha);
 // The voice screen: one sparkle, and six bar heights that a row of nine draws a waveform with.
 extern const ht_font_t ht_spark, ht_wave;
 // One badge per engine, from U+E020 in the order focus.c lists them. 24 px in a 38 px cell, so a

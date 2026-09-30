@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { baseModel, compatibleModels, contextLadder, LocalModels, modelFamily, rankForCoding, readRunRecords, type GridInventory } from './localModels.js'
+import { baseModel, compatibleModels, contextLadder, LocalModels, modelBudget, modelFamily, rankForCoding, readRunRecords, type GridInventory } from './localModels.js'
 import { GridFleetRpc, type GridFleetResult } from './gridFleetRpc.js'
 import { encryptDownFrame, encryptRpcResult } from './e2ee/applicationFrames.js'
 
@@ -439,46 +439,69 @@ describe('local model discovery and lifecycle', () => {
     expect((await service.list('home')).models.map(m => [m.name, m.recommended])).toEqual([['Fast', true], ['Large', false]])
   })
 
-  it('offers what a coding agent can work with first: fast enough, then bigger, then the catalog order', async () => {
-    // [id, estimated tok/s, billions of parameters] in the catalog's own order.
-    const rows: [string, number | undefined, number | undefined][] = [
-      ['org/Dense-70B-GGUF', 8, 70],                // big, and slow on this machine
+  it('offers what a coding agent can work with first: a faithful quant, fast enough, then bigger, then the catalog order', async () => {
+    // [id, estimated tok/s, billions of parameters, quant] in the catalog's own order.
+    const rows: [string, number | undefined, number | undefined, string?][] = [
+      ['org/Dense-70B-GGUF', 8, 70],                    // big, and slow on this machine
       ['org/Qwen-35B-A3B-GGUF', 21, 35],
-      ['org/Qwen-35B-A3B-MTP-GGUF', 21, 35],        // a variant of the one above
-      ['org/Tiny-4B-GGUF', 17, 4],
-      ['org/Other-35B-A3B-GGUF', 22, 35],           // as big as Qwen, later in the catalog
-      ['org/Coder-Next-GGUF', 25, undefined],       // no count: read off 48 GB of MXFP4 weights
-      ['org/Unknown-9B-GGUF', undefined, 9],        // no estimate: not known to be fast
-      ['org/gpt-oss-safeguard-20b-GGUF', 24, 20],   // a safety classifier, not a coding model
+      ['org/Qwen-35B-A3B-MTP-GGUF', 21, 35],            // a variant of the one above
+      ['org/Tiny-4B-GGUF', 27, 4],
+      ['org/Retrained-35B-A3B-GGUF', 22, 35],           // a fine-tune: the same MoE shape
+      ['org/Renamed-35B-GGUF', 21, 35],                 // a fine-tune: the same size, speed and weights
+      ['org/Coder-Next-GGUF', 25, undefined, 'MXFP4_MOE'], // no count: read off 48 GB of MXFP4 weights
+      ['org/Unknown-9B-GGUF', undefined, 9],            // no estimate: not known to be fast
+      ['org/gpt-oss-safeguard-20b-GGUF', 24, 20],       // a safety classifier, not a coding model
+      ['org/Giant-122B-A10B-GGUF', 30, 122, 'Q2_K_XL'], // biggest and fast, at 2 bits a weight
     ]
-    catalogCards = rows.map(([id, estimate, params]) => {
+    catalogCards = rows.map(([id, estimate, params, quant]) => {
       const row: Record<string, any> = card(id)
-      const file = `${id.split('/')[1]}.gguf`
-      row.versions[0].pull_spec = `${id}:${file}`
+      row.versions[0].pull_spec = `${id}:${id.split('/')[1]}.gguf`
       if (estimate !== undefined) row.fit = { ...row.fit, est_tok_s: estimate }
       if (params !== undefined) row.params_b = params
-      if (id.includes('Coder-Next')) {
-        row.fit = { ...row.fit, version: 'MXFP4_MOE' }
-        row.versions[0] = { ...row.versions[0], version: 'MXFP4_MOE', size_bytes: 48e9 }
+      if (quant) {
+        row.fit = { ...row.fit, version: quant }
+        row.versions[0] = { ...row.versions[0], version: quant, ...(quant === 'MXFP4_MOE' ? { size_bytes: 48e9 } : {}) }
       }
       return row as ReturnType<typeof card>
     })
     const snapshot = await service.list('home')
     expect(snapshot.models.map(model => model.name)).toEqual([
-      'Coder-Next', 'Qwen-35B-A3B', 'Other-35B-A3B', 'Tiny-4B',
+      'Coder-Next', 'Qwen-35B-A3B', 'Tiny-4B',
       'Dense-70B', 'Unknown-9B',
-      'Qwen-35B-A3B-MTP',
+      'Giant-122B-A10B',
+      'Qwen-35B-A3B-MTP', 'Retrained-35B-A3B', 'Renamed-35B',
     ])
     expect(snapshot.models[0].recommended).toBe(true)
   })
 
   it('ranks without regard to where a model was in the catalog once speed or size tells them apart', () => {
-    const at = (name: string, estTokS: number, paramsB: number) =>
-      ({ id: `org/${name}`, name, pull: `org/${name}:${name}.gguf`, file: `${name}.gguf`, files: [`${name}.gguf`], size: 1, quant: 'Q4', estTokS, paramsB })
-    expect(rankForCoding([at('Slow-Big', 5, 70), at('Fast-Small', 20, 4), at('Fast-Big', 20, 30)]).map(c => c.name))
+    const at = (name: string, estTokS: number, paramsB: number, size = 1) =>
+      ({ id: `org/${name}`, name, pull: `org/${name}:${name}.gguf`, file: `${name}.gguf`, files: [`${name}.gguf`], size, quant: 'Q4', estTokS, paramsB })
+    expect(rankForCoding([at('Slow-Big', 5, 70), at('Fast-Small', 25, 4), at('Fast-Big', 25, 30)]).map(c => c.name))
       .toEqual(['Fast-Big', 'Fast-Small', 'Slow-Big'])
     // At exactly the floor a model counts as fast enough.
-    expect(rankForCoding([at('Slow', 14.9, 30), at('Enough', 15, 4)]).map(c => c.name)).toEqual(['Enough', 'Slow'])
+    expect(rankForCoding([at('Slow', 19.9, 30), at('Enough', 20, 4)]).map(c => c.name)).toEqual(['Enough', 'Slow'])
+    // Two models of one size are two models when their weights or speed differ.
+    expect(rankForCoding([at('Moe-35B', 78, 35, 20e9), at('Dense-35B', 30, 35, 20e9), at('Other-35B', 78, 35, 24e9)]).map(c => c.name))
+      .toEqual(['Moe-35B', 'Dense-35B', 'Other-35B'])
+  })
+
+  it('fits the catalog to half the machine, and never to more than grid says is free', () => {
+    const device = (usable: number, total?: number, backend = 'metal') =>
+      ({ backend, usable_bytes: usable * 1024 ** 3, ...(total ? { memory: { total_gb: total } } : {}) })
+    expect(modelBudget(device(54, 64))).toBe(32 * 1024 ** 3)
+    expect(modelBudget(device(20, 64))).toBe(20 * 1024 ** 3)
+    expect(modelBudget(device(54))).toBe(54 * 1024 ** 3)
+    // No GPU: the model lives in system RAM, shared like unified memory.
+    expect(modelBudget(device(28, 32, 'cpu'))).toBe(16 * 1024 ** 3)
+    expect(modelBudget({})).toBeUndefined()
+  })
+
+  it("gives the catalog all of an NVIDIA card's free VRAM, whatever the system RAM", () => {
+    // A 24 GB card in a 32 GB PC: VRAM is not system RAM, and nothing else is waiting for it.
+    expect(modelBudget({ backend: 'cuda', usable_bytes: 23 * 1024 ** 3, memory: { total_gb: 32 } })).toBe(23 * 1024 ** 3)
+    // Two 24 GB cards in a 64 GB PC.
+    expect(modelBudget({ backend: 'cuda', usable_bytes: 46 * 1024 ** 3, memory: { total_gb: 64 } })).toBe(46 * 1024 ** 3)
   })
 
   it('names one base model across its variants, and a fine-tune under its own name apart', () => {
@@ -800,6 +823,27 @@ describe('local model discovery and lifecycle', () => {
     expect(snapshot.models[1]).not.toHaveProperty('estTokS')
     expect(snapshot.models[1]).not.toHaveProperty('paramsB')
     expect(snapshot.freeDiskBytes).toBeGreaterThan(0)
+  })
+
+  it("tells the catalog the machine's measured bandwidth and compute, which its speed estimates rest on", async () => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args[0] === 'device-info'
+      ? ok({ device_class: 'apple-silicon', backend: 'metal', usable_bytes: 54 * 1024 ** 3, memory: { total_gb: 64 },
+        mem_bandwidth_gbps: 400, compute_gflops: 15600 })
+      : original(args, output))
+    await service.list('home')
+    const sent = request.mock.calls.find(([url]) => String(url).includes('/catalog'))!
+    // Half of its 64 GB, not the 54 GB grid reports free: the rest stays for everything else it runs.
+    expect(JSON.parse(String(sent[1]?.body)).device).toEqual({ device_class: 'apple-silicon', usable_bytes: 32 * 1024 ** 3,
+      backend: 'metal', mem_bandwidth_gbps: 400, compute_gflops: 15600 })
+  })
+
+  it('leaves out a measurement the machine did not report, so the catalog falls back to its own', async () => {
+    await service.list('home')
+    const sent = request.mock.calls.find(([url]) => String(url).includes('/catalog'))!
+    const device = JSON.parse(String(sent[1]?.body)).device
+    expect(device).not.toHaveProperty('mem_bandwidth_gbps')
+    expect(device).not.toHaveProperty('compute_gflops')
   })
 
   it('names one model the same whatever its quantization', () => {

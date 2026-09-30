@@ -154,6 +154,11 @@ jobs:
           E2E_PORT: 19297
           HN_SOCKET_NAME: hn-ci-e2e
         run: bash tests/e2e.sh
+      - name: Pane surfaces, mouse coordinates and layout compatibility
+        env:
+          HN_PANE_UI_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_PANE_UI_PORT: 19783
+        run: python3 -u tests/pane-ui.py
       - name: Layout keys and shared desk synchronization
         env:
           HN_LAYOUT_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui

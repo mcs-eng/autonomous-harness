@@ -422,6 +422,49 @@ pub fn palette() -> (Color, Color, bool) {
     (bg, fg, light)
 }
 
+/// Surface colors derived from the terminal theme, with a stable fallback before OSC replies.
+#[derive(Clone, Copy, Debug)]
+pub struct PanePalette {
+    pub canvas: Color, pub surface: Color, pub inactive_surface: Color,
+    pub foreground: Color, pub inactive_foreground: Color, pub muted: Color,
+    pub active_foreground: Color,
+    pub border: Color, pub active_border: Color,
+    pub status: Color, pub status_foreground: Color,
+}
+
+pub fn pane_palette() -> PanePalette {
+    let native = crate::term_out::terminal_colours().and_then(|(bg, fg)|
+        Some((crate::tmuxconf::colour(&bg)?, crate::tmuxconf::colour(&fg)?)));
+    pane_palette_for(native)
+}
+
+fn pane_palette_for(native: Option<(Color, Color)>) -> PanePalette {
+    let (bg, foreground) = native.unwrap_or((Color::Rgb(28, 31, 36), Color::Rgb(220, 225, 231)));
+    let Color::Rgb(r, g, b) = bg else { unreachable!("terminal background is RGB") };
+    let light = 299 * r as u32 + 587 * g as u32 + 114 * b as u32 > 128_000;
+    let mix = |a: Color, b: Color, amount: u16| {
+        let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else { return a };
+        let c = |a: u8, b: u8| ((a as u16 * (100 - amount) + b as u16 * amount) / 100) as u8;
+        Color::Rgb(c(ar, br), c(ag, bg), c(ab, bb))
+    };
+    let green = if light { Color::Rgb(58, 102, 48) } else { Color::Rgb(133, 181, 105) };
+    let inactive_surface = if light { mix(bg, foreground, 8) } else { Color::Rgb(64, 64, 64) };
+    PanePalette {
+        // Separate pane cards sit on a quiet backdrop, with clear space between outlines.
+        canvas: if light { mix(bg, foreground, 14) } else { Color::Rgb(32, 32, 32) },
+        surface: bg,
+        inactive_surface,
+        foreground, inactive_foreground: mix(foreground, bg, 9),
+        muted: mix(foreground, bg, 30),
+        border: mix(inactive_surface, foreground, 20),
+        active_border: if light { Color::Rgb(70, 86, 103) } else { Color::Rgb(226, 230, 235) },
+        active_foreground: if light { Color::Rgb(74, 89, 105) } else { Color::Rgb(192, 200, 210) },
+        // A familiar green anchor, subdued enough that the working pane keeps the attention.
+        status: mix(bg, green, if light { 18 } else { 28 }),
+        status_foreground: if light { Color::Rgb(35, 62, 29) } else { Color::Rgb(196, 216, 183) },
+    }
+}
+
 /// fzf's colours — its dark256 default, or what `--color=light|16|bw` in `$FZF_DEFAULT_OPTS` asks
 /// for (and bw under NO_COLOR), so a list here looks like fzf does on this terminal.
 #[derive(Clone)]
@@ -1227,6 +1270,27 @@ mod opts_tests {
 
 #[cfg(test)]
 mod palette_tests {
+    #[test]
+    fn pane_surfaces_remain_distinct_on_dark_and_light_terminals() {
+        for (bg, fg) in [(Color::Rgb(0, 0, 0), Color::Rgb(245, 245, 245)),
+                         (Color::Rgb(247, 247, 247), Color::Rgb(26, 26, 26))] {
+            let p = super::pane_palette_for(Some((bg, fg)));
+            assert_ne!(p.surface, p.inactive_surface);
+            assert_ne!(p.inactive_surface, p.canvas);
+            assert_ne!(p.border, p.active_border);
+            assert_eq!(p.surface, bg);
+            assert_eq!(p.foreground, fg);
+            let luminance = |c: Color| { let Color::Rgb(r, g, b) = c else { panic!("RGB palette") };
+                299 * r as i32 + 587 * g as i32 + 114 * b as i32 };
+            assert!((luminance(p.surface) - luminance(p.foreground)).abs() > 180_000);
+            assert!((luminance(p.inactive_surface) - luminance(p.inactive_foreground)).abs() > 150_000);
+            assert!((luminance(p.status) - luminance(p.status_foreground)).abs() > 120_000);
+        }
+        let fallback = super::pane_palette_for(None);
+        assert_eq!(fallback.surface, Color::Rgb(28, 31, 36));
+        assert_eq!(fallback.inactive_surface, Color::Rgb(64, 64, 64));
+    }
+
     use super::palette;
     use ratatui::style::Color;
 
@@ -1247,7 +1311,8 @@ mod palette_tests {
         // chrome read as teal on some terminals while the status bar was light.
         for c in [super::MUTED, super::SOFT] {
             let s = super::fg(c);
-            assert_eq!(s.fg, Some(super::depth_fit(fg)), "{c:?} carries the theme's foreground, not the terminal default");
+            let expected = (!super::no_color()).then(|| super::depth_fit(fg));
+            assert_eq!(s.fg, expected, "{c:?} follows the theme and NO_COLOR");
             assert!(s.add_modifier.contains(ratatui::style::Modifier::DIM), "{c:?} stays emphasis (dim)");
         }
 

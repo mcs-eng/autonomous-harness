@@ -24,3 +24,10 @@ void ht_focus_portrait(ht_scene_t *s, const ht_character_face_t *f, uint8_t fram
 bool ht_focus_motion_tick(ht_character_motion_t *m, uint32_t now, ht_character_mood_t mood,
                           bool quiet, bool visible, bool down, int x, unsigned level,
                           uint32_t activity);
+
+/*
+ * The engine's badge: `out` gets its ht_engine glyph as UTF-8, `ink` its own colour as 0xRRGGBB, or 0
+ * for "no colour of its own — draw it in the row's ink". False, and nothing written, for an engine
+ * this build has no mark for; an unknown engine gets no badge rather than a wrong one.
+ */
+bool ht_focus_engine_mark(const char *engine, char out[4], uint32_t *ink);

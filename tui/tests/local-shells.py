@@ -116,8 +116,11 @@ try:
     launch('new-session', '-s', 'work')
     wait(lambda: hn('list-panes', '-t', 'work', '-F', '#{pane_id}', check=False).stdout.strip() == '%0', 'initial local shell')
     send("printf 'ENV:%s:%s:%s:%s:%s:%s\\n' \"$$\" \"$SHELL\" \"$HNE_KEEP\" \"${HNE_REMOVE-unset}\" \"${HNE_HIDDEN-unset}\" \"$TMUX_PANE\"; HNE_PERSIST=remembered")
-    wait(lambda: ':kept:unset:unset:%0' in capture(), 'configured environment and stable pane ID')
-    pid = int(next(line for line in capture().splitlines() if line.startswith('ENV:')).split(':')[1])
+    # An interactive shell may leave its startup prompt before the record. Match every
+    # field from one capture instead of assuming that output starts in column zero.
+    record = wait(lambda: re.search(r'ENV:(\d+):/bin/sh:kept:unset:unset:%0(?=\s|$)',
+                                    capture()), 'configured environment and stable pane ID')
+    pid = int(record.group(1))
     sockets = list((BASE / f'hn-{os.getuid()}').glob('*.pty'))
     assert len(sockets) == 1 and stat.S_IMODE(sockets[0].stat().st_mode) == 0o600
     assert stat.S_IMODE(sockets[0].parent.stat().st_mode) == 0o700

@@ -334,10 +334,10 @@ static void focus_face(void)
         assert(above == below);
     }
 
-    // Stated as its parts rather than as a number: the tab pill, the agent name, the engine mark on
-    // its own run so it can be coloured without a per-cell palette, the live status, and the four
-    // recap rows the octopus reads its summary in.
-    assert(expected == 1 + 1 + 1 + 1 + 4);
+    // Stated as its parts rather than as a number: the tab pill and the two rows of padding under it,
+    // the agent name, the engine mark on its own run so it can be coloured without a per-cell
+    // palette, the live status, and the four recap rows the octopus reads its summary in.
+    assert(expected == 1 + 1 + 1 + 1 + 1 + 4);
 }
 
 static void footer_layout(void)

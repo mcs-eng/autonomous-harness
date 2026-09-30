@@ -1,8 +1,6 @@
-//! Drawing, the way tmux and fzf draw. A frame is the active window's panes (edge to edge when
-//! there is one; tmux borders with `pane-border-status top` when there are several), then the
-//! status line — tmux's: green, at the bottom, `[harness] 0:name* 1:name-`, the pane's title and
-//! the time on the right; prompts and messages take it over in yellow. The search is fzf's own
-//! layout and colours, with a preview window.
+//! Pane surfaces with space between them, integrated titles, and a status line at the bottom.
+//! The tmux split tree remains intact beneath presentation insets. Classic and tmux looks
+//! retain line borders; the search keeps fzf's layout and colours with a preview window.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::fleet::ago;
+use crate::format::clip_middle;
 use crate::keys;
 use crate::modal::{Modal, PickerKind, PromptKind};
 use crate::pane::{Pane, Phase};
@@ -233,9 +232,14 @@ fn which_key(buf: &mut Buffer, app: &App, body: Rect) {
 
 // ── the window ───────────────────────────────────────────────────────────────
 
-/// The active window's panes, then their borders and status lines as tmux draws them.
+/// The active window's programs, then their pane surfaces or classic borders and titles.
 fn window(buf: &mut Buffer, app: &mut App, body: Rect) -> Option<Position> {
     let focus = app.focused();
+    let surfaces = app.options.pane_look();
+    if surfaces {
+        crate::term_out::clear_extras(body);
+        buf.set_style(body, Style::default().bg(theme::pane_palette().canvas));
+    }
     let rects = app.rects.clone();
     let mut cursor = None;
     for (id, rect) in rects.iter() {
@@ -246,6 +250,12 @@ fn window(buf: &mut Buffer, app: &mut App, body: Rect) -> Option<Position> {
         // window-style (both the pane's own, its window's or the global ones).
         let (a, w) = (app.style_of("window-active-style", app.active, Some(*id)), app.style_of("window-style", app.active, Some(*id)));
         let window = if active { (a.fg.or(w.fg), a.bg.or(w.bg)) } else { (w.fg, w.bg) };
+        if surfaces {
+            let f = crate::pane_frame::frame(*rect, app.window_area(app.tab()), app.pane_status(app.tab()));
+            // A lone or zoomed pane needs no focus treatment, including in its outer space.
+            let surface = if rects.len() == 1 { body } else { f.surface };
+            buf.set_style(surface, Style::default().fg(window.0.unwrap_or(Color::Reset)).bg(window.1.unwrap_or(Color::Reset)));
+        }
         // choose-tree's tree, over the pane.
         if app.panes.get(id).map(|p| p.tree_top()).unwrap_or(false) {
             if let Some(bg) = window.1 { buf.set_style(content, Style::default().bg(bg)) }
@@ -268,8 +278,50 @@ fn window(buf: &mut Buffer, app: &mut App, body: Rect) -> Option<Position> {
             pane.dirty = false;
         }
     }
-    borders(buf, app, body);
+    if surfaces { pane_chrome(buf, app); } else { borders(buf, app, body); }
     if app.modal.is_some() && !matches!(app.modal, Some(Modal::Copy { .. })) { None } else { cursor }
+}
+
+/// Integrated titles and thin outlines: bright for focus, muted otherwise.
+/// Program cells retain their ANSI colours; moving focus changes no content dimensions or mouse coordinates.
+fn pane_chrome(buf: &mut Buffer, app: &App) {
+    let canvas = app.window_area(app.tab());
+    for (id, rect) in &app.rects {
+        let f = crate::pane_frame::frame(*rect, canvas, app.pane_status(app.tab()));
+        let active = Some(*id) == app.focused();
+        let style_name = if active { "pane-active-border-style" } else { "pane-border-style" };
+        let style = app.style_of(style_name, app.active, Some(*id));
+        let own = |name| app.options.has_window_override(name, &app.tab().id, *id);
+        let a = app.style_of("window-active-style", app.active, Some(*id));
+        let w = app.style_of("window-style", app.active, Some(*id));
+        let pane_bg = if active { a.bg.or(w.bg) } else { w.bg };
+        let bg = if own(style_name) { style.bg.or(pane_bg) } else { pane_bg };
+        let style = style.bg(bg.unwrap_or(Color::Reset));
+        if let Some(outline) = f.outline.filter(|_| app.rects.len() > 1) {
+            let lines = app.options.get("pane-border-lines", &app.tab().id, Some(*id)).unwrap_or_default();
+            let (tl, tr, bl, br, hz, vt, _, _) = box_set(&lines);
+            // Border glyphs share the pane's fill: a canvas-colored border cell would
+            // leave a visible half-cell gap between the outline and its interior.
+            let put = |buf: &mut Buffer, x, y, glyph| {
+                if let Some(cell) = buf.cell_mut((x, y)) { cell.set_symbol(glyph).set_style(style); }
+            };
+            let (right, bottom) = (outline.right() - 1, outline.bottom() - 1);
+            for x in outline.x + 1..right { put(buf, x, outline.y, hz); put(buf, x, bottom, hz); }
+            for y in outline.y + 1..bottom { put(buf, outline.x, y, vt); put(buf, right, y, vt); }
+            put(buf, outline.x, outline.y, tl); put(buf, right, outline.y, tr);
+            put(buf, outline.x, bottom, bl); put(buf, right, bottom, br);
+        }
+        let Some(title) = f.title else { continue };
+        let style = if own(style_name) { style } else {
+            let palette = theme::pane_palette();
+            style.fg(if active { palette.active_foreground } else { palette.muted })
+        };
+        buf.set_style(title, style);
+        let marker = if app.marked == Some(*id) { "◆" } else { " " };
+        if title.width > 0 { if let Some(cell) = buf.cell_mut((title.x, title.y)) { cell.set_symbol(marker).set_style(style); } }
+        let text = Rect::new(title.x + 1.min(title.width), title.y, title.width.saturating_sub(2), 1);
+        title_line(buf, app, *id, text, style);
+    }
 }
 
 /// screen-redraw.c over the window: every border cell (its junction, the active pane's in
@@ -289,7 +341,7 @@ fn borders(buf: &mut Buffer, app: &App, body: Rect) {
     };
     for c in frame.cells() {
         let style = border_style(app, c.paint == crate::borders::Paint::Active);
-        let style = if c.marked { style.add_modifier(Modifier::REVERSED) } else { style };
+        let style = if c.marked { style.add_modifier(if app.options.tmux_look() { Modifier::REVERSED } else { Modifier::BOLD }) } else { style };
         if let Some(cell) = buf.cell_mut((body.x + c.x as u16, body.y + c.y as u16)) { cell.set_symbol(&c.glyph).set_style(style); }
     }
     for t in frame.titles() {
@@ -309,7 +361,7 @@ fn borders(buf: &mut Buffer, app: &App, body: Rect) {
 fn border_style(app: &App, active: bool) -> Style {
     let mut s = app.style_of(if active { "pane-active-border-style" } else { "pane-border-style" }, app.active, app.focused());
     let own = if active { app.look.active_border.is_some() } else { app.look.border.is_some() };
-    if !own {
+    if !own && !app.options.tmux_look() {
         let (_, fg, _) = crate::theme::palette();
         s = s.fg(fg);
         if !active { s = s.add_modifier(Modifier::DIM) }
@@ -318,7 +370,7 @@ fn border_style(app: &App, active: bool) -> Style {
 }
 
 /// A pane's status line over its border characters: its pane-border-format (hn's: the harness's
-/// symbol, its name, and as far as the pane is wide, its project and branch), drawn as
+/// name, its state symbol, and as far as the pane is wide, its project and branch), drawn as
 /// screen_redraw_make_pane_status draws it — format_draw over the border, so #[align=right],
 /// #[align=centre] and #[fill] place it as tmux does, the border showing wherever the format
 /// writes nothing.
@@ -442,7 +494,7 @@ fn status_line(buf: &mut Buffer, app: &mut App, rect: Rect) -> Option<Position> 
     status_formats(buf, app, rect);
     let line = app.options.get("message-line", "", None).and_then(|n| n.parse::<u16>().ok()).unwrap_or(0).min(rect.height.saturating_sub(1));
     let rect = Rect::new(rect.x, rect.y + line, rect.width, 1);
-    // NO_COLOR (and no colours of your own): reverse video carries the status line and messages.
+    // Messages inherit the configured status message colors.
     let yellow = app.message_style();
     // (A prompt's completion menu keeps the prompt on the status line under it.)
     let under_menu = match &app.modal { Some(Modal::Menu(m)) => m.complete.as_ref().map(|c| &c.prompt), _ => None };
@@ -2138,10 +2190,10 @@ fn preview(buf: &mut Buffer, app: &App, kind: &PickerKind, picker: &Picker, pb: 
         for i in 0..thumb { bar_cells.1[header + start + i] = true }
     }
     if let Some(bar) = &scrollbar { for (row, marked) in bar_cells.1.iter().enumerate() { if *marked { buf.set_string(pb.bar_x, inner.y + row as u16, bar, pal.preview_scrollbar.style()); } } }
-    // Its offset, N/M, at the top right in the info colour reversed (not with noinfo).
+    // The preview offset is a quiet label; exact tmux/fzf appearance keeps its inverse style.
     let mark = format!("{}/{}", offset + 1, total);
     if scrollable && pw.info && (mark.width() as u16) < inner.width {
-        buf.set_string(inner.x + inner.width - mark.width() as u16, inner.y, &mark, pal.info.style().add_modifier(Modifier::REVERSED));
+        buf.set_string(inner.x + inner.width - mark.width() as u16, inner.y, &mark, pal.info.style().add_modifier(if app.options.tmux_look() { Modifier::REVERSED } else { Modifier::BOLD }));
     }
 }
 
@@ -2317,27 +2369,6 @@ fn clock(buf: &mut Buffer, app: &App, rect: Rect) {
     }
 }
 
-/// Keep a distinguishing suffix, such as "(3)", visible when a home title is long.
-fn clip_middle(text: &str, cols: usize) -> String {
-    use unicode_segmentation::UnicodeSegmentation;
-    if text.width() <= cols { return text.to_string() }
-    if cols == 0 { return String::new() }
-    let left_room = cols / 2;
-    let right_room = cols - 1 - left_room;
-    let mut left = String::new();
-    for g in text.graphemes(true) {
-        if left.width() + g.width() > left_room { break }
-        left.push_str(g);
-    }
-    let mut right = Vec::new();
-    let mut width = 0;
-    for g in text.graphemes(true).rev() {
-        if width + g.width() > right_room { break }
-        right.push(g);
-        width += g.width();
-    }
-    format!("{}…{}", left.trim_end(), right.into_iter().rev().collect::<String>().trim_start())
-}
 
 fn clip(text: &str, cols: usize) -> String {
     if text.width() <= cols { return text.to_string() }
@@ -2475,8 +2506,10 @@ fn pane_body(buf: &mut Buffer, pane: &mut Pane, area: Rect, active: bool, window
         let note = &note;
         buf.set_style(area, Style::default().add_modifier(Modifier::DIM));
         let row = Rect::new(area.x, area.y, area.width, 1);
-        buf.set_style(row, Style::default().remove_modifier(Modifier::DIM).add_modifier(Modifier::REVERSED));
-        buf.set_stringn(area.x, area.y, format!("{:w$}", format!(" {note}"), w = area.width as usize), area.width as usize, Style::default().remove_modifier(Modifier::DIM).add_modifier(Modifier::REVERSED));
+        let notice = Style::default().fg(window.0.unwrap_or(Color::Reset)).bg(window.1.unwrap_or(Color::Reset))
+            .remove_modifier(Modifier::DIM | Modifier::REVERSED).add_modifier(Modifier::BOLD);
+        buf.set_style(row, notice);
+        buf.set_stringn(area.x, area.y, format!("{:w$}", format!(" ! {note}"), w = area.width as usize), area.width as usize, notice);
         return None;
     }
     // Local echo, drawn over the grid: underlined until the far side confirms it.

@@ -141,11 +141,17 @@ the downloads, and **Shared with you**. Headers are plain muted text and never
 take selection. Put **[ Add ]** within APIs. Your models puts downloaded models
 first, followed by models served on the user's machines. The downloads are
 headed with the machine they are for and its memory (`Get for this Mac · 64 GB`),
-and a machine with nothing to download has no such heading. They are ordered
-for a coding agent on that machine: the ones the catalog estimates at 15 tok/s
-or more first, then bigger models first, then the catalog's own (popularity)
-order, with one version of each base model before any MTP, QAT or pruned
-variant; safety classifiers are never offered. The list shows the first five;
+and a machine with nothing to download has no such heading. Where a model
+shares memory with everything else (a Mac's unified memory, or system RAM with
+no GPU), only models that fit half of it with a coding agent's 64K context are
+offered, and the other half stays for everything else it runs; an NVIDIA
+card's free VRAM is the model's own, all of it. They are ordered for a
+coding agent on that machine: quants of 3 bits or more first, then the ones the
+catalog estimates at 20 tok/s or more, then bigger models first, then the
+catalog's own (popularity) order — with one version of each model before any
+second: its MTP, QAT or pruned variants, and fine-tunes sharing its MoE shape
+(`35B-A3B`) or its size and speed. Safety classifiers are never offered. The
+list shows the first five;
 the rest stay behind **[ More models (N) ]**, where Enter
 expands them in place and selects the first catalog row, and **[ Show fewer ]**
 collapses them. The catalog never offers another quantization of a model the

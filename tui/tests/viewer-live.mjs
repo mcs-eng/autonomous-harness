@@ -372,7 +372,24 @@ try {
     assert.equal((await layoutHn('display-message', '-p', '#{window_layout}')).stdout.trim(), chosen, 'real desk reply reverted the layout')
   }
   assert.equal((await layoutHn('list-panes', '-F', '#{pane_id}')).stdout, paneIds)
-  pass('real C-b Space persists through daemon/backend save and remote desk updates, preserving both panes')
+  const desktopLayout = structuredClone((await desk()).tabs.find(t => t.id === layoutTab).layout)
+  assert.equal(desktopLayout.presets['2'], 'columns', 'C-b Space must update the desktop preset too')
+  delete desktopLayout.tmux
+  desktopLayout.sizes = {}
+  await desk([{ op: 'tab.layout', id: layoutTab, layout: desktopLayout }])
+  for (let i = 0; i < 10; i++) {
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal((await layoutHn('display-message', '-p', '#{window_layout}')).stdout.trim(), chosen,
+      'desktop layout serialization reset the real terminal')
+  }
+  desktopLayout.presets['2'] = 'rows'
+  await desk([{ op: 'tab.layout', id: layoutTab, layout: desktopLayout }])
+  await until('intentional desktop layout reaches hn', async () => {
+    const positions = (await layoutHn('list-panes', '-F', '#{pane_left} #{pane_top}')).stdout.trim().split('\n').map(row => row.split(' '))
+    return positions.length === 2 && positions[0][0] === positions[1][0] && positions[0][1] !== positions[1][1]
+  })
+  assert.equal((await layoutHn('list-panes', '-F', '#{pane_id}')).stdout, paneIds)
+  pass('real C-b Space survives desktop serialization; deliberate remote changes still apply without replacing panes')
   await layoutHn('kill-server')
 
   await owner.rpc('agent_delete', { agentId: controlsId }); controlsId = null

@@ -70,7 +70,7 @@ enum { FOCUS_BODY_Y = 118 + 38 + 27 };
  * has a line of text over it; the widths are re-measured for the y they actually use.
  */
 static const struct { int y, width; const ht_font_t *font; } ROWS[FOCUS_ROWS] = {
-    {  60, 288, &ht_mono_20 },
+    {  50, 240, &ht_mono_20 },   // the pill: 38 tall from 50, 20 cells of name — see pill()
     { 118, 384, &ht_mono_28 },
     { FOCUS_BODY_Y,       442, &ht_mono_28 },
     { FOCUS_BODY_Y,       408, &ht_mono_28 },
@@ -153,7 +153,7 @@ static const uint32_t ENGINE_INK[] = {
 _Static_assert(sizeof ENGINE_INK / sizeof ENGINE_INK[0] == sizeof ENGINES / sizeof ENGINES[0],
                "one ink per engine");
 
-static bool engine_mark(const char *engine, char out[4], uint32_t *ink)
+bool ht_focus_engine_mark(const char *engine, char out[4], uint32_t *ink)
 {
     if (!engine || !*engine) return false;
     for (unsigned i = 0; i < sizeof ENGINES / sizeof ENGINES[0]; i++) {
@@ -283,16 +283,58 @@ static const char *meter(unsigned level)
     return bars[level > 4 ? 4 : level];
 }
 
+/*
+ * THE TAB PILL, as the design draws it: a rounded box with a thin lighter rim.
+ *
+ * Habitat fills rectangles and nothing else, so the outline is a run of ht_pill glyphs — two cells of
+ * left cap, one body cell per letter, two of right cap — whose coverage levels 1 and 2 are the fill
+ * and the rim (see HT_THEME_PILL). The name is a second run laid over the body cells with exactly
+ * level 1 as its background, from ht_blend(), so the two meet without a seam. The caps are the
+ * padding: the name starts where the left cap's curve ends.
+ *
+ * TWO RUNS, ALWAYS — with no tab both are one empty cell — so the face's run count never moves.
+ * The name's cell sits 4 px into the pill, which centres its cap height (rows 8..22 of ht_mono_20)
+ * on the pill's middle rather than centring the cell and leaving the letters high.
+ */
+static void pill(ht_scene_t *s, const ht_character_face_t *f, const char *tab)
+{
+    const ht_font_t *font = ROWS[0].font;
+    int cells = ROWS[0].width / font->width;
+    char line[HT_TEXT_BYTES] = "";
+    if (*tab) {
+        const char *rest = tab, *end = ht_take_display_line(&rest, cells, font);
+        size_t n = (size_t)(end - tab);
+        if (n >= sizeof line) n = sizeof line - 1;
+        memcpy(line, tab, n);
+        line[n] = 0;
+    }
+    int glyphs = 0;
+    for (const char *p = line; *p; glyphs++) ht_utf8_next(&p);
+    if (!glyphs) {
+        ht_text(s, 0, ROWS[0].y, ht_pill.width, &ht_pill, s->background, s->background, "");
+        ht_text(s, 0, ROWS[0].y, font->width, font, f->foreground, s->background, "");
+        return;
+    }
+    char outline[HT_TEXT_BYTES];
+    int used = snprintf(outline, sizeof outline, "%s", HT_PILL_LEFT);
+    for (int i = 0; i < glyphs && used + 4 < (int)sizeof outline - 7; i++)
+        used += snprintf(outline + used, sizeof outline - (size_t)used, "%s", HT_PILL_BODY);
+    snprintf(outline + used, sizeof outline - (size_t)used, "%s", HT_PILL_RIGHT);
+    int width = (glyphs + 4) * ht_pill.width, x = (HT_WIDTH - width) / 2;
+    uint16_t ink = ht_rgb(HT_THEME_PILL);
+    ht_text(s, x, ROWS[0].y, width, &ht_pill, ink, s->background, outline);
+    ht_text(s, x + 2 * ht_pill.width, ROWS[0].y + 4, glyphs * font->width, font, f->foreground,
+            ht_blend(ink, s->background, 1), line);
+}
+
 void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, uint16_t ink,
                    const char *recap)
 {
     (void)ink;
     if (f->voice) { voice_face(s, f, frame); return; }
-    uint16_t card = ht_rgb(HT_THEME_CARD);
     // The pane this agent belongs to. It stands where the old face drew the repository name, which
     // does not exist anywhere in the cable vocabulary — see ht_character_face_t.
-    const char *tab = f->tab && *f->tab ? f->tab : "";
-    row(s, 0, f->foreground, tab[0] ? card : s->background, &tab);
+    pill(s, f, f->tab && *f->tab ? f->tab : "");
 
     /*
      * The name, and the engine's badge beside it.
@@ -306,7 +348,7 @@ void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, u
      */
     char mark[4];
     uint32_t mark_ink = 0;
-    bool badged = engine_mark(f->engine, mark, &mark_ink);
+    bool badged = ht_focus_engine_mark(f->engine, mark, &mark_ink);
     const char *who = f->recipient ? f->recipient : "";
     int cells = 0;
     for (const char *p = who; *p; cells++) ht_utf8_next(&p);

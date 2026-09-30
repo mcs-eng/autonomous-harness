@@ -87,6 +87,7 @@ fn parse_osc11(body: &str) -> Option<String> {
         let parts: Vec<&str> = rgb.split('/').collect();
         if parts.len() == 3 {
             let conv = |s: &str| -> Option<u8> {
+                if !(1..=4).contains(&s.len()) || !s.bytes().all(|b| b.is_ascii_hexdigit()) { return None }
                 let v = u32::from_str_radix(s, 16).ok()?;
                 let max = (1u32 << (4 * s.len())) - 1;
                 Some(((v * 255) / max) as u8)
@@ -196,5 +197,8 @@ mod tests {
         assert_eq!(parse_osc11("#1a1A1a"), Some("#1a1a1a".into()));
         assert_eq!(parse_osc11("rgb:0000/0000/0000"), Some("#000000".into())); // a terminal's black
         assert_eq!(parse_osc11("garbage"), None);
+        for bad in ["rgb:/00/00", "rgb:ffffffff/00/00", "rgb:10000/00/00", "rgb:+1/00/00", "rgb:zz/00/00"] {
+            assert_eq!(parse_osc11(bad), None, "{bad}");
+        }
     }
 }

@@ -134,12 +134,28 @@ void ht_recap_lines(ht_scene_t *s, int y, uint16_t ink, const char *recap)
 void ht_inbox_card(ht_scene_t *s, const char *mark, const char *name,
                    const char *message, uint16_t foreground, uint16_t status_ink)
 {
+    ht_inbox_card_badged(s, mark, name, message, foreground, status_ink, NULL, 0);
+}
+void ht_inbox_card_badged(ht_scene_t *s, const char *mark, const char *name,
+                          const char *message, uint16_t foreground, uint16_t status_ink,
+                          const char *badge, uint16_t badge_ink)
+{
     // One balanced text block. A fixed 28 px gap separates label and message,
     // whether they take two lines or six. No divider or empty reserved rows.
+    /*
+     * With a badge the status mark goes, and the NAME carries the status colour instead — the
+     * design's reading of this row (a green name for a finished turn), and what stops "claude ?"
+     * reading as two marks in a row. Without one the mark stays: on a creature skin it is the only
+     * thing on the card that says done, failed or asking.
+     */
     char title[HT_TEXT_BYTES];
-    snprintf(title, sizeof title, "%s %s", mark, name);
+    if (badge) snprintf(title, sizeof title, "%s", name);
+    else snprintf(title, sizeof title, "%s %s", mark, name);
     int start = s->count;
-    lines(s, 0, 374, 2, &ht_mono_28, foreground, title, true, NULL);
+    // The badge spends part of the title's width, so the title is wrapped in what is left. Without
+    // this the pair is wider than the row it was measured for and its ends reach the bezel.
+    int badge_w = badge ? ht_engine.width + 8 : 0;
+    lines(s, 0, 374 - badge_w, 2, &ht_mono_28, badge ? status_ink : foreground, title, true, NULL);
     while (s->count > start && !s->runs[s->count - 1].text[0]) s->count--;
     int body = s->count;
     recap_lines(s, 0, 391, HT_CHARACTER_RECAP_ROWS, false, NULL,
@@ -150,7 +166,14 @@ void ht_inbox_card(ht_scene_t *s, const char *mark, const char *name,
     int top = 72 + (310 - title_height - 28 - body_height) / 2;
     for (int i = start; i < s->count; i++)
         s->runs[i].y += i < body ? top : top + title_height + 28;
-    if (body > start) {
+    if (body > start && badge) {
+        // The badge leads the FIRST title line, and the pair is centred together.
+        ht_run_t *r = &s->runs[start];
+        int x = (HT_WIDTH - badge_w - r->w) / 2;
+        r->x = x + badge_w;
+        ht_text(s, x, r->y, ht_engine.width, &ht_engine, badge_ink, s->background, badge);
+    }
+    if (body > start && !badge) {
         // Put the colored symbol in its own immutable run. Avoid a shared
         // mutable per-cell palette between the compositor's two scene buffers.
         ht_run_t *r = &s->runs[start];
