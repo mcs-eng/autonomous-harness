@@ -126,8 +126,8 @@ void main() {
         // card follows it on the same row, never wrapped below it.
         expect(storeRect.left, closeTo(fieldRect.left, 1));
         expect(deviceRect.left, closeTo(storeRect.right + 16, 1));
-        expect(deviceRect.bottom, closeTo(height - 80, 1));
-        expect(storeRect.bottom, closeTo(height - 80, 1));
+        expect(deviceRect.bottom, closeTo(workspace.bottom - 80, 1));
+        expect(storeRect.bottom, closeTo(workspace.bottom - 80, 1));
         expect(find.text('Meet the\nHarness device'), findsOneWidget);
         expect(create.hitTestable(), findsOneWidget);
         expect(open.hitTestable(), findsOneWidget);

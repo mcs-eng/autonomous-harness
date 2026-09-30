@@ -30,7 +30,16 @@ void main() {
     final cell = terminalCellSizeOf(tester.element(field));
     expect(fieldRect.left - panelRect.left, closeTo(cell.width * 4, .01));
     expect(fieldRect.right, lessThanOrEqualTo(panelRect.right));
-    expect(fieldRect.width, greaterThan(panelRect.width / 2));
+    final listRect = tester.getRect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics && widget.properties.label == 'Search results',
+      ),
+    );
+    // The prompt fills the list column; the other half is its preview.
+    expect(listRect.width, closeTo((panelRect.width - 1) / 2, .01));
+    expect(fieldRect.width, greaterThan(listRect.width / 2));
+    expect(fieldRect.right, lessThanOrEqualTo(listRect.right));
     await chord(tester, LogicalKeyboardKey.keyN);
     expect(find.byType(AlertDialog), findsOneWidget);
     expect(find.byKey(const ValueKey('create-agent-submit')), findsOneWidget);

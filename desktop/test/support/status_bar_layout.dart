@@ -5,6 +5,8 @@
 // Only what both versions have is read, so the same code measures either:
 // every control in the bar (tabs, the new-tab button, the model picker) and
 // the focused pane's context, in the default test font.
+// The fork's fixture includes the 48px projects toggle and reserves a complete
+// tab before sizing Store. Both are independent of the daemon slot's visibility.
 import 'dart:convert';
 import 'dart:io';
 

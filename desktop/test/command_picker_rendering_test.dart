@@ -14,6 +14,7 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/terminal/terminal_text.dart';
+import 'package:harness/terminal/terminal_theme.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
 import 'package:harness/widgets/search_result_text.dart';
 import 'package:harness/widgets/swarm_switcher.dart';
@@ -130,13 +131,24 @@ void main() {
       void checkAppearance() {
         final field = tester.widget<TextField>(_input);
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
+        final chrome = terminalThemeFor(
+          grid.AppTheme.palette.value,
+          terminalThemeStore.value,
+        );
+        expect(
+          pane.theme.background,
+          terminalScreenThemeFor(
+            grid.AppTheme.palette.value,
+            terminalThemeStore.value,
+          ).background,
+        );
         final cell = terminalCellSizeOf(tester.element(_input));
         final line = find.byKey(ValueKey('swarm-search-line:${selected.id}'));
         expect(tester.getSize(line).height, closeTo(cell.height, .01));
-        expect(tester.widget<Container>(line).color, pane.theme.selection);
-        expect(tester.widget<Material>(_panel).color, pane.theme.background);
+        expect(tester.widget<Container>(line).color, chrome.selection);
+        expect(tester.widget<Material>(_panel).color, chrome.background);
         expect(field.cursorWidth, 2);
-        expect(field.cursorColor, pane.theme.cursor);
+        expect(field.cursorColor, chrome.cursor);
         final title = find.descendant(
           of: line,
           matching: find.byType(SearchResultText),
