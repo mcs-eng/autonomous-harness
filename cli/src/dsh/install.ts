@@ -256,8 +256,29 @@ function streamGit(args: string[], onLine: ((line: string) => void) | undefined)
     const tail: string[] = []
     let rest = ''
     let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, GIT_TIMEOUT_MS)
+    let exited = false
+    let finished = false
+    const finish = (code: number | null, signal: NodeJS.Signals | null, error?: Error): void => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      if (error) { resolve({ ok: false, detail: error.message }); return }
+      if (rest.trim()) { onLine?.(rest.trim()); tail.push(rest.trim()) }
+      if (code === 0) { resolve({ ok: true }); return }
+      const what = `git ${args[0] === '-C' ? args[2] : args[0]}`
+      const said = tail.filter((l) => !/^(Receiving|Resolving|Updating|remote:)/.test(l)).slice(-3).join(' · ') || tail.slice(-1).join('')
+      const how = timedOut ? `${what} was still running after ${GIT_TIMEOUT_MS / 60_000} min` : `${what} exited ${code ?? signal}`
+      resolve({ ok: false, detail: said ? `${how}: ${said}` : how })
+    }
+    // Keep the same overall bound if Git exits but a helper retains its stderr pipe.
+    const timer = setTimeout(() => {
+      timedOut = true
+      finish(null, null)
+      if (!exited) child.kill('SIGTERM')
+      child.stderr?.destroy()
+    }, GIT_TIMEOUT_MS)
     child.stderr?.on('data', (chunk: Buffer) => {
+      if (finished) return
       rest += chunk.toString('utf8')
       let at: number
       while ((at = rest.search(/[\r\n]/)) >= 0) {
@@ -269,16 +290,10 @@ function streamGit(args: string[], onLine: ((line: string) => void) | undefined)
         if (tail.length > 20) tail.shift()
       }
     })
-    child.on('error', (error) => { clearTimeout(timer); resolve({ ok: false, detail: error.message }) })
-    child.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      if (rest.trim()) { onLine?.(rest.trim()); tail.push(rest.trim()) }
-      if (code === 0) { resolve({ ok: true }); return }
-      const what = `git ${args[0] === '-C' ? args[2] : args[0]}`
-      const said = tail.filter((l) => !/^(Receiving|Resolving|Updating|remote:)/.test(l)).slice(-3).join(' · ') || tail.slice(-1).join('')
-      const how = timedOut ? `${what} was still running after ${GIT_TIMEOUT_MS / 60_000} min` : `${what} exited ${code ?? signal}`
-      resolve({ ok: false, detail: said ? `${how}: ${said}` : how })
-    })
+    child.on('error', (error) => finish(null, null, error))
+    child.on('exit', () => { exited = true })
+    // Exit can precede the last stderr chunk; classify the result after its pipe closes.
+    child.on('close', finish)
   })
 }
 
