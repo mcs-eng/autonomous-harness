@@ -244,7 +244,7 @@ fn check(app: &mut App, m: &mut Event, double: bool) -> Option<Key> {
         let (px, py) = (x as u32, body_y(m, y) as u32);
         let body = app.body();
         if px > body.width as u32 || py > body.height as u32 { return None }
-        let geoms = app.visible_geoms();
+        let geoms = app.visible_layout_geoms();
         // A border (a zoomed window has none): the column after a pane or the row below it.
         if !app.tab().zoomed {
             if let Some((id, _)) = geoms.iter().find(|(_, g)| (g.x + g.w == px && g.y <= 1 + py && g.y + g.h >= py) || (g.y + g.h == py && g.x <= 1 + px && g.x + g.w >= px)) {

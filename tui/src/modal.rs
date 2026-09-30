@@ -482,7 +482,7 @@ pub fn inbox_rows(app: &App) -> Vec<Row> {
         let mut detail = vec![span(who.clone(), fg(theme::MUTED))];
         if !options.is_empty() { detail.push(span(format!("  {options}"), fg(theme::ACCENT))) }
         rows.push(Row::new(format!("{}:{}#", a.machine_id, a.id), q.prompt.clone()).extra(format!("{who} {} {options}", a.branch))
-            .lead(vec![span("? ", fg(theme::ATTENTION).add_modifier(ratatui::style::Modifier::REVERSED)), span(mark, fg(mark_color)), span(" ", Style::default())])
+            .lead(vec![span("? ", fg(theme::ATTENTION).add_modifier(ratatui::style::Modifier::BOLD)), span(mark, fg(mark_color)), span(" ", Style::default())])
             .detail(detail)
             .right(ago(since)));
     }

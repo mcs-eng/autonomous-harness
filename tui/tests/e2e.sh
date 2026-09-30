@@ -15,7 +15,7 @@ home="$(mktemp -d /tmp/hn-e2e.XXXXXX)"
 export HN_TMPDIR="$home"
 tmux_() { tmux -L "$sock" "$@"; }
 screen() { tmux_ capture-pane -p -t t; }
-fail() { echo "✗ $1"; echo "--- screen ---"; screen || true; exit 1; }
+fail() { echo "✗ $1"; echo "--- screen ---"; screen || true; hn show-messages || true; hn display -p 'key-table=#{client_key_table} prefix=#{client_prefix} mode=#{pane_mode}' || true; exit 1; }
 expect() { # expect <what> <text> [timeout-ms]
   local waited=0 limit="${3:-3000}"
   until screen | grep -qF -- "$2"; do
@@ -61,7 +61,9 @@ tmux_ send-keys -t t 'Mock\ Claude'
 expect "fuzzy filter narrows" "1/"
 # Enter, as tmux's chooser: the harness in a window of its own (not a split of this one).
 tmux_ send-keys -t t Enter
-expect "C-b s Enter: a window of its own" "1:· Mock Claude*"
+expect "C-b s Enter: a window of its own, name before status" "1:Mock Claude*"
+idle_tab() { hn display -p "$(hn show -gwv window-status-current-format)"; }
+wait_eq "idle windows have no status dot" "1:Mock Claude*" idle_tab
 wait_eq "the harness window's one pane" "1" hn display -p '#{window_panes}'
 hn kill-window
 tmux_ send-keys -t t C-b s
@@ -85,18 +87,22 @@ wait_eq "#{pane_mode}" "view-mode" hn display -p '#{pane_mode}'
 tmux_ send-keys -t t q
 wait_eq "q leaves view mode" "0" hn display -p '#{pane_in_mode}'
 tmux_ send-keys -t t C-b ":"
-expect "C-b : is the command prompt" ":"
+# Titles contain colons too. Wait for the actual status prompt before typing a command.
+command_prompt() { screen | tail -n 1 | grep -q '^:' && echo yes; }
+wait_eq "C-b : is the command prompt" yes command_prompt
 tmux_ send-keys -t t "split-window -h" Enter
 # tmux's split: a shell at once, and what is typed straight after it lands in it.
 tmux_ send-keys -t t "typed-ahead"
-expect "split-window -h gives a shell" '── Mock terminal · main ─'
+wait_eq "split-window -h adds a pane" "3" hn display -p '#{window_panes}'
+expect "split-window -h gives a shell" 'Mock terminal'
 expect "keys typed while it starts go into it" "typed-ahead"
 tmux_ send-keys -t t C-b x y
 tmux_ send-keys -t t C-b s
 tmux_ send-keys -t t "remote"
 tmux_ send-keys -t t C-v
 expect "C-b s then C-v: a harness beside" "Remote shell (mock)"
-expect "pane titles, tmux pane-border-status" '── Remote shell'
+wait_eq "the remote harness is focused" 'Remote shell' hn display -p '#{pane_title}'
+expect "pane header names the focused harness" 'Remote shell'
 # From a shell, as tmux is scripted: the running client answers.
 out=$(hn display -p '#{session_windows} #{pane_index}')
 [ -n "$out" ] || fail "hn display -p from a shell answered nothing"
@@ -156,7 +162,7 @@ push "{\"type\":\"dial_swarm\",\"payload\":{\"swarmId\":\"$first\"}}"
 wait_eq "picking a window on the dial selects it" 0 hn display -p '#{window_index}'
 tmux_ send-keys -t t C-b 1
 tmux_ send-keys -t t C-b 0
-expect "C-b 0: back to window 0 (its harness idle: ·)" "0:· "
+wait_eq "C-b 0: back to window 0 (its harness idle: ·)" "0 ·" hn display -p '#{window_index} #{window_agent_icon}'
 # A harness at work, then done, as the daemon's events say it: its line, the counts, C-b a.
 claude=$(dial "d.agents.find(a => a.name === 'Mock Claude').id")
 csess=$(dial "d.agents.find(a => a.name === 'Mock Claude').sessionId")

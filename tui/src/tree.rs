@@ -41,6 +41,12 @@ pub const DEFAULT_FORMAT: &str = concat!(
     "}",
     "}",
 );
+/// Marked rows have an explicit marker and emphasis; tmux appearance keeps its original format.
+pub fn default_format(tmux_look: bool) -> String {
+    if tmux_look { DEFAULT_FORMAT.to_string() }
+    else { DEFAULT_FORMAT.replace("#[reverse]", "#[bold]◆ ") }
+}
+
 pub const DEFAULT_KEY_FORMAT: &str = "#{?#{e|<:#{line},10},#{line},#{?#{e|<:#{line},36},M-#{a:#{e|+:97,#{e|-:#{line},10}}},}}";
 const SORTS: [&str; 3] = ["index", "name", "time"];
 /// window-buffer.c's (choose-buffer): its template, its items' format and its sorts.
@@ -214,7 +220,7 @@ impl Tree {
         let sorts = if a.buffer { &BUFFER_SORTS } else { &SORTS };
         let sort = a.sort.as_deref().and_then(|s| sorts.iter().position(|x| x.eq_ignore_ascii_case(s))).unwrap_or(0);
         let tab = app.tabs.get(window).map(|t| t.id.clone()).unwrap_or_default();
-        let (format, command) = if a.buffer { (BUFFER_FORMAT, BUFFER_COMMAND) } else { (DEFAULT_FORMAT, DEFAULT_COMMAND) };
+        let (format, command) = if a.buffer { (BUFFER_FORMAT.to_string(), BUFFER_COMMAND) } else { (default_format(app.options.tmux_look()), DEFAULT_COMMAND) };
         let mut t = Tree {
             flavour,
             pane,
@@ -234,7 +240,7 @@ impl Tree {
             sort,
             groups: a.groups,
             reversed: a.reversed,
-            format: a.format.clone().unwrap_or_else(|| format.to_string()),
+            format: a.format.clone().unwrap_or(format),
             key_format: a.key_format.clone().unwrap_or_else(|| DEFAULT_KEY_FORMAT.to_string()),
             command: a.command.clone().unwrap_or_else(|| command.to_string()),
             kind: if a.buffer { Kind::None } else if a.session { Kind::Session } else if a.window { Kind::Window } else { Kind::Pane },

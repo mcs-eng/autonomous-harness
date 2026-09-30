@@ -228,7 +228,9 @@ pub fn set_colours(n: u32) { COLOURS.store(n, std::sync::atomic::Ordering::Relax
 /// The terminal's own default background and foreground, from its OSC 10/11 answers, as
 /// `#rrggbb` (bg, fg). None until the terminal answers. hn starts on top of the terminal, so
 /// these are asked directly and answer reliably; the daemon uses them to paint agent panes.
-static TERMINAL_FG_BG: std::sync::RwLock<Option<(String, String)>> = std::sync::RwLock::new(None);
+#[derive(Clone)]
+struct TerminalColours { bg: String, fg: String, foreground_reported: bool }
+static TERMINAL_FG_BG: std::sync::RwLock<Option<TerminalColours>> = std::sync::RwLock::new(None);
 
 fn hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     let h = hex.trim_start_matches('#');
@@ -246,19 +248,38 @@ fn companion_fg(bg: &str) -> String {
 
 /// What the terminal answered for its default colours, (bg, fg) hex, when it answered.
 pub fn terminal_colours() -> Option<(String, String)> {
-    TERMINAL_FG_BG.read().ok()?.clone()
+    TERMINAL_FG_BG.read().ok()?.as_ref().map(|c| (c.bg.clone(), c.fg.clone()))
 }
 
 /// Record an OSC 10/11 answer. A half left blank keeps the other (a terminal may answer bg only);
 /// a missing foreground is chosen for contrast on the background.
 pub fn set_terminal_colours(bg: Option<String>, fg: Option<String>) {
     if let Ok(mut guard) = TERMINAL_FG_BG.write() {
-        let existing = guard.clone();
-        let bg = bg.or(existing.as_ref().map(|(b, _)| b.clone()));
-        let fg = fg.or(existing.as_ref().map(|(_, f)| f.clone()));
-        if let Some(bg) = bg {
-            *guard = Some((bg.clone(), fg.unwrap_or_else(|| companion_fg(&bg))));
-        }
+        *guard = updated_terminal_colours(guard.as_ref(), bg, fg);
+    }
+}
+
+fn updated_terminal_colours(existing: Option<&TerminalColours>, bg: Option<String>, fg: Option<String>) -> Option<TerminalColours> {
+    let foreground_reported = fg.is_some() || existing.is_some_and(|c| c.foreground_reported);
+    let bg = bg.or_else(|| existing.map(|c| c.bg.clone()))?;
+    let fg = fg.or_else(|| existing.filter(|c| c.foreground_reported).map(|c| c.fg.clone()))
+        .unwrap_or_else(|| companion_fg(&bg));
+    Some(TerminalColours { bg, fg, foreground_reported })
+}
+
+#[cfg(test)]
+mod terminal_colour_tests {
+    use super::*;
+
+    #[test]
+    fn a_background_change_recomputes_inferred_foreground_only() {
+        let dark = updated_terminal_colours(None, Some("#101010".into()), None).unwrap();
+        assert_eq!(dark.fg, "#f5f5f5");
+        let light = updated_terminal_colours(Some(&dark), Some("#f7f7f7".into()), None).unwrap();
+        assert_eq!(light.fg, "#1a1a1a");
+        let own = updated_terminal_colours(Some(&light), None, Some("#202020".into())).unwrap();
+        let next = updated_terminal_colours(Some(&own), Some("#eeeeee".into()), None).unwrap();
+        assert_eq!(next.fg, "#202020");
     }
 }
 

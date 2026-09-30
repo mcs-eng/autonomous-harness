@@ -135,12 +135,16 @@ def scenario(mode, port, read_only=False):
         if read_only:
             assert not any(w for w in api('/test/layout')['writes'] if any(o['op'] == 'tab.layout' for o in w['ops']))
         else:
-            for name in ['even-vertical', 'main-horizontal', 'main-horizontal-mirrored',
-                         'main-vertical', 'main-vertical-mirrored', 'tiled']:
+            expected_presets = {'even-vertical': 'rows', 'main-horizontal': 'oneOverTwo',
+                                'main-horizontal-mirrored': 'twoOverOne', 'main-vertical': 'mainLeft',
+                                'main-vertical-mirrored': 'mainRight', 'tiled': 'twoOverOne'}
+            for name, desktop_preset in expected_presets.items():
                 hn('select-layout', name)
                 chosen = layout()
                 stable(chosen, .25)
-            print(f'PASS {mode}: all seven named layouts survive acknowledgements', flush=True)
+                wait(lambda: api()['tabs'][0]['layout'].get('presets', {}).get('3') == desktop_preset,
+                     f'{name} publishes a desktop-compatible preset')
+            print(f'PASS {mode}: all seven named layouts survive acknowledgements and share their presets', flush=True)
 
             # The server delays the first save. Without serialization the newer save wins
             # briefly, then the older save lands and puts the previous layout back.
@@ -222,6 +226,41 @@ def scenario(mode, port, read_only=False):
         wait(rows, 'remote preset must still apply')
         stable(layout(), .3)
         print(f'PASS {mode}: deliberate remote preset still applies', flush=True)
+
+        # The reported case: a two-pane window, with the desktop serializing only
+        # presets/sizes and dropping hn's native geometry a few seconds later.
+        removed = api()['tabs'][0]['panes'][-1]
+        api('/api/desk/ops', {'ops': [{'op': 'pane.remove', 'tabId': 'demo-1', **removed}]})
+        wait(lambda: hn('display-message', '-p', '#{window_panes}') == '2', 'two-pane desk window')
+        hn('select-layout', 'even-horizontal')
+        tmux('send-keys', '-t', 'main', 'C-b', 'Space')
+        def two_rows():
+            cells = [r.split() for r in hn('list-panes', '-F', '#{pane_left} #{pane_top}').splitlines()]
+            return len(cells) == 2 and len({r[0] for r in cells}) == 1 and len({r[1] for r in cells}) == 2
+        wait(two_rows, 'C-b Space changes two panes to rows')
+        # An unequal divider makes an accidental reconstruction visible even when
+        # desktop's coarse preset describes the same orientation.
+        first = hn('list-panes', '-F', '#{pane_id}').splitlines()[0]
+        hn('resize-pane', '-t', first, '-D', '3')
+        chosen = layout()
+        if not read_only:
+            wait(lambda: api()['tabs'][0]['layout'].get('presets', {}).get('2') == 'rows',
+                 'two-pane rows preset saved')
+            if mode == 'normal':
+                wait(lambda: api()['tabs'][0]['layout'].get('tmux') == chosen, 'two-pane divider saved')
+        stable(chosen, .4)
+        desktop = api()['tabs'][0]['layout']
+        desktop.pop('tmux', None)
+        desktop['sizes'] = {}
+        api('/api/desk/ops', {'ops': [{'op': 'tab.layout', 'id': 'demo-1', 'layout': desktop}]})
+        stable(chosen, 1)
+        desktop.setdefault('presets', {})['4'] = 'quad'
+        api('/api/desk/ops', {'ops': [{'op': 'tab.layout', 'id': 'demo-1', 'layout': desktop}]})
+        stable(chosen, .5)
+        desktop['presets']['2'] = 'columns'
+        api('/api/desk/ops', {'ops': [{'op': 'tab.layout', 'id': 'demo-1', 'layout': desktop}]})
+        wait(lambda: not two_rows(), 'an intentional two-pane remote layout still applies')
+        print(f'PASS {mode}: two-pane C-b Space and unequal divider survive desktop round-trip', flush=True)
     finally:
         if started:
             hn('kill-server', ok=False)

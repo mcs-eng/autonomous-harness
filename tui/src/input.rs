@@ -1047,6 +1047,9 @@ fn harness_preview(picker: &mut Picker) {
 
 /// Rebuild the open overlay's rows (the fleet or a catalog moved under it).
 pub fn refill(app: &mut App) {
+    // A delayed search/catalog reply may arrive after the picker has closed. It must not
+    // consume a command prompt, confirmation or copy mode that replaced that picker.
+    if !matches!(app.modal, Some(Modal::Picker { .. })) { return }
     if let Some(Modal::Picker { kind, mut picker }) = app.modal.take() {
         let was = picker.current_id();
         if !matches!(kind, PickerKind::Route { .. } | PickerKind::Palette | PickerKind::Help | PickerKind::Layout) { fill(app, &kind, &mut picker) }
@@ -3148,6 +3151,21 @@ pub fn menu_mouse(app: &mut App, m: &crate::mouse::Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delayed_picker_refresh_preserves_the_replacement_modal() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (80, 24));
+        app.modal = Some(Modal::Prompt(Prompt::status(PromptKind::Key { template: String::new() }, ":", "split-window")));
+        refill(&mut app);
+        assert!(matches!(&app.modal, Some(Modal::Prompt(p)) if p.value == "split-window"));
+        app.modal = Some(Modal::Confirm { prompt: "kill pane?".into(), command: "kill-pane".into(), key: 'y', enter_yes: false });
+        refill(&mut app);
+        assert!(matches!(app.modal, Some(Modal::Confirm { .. })));
+        app.modal = Some(Modal::Copy { pane: 1 });
+        refill(&mut app);
+        assert!(matches!(app.modal, Some(Modal::Copy { pane: 1 })));
+    }
 
     #[test]
     fn prompt_words_as_tmuxs() {

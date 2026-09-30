@@ -35,6 +35,7 @@ mod mouse;
 mod options;
 mod paste;
 mod pane;
+mod pane_frame;
 mod picker;
 mod proto;
 mod theme;
