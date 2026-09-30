@@ -63,7 +63,7 @@ OpenCode; Claude Code's remote Grid choices remain available.
 The daemon also serves a loopback dashboard at `http://127.0.0.1:18473`: health, this machine's
 fingerprint, paired clients, stop. It never renders a transcript. Configuration is environment
 variables (`BACKEND_WS_URL`, `WEB_URL`, `ADAPTER_DATA_DIR`, `ADAPTER_COMPUTER_ID`, `PORT`, and the
-per-engine home directories); [`cli/README.md`](cli/README.md) has the full table and the
+per-engine home directories); [`cli/README.md`](../cli/README.md) has the full table and the
 `.env.example`.
 
 ## Automation
