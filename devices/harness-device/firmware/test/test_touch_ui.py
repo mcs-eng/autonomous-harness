@@ -18,6 +18,7 @@ def function(name):
     return body + '\n'
 
 code = r'''
+#define _POSIX_C_SOURCE 200809L
 #include "runtime.h"
 #include "../../cable_features.h"
 #include "gestures.h"
@@ -122,7 +123,8 @@ static bool form_emit(const ht_form_command_t *c, void *ctx) {
 }
 static int starts, stops, boops, switches, down_reports, moves, ups, travel, waiting_count;
 static char target[64];
-#define COPY(dst, src) snprintf(dst, sizeof(dst), "%s", src)
+static void copy(char *dst, size_t cap, const char *src);
+#define COPY(dst, src) copy(dst, sizeof(dst), src)
 #include "theme.h"
 static uint16_t color(unsigned rgb);
 static unsigned preview_brightness = 100;
@@ -1080,7 +1082,7 @@ static void tab_frame_checks(void) {
     static uint16_t full[466*466], delta[466*466], patch[466*466];
     ht_scene_t previous={0};
     workspace_setup();
-    snprintf(s.tabs[1].name,sizeof s.tabs[1].name,"%s","Device firmware and voice interaction experiments");
+    COPY(s.tabs[1].name,"Device firmware and voice interaction experiments");
     strcpy(s.tabs[2].name,"Caf\xc3\xa9 / infrastructure");
     dispatch((action_t){.kind=A_TABS});
     for(int position=-80;position<=3*HT_TAB_PITCH+80;position+=17) {
@@ -1463,7 +1465,7 @@ int main(int argc, char **argv) {
     workspace_setup(); s.connected=false; dispatch((action_t){.kind=A_TABS}); scene_take();
     assert(!action_enabled(A_TAB)); tap(32000,233,233); assert(!tab_switches && !starts);
     // Long names wrap without painting into the rim. The only footer is Back.
-    workspace_setup(); snprintf(s.tabs[1].name,sizeof s.tabs[1].name,"%s","A workspace with a longer name for device development");
+    workspace_setup(); COPY(s.tabs[1].name,"A workspace with a longer name for device development");
     dispatch((action_t){.kind=A_TABS}); scene_take(); portrait(dir,"tabs-long-name");
     tap(33000,233,420); assert(s.view==HOME && !tab_switches && !starts);
     reset(); s.view=INBOX; dispatch((action_t){.kind=A_NOTICE,.id="off-tab-agent"});

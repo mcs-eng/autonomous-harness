@@ -688,7 +688,8 @@ export class LocalModels {
           if (candidate.pull) {
             const current = compatibleModels(await this.catalog({ ...currentDevice, usable_bytes: Math.max(0, budget) })).find(c => c.id === candidate.id)
             if (!current || current.size < candidate.size) throw new ModelError('Stop a running model to make room, then try again.')
-            candidate.context = Math.min(candidate.context ?? Infinity, current.context ?? Infinity)
+            // Both are catalog fits from compatibleModels(), which always sets a numeric context.
+            candidate.context = Math.min(candidate.context!, current.context!)
           } else if (candidate.size * 1.25 + 2 * GiB > budget) {
             throw new ModelError('Stop a running model to make room, then try again.')
           }

@@ -68,8 +68,10 @@ static resource *xSemaphoreCreateMutex(void) { return fail()?NULL:acquire(1,NULL
 static void vSemaphoreDelete(resource *p) { release(p); }
 static int i2s_new_channel(const i2s_chan_config_t *cfg,resource **tx,resource **rx) {
     assert(cfg->dma_desc_num==12&&cfg->dma_frame_num==160);
-    if(fail())return 1;*tx=acquire(2,NULL);
-    if(fail())return 1;*rx=acquire(2,NULL);return ESP_OK;
+    if(fail())return 1;
+    *tx=acquire(2,NULL);
+    if(fail())return 1;
+    *rx=acquire(2,NULL);return ESP_OK;
 }
 static int i2s_channel_init_std_mode(resource *p,const i2s_std_config_t *cfg) { (void)cfg;assert(p);return fail(); }
 static int i2s_channel_register_event_callback(resource *p,const i2s_event_callbacks_t *cb,void *ctx) { (void)ctx;assert(p&&cb->on_recv_q_ovf);return fail(); }
@@ -95,7 +97,8 @@ static bool rx_overrun(void *a,void *b,void *c) { (void)a;(void)b;(void)c;return
 static void beep_task(void *arg) { (void)arg; }
 static int xTaskCreate(void (*fn)(void *),const char *name,int stack,void *arg,int priority,resource **task) {
     (void)name;(void)arg;(void)priority;assert(fn==beep_task&&stack==4096);
-    if(fail())return 0;*task=acquire(8,NULL);return pdPASS;
+    if(fail())return 0;
+    *task=acquire(8,NULL);return pdPASS;
 }
 '''
 for name in ['capture_init_failed', 'audio_capture_init', 'notify_init_failed', 'audio_notify_init']:

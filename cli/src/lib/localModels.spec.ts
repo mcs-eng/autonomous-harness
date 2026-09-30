@@ -504,6 +504,13 @@ describe('local model discovery and lifecycle', () => {
     expect(modelBudget({ backend: 'cuda', usable_bytes: 46 * 1024 ** 3, memory: { total_gb: 64 } })).toBe(46 * 1024 ** 3)
   })
 
+  it('infers parameter counts from full-precision, importance and unknown quants when the catalog omits them', () => {
+    const at = (name: string, quant: string, size: number) =>
+      ({ id: `org/${name}`, name, pull: `org/${name}:${name}.gguf`, file: `${name}.gguf`, files: [`${name}.gguf`], size, quant, estTokS: 25 })
+    expect(rankForCoding([at('Full', 'BF16', 16e9), at('Unknown', 'custom', 12e9), at('Importance', 'IQ4_XS', 10e9)]).map(c => c.name))
+      .toEqual(['Unknown', 'Importance', 'Full'])
+  })
+
   it('names one base model across its variants, and a fine-tune under its own name apart', () => {
     for (const name of ['Qwen3.6-35B-A3B', 'Qwen3.6-35B-A3B-MTP', 'unsloth/Qwen3.6-35B-A3B-MTP-GGUF', 'Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf']) {
       expect(baseModel(name)).toBe('qwen3.6-35b-a3b')
@@ -814,6 +821,14 @@ describe('local model discovery and lifecycle', () => {
     expect(calls.filter(args => args.includes('join'))).toHaveLength(1)
   })
 
+  it('omits unavailable disk space when neither the model folder nor Grid home can be inspected', async () => {
+    await rm(home, { recursive: true, force: true })
+    const snapshot = await service.list('home')
+    expect(snapshot).not.toHaveProperty('freeDiskBytes')
+    expect(snapshot.models).toEqual([])
+    expect(snapshot.notice).toBe('Compatible models are unavailable. Try again.')
+  })
+
   it('tells, per model, the window and speed the catalog expects on this machine, and the free disk', async () => {
     catalogCards = [{ ...card(), params_b: 9, fit: { ...card().fit, est_tok_s: 21.3 } } as ReturnType<typeof card>, card('org/Bare-GGUF')]
     catalogCards[1].versions[0].pull_spec = 'org/Bare-GGUF:Bare-Q4.gguf'
@@ -1100,6 +1115,40 @@ describe('a context a coding agent can work in', () => {
     expect((await fresh.list('home')).models).toEqual([])
   })
 
+  it('keeps a verified start when the served-window metadata read fails', async () => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('engines') && serving
+      ? refused('Fixture metadata unavailable') : original(args, output))
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(request.mock.calls.some(([url]) => String(url).includes(RELAY_CHAT))).toBe(true)
+    expect((await service.list('home', true)).models[0].operation?.phase).toBe('done')
+    expect(calls.some(args => args.includes('leave'))).toBe(false)
+  })
+
+  it.each(['legacy id', 'sole unmatched node'])('enforces the served context floor with a %s', async identity => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('engines') && serving
+      ? ok([{ ...(identity === 'legacy id' ? { id: 'local-node' } : { node_id: 'different-node' }),
+        model_capabilities: { 'small-q4': { context_length: 32768 } } }]) : original(args, output))
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(calls).toContainEqual(['--remote', 'leave', 'home', '--engine', 'Small-Q4.gguf'])
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ phase: 'failed',
+      error: 'Small could only get a 32K context here. Coding agents need at least 64K. Close some apps, or choose a smaller model.' })
+  })
+
+  it('does not infer local ownership when a successful join leaves no run record', async () => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => {
+      const result = await original(args, output)
+      if (args.includes('join')) await rm(join(records, 'remote.json'))
+      return result
+    })
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(request.mock.calls.some(([url]) => String(url).includes(RELAY_CHAT))).toBe(true)
+    expect((await service.list('home', true)).models[0]).toMatchObject({ state: 'downloaded', canStop: false, operation: { phase: 'done' } })
+    expect(calls.some(args => args.includes('leave'))).toBe(false)
+  })
+
   it.each([
     [131072, 'done'], [undefined, 'done'], [32768, 'failed'],
   ] as const)('after a start that served %s tokens, the start is %s', async (window, phase) => {
@@ -1175,15 +1224,82 @@ describe('stepping down to the context that actually runs', () => {
     expect((await service.list('home', true)).models[0].operation?.phase).toBe('done')
   })
 
+  it.each(['stopped', 'unreadable'])('recovers a smaller context when Grid becomes %s between attempts', async status => {
+    catalogCards[0].fit.ctx = 262144
+    gpuHolds(131072)
+    const original = run.getMockImplementation()!
+    let afterLeave = false
+    run.mockImplementation(async (args, output) => {
+      if (afterLeave && args.includes('info') && args.includes('--json')) {
+        afterLeave = false
+        if (status === 'unreadable') return refused('Fixture status unavailable')
+      }
+      const result = await original(args, output)
+      if (args.includes('leave')) {
+        afterLeave = true
+        if (status === 'stopped') gridState = 'stopped'
+      }
+      return result
+    })
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(joinedAt()).toEqual([262144, 131072])
+    expect(calls.filter(args => args[1] === 'start')).toHaveLength(status === 'stopped' ? 1 : 0)
+    expect((await service.list('home', true)).models[0]).toMatchObject({ state: 'running', operation: { phase: 'done' } })
+  })
+
+  it('leaves a health check that keeps loading to the relay after the bounded wait', async () => {
+    const original = request.getMockImplementation()!
+    let attempted!: () => void
+    const firstHealth = new Promise<void>(resolve => { attempted = resolve })
+    request.mockImplementation(async (url, init) => {
+      if (String(url).startsWith('http://127.0.0.1:') && String(url).endsWith('/health')) {
+        attempted()
+        return new Response('', { status: 503 })
+      }
+      return original(url, init)
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] })
+    await service.act('home', 'org/Small-GGUF', 'start')
+    await firstHealth
+    await vi.advanceTimersByTimeAsync(600_500)
+    await service.settled()
+    expect(joinedAt()).toEqual([131072])
+    expect(request.mock.calls.some(([url]) => String(url).startsWith('http://127.0.0.1:') && String(url).endsWith('/v1/chat/completions'))).toBe(false)
+    expect(request.mock.calls.some(([url]) => String(url).includes(RELAY_CHAT))).toBe(true)
+    expect((await service.list('home', true)).models[0].operation?.phase).toBe('done')
+  })
+
   it.each([
     ['nothing is listening on this machine', () => { throw new Error('ECONNREFUSED') }],
-    ['the engine fails for another reason', () => new Response('{"error":{"message":"template error"}}', { status: 500 })],
     // Not a load in progress (503), so not waited on for ten minutes.
     ['its health check answers something unexpected', () => new Response('teapot', { status: 418 })],
   ])('leaves the judgement to the relay check when %s', async (_case, answer) => {
     const original = request.getMockImplementation()!
     request.mockImplementation(async (url, init) => String(url).includes('127.0.0.1') ? answer() : original(url, init))
     await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(joinedAt()).toEqual([131072])
+    expect(request.mock.calls.some(([url]) => String(url).includes(RELAY_CHAT))).toBe(true)
+    expect((await service.list('home', true)).models[0].operation?.phase).toBe('done')
+  })
+
+  it.each([
+    ['the completion request fails', () => { throw new Error('Fixture connection reset') }],
+    ['the engine fails for another reason', () => new Response('{"error":{"message":"template error"}}', { status: 500 })],
+    ['the error body cannot be read', () => new Response(new ReadableStream({
+      start(controller) { controller.error(new Error('Fixture body interrupted')) },
+    }), { status: 500 })],
+  ])('leaves the judgement to the relay after healthy startup when %s', async (_case, answer) => {
+    const original = request.getMockImplementation()!
+    const probe = vi.fn(answer)
+    request.mockImplementation(async (url, init) => {
+      if (String(url).startsWith('http://127.0.0.1:')) {
+        if (String(url).endsWith('/health')) return new Response('', { status: 200 })
+        if (String(url).endsWith('/v1/chat/completions')) return probe()
+      }
+      return original(url, init)
+    })
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(probe).toHaveBeenCalledOnce()
     expect(joinedAt()).toEqual([131072])
     expect(request.mock.calls.some(([url]) => String(url).includes(RELAY_CHAT))).toBe(true)
     expect((await service.list('home', true)).models[0].operation?.phase).toBe('done')
