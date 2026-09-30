@@ -94,6 +94,21 @@ class FakeHub {
   Future<void> close() => server.close(force: true);
 }
 
+/// Polls until [condition] holds. The hub is real and local, but how long a connect or a reconnect
+/// takes depends on how busy the machine is: a fixed wait passed on an idle host and failed under
+/// load, so the tests that depend on a connection wait for it instead.
+Future<void> waitUntil(
+  bool Function() condition, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) fail('Timed out waiting for $reason');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+}
+
 void main() {
   late FakeHub hub;
   WsConn? conn;
@@ -390,7 +405,12 @@ void main() {
         onStatus: (_) {},
       );
       await conn!.connect();
-      await Future<void>.delayed(const Duration(milliseconds: 400));
+      await waitUntil(
+        () => (hub.machineSelected['m1'] ?? 0) >= 1,
+        reason: 'the reconnect with the refreshed token',
+      );
+      // Only one refresh is allowed; leave a second one room to show up.
+      await Future<void>.delayed(const Duration(milliseconds: 100));
       expect(refreshes, 1);
       expect(hub.protocols, containsAllInOrder(['tok-old', 'tok-new']));
       expect(hub.machineSelected['m1'], 1);
@@ -411,11 +431,13 @@ void main() {
         onStatus: (_) {},
       );
       await conn!.connect();
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      expect(conn!.isReady, isTrue);
+      await waitUntil(() => conn!.isReady, reason: 'the first connection');
 
       await conn!.debugDropTransport();
-      await Future<void>.delayed(const Duration(milliseconds: 1300));
+      await waitUntil(
+        () => hub.machineSelected['m1'] == 2 && conn!.isReady,
+        reason: 'the reconnect after the drop',
+      );
 
       expect(hub.machineSelected['m1'], 2);
       expect(conn!.isReady, isTrue);
@@ -439,7 +461,10 @@ void main() {
       final c2 = pool.connFor('m2');
       expect(identical(c1a, c1b), isTrue);
       expect(identical(c1a, c2), isFalse);
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await waitUntil(
+        () => hub.machineSelected['m1'] == 1 && hub.machineSelected['m2'] == 1,
+        reason: 'both machines to select',
+      );
       expect(hub.machineSelected['m1'], 1);
       expect(hub.machineSelected['m2'], 1);
       await pool.closeMachine('m1');
