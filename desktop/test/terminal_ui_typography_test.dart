@@ -135,6 +135,7 @@ void main() {
               of: find.byWidgetPredicate(
                 (widget) =>
                     widget.key == const ValueKey('workspace-status-bar') ||
+                    widget.key == const ValueKey('workspace-tab-bar') ||
                     widget.key == const ValueKey('terminal-pane-title') ||
                     widget.key == const ValueKey('viewer-pane-title') ||
                     widget is ActivityMark ||

@@ -8,6 +8,7 @@ import 'package:harness/auth/auth_session.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
+import 'package:harness/shared/theme/color_palette.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/theme/app_theme.dart';
 
@@ -565,7 +566,11 @@ void main() {
     tester,
   ) async {
     final original = grid.AppTheme.brightness.value;
-    addTearDown(() => grid.AppTheme.brightness.value = original);
+    final originalPalette = grid.AppTheme.palette.value;
+    addTearDown(() {
+      grid.AppTheme.palette.value = originalPalette;
+      grid.AppTheme.brightness.value = original;
+    });
 
     final app = _notifier(local: false);
     final session = await _liveSession([]);
@@ -573,6 +578,9 @@ void main() {
     Future<({Color glyph, Color pane, Color wasFaint})> renderIn(
       Brightness brightness,
     ) async {
+      grid.AppTheme.palette.value = brightness == Brightness.light
+          ? HarnessPalette.paper
+          : HarnessPalette.graphite;
       grid.AppTheme.brightness.value = brightness;
       await tester.pumpWidget(_host(app, session));
       await tester.pump();

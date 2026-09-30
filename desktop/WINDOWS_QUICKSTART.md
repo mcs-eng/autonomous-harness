@@ -403,3 +403,9 @@ New Harness accepts a first task for Hermes, matching the CLI's existing support
 Windows validation now keeps its rules-file fixture in a disposable home
 directory and checks the complete appearance settings batch, including the
 custom-background key.
+
+The tab strip now reserves a complete tab before sizing the Store label at narrow
+widths. Shared-view actions wrap when needed, and short welcome pages reduce
+empty space above search before compressing its results. Windows test fixtures
+follow the current palette, chrome, keyboard, and workspace-layout contracts;
+clipboard delivery and unreachable-update checks use explicit test boundaries.

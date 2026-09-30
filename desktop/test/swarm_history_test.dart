@@ -16,10 +16,10 @@ import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/widgets/swarm_icon.dart';
 import 'package:xterm/xterm.dart';
 
-import 'swarm_interactions_test.dart' show chord;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
 import 'swarm_switcher_test.dart' show jumpField;
+import 'support/open_harness.dart';
 
 class _UnopenedAgent extends Agent {
   _UnopenedAgent()
@@ -248,7 +248,13 @@ void main() {
 
         // The mark a History row draws for the store, never the group grid.
         Future<void> expectFlutterRow() async {
-          await chord(tester, LogicalKeyboardKey.keyY);
+          // History is an unbound command; Cmd-Y no longer opens it by default.
+          await openHarnessPicker(tester);
+          await tester.enterText(jumpField, '> history');
+          await tester.pump();
+          await tester.tap(
+            find.byKey(const ValueKey('command:navigation.history')),
+          );
           await tester.pump();
           final row = find.ancestor(
             of: find.text(Swarm.storeName),

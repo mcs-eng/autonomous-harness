@@ -256,15 +256,33 @@ void main() {
   test(
     'checkOnce returns null (not an error) when the manifest is unreachable',
     () async {
+      var requests = 0;
+      final dio = Dio()
+        ..interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              requests++;
+              handler.reject(
+                DioException(
+                  requestOptions: options,
+                  type: DioExceptionType.connectionError,
+                  error: const SocketException('Fixture connection refused'),
+                ),
+              );
+            },
+          ),
+        );
+      addTearDown(dio.close);
       final updater = DesktopUpdater(
         isWindows: false,
         enabled: true,
-        dio: Dio(),
+        dio: dio,
         isLinux: false,
-        metadataUrl: 'http://127.0.0.1:1/metadata.json', // nothing listens here
+        metadataUrl: 'http://fixture.invalid/metadata.json',
         releaseMode: true,
       );
       expect(await updater.checkOnce(currentVersion: '1.0.0'), isNull);
+      expect(requests, 1);
     },
   );
 

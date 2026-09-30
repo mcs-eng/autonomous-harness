@@ -102,6 +102,10 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
+    variant: TargetPlatformVariant({
+      TargetPlatform.linux,
+      TargetPlatform.windows,
+    }),
   );
 
   testWidgets('directional moves swap only neighbors and carry their pins', (

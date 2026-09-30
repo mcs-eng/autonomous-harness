@@ -19,6 +19,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harness/shared/theme/app_theme.dart';
+import 'package:harness/shared/theme/color_palette.dart';
 import 'package:harness/shared/widgets/app_icon_button.dart';
 
 const _hovered = {WidgetState.hovered};
@@ -50,13 +51,23 @@ void main() {
   for (final brightness in [Brightness.dark, Brightness.light]) {
     group('on ${brightness.name}', () {
       late ThemeData theme;
+      late Brightness originalBrightness;
+      late HarnessPalette originalPalette;
 
       setUp(() {
+        originalBrightness = AppTheme.brightness.value;
+        originalPalette = AppTheme.palette.value;
+        AppTheme.palette.value = brightness == Brightness.dark
+            ? HarnessPalette.graphite
+            : HarnessPalette.paper;
         AppTheme.brightness.value = brightness;
         theme = buildAppTheme(brightness: brightness);
       });
 
-      tearDown(() => AppTheme.brightness.value = Brightness.light);
+      tearDown(() {
+        AppTheme.palette.value = originalPalette;
+        AppTheme.brightness.value = originalBrightness;
+      });
 
       test('every button kind declares a hover overlay', () {
         final kinds = {
@@ -92,9 +103,7 @@ void main() {
       // An overlay that exists but cannot be seen is the same bug wearing a
       // value. These are measured on the surfaces buttons actually sit on.
       test('the hover wash is visible on the surfaces buttons sit on', () {
-        final page = brightness == Brightness.dark
-            ? const Color(0xFF191919)
-            : const Color(0xFFFAFAF9);
+        final page = AppPalette.windowBg;
         final grounds = {
           'page': page,
           'card': _over(page, AppPalette.cardBg),
