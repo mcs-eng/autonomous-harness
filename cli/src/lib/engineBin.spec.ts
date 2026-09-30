@@ -76,9 +76,10 @@ describe('canonical engine CLI commands', () => {
 
   const linuxIt = process.platform === 'linux' ? it : it.skip
   linuxIt('keeps the running native image identity after an updater replaces its pathname', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'engine-bin-deleted-image-'))
+    const root = mkdtempSync(join(tmpdir(), 'engine-bin-deleted-native-agent-'))
     tempDirs.push(root)
-    const executable = join(root, 'native-agent')
+    // Multicall coreutils dispatch by basename, even with an explicit argv[0].
+    const executable = join(root, 'sleep')
     copyFileSync('/bin/sleep', executable)
     const child = spawn(executable, ['30'], { stdio: 'ignore' })
     await new Promise<void>((resolve, reject) => {

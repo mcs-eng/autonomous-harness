@@ -103,7 +103,7 @@ static void row(ht_scene_t *s, int index, uint16_t ink, uint16_t fill, const cha
     for (const char *p = line; *p; glyphs++) ht_utf8_next(&p);
     // A filled row is padded by one cell each side so the block clears the text it sits behind.
     bool filled = fill != s->background && glyphs;
-    char padded[HT_TEXT_BYTES];
+    char padded[sizeof line + 2];
     snprintf(padded, sizeof padded, filled ? " %s " : "%s", line);
     int width = (glyphs + (filled ? 2 : 0)) * font->width;
     /*

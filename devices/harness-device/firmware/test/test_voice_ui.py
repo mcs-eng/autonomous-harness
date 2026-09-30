@@ -21,6 +21,7 @@ def function(name):
 
 harness = re.search(r'^#define PANE_MEMORY_MAX \d+$', source, re.M).group(0) + '\n'
 harness += r'''
+#define _POSIX_C_SOURCE 200809L
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -63,7 +64,7 @@ static bool audio_active, recording, abort_requested, queue_full;
 static int starts, stops, aborts, cancels, confirms, scroll, gesture, reviews;
 static action_t queued;
 static agent_t *active(void) { return &s.agents[0]; }
-#define COPY(dst, src) snprintf(dst, sizeof(dst), "%s", (src) ? (src) : "")
+#define COPY(dst, src) copy(dst, sizeof(dst), src)
 #define ESP_LOGI(...) ((void)0)
 uint32_t ms(void) { return now; }
 void change(void) {}

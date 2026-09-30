@@ -214,6 +214,9 @@ def scenario(mode, port, read_only=False):
                 hn('kill-server', peer=True, ok=False)
 
         # A real remote layout choice must still apply (including in read-only mode).
+        # Start from columns so rows() cannot accept the previous peer layout before this update arrives.
+        api('/api/desk/ops', {'ops': [{'op': 'tab.layout', 'id': 'demo-1', 'layout': {'presets': {'3': 'columns'}}}]})
+        wait(columns, 'remote preset starts from columns')
         remote = {'presets': {'3': 'rows'}}
         api('/api/desk/ops', {'ops': [{'op': 'tab.layout', 'id': 'demo-1', 'layout': remote}]})
         wait(rows, 'remote preset must still apply')
