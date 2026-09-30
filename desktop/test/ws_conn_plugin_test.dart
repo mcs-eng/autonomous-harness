@@ -256,6 +256,7 @@ void main() {
 
       plugin.takeJson = false;
       await conn.sendTerminalFrame('terminal_alive', {'streamId': 'st'});
+      await _until(() => received.any((f) => f['type'] == 'terminal_alive'));
       await _settle();
       expect(
         received.where((f) => f['type'] == 'terminal_alive'),

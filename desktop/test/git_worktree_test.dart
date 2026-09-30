@@ -372,6 +372,8 @@ void main() {
     },
   );
 
+  // Four worktree starts use dozens of short Git processes. Allow the
+  // aggregate Windows fixture to finish before its repository is torn down.
   test('a remote base is fetched first; a remote branch is tracked under its own name', () async {
     final origin = p.join(root.path, 'origin.git');
     final upstream = p.join(root.path, 'upstream');
@@ -442,7 +444,7 @@ void main() {
       await git(['rev-parse', '--abbrev-ref', '@{upstream}'], tracking),
       'origin/fix/typo',
     );
-  });
+  }, timeout: Platform.isWindows ? const Timeout(Duration(seconds: 60)) : null);
 
   test(
     'ignored files named in .worktreeinclude are copied into new worktrees',

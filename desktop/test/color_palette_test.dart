@@ -33,6 +33,11 @@ class _Storage implements LocalKeyValueStore {
   }
 }
 
+double _contrast(Color a, Color b) {
+  final (x, y) = (a.computeLuminance(), b.computeLuminance());
+  return (x > y ? x + .05 : y + .05) / (x > y ? y + .05 : x + .05);
+}
+
 void main() {
   tearDown(() => grid.AppTheme.palette.value = HarnessPalette.graphite);
 
@@ -58,12 +63,9 @@ void main() {
   });
 
   test('palette text is readable and terminal themes are cached', () {
-    double contrast(Color foreground, Color background) =>
-        (foreground.computeLuminance() + .05) /
-        (background.computeLuminance() + .05);
     for (final palette in HarnessPalette.values) {
       expect(
-        contrast(palette.foreground, palette.background),
+        _contrast(palette.foreground, palette.background),
         greaterThanOrEqualTo(7),
         reason: palette.name,
       );
@@ -77,7 +79,7 @@ void main() {
           background,
         );
         expect(
-          contrast(secondary, background),
+          _contrast(secondary, background),
           greaterThanOrEqualTo(4.5),
           reason: palette.name,
         );
@@ -157,11 +159,6 @@ void main() {
       expect(terminal.yellow, lightTerminalTheme.yellow);
       expect(terminal.white, lightTerminalTheme.white);
 
-      double contrast(Color a, Color b) {
-        final (x, y) = (a.computeLuminance(), b.computeLuminance());
-        return (x > y ? x + .05 : y + .05) / (x > y ? y + .05 : x + .05);
-      }
-
       // Every ANSI slot is somebody's output text on this ground.
       for (final slot in [
         terminal.black, terminal.red, terminal.green, terminal.yellow,
@@ -171,7 +168,7 @@ void main() {
         terminal.brightCyan, terminal.brightWhite,
       ]) {
         expect(
-          contrast(slot, palette.background),
+          _contrast(slot, palette.background),
           greaterThanOrEqualTo(4.5),
           reason: '${palette.name} $slot',
         );
@@ -183,12 +180,12 @@ void main() {
         palette.search,
       ]) {
         expect(
-          contrast(Color.alphaBlend(terminal.muted, ground), ground),
+          _contrast(Color.alphaBlend(terminal.muted, ground), ground),
           greaterThanOrEqualTo(4.5),
           reason: '${palette.name} muted on $ground',
         );
         expect(
-          contrast(Color.alphaBlend(terminal.faded, ground), ground),
+          _contrast(Color.alphaBlend(terminal.faded, ground), ground),
           greaterThanOrEqualTo(3),
           reason: '${palette.name} faded on $ground',
         );

@@ -337,7 +337,7 @@ void main() {
     expect(resourceScope('@'), findsOneWidget);
     await key(tester, LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('swarm-search-button')), findsNothing);
+    expect(resourceScope('@'), findsNothing);
     await openWorkspaceTool(tester, 'machines');
     await tester.pumpAndSettle();
     expect(resourceScope('@'), findsOneWidget);

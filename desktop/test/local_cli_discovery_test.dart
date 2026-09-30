@@ -279,6 +279,7 @@ void main() {
     int port,
     File identityFile, {
     Future<void> Function()? spawnCommand,
+    Dio? dio,
     Duration probeTimeout = const Duration(milliseconds: 40),
   }) => LocalCliDiscovery(
     config: AppConfig(
@@ -291,13 +292,15 @@ void main() {
     // and the supervisor's millisecond-scale test windows never see a
     // spawn. A loopback connect that has not answered in 40ms is DOWN for
     // the purposes of these tests; live daemons answer in single digits.
-    dio: Dio(
-      BaseOptions(
-        connectTimeout: probeTimeout,
-        receiveTimeout: probeTimeout,
-        sendTimeout: probeTimeout,
-      ),
-    ),
+    dio:
+        dio ??
+        Dio(
+          BaseOptions(
+            connectTimeout: probeTimeout,
+            receiveTimeout: probeTimeout,
+            sendTimeout: probeTimeout,
+          ),
+        ),
     identity: LocalMachineIdentity(computerIdFile: identityFile),
     spawnCommand: spawnCommand,
   );
@@ -651,10 +654,13 @@ void main() {
     const computerId = '0123456789abcdef0123456789abcdef';
     final identityFile = File('${scratch.path}/computer-id')
       ..writeAsStringSync(computerId);
-    var scanned = false;
+    var statusReads = 0;
     server = await serveStatus(
       0,
-      () => readyStatus(computerId, extra: {'discoveryReady': scanned}),
+      () => readyStatus(
+        computerId,
+        extra: {'discoveryReady': ++statusReads > 1},
+      ),
     );
     var spawned = false;
     final discovery = discoveryFor(
@@ -664,11 +670,11 @@ void main() {
         spawned = true;
       },
     );
-    Future.delayed(const Duration(milliseconds: 700), () => scanned = true);
     final probe = await discovery.ensureRunning(
       readyTimeout: const Duration(seconds: 5),
     );
     expect(probe.state, LocalCliProbeState.ready);
+    expect(statusReads, greaterThanOrEqualTo(2));
     expect(spawned, isFalse, reason: 'a running daemon is never spawned over');
   });
 
@@ -755,12 +761,34 @@ void main() {
     final port = await freePort();
     var spawnCount = 0;
     var slotOpen = false;
+    var blockedChecks = 0;
+    var probes = 0;
+    var probesAtSpawn = 0;
+    final blocked = Completer<void>();
+    final spawned = Completer<void>();
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(milliseconds: 40),
+        receiveTimeout: const Duration(milliseconds: 40),
+        sendTimeout: const Duration(milliseconds: 40),
+      ),
+    )..interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          probes++;
+          handler.next(options);
+        },
+      ),
+    );
     final discovery = discoveryFor(
       port,
       identityFile,
+      dio: dio,
       spawnCommand: () async {
         spawnCount++;
+        probesAtSpawn = probes;
         server = await serveStatus(port, () => readyStatus(computerId));
+        if (!spawned.isCompleted) spawned.complete();
       },
     );
 
@@ -770,17 +798,27 @@ void main() {
       graceWindow: const Duration(milliseconds: 100),
       initialBackoff: const Duration(milliseconds: 200),
       maxBackoff: const Duration(milliseconds: 200),
-      spawnAllowedAt: (_) => slotOpen,
+      spawnAllowedAt: (_) {
+        if (!slotOpen && ++blockedChecks == 3) {
+          blocked.complete();
+        }
+        return slotOpen;
+      },
     );
     addTearDown(timer.cancel);
 
-    // Down for many ticks, but the slot is shut: nothing is spawned, and nothing is backed off
-    // either — the moment the slot opens the spawn is immediate.
-    await Future.delayed(const Duration(milliseconds: 200));
+    // Observe completed quiet probes reaching the closed slot before opening it.
+    await blocked.future.timeout(const Duration(seconds: 3));
     expect(spawnCount, 0);
+    final probesAtOpen = probes;
     slotOpen = true;
-    await Future.delayed(const Duration(milliseconds: 60));
+    await spawned.future.timeout(const Duration(seconds: 3));
     expect(spawnCount, 1);
+    expect(
+      probesAtSpawn,
+      probesAtOpen + 1,
+      reason: 'the first probe after the slot opens must spawn',
+    );
     expect(server, isNotNull);
   });
 
@@ -791,6 +829,9 @@ void main() {
     final port = await freePort();
     var spawnCount = 0;
     final readies = <LocalCliEndpoint>[];
+    var snapshots = 0;
+    final spawned = Completer<void>();
+    final observedReadyTicks = Completer<void>();
     final discovery = discoveryFor(
       port,
       identityFile,
@@ -800,6 +841,7 @@ void main() {
           port,
           () => readyStatus(computerId),
         ); // simulate `harness start` succeeding
+        if (!spawned.isCompleted) spawned.complete();
       },
     );
 
@@ -810,20 +852,19 @@ void main() {
       initialBackoff: const Duration(milliseconds: 200),
       maxBackoff: const Duration(milliseconds: 200),
       onReady: readies.add,
+      onSnapshot: (_) {
+        if (++snapshots == 3) observedReadyTicks.complete();
+      },
     );
     addTearDown(timer.cancel);
 
-    // Two down-probes must land before the spawn (spawnAfter: 2); on a host
-    // whose closed-port connects do not refuse instantly each probe can cost
-    // its whole timeout, so the window is sized for two full probes plus the
-    // spawn, not for macOS-class instant refusals.
-    await Future.delayed(const Duration(milliseconds: 400));
+    await spawned.future.timeout(const Duration(seconds: 3));
     expect(spawnCount, 1);
     expect(server, isNotNull);
 
     // Discovery now succeeds on every tick — no further spawn should ever happen, and the
     // transition into ready was reported exactly once.
-    await Future.delayed(const Duration(milliseconds: 200));
+    await observedReadyTicks.future.timeout(const Duration(seconds: 3));
     expect(spawnCount, 1);
     expect(readies, hasLength(1));
     expect(readies.single.computerId, computerId);
@@ -841,16 +882,27 @@ void main() {
         () => readyStatus(computerId, extra: {'connected': connected}),
       );
       final seen = <bool>[];
+      var offlineSnapshots = 0;
+      var onlineSnapshots = 0;
+      final observedOfflineTicks = Completer<void>();
+      final observedOnlineTicks = Completer<void>();
       final timer = discoveryFor(server!.port, identityFile).startSupervising(
         checkInterval: const Duration(milliseconds: 20),
         onBackendOnline: seen.add,
+        onSnapshot: (endpoint) {
+          if (endpoint.backendOnline) {
+            if (++onlineSnapshots == 3) observedOnlineTicks.complete();
+          } else {
+            if (++offlineSnapshots == 3) observedOfflineTicks.complete();
+          }
+        },
       );
       addTearDown(timer.cancel);
 
-      await Future.delayed(const Duration(milliseconds: 120));
+      await observedOfflineTicks.future.timeout(const Duration(seconds: 3));
       expect(seen, [false], reason: 'offline at first sight, said once');
       connected = true;
-      await Future.delayed(const Duration(milliseconds: 120));
+      await observedOnlineTicks.future.timeout(const Duration(seconds: 3));
       expect(seen, [false, true], reason: 'the reconnect, said once');
     },
   );
@@ -1131,12 +1183,15 @@ void main() {
 
       var spawnCount = 0;
       var signedOutCalls = 0;
+      final spawned = Completer<void>();
+      final authFinished = Completer<void>();
       // Windows refuses a closed loopback port slowly; the helper shortens the probe.
       final discovery = discoveryFor(
         closedPort,
         identityFile,
         spawnCommand: () async {
           spawnCount++;
+          if (!spawned.isCompleted) spawned.complete();
         },
       );
 
@@ -1146,12 +1201,30 @@ void main() {
         graceWindow: const Duration(milliseconds: 50),
         initialBackoff: const Duration(milliseconds: 20),
         maxBackoff: const Duration(milliseconds: 20),
-        stillSignedIn: check,
+        stillSignedIn: () {
+          final answer = check();
+          unawaited(
+            answer.then(
+              (_) {
+                if (!authFinished.isCompleted) authFinished.complete();
+              },
+              onError: (Object error) {
+                if (!authFinished.isCompleted) authFinished.complete();
+              },
+            ),
+          );
+          return answer;
+        },
         onSignedOut: () => signedOutCalls++,
       );
       addTearDown(timer.cancel);
 
-      await Future.delayed(const Duration(milliseconds: 300));
+      await spawned.future.timeout(const Duration(seconds: 3));
+      if (name == 'fails') {
+        await authFinished.future.timeout(const Duration(seconds: 3));
+      } else {
+        expect(authFinished.isCompleted, isFalse);
+      }
 
       expect(spawnCount, greaterThan(0));
       expect(
