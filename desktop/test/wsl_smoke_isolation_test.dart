@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/core/wsl_runtime.dart';
@@ -69,6 +71,35 @@ void main() {
       returnsNormally,
     );
   });
+
+  test(
+    'probes and scripts report an invalid contract without a process',
+    () async {
+      final calls = <List<String>>[];
+      final wsl = WslRuntime(
+        selection: const WslSelection(distro: 'Ubuntu', username: 'fixture'),
+        smokeEnvironment: {'HARNESS_SMOKE_GUARD': guard},
+        runProcess: (executable, arguments, {environment}) async {
+          calls.add(arguments);
+          return ProcessResult(0, 0, '', '');
+        },
+      );
+      for (final probe in [
+        await wsl.findHarness(),
+        await wsl.findHarness(distros: ['Ubuntu']),
+        await wsl.probeHarness(distro: 'Ubuntu'),
+      ]) {
+        expect(probe.found, isFalse);
+        expect(probe.failure, WslProbeFailure.smokeContractInvalid);
+        expect(probe.failureDetail, contains('HARNESS_SMOKE_'));
+      }
+      final ran = await wsl.runIn(distro: 'Ubuntu', script: 'echo ok');
+      expect(ran.exitCode, 125);
+      expect(await wsl.computerId(distro: 'Ubuntu'), isNull);
+      expect(await wsl.hasTmux(distro: 'Ubuntu'), isFalse);
+      expect(calls, isEmpty);
+    },
+  );
 
   test('blank, malformed, traversing, or real-home contracts refuse', () {
     for (final change in [

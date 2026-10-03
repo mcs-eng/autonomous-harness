@@ -94,6 +94,18 @@ class WslRuntime {
   WslSmokeIsolation? _smokeIsolation() =>
       WslSmokeIsolation.fromEnvironment(_smokeEnvironment);
 
+  /// Why the declared smoke contract cannot be used, or null when it can (or
+  /// none is declared). Probes and [runIn] report this as a refusal; the
+  /// argument builders throw it.
+  String? get _smokeContractError {
+    try {
+      _smokeIsolation();
+      return null;
+    } on StateError catch (error) {
+      return error.message;
+    }
+  }
+
   String? get selectionError =>
       _preferencesLoadError ??
       (selection == null
@@ -322,6 +334,12 @@ class WslRuntime {
         failure: WslProbeFailure.invalidSelection,
       );
     }
+    if (_smokeContractError != null) {
+      return WslHarnessProbe.failed(
+        distro: selection?.distro,
+        failure: WslProbeFailure.smokeContractInvalid,
+      );
+    }
     final names = distros ?? await usableDistros();
     if (selection != null) {
       if (!names.contains(selection!.distro)) {
@@ -361,6 +379,12 @@ class WslRuntime {
   /// state the app must name rather than report "ready".
   Future<WslHarnessProbe> probeHarness({required String distro}) async {
     if (isDockerDistro(distro)) return const WslHarnessProbe.notFound();
+    if (_smokeContractError != null) {
+      return WslHarnessProbe.failed(
+        distro: distro,
+        failure: WslProbeFailure.smokeContractInvalid,
+      );
+    }
     final result = await runIn(
       distro: distro,
       script:
@@ -433,6 +457,10 @@ class WslRuntime {
   }) async {
     if (isDockerDistro(distro)) {
       return _refuseDocker(distro);
+    }
+    final smokeError = _smokeContractError;
+    if (smokeError != null) {
+      return ProcessResult(0, 125, '', 'refused: $smokeError');
     }
     final arguments = buildArguments(
       distro: distro,
@@ -623,6 +651,7 @@ enum WslProbeFailure {
   invalidResponse,
   invalidSelection,
   selectedDistroUnavailable,
+  smokeContractInvalid,
 }
 
 class WslHarnessProbe {
@@ -672,6 +701,7 @@ class WslHarnessProbe {
     WslProbeFailure.invalidSelection => 'The saved Linux account is invalid or unreadable. Choose a Linux account, then close and reopen Harness.',
     WslProbeFailure.selectedDistroUnavailable =>
       'The selected distribution $distroLabel was not found in the WSL inventory. Check the Linux account selection before retrying.',
+    WslProbeFailure.smokeContractInvalid => 'The disposable WSL smoke contract (HARNESS_SMOKE_*) is incomplete or invalid, so WSL commands are refused. Fix or remove those variables, then reopen Harness.',
     null => null,
   };
 

@@ -526,8 +526,9 @@ be on the persistent Windows volume, outside the disposable Linux home.
 | `HARNESS_SMOKE_ID` | The fixture's 32-character hexadecimal identity |
 | `HARNESS_SMOKE_GUARD_SHA256` | SHA-256 of the reviewed guard script |
 
-Partial or invalid declarations refuse each WSL command when it is built; the app
-still opens, on every platform. Every WSL command through `WslRuntime` then
+Partial or invalid declarations refuse WSL commands: the CLI probe reports the
+invalid contract and nothing runs in WSL, while the app still opens on every
+platform. Every WSL command through `WslRuntime` then
 explicitly checks and sources the guard before executing its original arguments.
 A missing wrapper or fixture exits 125, and so does a guard that exits while it is
 sourced, so a guard can never report success without the command running. Smoke scripts
