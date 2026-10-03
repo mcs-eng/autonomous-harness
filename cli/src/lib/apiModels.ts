@@ -79,7 +79,14 @@ export async function listApiModels(
   connectionId: string,
   options: ApiModelDeps & { refresh?: boolean } = {},
 ): Promise<ApiModel[]> {
-  const { connection, apiKey } = store.modelAccess(connectionId)
+  return listApiModelsForAccess(store.modelAccess(connectionId), options)
+}
+
+/** The capability lookup and its launch must share one saved connection read. */
+async function listApiModelsForAccess(
+  { connection, apiKey }: ReturnType<ApiConnections['modelAccess']>,
+  options: ApiModelDeps & { refresh?: boolean },
+): Promise<ApiModel[]> {
   const now = options.now ?? Date.now
   const fingerprint = createHash('sha256').update(`${connection.baseUrl}\n${apiKey}`).digest('hex')
   const kept = lists.get(connection.id)
@@ -119,9 +126,17 @@ export async function resolveApiTarget(
   model: string,
   deps: ApiModelDeps = {},
 ): Promise<GridLaunchOverride> {
-  const { connection, apiKey } = store.modelAccess(connectionId)
+  return resolveApiTargetForAccess(store.modelAccess(connectionId), model, deps)
+}
+
+async function resolveApiTargetForAccess(
+  access: ReturnType<ApiConnections['modelAccess']>,
+  model: string,
+  deps: ApiModelDeps,
+): Promise<GridLaunchOverride> {
+  const { connection, apiKey } = access
   if (!MODEL_ID.test(model)) throw new ApiConnectionError('Choose a model.')
-  const listed = (await listApiModels(store, connectionId, deps)).find((row) => row.id === model)
+  const listed = (await listApiModelsForAccess(access, deps)).find((row) => row.id === model)
   if (!listed) throw new ApiConnectionError(`${connection.name} does not list ${model} for coding agents.`)
   rememberApiBase(connection.baseUrl)
   return {
@@ -136,12 +151,19 @@ export async function resolveApiTarget(
 
 /**
  * [launch] with the endpoint and key as saved NOW. A restart, a restore or a resume repeats the row's
- * launch, and the person may have pasted a new key since; a launch that is not onto an API comes back
- * unchanged. Throws when the connection was removed: its key must not keep being used.
+ * launch, and the person may have changed its URL or key since. Revalidate the selected model and
+ * context together for that new connection, keeping the captured settings across the lookup. An
+ * unchanged route needs no lookup. Throws when removed: its key must not keep being used.
  */
-export function refreshApiLaunch(store: ApiConnections, launch: GridLaunchOverride): GridLaunchOverride {
+export async function refreshApiLaunch(
+  store: ApiConnections, launch: GridLaunchOverride, deps: ApiModelDeps = {},
+): Promise<GridLaunchOverride> {
   if (!isApiLaunch(launch)) return launch
-  const { connection, apiKey } = store.modelAccess(launch.networkId.slice(API_NETWORK_PREFIX.length))
+  const access = store.modelAccess(launch.networkId.slice(API_NETWORK_PREFIX.length))
+  const { connection, apiKey } = access
+  if (connection.baseUrl !== launch.baseUrl || apiKey !== launch.apiKey) {
+    return resolveApiTargetForAccess(access, launch.model ?? '', deps)
+  }
   rememberApiBase(connection.baseUrl)
   return { ...launch, networkName: connection.name, baseUrl: connection.baseUrl, apiKey }
 }

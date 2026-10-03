@@ -25,19 +25,22 @@ Harness authors should list the operating systems and tool versions they actuall
 
 ## Account-free local use
 
-**Outstanding requirement:** someone should be able to open the desktop app, start local sessions,
-and use locally installed harnesses without an OpenHarness account. Sign-in should be needed only
-when they choose to link remote machines. The engine may still require its own account or API key.
+The native desktop and CLI support account-free local use. A signed-out desktop window opens
+on this computer's guest desk, labelled [local mode](../desktop/WINDOWS_QUICKSTART.md#local-mode-no-account)
+in this fork. The CLI serves this computer without a saved OpenHarness sign-in session.
+Remote machines and account-backed features still require sign-in; an engine may also require
+its own account or API key. The browser viewer has no local daemon and retains its sign-in gate.
 
-The current source does not meet that requirement: desktop bootstrap checks
-`cliLogin.checkStatus()` in `desktop/lib/state/app_state.dart`, and `startCommand` in
-`cli/src/cli.ts` refuses to start without a saved sign-in session. Removing one screen alone
-will not provide a working local mode.
+The implementation is in [desktop bootstrap](../desktop/lib/state/app_state.dart) and
+[`startCommand`](../cli/src/cli.ts). Regression coverage includes
+[`local_mode_test.dart`](../desktop/test/local_mode_test.dart),
+[`guest_window_test.dart`](../desktop/test/guest_window_test.dart), and
+[`cliCommand.spec.ts`](../cli/src/cliCommand.spec.ts).
 
-Completion should be verified with a clean local profile: start the daemon and app without saved
-account credentials, create and resume a local session, then sign in and link a remote machine
-without losing that work. Cancelling remote sign-in or signing out must leave local work usable.
-This is tracked work, not a claim that account-free startup is already available.
+When changing this path, verify startup and session creation in a disposable profile without
+account credentials, and preserve local work across cancelled sign-in and sign-out. Fixture
+success does not establish real-account migration or saved-session restoration. See
+[fork upkeep](fork-upkeep.md) for source comparisons, baseline evidence, and Windows bundle gates.
 
 ## Build and test
 

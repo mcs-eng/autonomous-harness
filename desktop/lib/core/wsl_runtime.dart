@@ -4,6 +4,7 @@ import 'dart:io';
 import 'bounded_process.dart';
 import 'utf16_probe_encoding.dart';
 import 'wsl_preferences.dart';
+import 'wsl_smoke_isolation.dart';
 
 /// The loopback port the Harness CLI daemon owns. Kept here only for the
 /// documentation comment below; the app reads the real address from AppConfig.
@@ -60,7 +61,9 @@ class WslRuntime {
     Duration? probeTimeout,
     WslSelection? selection,
     WslPreferencesStore? preferencesStore,
+    Map<String, String>? smokeEnvironment,
   }) : _runProcess = runProcess ?? Process.run,
+       _smokeEnvironment = smokeEnvironment ?? Platform.environment,
        selection = selection ?? (preferencesStore ?? wslPreferencesStore).value,
        _preferencesLoadError = selection == null
            ? (preferencesStore ?? wslPreferencesStore).loadError
@@ -82,6 +85,14 @@ class WslRuntime {
   final Duration _probeTimeout;
   final WslSelection? selection;
   final String? _preferencesLoadError;
+  final Map<String, String> _smokeEnvironment;
+
+  /// The smoke contract is read when a WSL command is built, not when the
+  /// runtime is constructed. Every platform constructs a runtime at startup
+  /// (sign-in builds one), so an invalid contract must refuse WSL commands
+  /// without stopping the app from opening.
+  WslSmokeIsolation? _smokeIsolation() =>
+      WslSmokeIsolation.fromEnvironment(_smokeEnvironment);
 
   String? get selectionError =>
       _preferencesLoadError ??
@@ -263,7 +274,17 @@ class WslRuntime {
     String scriptName = 'harness',
   }) => commandArguments(
     distro: distro,
-    command: ['bash', '-lc', script, scriptName, ...scriptArguments],
+    command: _smokeIsolation() == null
+        ? ['bash', '-lc', script, scriptName, ...scriptArguments]
+        : [
+            '/bin/bash',
+            '--noprofile',
+            '--norc',
+            '-c',
+            script,
+            scriptName,
+            ...scriptArguments,
+          ],
   );
 
   /// A direct command in the same pinned account, also used by companions that
@@ -285,7 +306,7 @@ class WslRuntime {
       distro,
       if (selection != null) ...['--user', selection!.username],
       '-e',
-      ...command,
+      ...(_smokeIsolation()?.wrap(command) ?? command),
     ];
   }
 
