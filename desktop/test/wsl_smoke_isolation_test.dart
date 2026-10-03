@@ -31,12 +31,43 @@ void main() {
     ]);
   });
 
+  // Refusal happens when a WSL command is built. Every platform constructs a
+  // runtime at startup, so construction itself must survive a bad contract.
+  void expectCommandsRefused(Map<String, String> environment) {
+    final wsl = runtime(environment);
+    expect(
+      () => wsl.buildArguments(distro: 'Ubuntu', script: 'echo ok'),
+      throwsStateError,
+    );
+    expect(
+      () => wsl.commandArguments(distro: 'Ubuntu', command: ['synthetic']),
+      throwsStateError,
+    );
+    expect(
+      () => wsl.bundledCliArguments(
+        const WslHarnessProbe(distro: 'Ubuntu', found: true),
+        r'C:\synthetic bundle',
+        ['version'],
+      ),
+      throwsStateError,
+    );
+  }
+
   test('every partially declared contract refuses before process creation', () {
     for (final key in WslSmokeIsolation.keys) {
-      expect(() => runtime({key: contract[key]!}), throwsStateError);
-      final missing = Map<String, String>.from(contract)..remove(key);
-      expect(() => runtime(missing), throwsStateError);
+      expectCommandsRefused({key: contract[key]!});
+      expectCommandsRefused(Map<String, String>.from(contract)..remove(key));
     }
+  });
+
+  test('an invalid contract does not prevent constructing the runtime', () {
+    for (final key in WslSmokeIsolation.keys) {
+      expect(() => runtime({key: contract[key]!}), returnsNormally);
+    }
+    expect(
+      () => runtime({...contract, 'HARNESS_SMOKE_ID': 'incorrect'}),
+      returnsNormally,
+    );
   });
 
   test('blank, malformed, traversing, or real-home contracts refuse', () {
@@ -49,7 +80,7 @@ void main() {
       {'HARNESS_SMOKE_ID': 'incorrect'},
       {'HARNESS_SMOKE_GUARD_SHA256': 'incorrect'},
     ]) {
-      expect(() => runtime({...contract, ...change}), throwsStateError);
+      expectCommandsRefused({...contract, ...change});
     }
   });
 

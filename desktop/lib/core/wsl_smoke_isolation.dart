@@ -55,7 +55,7 @@ class WslSmokeIsolation {
   // The check is explicit shell source, not optional BASH_ENV startup behavior.
   // Values and the original argv remain positional data, never interpolated.
   static const admissionScript = r'''
-_hws_refuse() { printf '%s\n' 'Disposable WSL smoke contract unavailable; refusing command.' >&2; exit 125; }
+_hws_refuse() { trap - EXIT; printf '%s\n' 'Disposable WSL smoke contract unavailable; refusing command.' >&2; exit 125; }
 _hws_guard=$1; _hws_home=$2; _hws_id=$3; _hws_sha=$4; shift 4
 [ -f "$_hws_guard" ] && [ ! -L "$_hws_guard" ] || _hws_refuse
 [ -d "$_hws_home" ] && [ ! -L "$_hws_home" ] || _hws_refuse
@@ -67,7 +67,10 @@ IFS= read -r _hws_actual < "$_hws_marker" || _hws_refuse
 _hws_sum=$(/usr/bin/sha256sum < "$_hws_guard") || _hws_refuse
 [ "${_hws_sum%% *}" = "$_hws_sha" ] || _hws_refuse
 unset HARNESS_SMOKE_VALIDATED_ID
+# A guard that exits while it is sourced refuses; it never reports success.
+trap _hws_refuse EXIT
 . "$_hws_guard" || _hws_refuse
+trap - EXIT
 [ "$HOME" = "$_hws_home" ] && [ "${HARNESS_SMOKE_VALIDATED_ID-}" = "$_hws_id" ] || _hws_refuse
 [ -d "$_hws_home" ] && [ -f "$_hws_guard" ] || _hws_refuse
 unset _hws_guard _hws_home _hws_id _hws_sha _hws_marker _hws_actual _hws_sum

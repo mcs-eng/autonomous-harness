@@ -63,9 +63,7 @@ class WslRuntime {
     WslPreferencesStore? preferencesStore,
     Map<String, String>? smokeEnvironment,
   }) : _runProcess = runProcess ?? Process.run,
-       _smokeIsolation = WslSmokeIsolation.fromEnvironment(
-         smokeEnvironment ?? Platform.environment,
-       ),
+       _smokeEnvironment = smokeEnvironment ?? Platform.environment,
        selection = selection ?? (preferencesStore ?? wslPreferencesStore).value,
        _preferencesLoadError = selection == null
            ? (preferencesStore ?? wslPreferencesStore).loadError
@@ -87,7 +85,14 @@ class WslRuntime {
   final Duration _probeTimeout;
   final WslSelection? selection;
   final String? _preferencesLoadError;
-  final WslSmokeIsolation? _smokeIsolation;
+  final Map<String, String> _smokeEnvironment;
+
+  /// The smoke contract is read when a WSL command is built, not when the
+  /// runtime is constructed. Every platform constructs a runtime at startup
+  /// (sign-in builds one), so an invalid contract must refuse WSL commands
+  /// without stopping the app from opening.
+  WslSmokeIsolation? _smokeIsolation() =>
+      WslSmokeIsolation.fromEnvironment(_smokeEnvironment);
 
   String? get selectionError =>
       _preferencesLoadError ??
@@ -269,7 +274,7 @@ class WslRuntime {
     String scriptName = 'harness',
   }) => commandArguments(
     distro: distro,
-    command: _smokeIsolation == null
+    command: _smokeIsolation() == null
         ? ['bash', '-lc', script, scriptName, ...scriptArguments]
         : [
             '/bin/bash',
@@ -301,7 +306,7 @@ class WslRuntime {
       distro,
       if (selection != null) ...['--user', selection!.username],
       '-e',
-      ...(_smokeIsolation?.wrap(command) ?? command),
+      ...(_smokeIsolation()?.wrap(command) ?? command),
     ];
   }
 
