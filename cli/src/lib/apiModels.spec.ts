@@ -123,11 +123,11 @@ describe('an API as a model source', () => {
     const saved = store.save({ provider: 'openrouter', apiKey: secret })
     const launch = await resolveApiTarget(store, saved.id, 'z-ai/glm-5', { fetch: answering(listing) })
     store.save({ id: saved.id, provider: 'openrouter', apiKey: newSecret })
-    expect(refreshApiLaunch(store, launch)).toEqual({ ...launch, apiKey: newSecret })
+    expect(await refreshApiLaunch(store, launch, { fetch: answering(listing) })).toEqual({ ...launch, apiKey: newSecret })
     const grid = { networkId: 'grid-1', networkName: 'home', baseUrl: 'https://grid.example.test/relay/v1', apiKey: 'grid-key' }
-    expect(refreshApiLaunch(store, grid)).toBe(grid)
+    expect(await refreshApiLaunch(store, grid)).toBe(grid)
     store.remove(saved.id)
-    expect(() => refreshApiLaunch(store, launch)).toThrow('This API is not saved. Add it in Models → APIs.')
+    await expect(refreshApiLaunch(store, launch)).rejects.toThrow('This API is not saved. Add it in Models → APIs.')
   })
 })
 

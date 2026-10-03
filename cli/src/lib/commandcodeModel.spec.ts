@@ -127,10 +127,12 @@ describe('a Command Code agent', () => {
     expect(parseRuntimeProfile(manager.selectedModel(target))?.effort).toBe('high')
 
     manager.ingest(target, assistantLine('moonshotai/kimi-k3'))
-    await new Promise((resolve) => setTimeout(resolve, 20))   // the re-read ingest() fires is async
-    const profile = parseRuntimeProfile(manager.selectedModel(target))
-    expect(profile?.model).toBe('kimi-k3')
-    expect(profile?.effort).toBe('auto')
+    // ingest() starts an asynchronous config read; wait for its observable result.
+    await vi.waitFor(() => {
+      const profile = parseRuntimeProfile(manager.selectedModel(target))
+      expect(profile?.model).toBe('kimi-k3')
+      expect(profile?.effort).toBe('auto')
+    })
   })
 
   it('offers nothing to pick when the catalogue cannot be read', async () => {

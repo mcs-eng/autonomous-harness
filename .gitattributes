@@ -6,3 +6,15 @@
 *.pdf binary
 *.xlsx binary
 *.zip binary
+
+# Keep recorded terminal captures byte-stable on Windows checkouts.
+/cli/src/lib/__fixtures__/question-*.txt text eol=lf
+/cli/src/lib/__fixtures__/permission-*.txt text eol=lf
+
+# Preserve byte checks and LF-sensitive source/module readers.
+/cli/src/cli.ts text eol=lf
+/cli/src/lib/e2ee/core.ts text eol=lf
+/cli/src/cable/vectors/cable_frame.txt text eol=lf
+/devices/harness-device/firmware/test/vectors/cable_frame.txt text eol=lf
+/store/tools/catalog.mjs text eol=lf
+/store/tools/sync-runtimes.mjs text eol=lf

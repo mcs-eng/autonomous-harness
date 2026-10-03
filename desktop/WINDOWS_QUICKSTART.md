@@ -438,3 +438,118 @@ depend on instead of a fixed interval. They passed on an idle machine and failed
 in a full run on a busy one. The application code is unchanged, and so are the
 outcomes the tests check. This is a test change; it does not update an installed
 desktop or daemon.
+
+## October 2 upkeep documentation
+
+The [fork upkeep guide](../docs/fork-upkeep.md) records how to compare immutable
+fork/upstream revisions, preserve Windows customizations, and distinguish source,
+package and runtime evidence. The older September 28/29 Windows failure notes
+are historical: [PR #32](https://github.com/mcs-eng/autonomous-harness/pull/32)
+records 4,533 desktop passes, 42 existing skips and zero failures on its tested
+tree. Later terminal-copy and connection-test changes have their own evidence.
+The development guide now describes the existing account-free local mode and
+its regression tests. These documentation changes do not replace a Windows
+bundle or establish real-account activation.
+
+## October 2 daemon attach recovery
+
+The CLI now retains an attach's original session key when the registry unbinds
+that session while its history is being read. Cleanup removes the completed
+attach, so a later reset can proceed instead of spinning on a settled promise
+and leaving the daemon unresponsive. This backports
+[upstream #586](https://github.com/autonomous-ai/openharness/pull/586).
+The regression test clears the session ID during an attach and verifies both
+cleanup and a subsequent reset. This source fix needs a matching Windows bundle
+before it affects an installed desktop's WSL daemon.
+
+## October 2 deterministic project-ordering check
+
+The CLI project-list regression uses explicit timestamps and checks that activity
+moves an older project to the top. This removes a same-millisecond test ambiguity;
+production ordering and the Windows preview are unchanged.
+
+The Command Code model-level check also waits for its asynchronous refresh result,
+instead of assuming that a config read finishes within 20 milliseconds.
+
+## October 2 recap answer selection
+
+Turn recaps now use the assistant's answer after its last tool call, so a long
+working turn shows what was found instead of its opening narration. A turn that
+ends on a tool call or is interrupted still falls back to its narration. This
+backports [upstream 03115e897](https://github.com/autonomous-ai/openharness/commit/03115e897f57b1bd04cccbccc06261bde25b7c9b),
+including its three regression tests. This source change does not update an
+installed Windows bundle or activate a daemon.
+
+## October 2 terminal question parsing
+
+Question parsing backports [upstream #568](https://github.com/autonomous-ai/openharness/pull/568)
+to avoid repeated whitespace matching on padded terminal rows. Regression fixtures
+cover labels, checked choices, frame borders and stable request IDs. The change is
+limited to parsing; the fork's question polling and session lifecycle stay intact.
+A matching Windows bundle is still needed before an installed preview uses it.
+
+## October 2 Windows terminal test fixtures
+
+Fresh Windows checkouts retain the recorded question and permission captures with
+LF line endings. Converting those fixtures to CRLF prevented the cursor-movement
+simulation from finding rows and caused 23 existing checks to fail. The Git rule
+preserves the recorded bytes; it does not change live terminal handling.
+
+LF is also retained for the cable vectors, pinned shared-core source, CLI startup
+source and two Store tooling modules. This prevents Windows checkout conversion
+from breaking byte checks, startup-source checks or script loading. Their committed
+contents and runtime logic are unchanged.
+
+## October 3 bundled Model Manager repair
+
+Windows source builds now embed Model Manager with portable file paths, LF text,
+and executable scripts. Previously a Windows-built CLI could report the bundled
+package installed while its Linux/WSL directory lacked the expected nested files
+and its scripts could not run. The repair is in the CLI build helper; it does not
+change the runtime installer or replace an installed Windows preview. A matching
+new bundle is required to receive it.
+
+The local-daemon transport tests also use Windows' temporary directory on that
+platform instead of assuming `/tmp`. All nine socket and TCP assertions still
+run; no test is skipped and no production transport behavior changes.
+
+## Disposable WSL smoke admission
+
+A smoke supervisor can opt in to an explicit fixture contract by setting all four
+Windows-process variables below. Paths are absolute Linux paths; the guard must
+be on the persistent Windows volume, outside the disposable Linux home.
+
+| Variable | Value |
+| --- | --- |
+| `HARNESS_SMOKE_GUARD` | Reviewed guard script under `/mnt/c/` |
+| `HARNESS_SMOKE_HOME` | Private `hwp-gui-*/home` fixture directory |
+| `HARNESS_SMOKE_ID` | The fixture's 32-character hexadecimal identity |
+| `HARNESS_SMOKE_GUARD_SHA256` | SHA-256 of the reviewed guard script |
+
+Partial or invalid declarations refuse command construction. Every WSL command
+through `WslRuntime` then explicitly checks and sources the guard before executing
+its original arguments. A missing wrapper or fixture exits 125. Smoke scripts
+skip login startup files; ordinary invocation is unchanged when none of the four
+variables is present. `BASH_ENV` alone is not an isolation contract.
+
+The guard must verify every declared private state directory and export
+`HARNESS_SMOKE_VALIDATED_ID` only after successful validation. The supervisor must
+pin the reviewed wrapper for the child lifetime, provide private Windows profile
+directories, and retain evidence. This admission check is not a sandbox or a
+guarantee about a running child's later filesystem or network activity. Synthetic
+guard checks do not qualify a GUI build or authorize an application launch.
+
+The live WSL argv test is opt-in: it additionally requires
+`HARNESS_TEST_WSL_ARGV=1`, `HARNESS_TEST_WSL_DISTRO` and `HARNESS_TEST_WSL_USER`.
+Without that explicit fixture contract it reports a skip, so the ordinary desktop
+suite never probes the default account's login shell. Missing WSL or an unavailable
+selected distro also reports a skip rather than a pass that exercised nothing.
+
+## Saved API changes before a model launch
+
+When a saved API's URL or key changes before an agent is moved or restarted,
+Harness checks the selected model and its context window against that connection
+again. An unavailable model or failed lookup refuses the launch before the pane
+is changed. A later edit during that lookup applies to the next launch; the
+current launch keeps one endpoint, key and model result together. An unchanged
+URL and key need no extra lookup.

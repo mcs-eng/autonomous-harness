@@ -5258,7 +5258,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     let gridLaunch = source.gridLaunch ?? null
     if (gridLaunch && isApiLaunch(gridLaunch)) {
       try {
-        gridLaunch = refreshApiLaunch(savedApis, gridLaunch)
+        gridLaunch = await refreshApiLaunch(savedApis, gridLaunch)
       } catch (error) {
         return {
           ok: false,
