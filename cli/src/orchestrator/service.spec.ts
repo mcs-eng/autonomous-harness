@@ -274,13 +274,19 @@ describe('durable orchestrator lifecycle', () => {
     expect(launches[0].cwd).toBe(join(realpathSync(root), '.harness-projects', id))
   })
   it('lists recent projects in order without exposing their full briefs', async () => {
+    // Wall-clock operations can share a millisecond; make recency explicit.
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
     await start(); await active()
+    now.mockReturnValue(1_700_000_001_000)
     const second = 'f'.repeat(32)
     await service.start({ id: second, engine: 'claude', prompt: 'A'.repeat(500) })
     await vi.waitFor(() => expect(service.snapshot(second).state).toBe('active'))
     service.chat(second, '1'.repeat(32), 'More detail')
     expect(service.list().map(r => r.id)).toEqual([second, id])
     expect(String(service.list()[0].prompt)).toHaveLength(160)
+    now.mockReturnValue(1_700_000_002_000)
+    service.chat(id, '2'.repeat(32), 'Update the older project')
+    expect(service.list().map(r => r.id)).toEqual([id, second])
   })
   it('preserves corrupt state and refuses to overwrite its identity', async () => {
     mkdirSync(deps.stateDir, { recursive: true })

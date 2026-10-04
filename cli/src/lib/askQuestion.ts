@@ -279,7 +279,13 @@ function unframe(capture: string): string {
   // raw text silently never fired — hermes read as "no dialog open" with the dialog plainly on screen.
   return stripAnsi(capture)
     .split('\n')
-    .map((line) => line.replace(/^(\s*)[│┃|]\s?/, '$1').replace(/\s*[│┃|]\s*$/, ''))
+    .map((line) => {
+      const left = line.replace(/^(\s*)[│┃|]\s?/, '$1')
+      // An unanchored whitespace regex retries at every column on blank rows.
+      // Inspect the last non-space character once; keep unframed lines intact.
+      const right = left.trimEnd()
+      return /[│┃|]$/.test(right) ? right.slice(0, -1).trimEnd() : left
+    })
     .join('\n')
 }
 
@@ -290,7 +296,9 @@ function multiSubmitKey(engine: AgentEngine): string {
 }
 
 function parseRow(line: string): QuestionRow | null {
-  const m = /^\s*[❯›>]?\s*(\d+)\.\s+(.+?)\s*$/.exec(line)
+  // Consume indentation once: two adjacent whitespace runs backtrack across
+  // every possible split on the padded non-option lines in terminal captures.
+  const m = /^[❯›>]?\s*(\d+)\.\s+(.+?)\s*$/.exec(line.trimStart())
   if (!m) return null
   const raw = m[2]
   const box = /^\[([^\]])\]\s*(.*)$/.exec(raw)

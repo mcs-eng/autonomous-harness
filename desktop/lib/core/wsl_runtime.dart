@@ -4,6 +4,7 @@ import 'dart:io';
 import 'bounded_process.dart';
 import 'utf16_probe_encoding.dart';
 import 'wsl_preferences.dart';
+import 'wsl_smoke_isolation.dart';
 
 /// The loopback port the Harness CLI daemon owns. Kept here only for the
 /// documentation comment below; the app reads the real address from AppConfig.
@@ -60,7 +61,9 @@ class WslRuntime {
     Duration? probeTimeout,
     WslSelection? selection,
     WslPreferencesStore? preferencesStore,
+    Map<String, String>? smokeEnvironment,
   }) : _runProcess = runProcess ?? Process.run,
+       _smokeEnvironment = smokeEnvironment ?? Platform.environment,
        selection = selection ?? (preferencesStore ?? wslPreferencesStore).value,
        _preferencesLoadError = selection == null
            ? (preferencesStore ?? wslPreferencesStore).loadError
@@ -82,6 +85,26 @@ class WslRuntime {
   final Duration _probeTimeout;
   final WslSelection? selection;
   final String? _preferencesLoadError;
+  final Map<String, String> _smokeEnvironment;
+
+  /// The smoke contract is read when a WSL command is built, not when the
+  /// runtime is constructed. Every platform constructs a runtime at startup
+  /// (sign-in builds one), so an invalid contract must refuse WSL commands
+  /// without stopping the app from opening.
+  WslSmokeIsolation? _smokeIsolation() =>
+      WslSmokeIsolation.fromEnvironment(_smokeEnvironment);
+
+  /// Why the declared smoke contract cannot be used, or null when it can (or
+  /// none is declared). Probes and [runIn] report this as a refusal; the
+  /// argument builders throw it.
+  String? get _smokeContractError {
+    try {
+      _smokeIsolation();
+      return null;
+    } on StateError catch (error) {
+      return error.message;
+    }
+  }
 
   String? get selectionError =>
       _preferencesLoadError ??
@@ -263,7 +286,17 @@ class WslRuntime {
     String scriptName = 'harness',
   }) => commandArguments(
     distro: distro,
-    command: ['bash', '-lc', script, scriptName, ...scriptArguments],
+    command: _smokeIsolation() == null
+        ? ['bash', '-lc', script, scriptName, ...scriptArguments]
+        : [
+            '/bin/bash',
+            '--noprofile',
+            '--norc',
+            '-c',
+            script,
+            scriptName,
+            ...scriptArguments,
+          ],
   );
 
   /// A direct command in the same pinned account, also used by companions that
@@ -285,7 +318,7 @@ class WslRuntime {
       distro,
       if (selection != null) ...['--user', selection!.username],
       '-e',
-      ...command,
+      ...(_smokeIsolation()?.wrap(command) ?? command),
     ];
   }
 
@@ -299,6 +332,12 @@ class WslRuntime {
       return WslHarnessProbe.failed(
         distro: selection?.distro,
         failure: WslProbeFailure.invalidSelection,
+      );
+    }
+    if (_smokeContractError != null) {
+      return WslHarnessProbe.failed(
+        distro: selection?.distro,
+        failure: WslProbeFailure.smokeContractInvalid,
       );
     }
     final names = distros ?? await usableDistros();
@@ -340,6 +379,12 @@ class WslRuntime {
   /// state the app must name rather than report "ready".
   Future<WslHarnessProbe> probeHarness({required String distro}) async {
     if (isDockerDistro(distro)) return const WslHarnessProbe.notFound();
+    if (_smokeContractError != null) {
+      return WslHarnessProbe.failed(
+        distro: distro,
+        failure: WslProbeFailure.smokeContractInvalid,
+      );
+    }
     final result = await runIn(
       distro: distro,
       script:
@@ -412,6 +457,10 @@ class WslRuntime {
   }) async {
     if (isDockerDistro(distro)) {
       return _refuseDocker(distro);
+    }
+    final smokeError = _smokeContractError;
+    if (smokeError != null) {
+      return ProcessResult(0, 125, '', 'refused: $smokeError');
     }
     final arguments = buildArguments(
       distro: distro,
@@ -602,6 +651,7 @@ enum WslProbeFailure {
   invalidResponse,
   invalidSelection,
   selectedDistroUnavailable,
+  smokeContractInvalid,
 }
 
 class WslHarnessProbe {
@@ -651,6 +701,7 @@ class WslHarnessProbe {
     WslProbeFailure.invalidSelection => 'The saved Linux account is invalid or unreadable. Choose a Linux account, then close and reopen Harness.',
     WslProbeFailure.selectedDistroUnavailable =>
       'The selected distribution $distroLabel was not found in the WSL inventory. Check the Linux account selection before retrying.',
+    WslProbeFailure.smokeContractInvalid => 'The disposable WSL smoke contract (HARNESS_SMOKE_*) is incomplete or invalid, so WSL commands are refused. Fix or remove those variables, then reopen Harness.',
     null => null,
   };
 

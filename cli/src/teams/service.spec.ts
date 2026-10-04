@@ -236,6 +236,39 @@ describe('continuing teams across engines and machines', () => {
 describe('destination delivery evidence', () => {
   const delivery = (expiresAt = 1_790_000_100_000): Delivery => ({ id: `team:${TEAM}:${Q}:question`, agentId: 'daemon', text: 'a question', expiresAt })
 
+  it('reuses an admitted delivery after its acceptance reply is lost', () => {
+    const f = fixture(), box = f.mailbox('host'), d = delivery()
+    const accepted = box.accept(d)
+    expect(accepted).toMatchObject({ id: d.id, state: 'queued' })
+    expect(f.sent).toHaveLength(0)
+    // The caller did not receive the reply and retries the same intent.
+    expect(box.accept(d)).toEqual(accepted)
+    box.pump()
+    expect(f.sent).toEqual([{ machine: 'host', agent: d.agentId, text: d.text, id: d.id }])
+    expect(box.accept(d)).toMatchObject({ id: d.id, state: 'started' })
+    box.pump()
+    expect(f.sent).toHaveLength(1)
+  })
+
+  it('recovers an admitted queue entry after restart before its first dispatch', () => {
+    const f = fixture(), d = delivery()
+    f.mailbox('host').accept(d)
+    expect(f.sent).toHaveLength(0)
+    // Lose the acknowledgment and every in-memory mailbox before pump runs.
+    f.restart()
+    const recovered = f.mailbox('host')
+    expect(recovered.status(d.id)).toMatchObject({ id: d.id, state: 'queued' })
+    expect(recovered.accept(d)).toMatchObject({ id: d.id, state: 'queued' })
+    expect(f.sent).toHaveLength(0)
+    recovered.pump()
+    recovered.pump()
+    expect(f.sent).toEqual([{ machine: 'host', agent: d.agentId, text: d.text, id: d.id }])
+    f.restart()
+    f.mailbox('host').accept(d)
+    f.mailbox('host').pump()
+    expect(f.sent).toHaveLength(1)
+  })
+
   it('suppresses reserved writes at the final boundary after pause, cancellation, consumption, or expiry', () => {
     const f = fixture(), box = f.mailbox('host'), d = delivery()
     box.accept(d)
