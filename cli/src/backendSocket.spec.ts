@@ -1,7 +1,7 @@
 import * as gitPullRequest from './lib/gitPullRequest.js'
 import * as sessionGitPullRequest from './lib/sessionGitPullRequest.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, chmodSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
@@ -3007,9 +3007,12 @@ describe('grid is set up on demand — by an act, never by a read', () => {
       ...plan,
       models: { stdout: JSON.stringify([{ model: 'Qwen-Test', engine: 'engine', node: 'cloud-node' }]) },
     })
-    vi.mocked(globalThis.fetch).mockResolvedValue(Response.json({ data: [{ id: 'Qwen-Test' }] }))
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ data: [{ id: 'Qwen-Test' }] }))
     const profileId = `backend-local-${randomUUID()}`
     const gridHome = `${env.ADAPTER_DATA_DIR}/${profileId}`
+    // Windows temp dirs are group/world writable by default; secureStateDirectory
+    // refuses to trust them until they are pinned owner-only (see gridProfiles.spec).
+    chmodSync(env.ADAPTER_DATA_DIR, 0o700)
     mkdirSync(gridHome, { mode: 0o700 })
     setLocalGridProfile({ id: profileId, label: 'Test local fleet', gridHome, gridName: 'local-fleet' })
 

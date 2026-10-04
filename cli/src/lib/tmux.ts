@@ -85,8 +85,16 @@ export interface ProcessRow extends ProcessIdentity {
 const ARGV_TOKEN = /"[^"]*"|'[^']*'|\S+/g
 
 function unquoteArgvToken(token: string): string {
-  const quoted = (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
-  return quoted ? token.slice(1, -1) : token
+  const doubleQuoted = token.startsWith('"') && token.endsWith('"')
+  if (doubleQuoted) {
+    // Same escape dialect argvTokens() parses (review cycle-2/3, P1): inside double quotes `\\`
+    // is one backslash and `\"` is a literal quote. The repair's quote() doubles every
+    // backslash, so a relayed Windows path re-read through this prefix cursor must collapse
+    // the pairs or suffix package-layout checks (`@openai[\/\\]codex…`) see `\\` and miss.
+    return token.slice(1, -1).replace(/\\([\\"])/g, '$1')
+  }
+  const singleQuoted = token.startsWith("'") && token.endsWith("'")
+  return singleQuoted ? token.slice(1, -1) : token
 }
 
 export function argvTokens(args: string): string[] {

@@ -61,7 +61,7 @@ function setup(row: RegisteredSession | null = agent(), over: Partial<RetargetDe
     restartJobs: { busy: vi.fn(() => false) } as never,
     paneSwapDeps: vi.fn(() => ({})) as never,
     liveBypassPermission: vi.fn(async () => true),
-    restartedGridAssignment: vi.fn(async () => null),
+    restartedGridAssignment: vi.fn(async () => undefined),
     announceSession: vi.fn(),
     opencodeDb: '/db/opencode.db',
     ...over,

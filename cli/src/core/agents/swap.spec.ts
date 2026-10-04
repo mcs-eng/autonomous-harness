@@ -4,16 +4,21 @@ import { checkPidRuntime, terminateDeletedAgent } from '../../lib/deleteAgentFal
 import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
-import { bypassPermissionActive, resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { bypassPermissionActive, processArgvIsBoundaryFaithful, resolvePaneEngineProcess } from '../../lib/tmux.js'
 import { createPaneSwap, type PaneSwapDeps } from './swap.js'
+import { probeGridAssignment } from '../../lib/gridAssignment.js'
 
 vi.mock('../../lib/deleteAgentFallback.js', async (real) => ({ ...await real<object>(), terminateDeletedAgent: vi.fn(async () => ({ ok: true })) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({ ...await real<object>(), buildEngineLaunchArgv: vi.fn(() => ['zsh', '-lc', 'claude']) }))
 vi.mock('../../lib/terminalAgentDiscovery.js', async (real) => ({ ...await real<object>(), processRows: vi.fn(async () => null) }))
+vi.mock('../../lib/gridAssignment.js', async (real) => ({ ...await real<object>(), probeGridAssignment: vi.fn(async () => undefined) }))
 vi.mock('../../lib/tmux.js', async (real) => ({
   ...await real<object>(),
   bypassPermissionActive: vi.fn(() => true),
   resolvePaneEngineProcess: vi.fn(async () => null),
+  // The fork's evidence gate: tests run on macOS/Windows, where /proc is absent,
+  // so the gate is mocked; swap.spec pins both sides of it explicitly.
+  processArgvIsBoundaryFaithful: vi.fn(() => true),
 }))
 
 const runtime = { backend: 'tmux', paneId: '%4' } as never
@@ -37,6 +42,8 @@ describe('the pane-process swap', () => {
   beforeEach(() => {
     vi.mocked(resolvePaneEngineProcess).mockReset().mockResolvedValue(null)
     vi.mocked(buildEngineLaunchArgv).mockClear()
+    vi.mocked(processArgvIsBoundaryFaithful).mockReset().mockReturnValue(true)
+    vi.mocked(probeGridAssignment).mockClear()
   })
   afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
 
@@ -120,6 +127,25 @@ describe('the pane-process swap', () => {
     vi.mocked(processRows).mockResolvedValue([{ pid: 42, startMarker: 'other', args: 'claude' }, { pid: 42, startMarker: 'm1', args: 'claude --dangerously-skip-permissions' }] as never)
     expect(await swap.liveBypassPermission(session({ processIdentity: identity } as Partial<RegisteredSession>))).toBe(true)
     expect(bypassPermissionActive).toHaveBeenCalledWith('claude', 'claude --dangerously-skip-permissions')
+    // The fork's evidence gate: a row whose argv is not boundary-faithful is no
+    // evidence — a prompt argument could be carrying the flag text (cycle-6 P1).
+    vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(false)
+    expect(await swap.liveBypassPermission(session({ processIdentity: identity } as Partial<RegisteredSession>))).toBe(false)
+    vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(true)
     expect(await swap.liveBypassPermission(session({ processIdentity: { pid: 43, startMarker: 'm1' } } as Partial<RegisteredSession>))).toBe(false)
+  })
+
+  it('restartedGridAssignment reads faithful argv and falls back to the executable', async () => {
+    const { swap } = setup()
+    const identity = { pid: 42, startMarker: 'm1', executable: '/bin/claude' }
+    const grid = { gridName: 'team-grid' } as never
+    vi.mocked(processRows).mockResolvedValue([{ pid: 42, startMarker: 'm1', args: 'claude --grid team-grid' }] as never)
+    vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(true)
+    await swap.restartedGridAssignment(identity as never, 'claude', grid)
+    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'claude', 'claude --grid team-grid', grid)
+    // Flattened ps text is never interpreted as the launch the new process got.
+    vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(false)
+    await swap.restartedGridAssignment(identity as never, 'claude', grid)
+    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'claude', '/bin/claude', grid)
   })
 })

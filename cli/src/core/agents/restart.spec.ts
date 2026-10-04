@@ -2,7 +2,6 @@ import { homedir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
 import { probeGatewayRuntime } from '../../lib/gatewayRuntime.js'
-import { probeGridAssignment } from '../../lib/gridAssignment.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
@@ -54,7 +53,7 @@ function setup(row: RegisteredSession | null = agent(), over: Partial<RestartDep
     downgradedPermission: vi.fn(async (_s, bypass: boolean) => ({ bypassPermission: bypass, permissionMode: 'auto' })) as never,
     refreshGridWebSearch: vi.fn() as never,
     liveBypassPermission: vi.fn(async () => true),
-    restartedGridAssignment: vi.fn(async () => null),
+    restartedGridAssignment: vi.fn(async () => undefined),
     paneSwapDeps: vi.fn(() => ({ swap: true })) as never,
     ...over,
   }
@@ -191,7 +190,7 @@ describe('restarting an agent', () => {
       expect(swapDeps.isCurrent?.()).toBe(true)
       expect(run.deps.refreshGridWebSearch).toHaveBeenCalledWith('a1', { env: { GRID_KEY: 'k' } })
       expect(probeGatewayRuntime).toHaveBeenCalledWith(newProcess)
-      expect(probeGridAssignment).toHaveBeenCalledWith(newProcess, 'claude', '/bin/claude')
+      expect(run.deps.restartedGridAssignment).toHaveBeenCalledWith(newProcess, 'claude', undefined)
       expect(run.deps.registry.updateProcessIdentity).toHaveBeenCalledWith('a1', newProcess, 'none', undefined)
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)
       expect(clearPaneRemainOnExit).toHaveBeenCalledWith('%4')

@@ -936,7 +936,7 @@ describe('tmux process primitives', () => {
 
   /** Review cycle-6 P2: codex.exe/claude.exe native names scored 0 while opencode.exe scored. */
   it.each(['claude', 'codex'] as const)('recognises native Windows %s.exe basenames', (engine) => {
-    expect(engineProcessMatchScore({ executable: `${engine}.exe`, args: `${engine}.exe --version` }, engine))
+    expect(engineProcessMatchScore({ executable: `${engine}.exe`, args: `${engine}.exe --continue` }, engine))
       .toBeGreaterThan(0)
   })
 
@@ -952,14 +952,15 @@ describe('tmux process primitives', () => {
       executable: '/tmp/not\\codex',
       args: '/tmp/not\\codex --version',
     }, 'codex')).toBe(0)
-    // The Windows dialect still splits on both separators.
+    // The Windows dialect still splits on both separators. A real argv, not a
+    // `--version` capability probe (probes score 0 by design upstream).
     expect(engineProcessMatchScore({
       executable: 'C:\\tools\\not\\codex.exe',
-      args: 'C:\\tools\\not\\codex.exe --version',
+      args: 'C:\\tools\\not\\codex.exe --continue',
     }, 'codex')).toBeGreaterThan(0)
     expect(engineProcessMatchScore({
       executable: '\\\\nas\\share\\not\\codex.exe',
-      args: '\\\\nas\\share\\not\\codex.exe --version',
+      args: '\\\\nas\\share\\not\\codex.exe --continue',
     }, 'codex')).toBeGreaterThan(0)
   })
 
