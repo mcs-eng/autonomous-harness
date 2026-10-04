@@ -977,10 +977,6 @@ async function executablePassesProbe(command: string, args: readonly string[]): 
     )
   })
 }
-      (error) => resolve(!error),
-    )
-  })
-}
 
 export type CommandFlagSupport = 'supported' | 'unsupported' | 'unknown'
 

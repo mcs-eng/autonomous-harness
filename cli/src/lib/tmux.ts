@@ -183,7 +183,7 @@ function processEntrypoint(args: string, next = argvPrefix(args)): string {
     }
     command = basename(token).toLowerCase()
   }
-  if (!/^(?:node|nodejs|bun|deno|python(?:\d+(?:\.\d+)*)?|bash|zsh|sh)(?:\.exe)?$/.test(command)) return tokens[index] ?? ''
+  if (!/^(?:node|nodejs|bun|deno|python(?:\d+(?:\.\d+)*)?|bash|zsh|sh)(?:\.exe)?$/.test(command)) return token
 
   token = next() ?? ''
   while (token) {

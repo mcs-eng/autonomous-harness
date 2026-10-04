@@ -3000,7 +3000,10 @@ describe('grid is set up on demand — by an act, never by a read', () => {
 
   it('answers local profiles immediately, then restores a derived private-cloud classification', async () => {
     resetGridModels({ dataDir: () => join(env.ADAPTER_DATA_DIR, 'profile-catalogue-fixture') })
-    fake = installFakeGrid({
+    // This test sits in the 'grid is set up on demand' group, whose fixture
+    // vars live in sibling groups upstream of the fork; define what it uses.
+    const { gridName: GRID_NAME, plan } = fakeGridAnswers()
+    let fake: FakeGrid | null = installFakeGrid({
       ...plan,
       models: { stdout: JSON.stringify([{ model: 'Qwen-Test', engine: 'engine', node: 'cloud-node' }]) },
     })
@@ -3046,6 +3049,8 @@ describe('grid is set up on demand — by an act, never by a read', () => {
     } finally {
       removeLocalGridProfile(profileId)
       await socket.stop()
+      fake?.dispose()
+      fake = null
     }
   })
 })

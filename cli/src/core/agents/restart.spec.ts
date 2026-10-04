@@ -54,6 +54,7 @@ function setup(row: RegisteredSession | null = agent(), over: Partial<RestartDep
     downgradedPermission: vi.fn(async (_s, bypass: boolean) => ({ bypassPermission: bypass, permissionMode: 'auto' })) as never,
     refreshGridWebSearch: vi.fn() as never,
     liveBypassPermission: vi.fn(async () => true),
+    restartedGridAssignment: vi.fn(async () => null),
     paneSwapDeps: vi.fn(() => ({ swap: true })) as never,
     ...over,
   }
