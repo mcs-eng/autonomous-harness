@@ -530,8 +530,10 @@ Partial or invalid declarations refuse WSL commands: the CLI probe reports the
 invalid contract and nothing runs in WSL, while the app still opens on every
 platform. Every WSL command through `WslRuntime` then
 explicitly checks and sources the guard before executing its original arguments.
-A missing wrapper or fixture exits 125, and so does a guard that exits while it is
-sourced, so a guard can never report success without the command running. Smoke scripts
+A missing wrapper or fixture exits 125, and so does a guard that calls `exit` while it
+is sourced. A guard can still end the shell with status 0 before the command runs (for
+example with `exec`, or by clearing the EXIT trap first), so admission trusts the guard
+only because `HARNESS_SMOKE_GUARD_SHA256` pins its reviewed bytes. Smoke scripts
 skip login startup files; ordinary invocation is unchanged when none of the four
 variables is present. `BASH_ENV` alone is not an isolation contract.
 
