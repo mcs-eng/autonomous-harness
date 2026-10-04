@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { buildLaunchOverrides, validateLaunchOverrides, type LaunchOverridesDeps } from './launchOverrides.js'
 import { DSH_SESSION_ENV } from '../dsh/launch.js'
@@ -149,7 +150,7 @@ describe('buildLaunchOverrides — coming back off a grid', () => {
     const seen: string[] = []
     const { d } = deps({ readCodexConfig: (path) => { seen.push(path); return null } })
     await buildLaunchOverrides(d, 'codex', { codexHome: '/profiles/work' }, 'a')
-    expect(seen).toEqual(['/profiles/work/config.toml'])
+    expect(seen).toEqual([join('/profiles/work', 'config.toml')])
   })
 
   it('keeps the Codex profile AND its hooks while naming the provider', async () => {
