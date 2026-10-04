@@ -7,6 +7,7 @@ typedef enum {
     HT_CHARACTER_OFFLINE, HT_CHARACTER_ASLEEP, HT_CHARACTER_BOOPED, HT_CHARACTER_LISTENING,
     HT_CHARACTER_MOODS
 } ht_character_mood_t;
+typedef struct { uint8_t stage, colour, mark; } ht_companion_style_t;
 typedef struct {
     int8_t look;
     uint8_t hands, level, mail; // 0: no letter, 1: holding, 2: briefly lifting it.
@@ -21,6 +22,7 @@ typedef struct {
 } ht_character_reaction_t;
 typedef struct {
     const char *recipient, *status, *hint, *detail;
+    ht_companion_style_t companion_style;
     /*
      * Three facts a creature has no use for, and the Focus skin is built out of.
      *
@@ -46,6 +48,12 @@ typedef struct {
      * WORKING means "an agent is busy" at home and "your words are on their way" here.
      */
     bool voice;
+    /*
+     * Focus only, for the engine pets: this agent has an open question, and the clock its loop reads.
+     * clock_ms 0 holds the pet still (quiet motion, asleep display); ui_habitat.c never sends 0 otherwise.
+     */
+    bool asking;
+    uint32_t clock_ms;
     uint16_t ink, foreground, dim;
 } ht_character_face_t;
 

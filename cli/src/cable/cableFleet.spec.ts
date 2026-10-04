@@ -1,4 +1,5 @@
-import { mkdtempSync, readdirSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -7,7 +8,8 @@ import { CableFleet as SourceFleet } from './cableFleet.js'
 import { CableSession, type CableHost, type CablePort } from './cableSession.js'
 import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { DialLog } from './dialLog.js'
-import { parseDarwinDialPorts, type DialPort } from './serial.js'
+import { DialVerdicts } from './dialPortVerdicts.js'
+import { parseDarwinDialPorts, portInUse, type DialPort } from './serial.js'
 
 // Run the same two-device scenarios against the staged helper before deployment.
 const CableFleet: typeof SourceFleet = process.env.HARNESS_TEST_USB_FLEET
@@ -47,6 +49,7 @@ function fixture() {
   }
   const logs = mkdtempSync(join(tmpdir(), 'usb-fleet-'))
   const options = {
+    canUseUsb: vi.fn(() => true),
     discover: vi.fn(async () => present), intervalMs: 60_000,
     open: vi.fn(async (path: string, onData: (chunk: Buffer) => void, onClosed: (why: string) => void) => {
       const port = new Peer(path, onData, onClosed); ports.push(port); return port
@@ -62,6 +65,55 @@ function fixture() {
 }
 
 describe('USB dial fleet', () => {
+  it('releases every dial on a macOS user switch and reconnects only when its account returns', async () => {
+    const f = fixture()
+    const scan = () => (f.fleet as unknown as { scan(): Promise<void> }).scan()
+    try {
+      f.options.canUseUsb.mockReturnValue(false)
+      f.fleet.start()
+      await scan()
+      expect(f.options.discover).not.toHaveBeenCalled()
+      expect(f.ports).toHaveLength(0)
+      f.options.canUseUsb.mockReturnValue(true)
+      await scan()
+      await vi.waitFor(() => expect(f.ports).toHaveLength(2))
+      await f.greet(f.ports)
+      expect(f.fleet.isConnected).toBe(true)
+      f.options.canUseUsb.mockReturnValue(false)
+      await scan()
+      expect(f.ports.every(port => !port.isOpen)).toBe(true)
+      expect(f.fleet.isConnected).toBe(false)
+      const discoveries = f.options.discover.mock.calls.length
+      await scan()
+      expect(f.options.discover).toHaveBeenCalledTimes(discoveries)
+      f.options.canUseUsb.mockReturnValue(true)
+      await scan()
+      await vi.waitFor(() => expect(f.ports).toHaveLength(4))
+      await f.greet(f.ports.slice(2))
+      expect(f.fleet.isConnected).toBe(true)
+    } finally { await f.fleet.stop() }
+  })
+
+  it('closes an opening port if the desktop account changes before open finishes', async () => {
+    const f = fixture()
+    f.setPorts([device('/dev/tim', 'AA:01')])
+    let finish!: () => void
+    f.options.open.mockImplementationOnce(async (path, onData, onClosed) => {
+      const peer = new Peer(path, onData, onClosed)
+      f.ports.push(peer)
+      await new Promise<void>(resolve => { finish = resolve })
+      return peer
+    })
+    try {
+      f.fleet.start()
+      await vi.waitFor(() => expect(f.ports).toHaveLength(1))
+      f.options.canUseUsb.mockReturnValue(false)
+      finish()
+      await vi.waitFor(() => expect(f.ports[0].isOpen).toBe(false))
+      expect(f.fleet.isConnected).toBe(false)
+    } finally { finish?.(); await f.fleet.stop() }
+  })
+
   it('names every device on the desk, and changes the settings of ONE of them', async () => {
     /*
      * Before this the fleet picked a row and threw the rest away, so the app drew one robot however
@@ -217,7 +269,166 @@ describe('USB dial fleet', () => {
   })
 })
 
+describe('a board that is not a dial', () => {
+  /**
+   * Found on a desk with a second ESP32-S3 plugged in for its own work: it shares the dial's USB ids, so
+   * the daemon opened it, heard nothing it understood, waited a minute and opened it again, for as long
+   * as it ran. That corrupted an esptool flash read twice. A board is looked at once per attachment.
+   */
+  const scenario = (opts: { inUse?: (path: string) => Promise<boolean>; file?: string } = {}) => {
+    const f = fixture()
+    const foreign = { ...device('/dev/other', 'CC:03'), session: '100' }
+    const dial = { ...device('/dev/tim', 'AA:01'), session: '200' }
+    f.setPorts([foreign, dial])
+    const options = { ...f.options, verdicts: new DialVerdicts(opts.file), watchEveryMs: 0, ...(opts.inUse ? { inUse: opts.inUse } : { inUse: async () => false }) }
+    const fleet = new CableFleet(CableSession, f.host, f.logs, DialLog, options)
+    const opens = () => f.options.open.mock.calls.map(c => c[0])
+    const scan = async () => { await (fleet as unknown as { scan(): Promise<void> }).scan(); await new Promise(r => setTimeout(r, 5)) }
+    return { f, fleet, foreign, dial, options, opens, scan }
+  }
+
+  it('is probed once, then left alone, while the dial beside it carries on', async () => {
+    const s = scenario()
+    try {
+      s.fleet.start()
+      await vi.waitFor(() => expect(s.f.ports).toHaveLength(2))
+      const other = s.f.ports.find(p => p.path === '/dev/other')!
+      const tim = s.f.ports.find(p => p.path === '/dev/tim')!
+      other.say({ t: 'hello', product: 'grid', mac: 'other', fw: '1', proto: 1 })
+      await s.f.greet([tim])
+      await vi.waitFor(() => expect(other.isOpen).toBe(false))
+      const after = s.opens().filter(p => p === '/dev/other').length
+      for (let i = 0; i < 4; i++) await s.scan()
+      expect(s.opens().filter(p => p === '/dev/other').length).toBe(after)
+      expect(tim.isOpen).toBe(true)
+      expect(s.f.host.log).toHaveBeenCalledWith(expect.stringContaining('leaving it alone until it is unplugged or reset'))
+    } finally { await s.fleet.stop() }
+  })
+
+  it('is looked at again once it has been unplugged and plugged back in', async () => {
+    const s = scenario()
+    try {
+      s.fleet.start()
+      await vi.waitFor(() => expect(s.f.ports).toHaveLength(2))
+      s.f.ports.find(p => p.path === '/dev/other')!.say({ t: 'hello', product: 'grid', mac: 'other', fw: '1', proto: 1 })
+      await vi.waitFor(() => expect(s.f.ports.find(p => p.path === '/dev/other')!.isOpen).toBe(false))
+      const before = s.opens().filter(p => p === '/dev/other').length
+      // Unplugged and plugged back in: same board, new attachment.
+      s.f.setPorts([{ ...s.foreign, session: '101' }, s.dial])
+      // Scanning as the interval would: the old entry leaves on a timer of its own, so the first scan
+      // may still find it there and the next one starts the new attachment.
+      await vi.waitFor(async () => {
+        await s.scan()
+        expect(s.opens().filter(p => p === '/dev/other').length).toBeGreaterThan(before)
+      }, { timeout: 5000 })
+    } finally { await s.fleet.stop() }
+  })
+
+  it('is looked at again once a program has worked on it and let go, which is what a flash looks like', async () => {
+    // A reset or a reflash over USB-Serial/JTAG leaves the attachment as it was (measured with esptool on
+    // the desk), so the USB view cannot say a board became a dial. Somebody holding its port for a while,
+    // and then not, can: that is esptool or idf.py. The board is looked at once more when they let go.
+    let busy = false
+    const s = scenario({ inUse: async path => path === '/dev/other' && busy })
+    try {
+      s.fleet.start()
+      await vi.waitFor(() => expect(s.f.ports).toHaveLength(2))
+      s.f.ports.find(p => p.path === '/dev/other')!.say({ t: 'hello', product: 'grid', mac: 'other', fw: '1', proto: 1 })
+      await vi.waitFor(() => expect(s.f.ports.find(p => p.path === '/dev/other')!.isOpen).toBe(false))
+      const before = s.opens().filter(p => p === '/dev/other').length
+
+      // Still ruled out while nothing has touched it, and while it is being worked on.
+      for (let i = 0; i < 3; i++) await s.scan()
+      busy = true
+      for (let i = 0; i < 3; i++) await s.scan()
+      expect(s.opens().filter(p => p === '/dev/other').length).toBe(before)
+
+      // They let go: it may be a different board now.
+      busy = false
+      await vi.waitFor(async () => {
+        await s.scan()
+        expect(s.opens().filter(p => p === '/dev/other').length).toBeGreaterThan(before)
+      }, { timeout: 5000 })
+      expect(s.f.host.log).toHaveBeenCalledWith(expect.stringContaining('was in use and is free again'))
+    } finally { await s.fleet.stop() }
+  })
+
+  it('is not probed again by the next daemon either', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'fleet-verdicts-')), 'dial-ports.json')
+    const first = scenario({ file })
+    try {
+      first.fleet.start()
+      await vi.waitFor(() => expect(first.f.ports).toHaveLength(2))
+      first.f.ports.find(p => p.path === '/dev/other')!.say({ t: 'hello', product: 'grid', mac: 'other', fw: '1', proto: 1 })
+      await vi.waitFor(() => expect(first.f.ports.find(p => p.path === '/dev/other')!.isOpen).toBe(false))
+    } finally { await first.fleet.stop() }
+
+    const second = scenario({ file })
+    try {
+      second.fleet.start()
+      await vi.waitFor(() => expect(second.opens()).toContain('/dev/tim'))
+      for (let i = 0; i < 3; i++) await second.scan()
+      expect(second.opens()).not.toContain('/dev/other')
+    } finally { await second.fleet.stop() }
+  })
+
+  it('is never opened while another program has it, and only then once that program is done', async () => {
+    let busy = true
+    const s = scenario({ inUse: async path => path === '/dev/other' && busy })
+    try {
+      s.fleet.start()
+      await vi.waitFor(() => expect(s.opens()).toContain('/dev/tim'))
+      for (let i = 0; i < 3; i++) await s.scan()
+      expect(s.opens()).not.toContain('/dev/other')
+      expect(s.f.host.log).toHaveBeenCalledWith(expect.stringContaining('/dev/other is in use by another program'))
+      busy = false
+      await s.scan()
+      await vi.waitFor(() => expect(s.opens()).toContain('/dev/other'))
+    } finally { await s.fleet.stop() }
+  })
+
+  it('reads a port as held when a process other than this one has it open', async () => {
+    // Skipped without lsof; the fleet treats "cannot tell" as free, so there is nothing to prove there.
+    const file = join(mkdtempSync(join(tmpdir(), 'held-')), 'tty')
+    writeFileSync(file, '')
+    const holder = spawn('tail', ['-f', file], { stdio: 'ignore' })
+    try {
+      await new Promise(r => setTimeout(r, 300))
+      const held = await portInUse(file)
+      const lsofExists = await new Promise<boolean>(r => spawn('lsof', ['-v'], { stdio: 'ignore' }).on('error', () => r(false)).on('exit', () => r(true)))
+      if (lsofExists) expect(held).toBe(true)
+    } finally {
+      holder.kill()
+      await new Promise(r => holder.on('exit', r))
+    }
+    expect(await portInUse(file)).toBe(false)
+  })
+})
+
 describe('macOS USB inventory', () => {
+  it('reads multiple USB-rooted subtrees without leaking IDs into their siblings', () => {
+    const dump = `+-o Tim <class IOUSBHostDevice>
+  "idVendor" = 12346
+  "idProduct" = 4097
+  "USB Serial Number" = "AA:01"
+  +-o CDC
+    +-o serial
+      "IOCalloutDevice" = "/dev/tim"
++-o unrelated <class IOUSBHostDevice>
+  "idVendor" = 12346
+  "idProduct" = 12
+  +-o serial
+    "IOCalloutDevice" = "/dev/unrelated"
++-o Tux <class IOUSBHostDevice>
+  "USB Serial Number" = "BB:02"
+  "idProduct" = 4097
+  "idVendor" = 12346
+  +-o serial
+    "IOCalloutDevice" = "/dev/tux"`
+    expect(parseDarwinDialPorts(dump)).toEqual([device('/dev/tim', 'AA:01'), device('/dev/tux', 'BB:02')])
+    expect(parseDarwinDialPorts('')).toEqual([])
+  })
+
   it('associates each tty with its own matching USB parent and serial in either property order', () => {
     const dump = `+-o root
   +-o Tim
@@ -236,11 +447,14 @@ describe('macOS USB inventory', () => {
   +-o Tux
     "idVendor" = 12346
     "idProduct" = 4097
+    "sessionID" = 14351572441873
     "USB Serial Number" = "BB:02"
     +-o serial
+      "sessionID" = 99
       "IOCalloutDevice" = "/dev/tux"
   +-o console
     "IOCalloutDevice" = "/dev/debug-console"`
-    expect(parseDarwinDialPorts(dump)).toEqual([device('/dev/tim', 'AA:01'), device('/dev/tux', 'BB:02')])
+    // The attachment identity is the USB device's own sessionID, not one from a node below it.
+    expect(parseDarwinDialPorts(dump)).toEqual([device('/dev/tim', 'AA:01'), { ...device('/dev/tux', 'BB:02'), session: '14351572441873' }])
   })
 })

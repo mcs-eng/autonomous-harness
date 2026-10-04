@@ -23,8 +23,8 @@ def function(name, text=source):
 load = re.search(r'    s\.brightness = [^;]*config_load_brightness\(\)[^;]*;', function('ui_init')).group(0)
 # The two production lines that move a percentage in each direction, taken from where they live now:
 # the app's value is staged under the display lock, and the worker writes it off the render path.
-stage = re.search(r'    if \(fields & UI_SETTING_BRIGHTNESS\) s\.brightness = [^;]*;',
-                  function('ui_settings_apply')).group(0)
+stage = re.search(r'    if \(fields & UI_SETTING_BRIGHTNESS\) \{.*?\n    \}',
+                  function('ui_settings_apply'), re.S).group(0)
 save = re.search(r'            if \(fields & UI_SETTING_BRIGHTNESS\)\n[^\n]*config_save_brightness[^\n]*',
                  function('worker')).group(0)
 code = r'''
@@ -42,6 +42,8 @@ static void config_save_brightness(uint8_t value) { saved=value; }
 static void display_lock(void) {}
 static void display_unlock(void) {}
 static void change(void) {}
+static uint8_t panel_level;
+static void display_set_brightness(uint8_t value) { panel_level = value; }
 '''
 code += function('ui_set_brightness') + '\n'
 code += function('ht_rgb', (here / '../main/ui/habitat/terminal.c').read_text()) + '\n'
@@ -88,9 +90,9 @@ int main(void) {
         unsigned r=canvas>>11, g=(canvas>>5)&63, b=canvas&31;
         r=(r<<3)|(r>>2); g=(g<<2)|(g>>4); b=(b<<3)|(b>>2);
         assert(r==g && g==b && r<=24);
-        if(percent==25)assert(r==8);
-        if(percent==60)assert(r==16);
-        if(percent==100)assert(r==24 && color(HT_THEME_TEXT)==ht_rgb(HT_THEME_TEXT));
+        assert(r==24 && color(HT_THEME_TEXT)==ht_rgb(HT_THEME_TEXT));
+        app_sets(percent);
+        assert(panel_level == (percent * 255 + 50) / 100);
     }
     puts("Brightness: 101 app-set percentages survive a reboot exactly, 256 stored bytes load bounded and monotonic, neutral canvas throughout PASS");
 }

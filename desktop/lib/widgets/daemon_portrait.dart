@@ -5,10 +5,12 @@ import 'package:xterm/xterm.dart' show TerminalTheme;
 
 import '../daemons/daemon_plate_client.dart';
 import '../daemons/individuals.dart';
+import '../daemons/illustrated_art.dart';
 import '../daemons/plates.dart';
 import '../daemons/render.dart';
 import '../daemons/roster.dart';
 import 'daemon_slot.dart';
+import 'daemon_illustration.dart';
 
 /// A daemon's portrait wherever one shows: the panel's zoo, the hatch
 /// reveal, a duplicate's merge and a level-up.
@@ -135,6 +137,7 @@ class _DaemonPortraitState extends State<DaemonPortrait> {
   /// can move (no Reduce Motion, a live ticker), with more than one frame.
   bool get _moving =>
       widget.animate &&
+      !IllustratedArt.supports(widget.def.id) &&
       widget.def.plate &&
       widget.rows == null &&
       !widget.silhouette &&
@@ -160,6 +163,23 @@ class _DaemonPortraitState extends State<DaemonPortrait> {
   Widget build(BuildContext context) {
     final w = widget;
     final label = w.semanticsLabel;
+    if (IllustratedArt.supports(w.def.id)) {
+      return DaemonIllustration(
+        key: w.textKey,
+        art: IllustratedArt.daemon(
+          w.def.id,
+          version: w.version,
+          mood: w.mood,
+          blink: w.lid != null,
+          traits: w.traits,
+        ),
+        size: w.size == PlateSize.reveal ? 350 : 240,
+        animate: w.animate && !w.silhouette && w.rows == null,
+        silhouette: w.silhouette ? w.style.color : null,
+        semanticsLabel:
+            label ?? '${IllustratedArt.name(w.def.id)} ${w.version}',
+      );
+    }
     if (!w.def.plate) {
       final rows =
           w.rows ??
@@ -244,7 +264,7 @@ class _DaemonPortraitState extends State<DaemonPortrait> {
 /// loop a frame every `eggMs.loop` (190 ms) while [animate] is on and the
 /// page can move; `p1` to `p3` hold still. [frame] draws one fixed frame
 /// (the hatch drives its own).
-class DaemonEggPlate extends StatefulWidget {
+class DaemonEggPlate extends StatelessWidget {
   const DaemonEggPlate({
     super.key,
     required this.roster,
@@ -275,94 +295,13 @@ class DaemonEggPlate extends StatefulWidget {
   final String? semanticsLabel;
 
   @override
-  State<DaemonEggPlate> createState() => _DaemonEggPlateState();
-}
-
-class _DaemonEggPlateState extends State<DaemonEggPlate> {
-  Timer? _timer;
-  int _tick = 0;
-
-  List<PlateFrame> get _frames =>
-      daemonPlates.egg(widget.kind, widget.size, widget.stage);
-
-  bool get _moving =>
-      widget.animate &&
-      widget.frame == null &&
-      (widget.stage == 'p0' || widget.stage == 'p4') &&
-      !(MediaQuery.maybeDisableAnimationsOf(context) ?? false) &&
-      TickerMode.valuesOf(context).enabled &&
-      _frames.length > 1;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _schedule();
-  }
-
-  @override
-  void didUpdateWidget(DaemonEggPlate old) {
-    super.didUpdateWidget(old);
-    if (old.kind != widget.kind ||
-        old.stage != widget.stage ||
-        old.size != widget.size) {
-      _tick = 0;
-    }
-    _schedule();
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  void _schedule() {
-    final moving = _moving;
-    if (moving == (_timer != null)) return;
-    _timer?.cancel();
-    _timer = null;
-    if (!moving) {
-      _tick = 0;
-      return;
-    }
-    final ms = widget.roster.rules.plate?.eggMs.loop ?? 190;
-    _timer = Timer.periodic(Duration(milliseconds: ms), (_) {
-      if (mounted) setState(() => _tick++);
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final w = widget;
-    final frames = _frames;
-    if (frames.isEmpty) return const SizedBox.shrink();
-    final frame = frames[(w.frame ?? _tick) % frames.length];
-    final ink = daemonEggInk(
-      w.roster,
-      w.kind,
-      w.theme,
-      light: w.light,
-      dim: w.dim,
-      background: w.background,
-    );
-    final size = w.style.fontSize ?? 13;
-    final style = w.style.copyWith(
-      shadows: [
-        Shadow(
-          color: ink.glow.withValues(alpha: w.dim ? .25 : .4),
-          blurRadius: size * .8,
-        ),
-      ],
-    );
-    return RepaintBoundary(
-      child: Text.rich(
-        TextSpan(
-          children: plateSpans(frame.rows, ink, style, mats: frame.mats),
-        ),
-        key: w.textKey,
-        semanticsLabel: w.semanticsLabel,
-        style: style,
-      ),
-    );
-  }
+  Widget build(BuildContext context) => DaemonIllustration(
+    key: textKey,
+    art: IllustratedArt.egg(kind: kind, stage: stage),
+    size: size == PlateSize.reveal ? 350 : 220,
+    animate: animate && frame == null && (stage == 'p0' || stage == 'p4'),
+    frame: frame ?? 0,
+    silhouette: dim ? theme.foreground.withValues(alpha: .4) : null,
+    semanticsLabel: semanticsLabel ?? '$kind egg, $stage',
+  );
 }

@@ -242,7 +242,7 @@ function boundedPrompt(prompt) {
   return Buffer.byteLength(JSON.stringify(prompt)) <= 128 * 1024 ? prompt : ''
 }
 
-function post(port, path, body) {
+function post(port, path, body, onResponse) {
   return new Promise((resolve) => {
     const payload = JSON.stringify(body)
     const credential = readHookCredential()
@@ -261,8 +261,16 @@ function post(port, path, body) {
         timeout: Math.max(1, Math.min(500, remainingBudget())),
       },
       (res) => {
-        res.resume()
-        res.on('end', () => resolve((res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300))
+        let response = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => { if (response.length < 16_384) response += chunk })
+        res.on('end', () => {
+          const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300
+          if (ok && onResponse && response.length <= 16_384) {
+            try { onResponse(JSON.parse(response)) } catch { /* Unavailable context never blocks a turn. */ }
+          }
+          resolve(ok)
+        })
       }
     )
     req.on('error', () => resolve(false))
@@ -460,8 +468,14 @@ function processEntrypoint(args) {
  * or run it through runpy. Require that executable prefix and actual code, never a script argument
  * or a quoted mention. argv[0] is authoritative here: macOS can truncate an absolute `comm` path.
  * Keep the standalone hook's copy in sync. */
+/** macOS `ps` prints argv through vis(3): a newline as `\\012`, a backslash as `\\\\`. Read those back
+ * so a multi-line `-c` source is the source it runs. Linux `ps` prints argv as it is, without them. */
+function unvisArgs(args) {
+  return args.replace(/\\([0-7]{3}|\\)/g, (_, code) => code === '\\' ? '\\' : String.fromCharCode(parseInt(code, 8)))
+}
+
 function hermesInlineLauncher(row) {
-  const args = row.args.trim()
+  const args = unvisArgs(row.args).trim()
   if (!/^python(?:\d+(?:\.\d+)*)?$/.test(basename(argvTokens(args)[0] ?? '').toLowerCase())) return false
   const prefix = /^(?:"[^"]+"|'[^']+'|\S+)(?:\s+-(?:I|E|s|S|u|B|O{1,2}|q))*\s+-c\s+/.exec(args)
   if (!prefix) return false
@@ -1547,8 +1561,7 @@ async function main() {
   }
 
   // SessionStart or UserPromptSubmit (the catch hook) → register the session. Registration is
-  // idempotent, so re-registering on every prompt is cheap. (We print nothing to stdout, so this
-  // never injects context into a UserPromptSubmit turn.)
+  // idempotent, so re-registering on every prompt is cheap. The adapter verifies the process.
   // Command Code fires SessionStart BEFORE it writes the transcript, and the daemon validates the path
   // (realpath) — sending one that isn't on disk yet gets the whole registration rejected. Announce
   // without it; the session is registered again with the real path on the first Stop. Scoped to

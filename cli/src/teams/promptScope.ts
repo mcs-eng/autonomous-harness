@@ -114,12 +114,26 @@ export class SwarmPromptScopes {
       if (bytes.length > MAX_TEXT) { state.known = false; state.draft = []; return }
       insert(Buffer.from(bytes).toString('utf8')); return
     }
+    // The app writes each line key as one string, so ⌥⏎ (and its \n under LNM) is only
+    // recognised within this call; a lone Esc followed later by Return fails closed.
+    let escaped = false, metaReturn = false
     for (const char of state.decoder.write(Buffer.from(bytes))) {
+      if (metaReturn) { metaReturn = false; if (char === '\n') continue }
       if (state.escape) {
         state.escape += char
         if (state.escape === '\x1b[200~') { state.paste = true; state.escape = ''; continue }
         if (state.escape === '\x1b[201~') { state.paste = false; state.escape = ''; continue }
-        if (['\x1b', '\x1b[', '\x1b[2', '\x1b[20', '\x1b[200', '\x1b[201', '\x1b[3', '\x1bO'].includes(state.escape)) continue
+        // The app sends ⇧⏎ as CSI-u and ⌥⏎ as Meta+Return; engines read both as a line break.
+        // Inside a paste the engine receives those bytes literally, so they fail closed there.
+        if (state.escape === '\x1b[13;2u' && !state.paste) { state.escape = ''; insert('\n'); continue }
+        if (state.escape === '\x1b\r' && escaped && !state.paste) { state.escape = ''; insert('\n'); metaReturn = true; continue }
+        // SGR mouse reports (focus clicks, wheel) never type text. If a click did move the engine's
+        // caret, the draft stops matching the accepted prompt, which still fails closed.
+        if (state.escape.startsWith('\x1b[<') && !state.paste) {
+          if (/^\x1b\[<[\d;]*$/.test(state.escape) && state.escape.length < 32) continue
+          if (/^\x1b\[<\d+;\d+;\d+[Mm]$/.test(state.escape)) { state.escape = ''; continue }
+        }
+        if (['\x1b', '\x1b[', '\x1b[1', '\x1b[13', '\x1b[13;', '\x1b[13;2', '\x1b[2', '\x1b[20', '\x1b[200', '\x1b[201', '\x1b[3', '\x1bO'].includes(state.escape)) continue
         const sequence = state.escape
         state.escape = ''
         if (sequence === '\x1b[D') state.cursor = Math.max(0, state.cursor - 1)
@@ -127,10 +141,11 @@ export class SwarmPromptScopes {
         else if (sequence === '\x1b[H' || sequence === '\x1bOH') state.cursor = 0
         else if (sequence === '\x1b[F' || sequence === '\x1bOF') state.cursor = state.draft.length
         else if (sequence === '\x1b[3~') state.draft.splice(state.cursor, 1)
+        // ⌥⌫ (\x1b\x7f) fails closed too: engines may disagree on word boundaries.
         else { state.known = false; state.draft = [] }
         continue
       }
-      if (char === '\x1b') { state.escape = char; continue }
+      if (char === '\x1b') { state.escape = char; escaped = true; continue }
       if (state.paste) { insert(char); continue }
       if (char === '\r') {
         if (state.known && state.draft.length) this.prepare(agentId, state.draft.join(''), tabId)

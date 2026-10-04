@@ -14,7 +14,7 @@
  *   turn_ended (empty text) → {kind:'done'}                          (clear busy)
  *
  * Every frame carries top-level `agentId` + `dbSessionId` (= the tmux session id). The recap
- * (`summarizeTurnText`) is injected so it's unit-testable with a stub. Mirrors the hosted runtime's
+ * writer (`summarize`) is injected so it's unit-testable with a stub; the daemon's is an excerpt. Mirrors the hosted runtime's
  * device-gated recap (recap.ts / manager.ts triggerTurnRecap / websocket.ts handleBrainSummaryEvent).
  */
 
@@ -23,6 +23,7 @@ import { join } from 'path'
 import type { LastTurnText, LiveEvent } from './normalize.js'
 import { AgentNotifications } from './agentNotifications.js'
 import { deriveTurnSummary } from './deviceRecap.js'
+import { atomicWriteJson } from './registry.js'
 
 export type CommanderFrame = {
   type: 'commander_event'
@@ -32,6 +33,8 @@ export type CommanderFrame = {
 }
 
 export interface CommanderMirrorOpts {
+  /** Presentation lease only. Unverified work stays open for its real completion. */
+  verifiedWorking?: (sessionId: string) => boolean
   /** Shared with QuestionWatcher; both screens receive this policy's decision. */
   notifications?: AgentNotifications
   /** Produce desktop results without a device, using a free local excerpt. */
@@ -81,10 +84,8 @@ export interface CommanderMirrorOpts {
   subagentActive?: (sessionId: string, agentId: string) => boolean
   dataDir: string
   recapForce?: boolean
-  /** A function when it can change while the daemon runs — the pair brain switches it on with pairing. */
+  /** A function when the setting can change while the daemon runs. */
   alwaysGenerate?: boolean | (() => boolean)
-  /** Every recap that is stored, as it is stored — the pair sensor journals it (pair/sensor.ts). */
-  onSummary?: (sessionId: string, summary: { recap: string; body: string }) => void
 }
 
 interface SessionState {
@@ -373,35 +374,11 @@ export class CommanderMirror {
     ;(isError ? console.error : console.log)(`[recap] ${line}`)
   }
 
-  /**
-   * Tool calls started and not yet answered, per session, exactly as the transcript has them: the pair's
-   * floor (pair/classify.ts) reads a permission prompt from the call it is about, not from its wrapped paint.
-   */
-  private readonly toolCalls = new Map<string, Map<string, { name: string; input: unknown }>>()
-
-  /** The session's open tool calls (started, no result yet), oldest first. */
-  openTools(sessionId: string): Array<{ name: string; input: unknown }> {
-    return [...(this.toolCalls.get(sessionId)?.values() ?? [])]
-  }
-
-  private trackTool(sessionId: string, e: LiveEvent): void {
-    if (e.type === 'turn_started' || e.type === 'turn_ended') { this.toolCalls.delete(sessionId); return }
-    if (e.type === 'tool_start') {
-      let open = this.toolCalls.get(sessionId)
-      if (!open) { open = new Map(); this.toolCalls.set(sessionId, open) }
-      open.set(String(e.payload.id), { name: String(e.payload.tool || ''), input: e.payload.input })
-      if (open.size > 32) open.delete(open.keys().next().value as string)
-    } else if (e.type === 'tool_end') {
-      this.toolCalls.get(sessionId)?.delete(String(e.payload.id))
-    }
-  }
-
   /** Fold one session's LiveEvents into device commander_event frames (live cards + async recap). */
   ingest(events: LiveEvent[], sessionId: string, options?: { replay?: boolean }): void {
     const st = this.stateFor(sessionId)
     if (!options?.replay && st.turnOpen) this.notifications.continued(sessionId)
     for (const e of events) {
-      this.trackTool(sessionId, e)
       switch (e.type) {
         case 'turn_started':
           this.notifications.started(sessionId, options?.replay)
@@ -661,8 +638,7 @@ export class CommanderMirror {
     //     nothing rides the wire to an absent device. This is the fix for the back-fill gap — a device
     //     that pairs LATER restores real tiles from what was persisted here, instead of blank ones,
     //     because replayAll() only re-emits stored recaps and never regenerates a past turn.
-    // Cost: with SUMMARY_MODE=model this is one engine one-shot per turn, per agent, forever — the very
-    // cost the device gate used to avoid. SUMMARY_MODE=local makes it free (no model, same-tick excerpt).
+    // Free: the recap is an excerpt cut the moment the turn ends, with no model in the loop.
     const alwaysGenerate = typeof this.opts.alwaysGenerate === 'function' ? this.opts.alwaysGenerate() : this.opts.alwaysGenerate
     const localOnly = !device && !this.opts.recapForce && !alwaysGenerate
     if (localOnly && !this.opts.notifyWithoutDevice) {
@@ -767,7 +743,6 @@ export class CommanderMirror {
           const { recap, body } = splitSummary(summary)
           const notification = this.notifications.completed(sessionId, body || recap,
             (this.opts.isSubagent?.(sessionId) ?? false) || st.abandoned)
-          try { this.opts.onSummary?.(sessionId, { recap, body }) } catch { /* an observer never costs the recap */ }
           this.trace(sessionId, `${sid} done in ${ms}ms · recap="${recap}" · bodyLen=${body.length}`)
           this.emit(sessionId, { kind: 'done', text: 'done' })
           // One decision feeds both clients. A silent recap still updates the
@@ -824,6 +799,7 @@ export class CommanderMirror {
     const st = this.states.get(sessionId)
     if (!st) return false
     if (st.turnOpen) {
+      if (this.opts.verifiedWorking?.(sessionId) === false) return true
       this.emit(sessionId, st.lastTodos
         ? { kind: 'processing', text: 'Processing', todos: st.lastTodos }
         : { kind: 'processing', text: 'Processing' })
@@ -957,12 +933,22 @@ export class CommanderMirror {
     // The state object is about to be dropped; a held turn-end timer would fire against a dead session.
     if (st) this.clearEndTimers(st)
     this.states.delete(sessionId)
-    this.toolCalls.delete(sessionId)
     // NB: intentionally do NOT delete this.summaries[sessionId] — reuse it on the next resume.
     this.emit(sessionId, { kind: 'done', text: 'done' })
   }
 
   // ── persistence ──────────────────────────────────────────────────────────────────────────────
+  deleteHistory(sessionId: string): void {
+    this.forget(sessionId)
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = null
+    this.summaries.delete(sessionId)
+    this.history.delete(sessionId)
+    this.fullTexts.delete(sessionId)
+    this.asks.delete(sessionId)
+    this.save(true)
+  }
+
   private load(): void {
     try {
       const obj = JSON.parse(readFileSync(this.file, 'utf-8')) as Record<string, string>
@@ -995,14 +981,24 @@ export class CommanderMirror {
     this.saveTimer = setTimeout(() => this.save(), 200)
   }
 
-  private save(): void {
+  private save(strict = false): void {
     try {
       mkdirSync(this.opts.dataDir, { recursive: true, mode: 0o700 })
+      if (strict) {
+        // Cleanup is often requested on a full disk. Never truncate other sessions' shared
+        // history while rewriting these files; failed atomic writes remain safely retryable.
+        atomicWriteJson(this.file, Object.fromEntries(this.summaries))
+        atomicWriteJson(this.historyFile, Object.fromEntries(this.history))
+        atomicWriteJson(this.fullTextFile, Object.fromEntries(this.fullTexts))
+        atomicWriteJson(this.askFile, Object.fromEntries(this.asks))
+        return
+      }
       writeFileSync(this.file, JSON.stringify(Object.fromEntries(this.summaries), null, 2))
       writeFileSync(this.historyFile, JSON.stringify(Object.fromEntries(this.history), null, 2))
       writeFileSync(this.fullTextFile, JSON.stringify(Object.fromEntries(this.fullTexts), null, 2))
       writeFileSync(this.askFile, JSON.stringify(Object.fromEntries(this.asks), null, 2))
     } catch (err) {
+      if (strict) throw err
       console.error('[commander] save summaries failed:', err)
     }
   }

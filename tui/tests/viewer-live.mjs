@@ -390,6 +390,25 @@ try {
   })
   assert.equal((await layoutHn('list-panes', '-F', '#{pane_id}')).stdout, paneIds)
   pass('real C-b Space survives desktop serialization; deliberate remote changes still apply without replacing panes')
+  // Reordering from desktop uses the same real desk API as the UI. Keep the
+  // unequal slots and focused harness, then exercise the reverse direction.
+  const placed = async () => (await layoutHn('list-panes', '-F',
+    '#{pane_id}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}')).stdout.trim().split('\n')
+      .map(row => row.split('|')).sort((a, b) => Number(a[2]) - Number(b[2]) || Number(a[1]) - Number(b[1]))
+  const initial = await placed()
+  await layoutHn('select-pane', '-t', initial[1][0])
+  await layoutHn('resize-pane', '-t', initial[0][0], '-D', '2')
+  const resized = (await layoutHn('display-message', '-p', '#{window_layout}')).stdout.trim()
+  await until('real divider saved before reorder', async () => (await desk()).tabs.find(t => t.id === layoutTab)?.layout?.tmux === resized)
+  const slots = (await placed()).map(row => row.slice(1))
+  await desk([{ op: 'pane.move', tabId: layoutTab, machineId, agentId: controlsId, index: 0 }])
+  await until('real desktop reorder reaches hn', async () => (await placed())[0][0] === initial[1][0])
+  assert.deepEqual((await placed()).map(row => row.slice(1)), slots)
+  assert.equal((await layoutHn('display-message', '-p', '#{pane_id}')).stdout.trim(), initial[1][0])
+  await layoutHn('swap-pane', '-s', initial[0][0], '-t', initial[1][0], '-d')
+  await until('real terminal swap reaches desktop', async () => (await desk()).tabs.find(t => t.id === layoutTab).panes[0].agentId === agentId)
+  assert.deepEqual((await placed()).map(row => row[0]), initial.map(row => row[0]))
+  pass('desktop reorder and terminal swap share pane order through the real backend, preserving focus and dividers')
   await layoutHn('kill-server')
 
   await owner.rpc('agent_delete', { agentId: controlsId }); controlsId = null

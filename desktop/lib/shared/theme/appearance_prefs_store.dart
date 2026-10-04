@@ -22,6 +22,8 @@ class AppearancePrefs {
     this.palette = HarnessPalette.graphite,
     this.background = HarnessBackground.plain,
     this.custom = const CustomBackground(),
+    this.paneOpacity = paneOpacityDefault,
+    this.shadeInactivePanes = false,
     this.prompt = const PromptPrefs(),
   });
 
@@ -32,6 +34,22 @@ class AppearancePrefs {
   /// Kept while a built-in background is showing, so switching back is one
   /// click.
   final CustomBackground custom;
+
+  /// How solid the panes are while the background shows through them.
+  final double paneOpacity;
+  static const double paneOpacityDefault = 0.5;
+  static const double paneOpacityMin = 0;
+
+  /// Whether panes outside the current focus receive a neutral-gray veil.
+  final bool shadeInactivePanes;
+
+  /// Whether a running harness tab paints the background at all: Blank has
+  /// nothing to show through.
+  bool get showsBackground => background != HarnessBackground.plain;
+
+  /// The opacity panes paint their own fill at; 1 unless the background is
+  /// showing behind them.
+  double get effectivePaneOpacity => showsBackground ? paneOpacity : 1;
 
   /// Legacy fields, retained for settings compatibility with older builds.
   final String? uiFamily;
@@ -50,6 +68,8 @@ class AppearancePrefs {
     HarnessPalette? palette,
     HarnessBackground? background,
     CustomBackground? custom,
+    double? paneOpacity,
+    bool? shadeInactivePanes,
     PromptPrefs? prompt,
     bool clearUiFamily = false,
   }) => AppearancePrefs(
@@ -58,6 +78,8 @@ class AppearancePrefs {
     palette: palette ?? this.palette,
     background: background ?? this.background,
     custom: custom ?? this.custom,
+    paneOpacity: paneOpacity ?? this.paneOpacity,
+    shadeInactivePanes: shadeInactivePanes ?? this.shadeInactivePanes,
     prompt: prompt ?? this.prompt,
   );
 
@@ -69,11 +91,21 @@ class AppearancePrefs {
       other.palette == palette &&
       other.background == background &&
       other.custom == custom &&
+      other.paneOpacity == paneOpacity &&
+      other.shadeInactivePanes == shadeInactivePanes &&
       other.prompt == prompt;
 
   @override
-  int get hashCode =>
-      Object.hash(uiFamily, uiSize, palette, background, custom, prompt);
+  int get hashCode => Object.hash(
+    uiFamily,
+    uiSize,
+    palette,
+    background,
+    custom,
+    paneOpacity,
+    shadeInactivePanes,
+    prompt,
+  );
 }
 
 /// The user's appearance choices, remembered across launches.
@@ -95,11 +127,16 @@ class AppearancePrefsStore extends ValueNotifier<AppearancePrefs> {
   static const _paletteKey = 'app_color_palette';
   static const _backgroundKey = 'harness_start_background';
   static const _customKey = 'harness_custom_background';
+  // Named for the retired on/off choice; it now holds only pane opacity.
+  static const _paneOpacityKey = 'harness_background_behind_harnesses';
+  static const _shadeInactivePanesKey = 'harness_shade_inactive_panes';
   static const _promptKey = 'workspace_prompt_v1';
   Future<void>? _promptSave;
   Future<void>? _paletteSave;
   Future<void>? _backgroundSave;
   Future<void>? _customSave;
+  Future<void>? _paneOpacitySave;
+  Future<void>? _shadeInactivePanesSave;
 
   final LocalKeyValueStore _storage;
   final Directory? _backgroundsDirectory;
@@ -129,6 +166,8 @@ class AppearancePrefsStore extends ValueNotifier<AppearancePrefs> {
         _paletteKey,
         _backgroundKey,
         _customKey,
+        _paneOpacityKey,
+        _shadeInactivePanesKey,
         _promptKey,
       ]);
       final custom = _customFrom(saved[_customKey]);
@@ -143,6 +182,8 @@ class AppearancePrefsStore extends ValueNotifier<AppearancePrefs> {
             ? HarnessBackground.plain
             : background,
         custom: custom,
+        paneOpacity: _paneOpacityFrom(saved[_paneOpacityKey]),
+        shadeInactivePanes: saved[_shadeInactivePanesKey] == 'true',
         prompt: _promptFrom(saved[_promptKey]),
       );
     } catch (_) {
@@ -250,6 +291,69 @@ class AppearancePrefsStore extends ValueNotifier<AppearancePrefs> {
     }
   }
 
+  /// Pane opacity, clamped to [AppearancePrefs.paneOpacityMin]…1 rather than
+  /// rejected.
+  Future<void> setPaneOpacity(double opacity) {
+    final next = value.copyWith(paneOpacity: _clampOpacity(opacity));
+    if (next == value) return _paneOpacitySave ?? Future.value();
+    value = next;
+    return _paneOpacitySave ??= _savePaneOpacity();
+  }
+
+  Future<void> _savePaneOpacity() async {
+    try {
+      while (true) {
+        final opacity = value.paneOpacity;
+        await _storage.write(_paneOpacityKey, jsonEncode({'opacity': opacity}));
+        if (value.paneOpacity == opacity) break;
+      }
+    } catch (_) {
+      // Keep the choice for this run if storage is unavailable.
+    } finally {
+      _paneOpacitySave = null;
+    }
+  }
+
+  /// Apply immediately and serialize writes so the final choice survives.
+  Future<void> setShadeInactivePanes(bool enabled) {
+    if (value.shadeInactivePanes == enabled) {
+      return _shadeInactivePanesSave ?? Future.value();
+    }
+    value = value.copyWith(shadeInactivePanes: enabled);
+    return _shadeInactivePanesSave ??= _saveShadeInactivePanes();
+  }
+
+  Future<void> _saveShadeInactivePanes() async {
+    try {
+      while (true) {
+        final enabled = value.shadeInactivePanes;
+        await _storage.write(_shadeInactivePanesKey, enabled.toString());
+        if (value.shadeInactivePanes == enabled) break;
+      }
+    } catch (_) {
+      // Keep the choice for this run if storage is unavailable.
+    } finally {
+      _shadeInactivePanesSave = null;
+    }
+  }
+
+  /// Older builds also saved an `on` flag here; it is ignored.
+  static double _paneOpacityFrom(String? raw) {
+    try {
+      final json = raw == null ? null : jsonDecode(raw);
+      final opacity = json is Map ? json['opacity'] : null;
+      return opacity is num
+          ? _clampOpacity(opacity.toDouble())
+          : AppearancePrefs.paneOpacityDefault;
+    } catch (_) {
+      return AppearancePrefs.paneOpacityDefault;
+    }
+  }
+
+  static double _clampOpacity(double opacity) => opacity.isFinite
+      ? opacity.clamp(AppearancePrefs.paneOpacityMin, 1.0)
+      : AppearancePrefs.paneOpacityDefault;
+
   static CustomBackground _customFrom(String? raw) {
     try {
       return CustomBackground.fromJson(raw == null ? null : jsonDecode(raw));
@@ -324,6 +428,8 @@ class AppearancePrefsStore extends ValueNotifier<AppearancePrefs> {
     await _paletteSave;
     await _backgroundSave;
     await _customSave;
+    await _paneOpacitySave;
+    await _shadeInactivePanesSave;
     await _promptSave;
     try {
       await _storage.delete(_familyKey);
@@ -331,6 +437,8 @@ class AppearancePrefsStore extends ValueNotifier<AppearancePrefs> {
       await _storage.delete(_paletteKey);
       await _storage.delete(_backgroundKey);
       await _storage.delete(_customKey);
+      await _storage.delete(_paneOpacityKey);
+      await _storage.delete(_shadeInactivePanesKey);
       await _storage.delete(_promptKey);
     } catch (_) {
       // See above.

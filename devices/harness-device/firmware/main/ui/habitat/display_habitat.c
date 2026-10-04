@@ -1,3 +1,4 @@
+#include "illustrated.h"
 // Direct text -> RGB565 -> QSPI DMA. No LVGL initialization or object pool.
 #include "runtime.h"
 #include "perf_bench.h"
@@ -45,6 +46,8 @@ static uint16_t *pixels[2];
 static ht_scene_t scenes[2];
 static bool painted;
 static atomic_bool asleep, force_frame;
+// Panel IO belongs to the renderer, including brightness changes.
+static atomic_uint requested_brightness = 40;
 static atomic_uint last_activity;
 static int64_t input_us;
 static portMUX_TYPE stats_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -242,7 +245,9 @@ void display_wake(void)
 }
 void display_set_brightness(uint8_t value)
 {
-    (void)value; /* Palette brightness is applied once per scene, not per pixel. */
+    unsigned percent = ((unsigned)value * 100 + 127) / 255;
+    atomic_store(&requested_brightness, percent < 8 ? 8 : percent);
+    habitat_render_notify();
 }
 static void wait_dma(void)
 {
@@ -361,6 +366,7 @@ static void render_task(void *arg)
     ESP_ERROR_CHECK(esp_timer_start_periodic(render_guard, 1000000));
     int front = 0;
     bool panel_on = true;
+    unsigned applied_brightness = 101;
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
 #ifdef DEVICE_RENDER_FAULT
@@ -386,6 +392,13 @@ static void render_task(void *arg)
         ht_perf_tag_t tag = octopus_perf_capture(&scenes[front ^ 1], fresh);
 #endif
         display_unlock();
+        unsigned brightness = atomic_load(&requested_brightness);
+        if (brightness != applied_brightness) {
+            render_progress(RENDER_POWER);
+            ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, brightness));
+            applied_brightness = brightness;
+            ESP_LOGI("habitat", "OLED brightness %u%%", brightness);
+        }
         bool on = !display_is_asleep();
         if (on != panel_on) {
             render_progress(RENDER_POWER);
@@ -403,6 +416,7 @@ static void render_task(void *arg)
 #ifdef DEVICE_OCTOPUS_BENCH
             int64_t damage_started = esp_timer_get_time();
 #endif
+            ht_illustrated_prepare(&scenes[front ^ 1]);
             ht_damage(painted && !force ? &scenes[front] : NULL, &scenes[front ^ 1], &damage);
 #ifdef DEVICE_OCTOPUS_BENCH
             uint32_t damage_us = (uint32_t)(esp_timer_get_time() - damage_started);
@@ -437,6 +451,7 @@ static void render_task(void *arg)
 }
 void display_init(void)
 {
+    ht_illustrated_init();
     model_lock = xSemaphoreCreateRecursiveMutex();
     dma_done = xSemaphoreCreateBinary();
     assert(model_lock && dma_done);
@@ -467,7 +482,9 @@ void display_init(void)
         assert(pixels[i]);
     }
     display_bump_activity();
-    assert(xTaskCreatePinnedToCore(render_task, "habitat_render", 6144, NULL, 5, &renderer, 1) ==
+    // The ROM inflater keeps its Huffman tables on the calling task's stack.
+    // Illustrated companions can become active at any time over the USB link.
+    assert(xTaskCreatePinnedToCore(render_task, "habitat_render", 24576, NULL, 5, &renderer, 1) ==
            pdPASS);
     touch_init();
     ESP_LOGI("habitat", "direct C renderer on a %dpx face: two %d-byte internal DMA buffers over %s",

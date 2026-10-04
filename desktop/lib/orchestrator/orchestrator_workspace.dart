@@ -1,8 +1,8 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/widgets/app_dialog.dart';
@@ -121,8 +121,8 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
           Row(
             children: [
               Icon(
-                LucideIcons.sparkles,
-                size: 17,
+                AppIcons.sparkles,
+                size: 16,
                 color: grid.AppPalette.swarmAccent,
               ),
               const SizedBox(width: 10),
@@ -145,7 +145,7 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
                   child: const Text('Stop'),
                 ),
               AppIconButton(
-                icon: LucideIcons.plus,
+                icon: AppIcons.plus,
                 tooltip: 'New project',
                 onPressed: () =>
                     showOrchestratorLauncher(context, widget.notifier),
@@ -212,7 +212,7 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  LucideIcons.layers,
+                  AppIcons.layers,
                   color: grid.AppPalette.textSecondary,
                   size: 28,
                 ),
@@ -318,9 +318,7 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  task.state == 'succeeded'
-                      ? LucideIcons.check
-                      : LucideIcons.layers,
+                  task.state == 'succeeded' ? AppIcons.check : AppIcons.layers,
                   size: 24,
                   color: grid.AppPalette.textSecondary,
                 ),
@@ -385,7 +383,7 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
                     ].contains(task.state) &&
                     model.state == 'active')
                   AppIconButton(
-                    icon: LucideIcons.rotateCcw,
+                    icon: AppIcons.rotateCcw,
                     tooltip: 'Retry task',
                     onPressed: model.operating
                         ? null
@@ -393,7 +391,7 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
                   ),
                 if (task.agentId != null)
                   AppIconButton(
-                    icon: LucideIcons.terminal,
+                    icon: AppIcons.terminal,
                     tooltip: 'Inspect ${task.title}',
                     onPressed: () => _inspect(task.agentId!),
                   ),
@@ -434,7 +432,7 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
               const Expanded(child: Text('Director')),
               if (model.directorId != null)
                 AppIconButton(
-                  icon: LucideIcons.terminal,
+                  icon: AppIcons.terminal,
                   tooltip: 'Inspect director',
                   onPressed: () => _inspect(model.directorId!),
                 ),
@@ -560,15 +558,17 @@ class _OrchestratorWorkspaceState extends State<OrchestratorWorkspace> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      Text(
-                        'Shift ↵ for a new line',
-                        style: grid.AppType.monoMeta(
-                          color: grid.AppPalette.textSecondary,
+                      Flexible(
+                        child: Text(
+                          'Shift ↵ for a new line',
+                          style: grid.AppType.monoMeta(
+                            color: grid.AppPalette.textSecondary,
+                          ),
                         ),
                       ),
                       const SizedBox(width: 10),
                       AppIconButton(
-                        icon: LucideIcons.arrowUp,
+                        icon: AppIcons.arrowUp,
                         tooltip: 'Send to director',
                         onPressed: !model.canChat || model.sending
                             ? null

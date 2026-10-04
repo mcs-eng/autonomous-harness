@@ -45,7 +45,7 @@ class ChannelConnection extends WsConn {
 void main() {
   for (final shared in [true, false]) {
     test(
-      'swarm reads use an owned available gateway when preferred is ${shared ? 'shared' : 'offline'}',
+      'tab reads use an owned available gateway when preferred is ${shared ? 'shared' : 'offline'}',
       () async {
         final connection = ChannelConnection();
         final gateways = <String>[];
@@ -86,7 +86,7 @@ void main() {
     );
   }
 
-  testWidgets('Cmd+Shift+A does not start cross-swarm work', (tester) async {
+  testWidgets('Cmd+Shift+A does not start cross-tab work', (tester) async {
     final connection = ChannelConnection();
     final app = createApp(connectionForTest: (_) => connection, connected: true)
       ..status = AppStatus.authenticated;

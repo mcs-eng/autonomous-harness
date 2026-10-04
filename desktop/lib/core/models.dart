@@ -1,8 +1,9 @@
 /// Data models mirroring the backend/web types.
 library;
 
-import 'package:flutter/foundation.dart' show immutable;
+import 'package:flutter/foundation.dart' show immutable, listEquals;
 
+import 'agent_activity.dart';
 import 'runtime_model_name.dart';
 import 'agent_git_context.dart';
 
@@ -289,6 +290,7 @@ class AgentOutputStats {
 }
 
 class Agent {
+  final AgentActivity? activity;
   final String id;
   final String? sessionId;
   final String name;
@@ -341,24 +343,16 @@ class Agent {
 
   /// The CLI's transcript/hook activity time, not its registry refresh time.
   final DateTime? lastActivityAt;
+  final DateTime? createdAt;
+  final bool closeSupported;
+  final String? closePlanState;
+  final String? closePlanDetail;
 
   /// When a person last opened or focused this harness in ANY client, as the
   /// owning daemon recorded it (`lastOpenedAt`, stamped by `agent_update
   /// {opened: true}`). Null when never opened, or from a daemon that predates
   /// the field.
   final DateTime? lastOpenedAt;
-
-  /// What harness lists sort by: the later of [lastActivityAt] and
-  /// [lastOpenedAt], so a harness someone just looked at rises even while it
-  /// is quiet. The order is global — every client and machine reads the same
-  /// daemon stamps.
-  DateTime? get lastUsedAt {
-    final activity = lastActivityAt;
-    final opened = lastOpenedAt;
-    if (activity == null) return opened;
-    if (opened == null) return activity;
-    return opened.isAfter(activity) ? opened : activity;
-  }
 
   /// Cached conversation usage reported by this agent's owning machine.
   final int? tokensUsed;
@@ -429,6 +423,7 @@ class Agent {
   final String? namedAgent;
 
   const Agent({
+    this.activity,
     required this.id,
     this.sessionId,
     required this.name,
@@ -449,6 +444,10 @@ class Agent {
     this.project,
     this.gitContext,
     this.lastActivityAt,
+    this.createdAt,
+    this.closeSupported = false,
+    this.closePlanState,
+    this.closePlanDetail,
     this.lastOpenedAt,
     this.tokensUsed,
     this.tokensUpdatedAt,
@@ -566,6 +565,7 @@ class Agent {
       engine: _safeEngine(j['engine']),
     );
     return Agent(
+      activity: AgentActivity.fromJson(j['activity']),
       id: j['id'] as String,
       sessionId: _safeLabel(j['sessionId']),
       name: j['name'] as String? ?? 'harness',
@@ -587,6 +587,18 @@ class Agent {
       gitContext: AgentGitContext.fromJson(j['gitContext']),
       lastActivityAt: j['updatedAt'] is String
           ? DateTime.tryParse(j['updatedAt'] as String)
+          : null,
+      createdAt: j['createdAt'] is String
+          ? DateTime.tryParse(j['createdAt'] as String)
+          : null,
+      closeSupported: j['closeSupported'] == true,
+      closePlanState:
+          j['closePlan'] is Map &&
+              const {'waiting', 'failed'}.contains(j['closePlan']['state'])
+          ? j['closePlan']['state'] as String
+          : null,
+      closePlanDetail: j['closePlan'] is Map
+          ? _safeDetail(j['closePlan']['detail'])
           : null,
       lastOpenedAt: j['lastOpenedAt'] is String
           ? DateTime.tryParse(j['lastOpenedAt'] as String)
@@ -631,7 +643,9 @@ class Agent {
     String? status,
     bool? terminalAvailable,
     DateTime? lastOpenedAt,
+    bool clearClosePlan = false,
   }) => Agent(
+    activity: activity,
     id: id,
     sessionId: sessionId,
     name: name ?? this.name,
@@ -652,6 +666,10 @@ class Agent {
     project: project,
     gitContext: gitContext ?? this.gitContext,
     lastActivityAt: lastActivityAt,
+    createdAt: createdAt,
+    closeSupported: closeSupported,
+    closePlanState: clearClosePlan ? null : closePlanState,
+    closePlanDetail: clearClosePlan ? null : closePlanDetail,
     lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
     tokensUsed: tokensUsed,
     tokensUpdatedAt: tokensUpdatedAt,
@@ -785,6 +803,17 @@ class AgentPhase {
   final AgentPhaseState state;
   final String? artifact;
 
+  @override
+  bool operator ==(Object other) =>
+      other is AgentPhase &&
+      id == other.id &&
+      name == other.name &&
+      state == other.state &&
+      artifact == other.artifact;
+
+  @override
+  int get hashCode => Object.hash(id, name, state, artifact);
+
   static AgentPhase? fromJson(Object? raw) {
     if (raw is! Map) return null;
     final name = AgentVerdict._safeText(raw['name'], 40);
@@ -890,11 +919,19 @@ class AgentVerdict {
       other.errors == errors &&
       other.warnings == warnings &&
       other.artifact == artifact &&
+      listEquals(other.phases, phases) &&
       other.updatedAt == updatedAt;
 
   @override
-  int get hashCode =>
-      Object.hash(ready, summary, errors, warnings, artifact, updatedAt);
+  int get hashCode => Object.hash(
+    ready,
+    summary,
+    errors,
+    warnings,
+    artifact,
+    Object.hashAll(phases),
+    updatedAt,
+  );
 }
 
 /// What the daemon answered when asked where a typed task belongs (⌘B).

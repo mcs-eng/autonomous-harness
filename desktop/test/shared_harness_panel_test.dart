@@ -216,7 +216,7 @@ void main() {
         await settleNetwork(() => find.text('Live').evaluate().isNotEmpty);
         expect(requests.first['payload'], containsPair('shareId', 'grant'));
         expect(find.text('View only'), findsOneWidget);
-        await tester.tap(find.text('[ Comments ]'));
+        await tester.tap(find.widgetWithText(TextButton, 'Comments'));
         await settleNetwork(
           () => find.byKey(const Key('comment-input')).evaluate().isNotEmpty,
         );
@@ -224,9 +224,9 @@ void main() {
           find.byKey(const Key('comment-input')),
           'Keep this draft',
         );
-        await tester.tap(find.text('[ Watch ]'));
+        await tester.tap(find.widgetWithText(TextButton, 'Watch'));
         await tester.pump();
-        await tester.tap(find.text('[ Comments ]'));
+        await tester.tap(find.widgetWithText(TextButton, 'Comments'));
         await tester.pump();
         expect(
           tester
@@ -235,7 +235,7 @@ void main() {
               .text,
           'Keep this draft',
         );
-        await tester.tap(find.text('[ Watch ]'));
+        await tester.tap(find.widgetWithText(TextButton, 'Watch'));
         await tester.pump();
         // Receiving the request on the server does not mean its reply has
         // reached the UI yet. Wait for the response we are about to inspect.

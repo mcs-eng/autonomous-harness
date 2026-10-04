@@ -33,7 +33,8 @@ void main() {
       'swarm.new',
       'harnesses.list',
       'navigation.needs_input',
-      'pane.split_right',
+      'pane.split_down',
+      'pane.close',
       'pane.zoom',
       'pane.layout',
       'keyboard.help',
@@ -43,9 +44,14 @@ void main() {
     }
   });
 
+  test('sharing and one split, to the right, have a row', () {
+    final all = _commands(runnableWebMenu((_) => true, compact: true));
+    expect(all, containsAll(['agent.share', 'pane.split_right']));
+  });
+
   test('rows that cannot run, and groups left empty, are not drawn', () {
     final menu = runnableWebMenu(
-      (command) => command != 'agent.share' && command != 'pane.close',
+      (command) => !command.startsWith('pane.') && command != 'agent.share',
       compact: false,
     );
     expect(menu, hasLength(kWebMenuGroups.length - 1));

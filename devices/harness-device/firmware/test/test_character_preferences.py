@@ -42,8 +42,14 @@ static int nvs_open(const char *ns, int mode, nvs_handle_t *h) {
     if (fail_open) return -1;
     opens++; *h = 123; writable = mode == NVS_READWRITE; staged = stored; return ESP_OK;
 }
+static bool bright_present; static uint8_t bright_stored;
 static int nvs_get_u8(nvs_handle_t h, const char *key, uint8_t *value) {
-    assert(h == 123 && !strcmp(key, "habitat_char"));
+    assert(h == 123);
+    if (!strcmp(key, "bright")) {
+        if (!bright_present) return -1;
+        *value = bright_stored; return ESP_OK;
+    }
+    assert(!strcmp(key, "habitat_char"));
     if (!present || fail_get) return -1;
     *value = stored; return ESP_OK;
 }
@@ -59,11 +65,13 @@ static int nvs_commit(nvs_handle_t h) {
 }
 static void nvs_close(nvs_handle_t h) { assert(h == 123); closes++; }
 static ht_character_t character;
+static ht_character_id_t device_skin, desktop_companion;
 static ht_character_caption_t home_caption;
 static void ui_cable_toast(const char *message) {
     assert(!strcmp(message, "Character changed; saving failed.")); errors++;
 }
 '''
+code += function('config_load_brightness', config) + '\n'
 code += function('config_load_habitat_character', config) + '\n'
 code += function('config_save_habitat_character', config) + '\n'
 code += 'static void boot(void) {\n' + load + '}\n'
@@ -76,14 +84,19 @@ int main(void) {
 #ifdef DEVICE_DEFAULT_CHARACTER_TUX
     assert(ht_character_default() == HT_CHARACTER_TUX);
 #else
-    assert(ht_character_default() == HT_CHARACTER_TIM);
+    // Focus is what a dial shows before anybody has chosen (owner's decision, 2026-09-30).
+    assert(ht_character_default() == HT_CHARACTER_FOCUS);
 #endif
+    // And at 80%: no "bright" key is 204 (80 of 100 once the UI rounds it), a saved one is kept exactly.
+    bright_present = false; assert(config_load_brightness() == 204 && (204 * 100 + 127) / 255 == 80);
+    bright_present = true; bright_stored = 102; assert(config_load_brightness() == 102);
+    bright_present = false;
     home_caption.initialized=true;
     boot(); assert(character.id == ht_character_default() && !home_caption.initialized);
     assert(!writes && !commits); // Boot cannot overwrite a previous preference.
     for (unsigned id = 0; id <= 255; id++) {
         save(id); assert(stored == id && !errors);
-        boot(); assert(character.id == (id < HT_CHARACTER_COUNT ? id : ht_character_default()));
+        boot(); assert(character.id == (id <= HT_CHARACTER_FOCUS ? id : ht_character_default()));
     }
     save(HT_CHARACTER_TUX); boot(); assert(character.id == HT_CHARACTER_TUX);
     save(HT_CHARACTER_TIM); boot(); assert(character.id == HT_CHARACTER_TIM);
@@ -103,7 +116,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='harness-character-pref-') as directory:
     out = Path(directory)
     (out / 'test.c').write_text(code)
-    sources = ['character.c', 'character_motion.c', 'character_layout.c', 'tux.c', 'focus.c',
+    sources = ['character.c', 'illustrated.c', 'character_motion.c', 'character_layout.c', 'tux.c', 'focus.c', 'lvgl_fonts.c', 'lvgl_icons.c', 'focus_marks.c', 'focus_faces.c', 'pets.c',
                'octopus.c', 'octopus_font.c', 'ascii_clip.c', 'terminal.c', 'fonts.c']
     for flags in ([], ['-DDEVICE_DEFAULT_CHARACTER_TUX=1']):
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',

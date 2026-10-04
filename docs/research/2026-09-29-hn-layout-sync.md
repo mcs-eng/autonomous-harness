@@ -61,3 +61,26 @@ The regression covers modern and legacy schemas, read-only mode, and real two-pa
 The isolated real daemon/backend test also drops native geometry as desktop serialization does,
 then verifies both preservation and a deliberate subsequent remote change. All 148 Rust tests,
 the layout suite, pane UI, local shell lifecycle, complete e2e and real-stack checks pass locally.
+
+## Shared pane order
+
+A desktop drag can change `tabs[].panes` without changing membership or geometry. hn previously
+compared only membership, so those reorders were ignored; insertions were appended after existing
+panes. A saved native layout could also retain an obsolete order through its numeric pane IDs,
+which are local to an hn server rather than portable harness identities.
+
+The shared pane sequence now defines placement in screen order: across the top, then down.
+Reordering an existing window relabels its layout slots while preserving unequal dividers and
+focused harness identity. Insertions use their shared index. Loading native geometry retains its
+split sizes but uses the desk identities for placement. Local swaps, rotations and mirrored
+layouts publish the matching `pane.move` operations with their geometry. Unchanged desk snapshots
+and replies arriving before queued keyboard edits are sent do not revert those edits.
+
+Five unit regressions cover live reorders, combined order/layout changes, stale native IDs,
+queued local rotation and the difference between spatial order and tree traversal. The real-PTY
+layout fixture also checks desktop-style moves, insertion at the front, focus and divider
+preservation, keyboard rotation and swaps, fresh clients, legacy schemas and read-only mode.
+
+The isolated real-stack test also passes desktop-to-hn reordering and hn-to-desktop swaps
+through the real daemon/backend on one Mac, checking pane identities, focused harness and
+unequal divider preservation. OAuth and model execution remain fixtures.

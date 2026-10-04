@@ -1,6 +1,6 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../logging/log_file.dart';
 import '../../logging/log_stream.dart';
@@ -124,8 +124,8 @@ class _DebugSectionState extends State<DebugSection> {
                             'Search messages, categories, errors',
                           ).copyWith(
                             prefixIcon: Icon(
-                              LucideIcons.search,
-                              size: 15,
+                              AppIcons.search,
+                              size: 16,
                               color: AppPalette.textFaint,
                             ),
                             prefixIconConstraints: const BoxConstraints(
@@ -215,7 +215,7 @@ class _DebugSectionState extends State<DebugSection> {
     // so the search box stays above and the user has a way back out.
     if (nothingLogged) {
       return const EmptyState(
-        icon: LucideIcons.terminal300,
+        icon: AppIcons.terminal,
         title: 'Nothing logged yet',
         message:
             'Use the app and every command, socket frame and request it makes '

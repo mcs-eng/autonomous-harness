@@ -5,6 +5,7 @@ Run after a release build. Optional HN_NATIVE_TEST_BINARY, HN_NATIVE_TEST_PORT
 (19430..19439), HN_NATIVE_TEST_PREFIX (hnt19fixnative...). No daemon is started.
 """
 import fcntl
+from collections import deque
 import os
 from pathlib import Path
 import pty
@@ -43,6 +44,7 @@ CONF.write_text('set -g default-shell /bin/sh\nset -g @hn-look tmux\n'
                 'set -g automatic-rename off\nset -g status off\n'
                 'set -g pane-border-status off\n')
 clients = []
+observations = deque(maxlen=4)
 
 
 def argv(kind, *args):
@@ -60,6 +62,7 @@ def cli(kind, *args, check=True):
 
 def same(*args):
     h, t = (cli(kind, *args, check=False) for kind in ('hn', 'tmux'))
+    observations.append((args, (h.returncode, h.stdout, h.stderr), (t.returncode, t.stdout, t.stderr)))
     assert (h.returncode, h.stdout, h.stderr) == (t.returncode, t.stdout, t.stderr), (args, h, t)
     return h.stdout.strip()
 
@@ -71,14 +74,15 @@ def both(*args):
 
 def wait(fn, label, seconds=8):
     end = time.monotonic() + seconds
+    last_error = None
     while time.monotonic() < end:
         try:
             if answer := fn():
                 return answer
-        except (AssertionError, subprocess.TimeoutExpired):
-            pass
+        except (AssertionError, subprocess.TimeoutExpired) as error:
+            last_error = repr(error)
         time.sleep(.04)
-    raise AssertionError(label)
+    raise AssertionError(f'{label}; last error: {last_error}; recent hn/tmux comparisons: {list(observations)!r}')
 
 
 def owned():
@@ -120,7 +124,11 @@ class Terminal:
                 self.data.extend(chunk)
 
     def write(self, text):
-        os.write(self.fd, text)
+        pending = memoryview(text)
+        while pending:
+            written = os.write(self.fd, pending)
+            assert written > 0, 'PTY input closed'
+            pending = pending[written:]
 
     def stop(self):
         if self.proc.poll() is None:
@@ -135,6 +143,81 @@ class Terminal:
 def stop_servers():
     both('kill-server')
     wait(lambda: not owned(), 'native processes cleaned')
+
+
+def idle_input():
+    """Exercise the real input fd after idle, with byte-exact delivery to a raw PTY."""
+    program = BASE / 'record-input.py'
+    program.write_text('''import os, signal, sys, tty
+from pathlib import Path
+tty.setraw(0)
+def resized(*_):
+    size = os.get_terminal_size(0)
+    Path(sys.argv[2]).write_text(f"{size.columns}x{size.lines}")
+signal.signal(signal.SIGWINCH, resized)
+resized()
+with open(sys.argv[1], "ab", buffering=0) as output:
+    os.write(1, b"\\x1b[?2004hINPUT_READY")
+    while chunk := os.read(0, 65536):
+        output.write(chunk)
+''')
+    for kind in ('hn', 'tmux'):
+        recorded = BASE / f'{kind}-input-bytes'
+        size_file = BASE / f'{kind}-input-size'
+        ui = Terminal(kind, 'new-session', '-s', 'input',
+                      shlex.join(['python3', str(program), str(recorded), str(size_file)]))
+        wait(lambda: b'INPUT_READY' in ui.data, f'{kind} raw input program ready')
+        # tmux also applies escape-time (10 ms by default) to partial UTF-8.
+        # Allow the deliberate 100 ms fragmentation below in the reference.
+        if kind == 'tmux':
+            cli(kind, 'set-option', '-s', 'escape-time', '500')
+        expected = bytearray()
+
+        def received():
+            return recorded.read_bytes() if recorded.exists() else b''
+
+        def send(parts, result):
+            for chunk, delay in parts:
+                ui.write(chunk)
+                if delay:
+                    time.sleep(delay)
+            expected.extend(result)
+            wait(lambda: received() == expected, f'{kind} byte-exact input {result[:30]!r}')
+
+        time.sleep(.2)
+        send([(b'after-idle', 0)], b'after-idle')
+        send([(b'\x1b', 0)], b'\x1b')
+        send([(b'\x1bP', 0)], b'\x1bP')
+        send([(b'\xc3', .1), (b'\xa9', 0)], 'é'.encode())
+        send([(b'\x1b[', .1), (b'A', 0)], b'\x1b[A')
+        # Use terminal return bytes; this test isolates buffering/timing from
+        # the client's existing normalization of clipboard line endings.
+        paste = 'first line\rsecond 🐯'.encode()
+        send([(b'\x1b[200~' + paste[:5], .1), (paste[5:] + b'\x1b[201~', 0)],
+             b'\x1b[200~' + paste + b'\x1b[201~')
+        # A full input buffer may end with Escape: without a deadline that final
+        # key could remain stuck until somebody types again.
+        burst = b'x' * 8191 + b'\x1b'
+        send([(burst, 0)], burst)
+        print(f'PASS {kind} idle input: Escape, Alt-P, split UTF-8/arrow/paste and full-buffer typeahead', flush=True)
+
+        time.sleep(.15)
+        fcntl.ioctl(ui.fd, termios.TIOCSWINSZ, struct.pack('HHHH', 27, 91, 0, 0))
+        wait(lambda: size_file.read_text() == '91x27', f'{kind} resize with no keyboard activity')
+        os.kill(ui.proc.pid, signal.SIGSTOP)
+        try:
+            time.sleep(.1)
+        finally:
+            os.kill(ui.proc.pid, signal.SIGCONT)
+        send([(b'after-resume', 0)], b'after-resume')
+        time.sleep(.15)
+        # A server command ends the client while its input thread has nothing
+        # to read. A blocking wait must not prevent shutdown.
+        cli(kind, 'kill-server')
+        ui.proc.wait(timeout=4)
+        ui.stop()
+        assert received() == expected
+        print(f'PASS {kind} idle input: resize, process resume and shutdown without another key', flush=True)
 
 
 def async_creation():
@@ -358,7 +441,14 @@ try:
     both('split-window', '-d', '-t', 'work:4', 'sleep 30')
     first_id = same('list-panes', '-t', 'work:4', '-F', '#{pane_id}').splitlines()[0]
     both('select-window', '-t', 'work:0')
-    both('respawn-window', '-k', '-t', 'work:4', 'printf "WHOLE_WINDOW\\n"; exit 9')
+    # Check whole-window replacement after the new shell is ready. Immediate
+    # exit here races the reference tmux's old-child signal reaping; rapid exits
+    # have their own paired coverage below.
+    both('respawn-window', '-k', '-t', 'work:4', 'printf "WHOLE_WINDOW\\n"; read -r status; exit 9')
+    wait(lambda: same('list-panes', '-t', 'work:4', '-F', '#{pane_id}:#{pane_dead}') == first_id + ':0'
+         and all('WHOLE_WINDOW' in cli(kind, 'capture-pane', '-p', '-t', 'work:4').stdout
+                 for kind in ('hn', 'tmux')), 'whole-window replacement ready')
+    both('send-keys', '-t', 'work:4', '9', 'Enter')
     wait(lambda: same('list-panes', '-t', 'work:4', '-F', '#{pane_id}:#{pane_dead}:#{pane_dead_status}') == first_id + ':1:9', 'whole-window respawn keeps only the first pane')
     assert same('display', '-p', '-t', 'work', '#{window_index}') == '4'
     assert 'WHOLE_WINDOW' in same('display', '-p', '-t', 'work:4', '#{pane_start_command}')
@@ -384,6 +474,7 @@ try:
     print('PASS retained exits/signals, hooks, history, crash recovery and respawn', flush=True)
 
     async_creation()
+    idle_input()
 
     for delay in (0, .1):
         for kind in ('hn', 'tmux'):

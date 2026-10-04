@@ -68,6 +68,26 @@ export interface RuntimeState {
   observedAt: number | null
 }
 
+/** The runtime axes a transcript record can set — see `RuntimeProfileManager.transcriptFields`. */
+export type RuntimeField = 'model' | 'effort' | 'mode'
+
+/** The session `transcriptFields` reads as — never a real one, so no model-switch control applies.
+ *  No engine session id is empty or starts with NUL. */
+const FIELD_PROBE = '\u0000transcript-fields'
+
+const blankState = (): RuntimeState => ({ model: null, effort: null, mode: 'unknown', cliVersion: null, observedAt: null })
+
+/** Where a session's runtime state starts before its transcript is read. */
+function freshState(session: RegisteredSession): RuntimeState {
+  return {
+    ...blankState(),
+    // Registries written by older builds can hold a non-string model; treat it as unknown instead of
+    // letting it reach claudeAliasForModel and abort startup.
+    model: typeof session.model === 'string' ? session.model : null,
+    cliVersion: session.cliVersion,
+  }
+}
+
 export interface CursorModelTarget {
   rawId: string
   modelKey: string
@@ -585,6 +605,51 @@ async function claudeConfiguredEffort(session: RegisteredSession): Promise<strin
   return configured ?? 'auto'
 }
 
+/** The first-run banner names the model before Claude writes a conversation transcript. */
+function claudeStartupBanner(pane: string): { model: string; effort?: string } | null {
+  const lines = pane.split('\n')
+  const start = lines.findLastIndex(line => /\bClaude Code v\d+\.\d+/.test(line))
+  if (start < 0) return null
+  const banner = lines.slice(start, start + 4).join('\n')
+  const match = /\b(Fable|Opus|Sonnet|Haiku)\s+(\d+(?:\.\d+)*)(\s+\(1M context\))?(?:\s+with\s+(low|medium|high|xhigh|max|ultracode)\s+effort)?\s*·\s*Claude\s+(?:Max|Pro|Team|Enterprise)\b/i.exec(banner)
+  if (!match) return null
+  return {
+    model: `claude-${match[1].toLowerCase()}-${match[2].replace(/\./g, '-')}${match[3] ? '[1m]' : ''}`,
+    ...(match[4] ? { effort: match[4].toLowerCase() } : {}),
+  }
+}
+
+/**
+ * Read-only evidence for a ready, pre-conversation CLI. Callers must scope this to the live process;
+ * it deliberately never enters RuntimeProfileManager's conversation cache under an empty session ID.
+ */
+export async function readStartupProfile(session: RegisteredSession, pane: string): Promise<string | null> {
+  if (session.sessionId || !session.active || session.grid || session.gridLaunch || session.gateway) return null
+  pane = stripAnsi(pane).trimEnd()
+  // A banner above an onboarding dialog is not a ready agent. Do not accept a numbered menu cursor.
+  if (/trust this (?:folder|directory)|trust the files|sign in|log in|select a login|choose.*theme/i.test(pane)) return null
+  if (session.engine === 'claude') {
+    const banner = claudeStartupBanner(pane)
+    if (!banner || !/^\s*❯\s*(?:Try\s+[^\n]*)?$/mu.test(pane)) return null
+    // Slash commands can change the selection before a first conversational turn binds the session.
+    const change = [...pane.matchAll(/(?:^|\n)\s*(?:⎿\s*)?Set model to\s+([^\n]+)/gi)].at(-1)
+    const model = change ? normalizeClaudeDisplay(change[1]) : banner.model
+    if (!model) return null
+    const effort = banner.effort ?? await claudeConfiguredEffort(session)
+    return encodeRuntimeProfile({ sessionId: session.agentId, engine: 'claude',
+      model: claudeAliasForModel(model) ?? model, effort })
+  }
+  if (session.engine === 'codex') {
+    if (!/\bOpenAI Codex\b/.test(pane) || !/^\s*›(?!\s*\d+\.)[^\n]*$/mu.test(pane)) return null
+    const matches = [...pane.matchAll(/\b(gpt-[a-z0-9][a-z0-9._-]*)\s+(low|medium|high|xhigh|max|ultra|default)\s*[·│]/gi)]
+    const match = matches.at(-1)
+    if (!match) return null
+    return encodeRuntimeProfile({ sessionId: session.agentId, engine: 'codex', model: match[1].toLowerCase(),
+      effort: match[2].toLowerCase() === 'default' ? 'auto' : match[2].toLowerCase() })
+  }
+  return null
+}
+
 function addOption(
   output: RuntimeModelOption[],
   seen: Set<string>,
@@ -627,16 +692,32 @@ export class RuntimeProfileManager {
 
   hydrate(session: RegisteredSession, rawLines: string[]): void {
     if (this.unbound(session.sessionId)) return
-    this.states.set(session.sessionId, {
-      // Registries written by older builds can hold a non-string model; treat it as unknown instead of
-      // letting it reach claudeAliasForModel and abort startup.
-      model: typeof session.model === 'string' ? session.model : null,
-      effort: null,
-      mode: 'unknown',
-      cliVersion: session.cliVersion,
-      observedAt: null,
-    })
+    this.states.set(session.sessionId, freshState(session))
     for (const line of rawLines) this.ingest(session, line, true)
+  }
+
+  /**
+   * `hydrate`, for a Claude Code or Codex transcript streamed in rather than loaded
+   * (lib/attachTranscript.ts): records are read into a staged state, and what the session shows only
+   * changes at `commit` — never an empty chip while the read runs, never a live record overwritten by
+   * an older one read after it.
+   */
+  beginHydrate(session: RegisteredSession): { ingest(rawLine: string): void; commit(): void } {
+    const staged = freshState(session)
+    return {
+      ingest: (rawLine) => {
+        let raw: Record<string, unknown> | null
+        try { raw = record(JSON.parse(rawLine)) } catch { return }
+        if (!raw) return
+        if (session.engine === 'codex') this.ingestCodex(session, raw, staged)
+        else this.ingestClaude(session, raw, staged)
+      },
+      commit: () => {
+        if (this.unbound(session.sessionId)) return
+        this.states.set(session.sessionId, staged)
+        this.wake(session.sessionId)
+      },
+    }
   }
 
   ingest(session: RegisteredSession, rawLine: string, silent = false): boolean {
@@ -661,6 +742,31 @@ export class RuntimeProfileManager {
     this.wake(session.sessionId)
     if (!silent && this.suppressNotifications === 0 && before !== after && !this.controls.has(session.sessionId)) this.scheduleChanged(session.sessionId)
     return before !== after
+  }
+
+  /**
+   * Which of model, effort and mode one Claude or Codex transcript record sets — asked of the same
+   * readers `ingest` uses, on a scratch state, so the two cannot disagree. An attach that reads only the
+   * end of a transcript (lib/attachTranscript.ts) reaches back to the newest record that set each one.
+   *
+   * It can only under-report (the session's own model-switch control is not consulted), and the attach
+   * replays every record from the oldest one it reached, so under-reporting costs a longer reach, never
+   * a wrong value.
+   */
+  transcriptFields(session: RegisteredSession, rawLine: string): RuntimeField[] {
+    if (session.engine !== 'claude' && session.engine !== 'codex') return []
+    let raw: Record<string, unknown> | null
+    try { raw = record(JSON.parse(rawLine)) } catch { return [] }
+    if (!raw) return []
+    const probe: RegisteredSession = { ...session, sessionId: FIELD_PROBE }
+    const state = blankState()
+    if (session.engine === 'codex') this.ingestCodex(probe, raw, state)
+    else this.ingestClaude(probe, raw, state)
+    const fields: RuntimeField[] = []
+    if (state.model !== null) fields.push('model')
+    if (state.effort !== null) fields.push('effort')
+    if (state.mode !== 'unknown') fields.push('mode')
+    return fields
   }
 
   async ingestConfig(session: RegisteredSession, silent = false): Promise<boolean> {
@@ -899,6 +1005,12 @@ export class RuntimeProfileManager {
         state.observedAt = Date.now()
       }
     } else {
+      const banner = !state.model ? claudeStartupBanner(paneText) : null
+      if (banner) {
+        state.model = banner.model
+        if (banner.effort) state.effort = banner.effort
+        state.observedAt = Date.now()
+      }
       const header = /(Fable|Opus|Sonnet|Haiku)\s+(\d+(?:\.\d+)*)(\s+\(1M context\))?\s+with\s+(low|medium|high|xhigh|max|ultracode)\s+effort/gi
       const matches = [...paneText.matchAll(header)]
       const latest = matches[matches.length - 1]
@@ -1093,27 +1205,26 @@ export class RuntimeProfileManager {
    * first. The claude pane came home with `ANTHROPIC_MODEL=opencode/big-pickle` and Claude Code
    * answered "There's an issue with the selected model (opencode/big-pickle). It may not exist".
    *
-   * So `''` gets no entry. Reads answer "nothing observed", which is TRUE — an agent with no engine
-   * session has no model to report — and writes land in a throwaway rather than in a bucket the next
-   * agent will read. Everything real is re-read once the session binds, moments later.
+   * So `''` gets no entry in this conversation cache, and writes land in a throwaway rather than a
+   * bucket the next agent will read. A ready startup banner can be read separately with
+   * readStartupProfile, whose caller must scope that observation to the live process. Transcript
+   * state is re-read once a real conversation binds.
    */
   private unbound(sessionId: string): boolean {
     return !sessionId
   }
 
   private state(sessionId: string): RuntimeState {
-    const blank = (): RuntimeState => ({ model: null, effort: null, mode: 'unknown', cliVersion: null, observedAt: null })
-    if (this.unbound(sessionId)) return blank()
+    if (this.unbound(sessionId)) return blankState()
     let state = this.states.get(sessionId)
     if (!state) {
-      state = blank()
+      state = blankState()
       this.states.set(sessionId, state)
     }
     return state
   }
 
-  private ingestCodex(session: RegisteredSession, raw: Record<string, unknown>): void {
-    const state = this.state(session.sessionId)
+  private ingestCodex(session: RegisteredSession, raw: Record<string, unknown>, state = this.state(session.sessionId)): void {
     const payload = record(raw.payload)
     const cliVersion = raw.type === 'session_meta' ? text(payload?.cli_version) : ''
     if (parseVersion(cliVersion)) {
@@ -1162,8 +1273,7 @@ export class RuntimeProfileManager {
     }
   }
 
-  private ingestClaude(session: RegisteredSession, raw: Record<string, unknown>): void {
-    const state = this.state(session.sessionId)
+  private ingestClaude(session: RegisteredSession, raw: Record<string, unknown>, state = this.state(session.sessionId)): void {
     const cliVersion = text(raw.version)
     if (parseVersion(cliVersion)) {
       session.cliVersion = cliVersion
@@ -1171,7 +1281,9 @@ export class RuntimeProfileManager {
     }
     const message = record(raw.message)
     const assistantModel = raw.type === 'assistant' ? text(message?.model) : ''
-    if (assistantModel) {
+    // Claude uses this marker for local errors such as exhausted quota.
+    // It is not a model change; keep the last real observation.
+    if (assistantModel && assistantModel !== '<synthetic>') {
       state.model = assistantModel
       state.observedAt = Date.now()
     }

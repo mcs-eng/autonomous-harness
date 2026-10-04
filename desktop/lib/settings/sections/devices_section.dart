@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -19,7 +20,14 @@ import '../../state/dial_status.dart';
 import 'cabled_device_card.dart';
 
 class DevicesSection extends StatefulWidget {
-  const DevicesSection({super.key, this.cli, this.dial, this.onDeviceSettings});
+  const DevicesSection({
+    super.key,
+    this.cli,
+    this.dial,
+    this.onDeviceSettings,
+    this.showCompanion = false,
+  });
+  final bool showCompanion;
   final AutonomousDeviceCli? cli;
 
   /// The robots on a cable at THIS desk. Null in a build with no daemon behind it (and in the tests
@@ -48,6 +56,8 @@ class _DevicesSectionState extends State<DevicesSection> {
   List<Map<String, dynamic>> _discovered = [];
   Map<String, dynamic> _status = {};
   List<Map<String, dynamic>> _devices = [];
+  bool get _controlsDisabled =>
+      _busy || _loading || (kUnderTest && widget.cli == null);
 
   @override
   void initState() {
@@ -275,7 +285,7 @@ class _DevicesSectionState extends State<DevicesSection> {
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
-    final disabled = _busy || _loading || (kUnderTest && widget.cli == null);
+    final disabled = _controlsDisabled;
     Widget action(String label, VoidCallback? onPressed) => SizedBox(
       width: SettingRow.controlWidth,
       child: OutlinedButton(onPressed: onPressed, child: Text(label)),
@@ -294,6 +304,7 @@ class _DevicesSectionState extends State<DevicesSection> {
                 listenable: dial,
                 builder: (context, _) => CabledDeviceCard(
                   devices: dial.devices,
+                  showCompanion: widget.showCompanion,
                   onChanged: widget.onDeviceSettings ?? (_, _) {},
                 ),
               ),
@@ -325,7 +336,7 @@ class _DevicesSectionState extends State<DevicesSection> {
                     children: [
                       const Expanded(child: SelectableText('harness update')),
                       AppIconButton(
-                        icon: Icons.refresh_rounded,
+                        icon: AppIcons.refreshCw,
                         tooltip: 'Refresh Autonomous robot status',
                         onPressed: disabled
                             ? null
@@ -340,7 +351,9 @@ class _DevicesSectionState extends State<DevicesSection> {
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 child: Text(
                   _actionError ?? _error!,
-                  style: grid.AppType.body(color: grid.AppPalette.dangerFill),
+                  style: grid.AppType.body(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
                 ),
               ),
             if (!_unsupported && !_loading) ...[
@@ -404,35 +417,42 @@ class _DevicesSectionState extends State<DevicesSection> {
                       Row(
                         children: [
                           Expanded(
-                            child: IgnorePointer(
-                              ignoring: disabled,
-                              child: AppSelectField<String?>(
-                                key: const Key('autonomous-device-selection'),
-                                value: _selectedDevice,
-                                options: [
-                                  const SelectOption<String?>(
-                                    value: null,
-                                    label: 'Select a device',
-                                  ),
-                                  for (final device in _discovered)
-                                    SelectOption<String?>(
-                                      value: device['id'] as String,
-                                      label:
-                                          device['name']?.toString() ??
-                                          'Autonomous robot',
+                            child: ExcludeFocus(
+                              excluding: disabled,
+                              child: IgnorePointer(
+                                ignoring: disabled,
+                                child: AppSelectField<String?>(
+                                  key: const Key('autonomous-device-selection'),
+                                  semanticLabel: 'Autonomous robot',
+                                  value: _selectedDevice,
+                                  options: [
+                                    const SelectOption<String?>(
+                                      value: null,
+                                      label: 'Select a device',
                                     ),
-                                ],
-                                onChanged: (value) => setState(() {
-                                  _selectedDevice = value;
-                                  _code.clear();
-                                  _actionError = null;
-                                }),
+                                    for (final device in _discovered)
+                                      SelectOption<String?>(
+                                        value: device['id'] as String,
+                                        label:
+                                            device['name']?.toString() ??
+                                            'Autonomous robot',
+                                      ),
+                                  ],
+                                  onChanged: (value) {
+                                    if (_controlsDisabled) return;
+                                    setState(() {
+                                      _selectedDevice = value;
+                                      _code.clear();
+                                      _actionError = null;
+                                    });
+                                  },
+                                ),
                               ),
                             ),
                           ),
                           const SizedBox(width: 8),
                           AppIconButton(
-                            icon: Icons.refresh_rounded,
+                            icon: AppIcons.refreshCw,
                             tooltip: 'Refresh Autonomous robot status',
                             onPressed: disabled
                                 ? null

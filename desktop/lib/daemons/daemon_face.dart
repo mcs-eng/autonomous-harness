@@ -2,12 +2,12 @@
 /// frames it steps through while agents work and the one line it says.
 ///
 /// The rules are the README's (`daemons/README.md`, Moods, Motion and blinks,
-/// Voice). Moods come from work, never from the clock: there is no idle timer.
+/// Voice). Moods come from work. Illustrated idle motion has a separate visual clock.
 ///
 /// - **Motion** is driven by work, not by time: while agents work, the work
 ///   frame steps once per real agent event ([pulse]), at most twice a second,
 ///   so a baton that stops means an agent that stopped. The only timers end a
-///   held reaction, run a blink or the return wave, end a nap and clear a line.
+///   held reaction, run decorative motion, end a nap and clear a line.
 ///   Reduce Motion, a background window and the Motion setting stop them all;
 ///   the face still changes.
 /// - **Interruptions**: only a harness waiting on you and a failure take over
@@ -29,6 +29,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'daemon_brain.dart';
+import 'illustrated_styles.g.dart';
 import 'daemon_lines.dart';
 import 'daemon_plate_client.dart';
 import 'daemon_settings.dart';
@@ -157,6 +158,7 @@ class DaemonFace extends ChangeNotifier {
     DaemonRoster? roster,
     DateTime Function()? now,
     DaemonSettings? settings,
+    this.animateIllustrations = false,
   }) : roster = roster ?? zoo.roster,
        settings = settings ?? DaemonSettings(),
        _ownsSettings = settings == null,
@@ -167,6 +169,9 @@ class DaemonFace extends ChangeNotifier {
   }
 
   final ZooController zoo;
+
+  /// Enabled by a mounted illustration surface; headless state observers stay idle.
+  final bool animateIllustrations;
   final DaemonSettings settings;
 
   /// Individuals' own plates from this computer's harness process, when the
@@ -251,6 +256,16 @@ class DaemonFace extends ChangeNotifier {
   int _step = 0;
   DateTime? _lastStep;
   Timer? _stepTimer;
+  Timer? _artTimer;
+  int _artFrame = 0;
+  String? _artKey;
+
+  /// Decorative motion has its own clock; work still advances only on real events.
+  int get artFrame => !motionEnabled || quiet
+      ? 0
+      : mood == DaemonMood.work
+      ? steps
+      : _artFrame;
   int _backT = 0;
   Timer? _backTimer;
 
@@ -392,10 +407,18 @@ class DaemonFace extends ChangeNotifier {
   /// The slot shows the daemon itself (not a new egg's moment in the nest).
   bool get showsDaemon => def != null && !_showsArrival;
 
+  /// The same egg already chosen by the face, as an art-independent state.
+  /// The hatchling's identity remains withheld until the reveal completes.
+  (String, String)? get eggArtwork {
+    if (!visible || showsDaemon) return null;
+    if (_revealing) return (_revealKind, _revealStage ?? 'p4');
+    if (_showsArrival) return (_arriving!.kind, 'p4');
+    final egg = nearestEgg;
+    return egg == null ? null : (egg.kind, egg.stage);
+  }
+
   bool get _showsArrival =>
-      _arriving != null &&
-      mood != DaemonMood.need &&
-      mood != DaemonMood.boop;
+      _arriving != null && mood != DaemonMood.need && mood != DaemonMood.boop;
 
   /// The sprite or egg for the status slot (at most eight cells): the
   /// paired individual's one line (render.mjs `renderIndividualSprite`), or
@@ -545,8 +568,7 @@ class DaemonFace extends ChangeNotifier {
         // Above `suggest` it acts on its own for you: always said.
         if (daemonAutonomyAboveSuggest(_autonomy))
           'autonomy: ${daemonAutonomyLabel(_autonomy!)}',
-        if (_autonomyRequested case final asked?
-            when asked != _autonomy)
+        if (_autonomyRequested case final asked? when asked != _autonomy)
           'asks for ${daemonAutonomyLabel(asked)}: waiting for your yes',
         if (quiet) 'Quiet: it says nothing until you turn Quiet off.',
       ].join('\n');
@@ -776,8 +798,7 @@ class DaemonFace extends ChangeNotifier {
     }
     _update(
       before: before,
-      force:
-          finished.isNotEmpty || awayChanged || countsChanged || dialChanged,
+      force: finished.isNotEmpty || awayChanged || countsChanged || dialChanged,
     );
   }
 
@@ -982,9 +1003,26 @@ class DaemonFace extends ChangeNotifier {
         });
         _blink('ack', delay: const Duration(milliseconds: 160));
         _update(force: true);
-      case ZooDaemonGrew(:final daemon):
+      case ZooDaemonHatched(:final daemon):
+        if (daemon.uid == this.daemon?.uid &&
+            !revealing &&
+            !quiet &&
+            motionEnabled &&
+            !napping &&
+            mood != DaemonMood.need) {
+          _hold(DaemonMood.done);
+          _update(force: true);
+        }
+      case ZooDaemonGrew(:final daemon, :final versionChanged):
         if (d == null || daemon.uid != this.daemon?.uid) return;
-        // "I trust you": a slow blink.
+        if (versionChanged &&
+            !quiet &&
+            motionEnabled &&
+            !napping &&
+            mood != DaemonMood.need) {
+          _hold(DaemonMood.done);
+        }
+        // A bond-only increase remains a slow blink.
         _blink('slow', delay: const Duration(milliseconds: 200));
         _update(force: true);
     }
@@ -1066,8 +1104,7 @@ class DaemonFace extends ChangeNotifier {
     if (line.isEmpty || quiet) return;
     _dropExpired();
     // A reply never pushes aside an alert waiting to be said.
-    if (kind == _LineKind.reply &&
-        (_pendingVoice?.kind.unsolicited ?? false)) {
+    if (kind == _LineKind.reply && (_pendingVoice?.kind.unsolicited ?? false)) {
       return;
     }
     final now = _now();
@@ -1152,8 +1189,7 @@ class DaemonFace extends ChangeNotifier {
     // A reply never pushes aside an alert waiting to be said (the talk keeps
     // it in the panel). A proposal does: its keys work only while it shows,
     // and the need it displaces stays on the face and in the panel.
-    if (kind == _LineKind.reply &&
-        (_pendingVoice?.kind.unsolicited ?? false)) {
+    if (kind == _LineKind.reply && (_pendingVoice?.kind.unsolicited ?? false)) {
       return;
     }
     _pendingVoice = line;
@@ -1283,6 +1319,53 @@ class DaemonFace extends ChangeNotifier {
 
   void _runMotion(DaemonMood now) {
     final d = def;
+    final artKey = '${daemon?.uid}:${now.name}';
+    final animated =
+        animateIllustrations &&
+        d != null &&
+        illustratedStyles.containsKey(d.id) &&
+        motionEnabled &&
+        !quiet &&
+        now != DaemonMood.work &&
+        now != DaemonMood.fail;
+    if (!animated || artKey != _artKey) {
+      _artTimer?.cancel();
+      _artTimer = null;
+      _artFrame = 0;
+      _artKey = artKey;
+    }
+    final finite =
+        now == DaemonMood.done ||
+        now == DaemonMood.boop ||
+        now == DaemonMood.back;
+    if (animated && _artTimer == null && (!finite || _artFrame < 3)) {
+      final index = const [
+        'idle',
+        'work',
+        'need',
+        'done',
+        'fail',
+        'nap',
+        'boop',
+      ].indexOf(now == DaemonMood.back ? 'done' : now.name);
+      final timing = illustratedStyles[d.id]!['timing'] as List;
+      _artTimer = Timer.periodic(
+        Duration(
+          milliseconds: index < 0 ? 190 : (timing[index] as int).clamp(80, 600),
+        ),
+        (_) {
+          if (_disposed) return;
+          _artFrame = finite
+              ? (_artFrame + 1).clamp(0, 3)
+              : (_artFrame + 1) % 4;
+          if (finite && _artFrame == 3) {
+            _artTimer?.cancel();
+            _artTimer = null;
+          }
+          notifyListeners();
+        },
+      );
+    }
     // Work frames step only on agent events; leaving work puts them at rest.
     if (d == null || !motionEnabled || now != DaemonMood.work) {
       _stepTimer?.cancel();
@@ -1327,6 +1410,7 @@ class DaemonFace extends ChangeNotifier {
       _blinkTimer,
       _stepTimer,
       _backTimer,
+      _artTimer,
       _voiceTimer,
       _pendingTimer,
       _seenTimer,

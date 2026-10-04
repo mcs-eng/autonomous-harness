@@ -1,7 +1,7 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/rendering.dart' show OverflowBoxFit;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/appearance_prefs_store.dart';
@@ -129,7 +129,7 @@ class _PromptContextViewState extends State<PromptContextView> {
               label: 'Machine',
               value: data.machine!,
               ascii: '@',
-              icon: LucideIcons.monitor300,
+              icon: AppIcons.monitor,
               color: grid.AppPalette.swarmAccent,
             ),
           if (prefs.project && data.project?.isNotEmpty == true)
@@ -137,7 +137,7 @@ class _PromptContextViewState extends State<PromptContextView> {
               label: 'Project',
               value: data.project!,
               ascii: '/',
-              icon: LucideIcons.folder300,
+              icon: AppIcons.folder,
               color: grid.AppPalette.teal,
             ),
           if (prefs.branch && data.branch?.isNotEmpty == true)
@@ -145,7 +145,7 @@ class _PromptContextViewState extends State<PromptContextView> {
               label: 'Branch',
               value: data.branch!,
               ascii: 'git:',
-              icon: LucideIcons.gitBranch300,
+              icon: AppIcons.gitBranch,
               color: grid.AppPalette.online,
             ),
         ];

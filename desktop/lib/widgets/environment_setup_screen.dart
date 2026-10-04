@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:harness/terminal/terminal_text.dart';
 
 import '../bootstrap/environment_provisioner.dart';
 import '../core/wsl_preferences.dart';
@@ -13,8 +13,10 @@ import '../shared/widgets/command_row.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 
-/// One setup review with a direct install action. Launch probes stay read-only;
-/// installation starts only after the user chooses the visible install action.
+/// First-run setup. Launch probes stay read-only; a plan that installs
+/// entirely in-app then runs unasked and this screen shows its progress. Only a
+/// plan that needs a password in Terminal (Linux apt) waits on the review's
+/// install action.
 class EnvironmentSetupScreen extends StatefulWidget {
   final AppNotifier notifier;
   final WslPreferencesStore? wslPreferences;
@@ -126,7 +128,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
           padding: EdgeInsets.all(compact ? 16 : 24),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 760),
+              constraints: const BoxConstraints(maxWidth: 640),
               child: Material(
                 color: AppColors.sidebar,
                 clipBehavior: Clip.antiAlias,
@@ -219,20 +221,16 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Text(
-        eyebrow.toUpperCase(),
-        style: grid.AppType.monoMeta(
+        eyebrow,
+        style: grid.AppType.caption(
           color: AppColors.accent,
           fontWeight: FontWeight.w600,
-          letterSpacing: 1.2,
         ),
       ),
       const SizedBox(height: 6),
-      // Terminal type here too: setup is the first thing a new install shows,
-      // and it should read like the app it is about to open (owner,
-      // 2026-09-23). Weight and colour carry the hierarchy instead of size.
       Text(
         title,
-        style: terminalTextStyle(
+        style: grid.AppType.title(
           fontWeight: FontWeight.w600,
           color: AppColors.text,
         ),
@@ -240,7 +238,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
       const SizedBox(height: 6),
       Text(
         lead,
-        style: terminalTextStyle(color: AppColors.textSoft, height: 1.55),
+        style: grid.AppType.body(color: AppColors.textSoft, height: 1.55),
       ),
       const SizedBox(height: 16),
     ],
@@ -302,7 +300,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
         if (mode == EnvironmentSetupMode.automatic) ...[
           if (needsTerminal) ...[
             _notice(
-              Icons.terminal,
+              AppIcons.terminal,
               'Admin prompts stay in Terminal',
               'Complete any installation prompts there, then return to Harness.',
             ),
@@ -329,7 +327,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
       ),
       if (state.phase == EnvironmentSetupPhase.waitingForTerminal)
         _notice(
-          Icons.lock_outline,
+          AppIcons.lock,
           'Harness cannot see your password',
           'Finish the prompts in Terminal, then return here. Harness checks progress automatically.',
         ),
@@ -442,7 +440,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
   Widget _planList(List<EnvironmentPlanItem> items) {
     if (items.isEmpty) {
       return _notice(
-        Icons.check_circle_outline,
+        AppIcons.circleCheck,
         'Nothing left to install',
         'Every dependency is ready. Continue to final verification.',
       );
@@ -476,7 +474,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.end,
-                        style: grid.AppType.body(color: AppColors.muted),
+                        style: grid.AppType.body(color: AppColors.textSoft),
                       ),
                     ),
             ),
@@ -489,7 +487,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
     children: [
       if (items.isEmpty)
         _notice(
-          Icons.check_circle_outline,
+          AppIcons.circleCheck,
           'Nothing left to install',
           'Every dependency is ready. Continue to final verification.',
         ),
@@ -503,7 +501,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
               children: [
                 Text(
                   '${index + 1} · ${items[index].title}',
-                  style: terminalTextStyle(
+                  style: grid.AppType.heading(
                     fontWeight: FontWeight.w600,
                     color: AppColors.text,
                   ),
@@ -543,7 +541,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
             Expanded(
               child: Text(
                 'Setup details',
-                style: terminalTextStyle(
+                style: grid.AppType.label(
                   fontWeight: FontWeight.w600,
                   color: AppColors.text,
                 ),
@@ -551,7 +549,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
             ),
             TextButton.icon(
               onPressed: () => _copy(diagnostics),
-              icon: const Icon(Icons.copy, size: 14),
+              icon: const Icon(AppIcons.copy, size: 14),
               label: Text(
                 _copied == diagnostics ? 'Copied' : 'Copy diagnostics',
               ),
@@ -635,7 +633,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
             : missingCount == 0
             ? 'Verify and continue'
             : 'Install $missingCount ${missingCount == 1 ? 'tool' : 'tools'}';
-        icon = manual ? Icons.refresh : Icons.download_outlined;
+        icon = manual ? AppIcons.refreshCw : AppIcons.download;
         action = manual
             ? widget.notifier.retryEnvironmentSetup
             : widget.notifier.startEnvironmentSetup;
@@ -652,7 +650,7 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
         action = widget.notifier.continueAfterEnvironmentSetup;
       case EnvironmentSetupPhase.waitingForTerminal:
         label = 'Recheck now';
-        icon = Icons.refresh;
+        icon = AppIcons.refreshCw;
         action = () => widget.notifier.recheckEnvironmentStep(
           state.steps[EnvironmentStep.clipboard] ==
                   EnvironmentStepStatus.needsTerminal
@@ -704,7 +702,9 @@ class _EnvironmentSetupScreenState extends State<EnvironmentSetupScreen> {
       child: Text(
         _copyError ?? 'Next: sign in and start a harness.',
         style: grid.AppType.body(
-          color: _copyError == null ? AppColors.textSoft : AppColors.danger,
+          color: _copyError == null
+              ? AppColors.textSoft
+              : Theme.of(context).colorScheme.error,
         ),
       ),
     );
@@ -764,7 +764,7 @@ class _CheckSectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    TerminalFontScope.watch(context);
+    grid.AppTheme.watch(context);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(16, 11, 16, 8),
@@ -773,11 +773,10 @@ class _CheckSectionLabel extends StatelessWidget {
         border: Border(bottom: BorderSide(color: AppColors.border)),
       ),
       child: Text(
-        label.toUpperCase(),
-        style: grid.AppType.monoMeta(
+        label,
+        style: grid.AppType.label(
           color: AppColors.textSoft,
           fontWeight: FontWeight.w600,
-          letterSpacing: 1.1,
         ),
       ),
     );
@@ -858,7 +857,10 @@ class _CheckRow extends StatelessWidget {
               children: [
                 Text(label, style: grid.AppType.label()),
                 const SizedBox(height: 3),
-                Text(detail, style: grid.AppType.body(color: AppColors.muted)),
+                Text(
+                  detail,
+                  style: grid.AppType.body(color: AppColors.textSoft),
+                ),
               ],
             ),
           ),

@@ -303,8 +303,9 @@ Future<Map<String, dynamic>> readLocalGitProject(
   bool refresh = false,
   GitProcessStarter? startProcess,
 }) async {
-  Future<({int code, String output})> git(List<String> arguments) =>
-      _git(source, arguments, startProcess: startProcess);
+  Future<({int code, String output, String errorOutput})> git(
+    List<String> arguments,
+  ) => _git(source, arguments, startProcess: startProcess);
   if (!validGitPath(source)) return {'error': 'INVALID_PATH'};
   try {
     final root = await git(['rev-parse', '--show-toplevel']);
@@ -439,7 +440,7 @@ Future<String> prepareGitProject(
   Random? random,
   GitProcessStarter? startProcess,
 }) async {
-  Future<({int code, String output})> git(
+  Future<({int code, String output, String errorOutput})> git(
     List<String> arguments, {
     Duration timeout = const Duration(seconds: 4),
     String? at,
@@ -672,7 +673,10 @@ Future<String> prepareGitProject(
         throw FileSystemException('Could not create folder', folder);
       }
     }
-  } on FileSystemException {
+  } on FileSystemException catch (error) {
+    if ([28, 69, 122].contains(error.osError?.errorCode)) {
+      throw const RepositoryCloneException(_worktreeDiskFull);
+    }
     throw const RepositoryCloneException(
       'Could not create a worktree folder. Check folder permissions, then retry.',
     );
@@ -730,7 +734,9 @@ Future<String> prepareGitProject(
   if (result.code != 0) {
     // A partial checkout or branch stays available for recovery.
     throw RepositoryCloneException(
-      'Could not create the worktree at $destination. Check Git and folder permissions, then retry.',
+      _diskFullMessage(result.errorOutput)
+          ? _worktreeDiskFull
+          : 'Could not create the worktree at $destination. Check Git and folder permissions, then retry.',
     );
   }
   // Harness made this branch: its cleanup may remove it, and a made-up name
@@ -822,6 +828,14 @@ Future<void> _copyIncluded(
   }
 }
 
+const _worktreeDiskFull =
+    'Not enough disk space to create the worktree. Free space on this machine, then retry.';
+
+bool _diskFullMessage(String message) => RegExp(
+  r'no space left on device|disk quota exceeded',
+  caseSensitive: false,
+).hasMatch(message);
+
 /// Windows has no `cp` executable. Copy the selected tree without following links.
 Future<void> _copyWindowsIncluded(String source, String target) async {
   final kind = await FileSystemEntity.type(source, followLinks: false);
@@ -842,7 +856,7 @@ Future<void> _copyWindowsIncluded(String source, String target) async {
   }
 }
 
-Future<({int code, String output})> _git(
+Future<({int code, String output, String errorOutput})> _git(
   String source,
   List<String> arguments, {
   Duration timeout = const Duration(seconds: 4),
@@ -882,6 +896,7 @@ Future<({int code, String output})> _git(
   }
   unawaited(process.stdin.close());
   final output = StringBuffer();
+  var errorOutput = '';
   var overflow = false;
   final outDone = Completer<void>(), errDone = Completer<void>();
   final stdout = process.stdout
@@ -898,11 +913,20 @@ Future<({int code, String output})> _git(
         onDone: outDone.complete,
         onError: outDone.completeError,
       );
-  final stderr = process.stderr.listen(
-    (_) {},
-    onDone: errDone.complete,
-    onError: errDone.completeError,
-  );
+  final stderr = process.stderr
+      .transform(const Utf8Decoder(allowMalformed: true))
+      .listen(
+        (chunk) {
+          errorOutput += chunk;
+          // Keep a bounded tail for failure classification; never show raw Git
+          // output, which can contain credentials or repository contents.
+          if (errorOutput.length > 8192) {
+            errorOutput = errorOutput.substring(errorOutput.length - 8192);
+          }
+        },
+        onDone: errDone.complete,
+        onError: errDone.completeError,
+      );
   try {
     final results = await Future.wait<dynamic>([
       process.exitCode,
@@ -917,6 +941,7 @@ Future<({int code, String output})> _git(
     return (
       code: results.first as int,
       output: output.toString().replaceFirst(RegExp(r'\r?\n$'), ''),
+      errorOutput: errorOutput,
     );
   } on TimeoutException {
     process.kill(ProcessSignal.sigkill);

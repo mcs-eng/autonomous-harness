@@ -1,10 +1,10 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/screens/swarm_screen.dart';
 import 'package:harness/settings/experimental_features.dart';
@@ -54,6 +54,18 @@ class _SharingConnection extends WsConn {
 
 void main() {
   final button = find.byKey(const ValueKey('workspace-share-button'));
+  void expectSharedHarness(String name) {
+    final dialog = find.byType(ShareHarnessDialog);
+    expect(
+      find.descendant(of: dialog, matching: find.text('Share harness')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: dialog, matching: find.text(name)),
+      findsOneWidget,
+    );
+  }
+
   late AppNotifier app;
   late MemoryKeymap keymap;
   late MemoryStore preferences;
@@ -62,15 +74,17 @@ void main() {
   final input = <TerminalBinaryFrame>[];
 
   // Initialize the icon library before the deep viewer build stack in Chrome.
-  setUpAll(() => expect(LucideIcons.refreshCw.codePoint, greaterThan(0)));
+  setUpAll(() => expect(AppIcons.refreshCw.codePoint, greaterThan(0)));
 
-  setUp(() {
+  setUp(() async {
     connection = _SharingConnection();
     app = createApp(connectionForTest: (_) => connection);
     app.stateOf('m')!.nodeOnline = true;
     keymap = MemoryKeymap();
     preferences = MemoryStore();
     experiments = MemoryExperimentalFeaturesStore(storage: preferences);
+    // Finish the real-zone read before testWidgets enters its fake clock.
+    await experiments.refresh();
     input.clear();
   });
   tearDown(() {
@@ -208,7 +222,7 @@ void main() {
       );
       await tester.tap(button);
       await tester.pumpAndSettle();
-      expect(find.text('Share Agent 0'), findsOneWidget);
+      expectSharedHarness('Agent 0');
       expect(connection.shares, [('harness_share_list', 'a0')]);
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
@@ -217,7 +231,7 @@ void main() {
       await tester.pump();
       await shareKey(tester);
       await tester.pumpAndSettle();
-      expect(find.text('Share Agent 1'), findsOneWidget);
+      expectSharedHarness('Agent 1');
       await shareKey(tester);
       await tester.pump();
       expect(find.byType(ShareHarnessDialog), findsOneWidget);
@@ -282,7 +296,7 @@ void main() {
     await tester.tap(button);
     await tester.pumpAndSettle();
     expect(connection.shares.single, ('harness_share_list', 'a0'));
-    expect(find.text('Share Agent 0'), findsOneWidget);
+    expectSharedHarness('Agent 0');
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -317,7 +331,7 @@ void main() {
       expect(connection.shares, isEmpty);
       await key(tester, LogicalKeyboardKey.f8);
       await tester.pumpAndSettle();
-      expect(find.text('Share Agent 0'), findsOneWidget);
+      expectSharedHarness('Agent 0');
       await tester.pumpWidget(const SizedBox());
     },
   );

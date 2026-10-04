@@ -1,3 +1,5 @@
+import '../widgets/engine_identity.dart';
+
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -8,11 +10,13 @@ import '../models/api_connections_controller.dart'
 import '../models/local_model.dart';
 import '../models/model_search_catalog.dart';
 import '../core/dsh_catalog.dart';
+import '../store/experimental_harnesses.dart';
 import '../core/machine_resources.dart';
 import '../core/models.dart'
     show Agent, ConnectionStatus, GridModels, GridModel;
 
 import 'app_state.dart';
+import 'agent_switch_handoff.dart';
 import 'harness_placement.dart';
 import 'pane_arrangement.dart';
 import 'swarm_catalog.dart';
@@ -87,6 +91,7 @@ class SwarmSearchController extends ChangeNotifier {
     }
     _refresh();
     app.addListener(_refresh);
+    app.experimentalFeatures.addListener(_refresh);
     projects?.addListener(_refresh);
     models?.addListener(_modelsChanged);
     app.gridPictures.addListener(_modelChoicesChanged);
@@ -104,6 +109,29 @@ class SwarmSearchController extends ChangeNotifier {
   bool modelDownloadsVisible = false;
   bool isModelDownloadsRow(SwarmDestination? row) =>
       isModelMode && row?.id == 'model:downloads';
+
+  /// Grid is not set up on this machine, so local and shared models are one row offering to set it
+  /// up — Grid is an add-on, set up the first time a person asks for it, never by opening a picker.
+  bool get gridSetupOffered {
+    final manager = models?.manager;
+    return manager != null &&
+        (manager.gridSetupNeeded || manager.settingUpGrid);
+  }
+
+  /// The row that sets Grid up ([gridSetupOffered]).
+  bool isGridSetupRow(SwarmDestination? row) =>
+      isModelMode && row?.id == gridSetupRowId;
+
+  static const gridSetupRowId = 'model:grid-setup';
+
+  late final _gridSetupRow = SwarmDestination(
+    id: gridSetupRowId,
+    modelId: gridSetupRowId,
+    title: '[ Set up local & shared models ]',
+    detail: '',
+    swarmId: null,
+    current: false,
+  );
 
   /// Saved APIs whose models are shown under them. An API such as OpenRouter lists hundreds, so
   /// they stay folded until Enter on the API's row — or a search that matches them.
@@ -195,9 +223,26 @@ class SwarmSearchController extends ChangeNotifier {
 
   ModelSearchSection modelSection(SwarmDestination row) => row.isCreate
       ? ModelSearchSection.apis
+      : isGridSetupRow(row)
+      ? ModelSearchSection.local
       : isModelDownloadsRow(row)
       ? ModelSearchSection.catalog
       : models?.entries[row.modelId]?.section ?? ModelSearchSection.local;
+
+  /// Whether a search should still show the Set up row: always with nothing typed, and for words that
+  /// ask for what it unlocks.
+  bool _offersGridSetupFor(String query) {
+    final words = query.trim().toLowerCase();
+    if (words.isEmpty) return true;
+    return const [
+      'set up',
+      'setup',
+      'local',
+      'shared',
+      'grid',
+      'download',
+    ].any((word) => word.contains(words) || words.contains(word));
+  }
 
   /// A section's heading in the list. The downloads name the machine they are for.
   String modelSectionLabel(ModelSearchSection section) =>
@@ -220,6 +265,14 @@ class SwarmSearchController extends ChangeNotifier {
   /// (In use); only a row with no action says its state. Operation words come from the catalogue's
   /// [ModelSearchCatalog.localStatusWord], which the preview's status also reads.
   String? modelRowStatus(SwarmDestination row) {
+    if (isGridSetupRow(row)) {
+      final manager = models!.manager;
+      return manager.settingUpGrid
+          ? 'Setting up…'
+          : manager.setUpWaitsForSignIn
+          ? 'Signing in…'
+          : null;
+    }
     final catalog = models;
     final entry = catalog?.entries[row.modelId];
     if (entry == null || catalog == null) return null;
@@ -228,15 +281,21 @@ class SwarmSearchController extends ChangeNotifier {
     // Its entry's status is only the API's name, which the row it sits under already shows.
     if (entry.apiModel != null) return modelRowAction(row);
     final local = entry.local;
-    if (local == null) {
-      return entry.own ? modelRowAction(row) ?? entry.status : entry.status;
-    }
+    // A subscription says how much of it is left — the one figure worth a glance; Enter on it is
+    // the preview's to say. Other rows with no weights here say what Enter does.
+    if (entry.subscription != null) return entry.status;
+    if (local == null) return modelRowAction(row) ?? entry.status;
     final owner = entry.controller ?? catalog.manager;
     final operation = owner.operationFor(local);
     if (operation?.active == true ||
         owner.pendingId == local.id ||
         operation?.failed == true) {
       return catalog.localStatusWord(local, controller: owner);
+    }
+    // Use under way: running is not yet the harness on it. Until it moves, the row keeps saying so —
+    // a row that turned to Use there read as a second click to make.
+    if (usingModelId == row.modelId) {
+      return local.downloaded ? 'Starting' : 'Downloading';
     }
     return modelRowAction(row) ??
         (local.running
@@ -247,6 +306,18 @@ class SwarmSearchController extends ChangeNotifier {
   }
 
   static const inUseWord = '● In use';
+
+  /// A model row's title on the desktop list: the two action rows named for what they do, without
+  /// the terminal list's brackets; every other row as it is.
+  String modelRowTitle(SwarmDestination row) {
+    if (isGridSetupRow(row)) return 'Set up local & shared models';
+    if (isModelDownloadsRow(row)) {
+      return modelDownloadsVisible
+          ? 'Show fewer'
+          : 'More models (${_downloadCount - shownDownloads})';
+    }
+    return row.title;
+  }
 
   /// Whether the harness this picker chooses for is on [row]'s model now: the grid model the
   /// daemon read off its process, or a saved API's model at that API's address.
@@ -266,6 +337,10 @@ class SwarmSearchController extends ChangeNotifier {
   /// Whether the model row is live right now: running, in use, or a download, start or stop under
   /// way. Only a live row's word is green.
   bool modelRowLive(SwarmDestination row) {
+    if (isGridSetupRow(row)) {
+      final manager = models!.manager;
+      return manager.settingUpGrid || manager.setUpWaitsForSignIn;
+    }
     final catalog = models;
     final entry = catalog?.entries[row.modelId];
     if (entry == null || catalog == null) return false;
@@ -289,7 +364,8 @@ class SwarmSearchController extends ChangeNotifier {
 
   /// What sets one model of yours apart from the next, in two aligned columns ahead of the row's
   /// word: its size, and its speed — measured while it runs, else the catalog's estimate for this
-  /// machine (`~`). Null for any other row. Widths are fixed so every row's columns line up.
+  /// machine (`~`), else the app it came from (`Ollama`). Null for any other row. Widths are fixed
+  /// so every row's columns line up.
   String? modelRowFacts(SwarmDestination row) {
     final local = models?.entries[row.modelId]?.local;
     if (local == null) return null;
@@ -301,7 +377,7 @@ class SwarmSearchController extends ChangeNotifier {
         ? '${measured.round()} tok/s'
         : local.estTokS != null
         ? '~${local.estTokS!.round()} tok/s'
-        : '';
+        : local.app ?? '';
     return '${size.padLeft(6)}  ${speed.padLeft(9)}';
   }
 
@@ -388,12 +464,10 @@ class SwarmSearchController extends ChangeNotifier {
   /// Open Harness filters by latest activity; commands and splits keep relevance order.
   final bool activityFirst;
 
-  /// When this opening began: the list's ages are measured from it.
-  final DateTime openedAt = DateTime.now();
   final _activity = <String, DateTime?>{};
 
   /// A row's last activity as it was when this opening first listed it. The
-  /// list keeps the order and ages it opened with while agents work on:
+  /// list keeps its activity snapshot and order while agents work on:
   /// rows moving under the cursor as someone arrowed through them was the
   /// confusing part. The next opening reads activity afresh.
   DateTime? activityOf(SwarmDestination row) =>
@@ -552,17 +626,14 @@ class SwarmSearchController extends ChangeNotifier {
   }
 
   /// Whether Get on [row] can go on to put the picker's harness on the model: a download of yours,
-  /// chosen for a harness that can run on a local model. Otherwise Get only downloads.
-  ///
-  /// Not while another model runs on that machine: its daemon runs one local model at a time and
-  /// refuses the start, so Get would download and then fail. It only downloads, and says why.
+  /// chosen for a harness that can run on a local model. Otherwise Get only downloads. Another model
+  /// running on that machine is stopped first ([otherRunningModel]): it runs one at a time.
   bool canGetModelForUse(SwarmDestination? row) =>
       canGetModel(row) &&
       modelSelectionEngine != null &&
       _modelChoices?.reachable == true &&
       _modelChoices?.canRunLocally(modelSelectionEngine) == true &&
-      models!.entries[row!.modelId]!.own &&
-      otherRunningModel(row) == null;
+      models!.entries[row!.modelId]!.own;
 
   /// Another model of yours running on [row]'s machine — the one to stop before [row]'s can run.
   LocalModel? otherRunningModel(SwarmDestination? row) {
@@ -591,11 +662,15 @@ class SwarmSearchController extends ChangeNotifier {
     );
   }
 
+  /// The model Use or Get is stopping to make room — its machine runs one local model at a time.
+  String? stoppingOther;
+
   /// What the picker is doing for Use or Get, for its hint: `Downloading 42%…`, `Starting…`.
   String? get usingLabel {
     final entry = models?.entries[usingModelId];
     final local = entry?.local;
     if (usingModelId == null) return null;
+    if (stoppingOther case final other?) return 'Stopping $other…';
     if (entry == null || local == null) return 'Starting…';
     final owner = entry.controller ?? models!.manager;
     final operation = owner.operationFor(local);
@@ -645,6 +720,54 @@ class SwarmSearchController extends ChangeNotifier {
     LocalModel? model() =>
         owner.localModels.where((model) => model.id == modelId).firstOrNull;
 
+    /// The model running on that machine besides this one, stopped and gone before this one starts:
+    /// the machine runs one local model at a time, and Use is a switch, not two steps to make.
+    Future<bool> stopOther() async {
+      final other = otherRunningModel(row);
+      if (other == null) return true;
+      stoppingOther = other.name;
+      notifyListeners();
+      try {
+        await owner.control(other, 'stop');
+        final deadline = DateTime.now().add(timeout);
+        while (current()) {
+          if (hostGone()) {
+            fail('Reconnect to ${entry.node} to use this model.');
+            return false;
+          }
+          final now = owner.localModels
+              .where((model) => model.id == other.id)
+              .firstOrNull;
+          final operation = now == null ? null : owner.operationFor(now);
+          if (operation?.failed == true ||
+              (owner.error != null && !owner.busy)) {
+            fail(
+              operation?.error ??
+                  owner.error ??
+                  'Could not stop ${other.name}. Try again.',
+            );
+            return false;
+          }
+          if (now?.canStop != true &&
+              operation?.active != true &&
+              !owner.busy) {
+            return true;
+          }
+          if (DateTime.now().isAfter(deadline)) {
+            fail('${other.name} is still stopping. Try again in a moment.');
+            return false;
+          }
+          await _modelUsePause();
+          if (!current()) return false;
+          await owner.refresh();
+        }
+        return false;
+      } finally {
+        stoppingOther = null;
+        if (!_disposed) notifyListeners();
+      }
+    }
+
     try {
       if (download) {
         await owner.control(
@@ -673,7 +796,10 @@ class SwarmSearchController extends ChangeNotifier {
               got.downloaded &&
               operation?.active != true &&
               !owner.busy) {
-            if (!got.running) await owner.control(got, 'start');
+            if (!got.running) {
+              if (!await stopOther()) return null;
+              await owner.control(model() ?? got, 'start');
+            }
             break;
           }
           await _modelUsePause();
@@ -681,7 +807,8 @@ class SwarmSearchController extends ChangeNotifier {
           await owner.refresh();
         }
       } else {
-        await owner.control(entry.local!, 'start');
+        if (!await stopOther()) return null;
+        await owner.control(model() ?? entry.local!, 'start');
       }
       final deadline = DateTime.now().add(timeout);
       while (current()) {
@@ -700,7 +827,10 @@ class SwarmSearchController extends ChangeNotifier {
           return null;
         }
         if (started?.running == true && operation?.active != true) {
-          await models!.manager.refresh(force: true);
+          // The grid's models only: the harness moves onto one of them, and this machine's own list
+          // already says the model runs. A full forced read held the move 16s past "running" [run],
+          // with the row saying Use — and a second Use looked needed.
+          await models!.manager.refresh(force: true, local: false);
           if (!current()) return null;
           final machineId = _modelSelectionMachineId;
           if (machineId != null) {
@@ -772,7 +902,12 @@ class SwarmSearchController extends ChangeNotifier {
 
   /// The words sent to the session indexes: plain harness search only.
   String get _contentQuery =>
-      isCommandMode || isHelpMode || isGroupMode || isModelMode || isStoreMode
+      isCommandMode ||
+          isHelpMode ||
+          isGroupMode ||
+          isModelMode ||
+          isStoreMode ||
+          isAgentMode
       ? ''
       : matchQuery;
 
@@ -875,15 +1010,38 @@ class SwarmSearchController extends ChangeNotifier {
   String get helpQuery => query.trimLeft().replaceFirst(_helpPrefix, '');
   bool get isProjectMode =>
       allowsCommands && !commandsOnly && query.trimLeft().startsWith('#');
-  static final _quickAccessPrefix = RegExp(r'^[>@#?:*]');
+  static final _quickAccessPrefix = RegExp(r'^[>@#?:*&]');
   bool get isMachineMode =>
       allowsCommands && !commandsOnly && query.trimLeft().startsWith('@');
   bool get isModelMode =>
       allowsCommands && !commandsOnly && query.trimLeft().startsWith(':');
+  bool get isAgentMode =>
+      allowsCommands && !commandsOnly && query.trimLeft().startsWith('&');
+  String? agentSelectionMachineId, agentSelectionId;
+  Agent? get agentSelection => app
+      .stateOf(agentSelectionMachineId ?? '')
+      ?.agents
+      .where((a) => a.id == agentSelectionId)
+      .firstOrNull;
+  void setAgentSelection(String machineId, String agentId) {
+    agentSelectionMachineId = machineId;
+    agentSelectionId = agentId;
+    _filter();
+    notifyListeners();
+  }
+
+  bool canSelectAgent(String engine) =>
+      agentSelection != null &&
+      app.stateOf(agentSelectionMachineId!)?.machine.isShared == false &&
+      app
+          .agentSwitchEngines(agentSelectionMachineId!, agentSelection!)
+          .contains(engine);
   bool get isStoreMode =>
       allowsCommands && !commandsOnly && query.trimLeft().startsWith('*');
   bool get isGroupMode => isProjectMode || isMachineMode;
-  String get scopePrefix => isMachineMode
+  String get scopePrefix => isAgentMode
+      ? '&'
+      : isMachineMode
       ? '@'
       : isProjectMode
       ? '#'
@@ -902,7 +1060,7 @@ class SwarmSearchController extends ChangeNotifier {
       ? '[ Add ]'
       : 'New Harness';
   String get createDescription => isMachineMode
-      ? 'On the other computer:\n\n1. Install the app or CLI.\n2. Sign in to the same account.\n3. Set its password.\n\nThen select it here and Connect.'
+      ? 'On the other computer:\n\n1. Install the app or CLI.\n2. Sign in to the same account.\n\nIt appears here and connects on its own.'
       : isModelMode
       ? 'Add an API key\n\n'
             'OpenRouter or a Custom API: Use its models to run a harness.\n'
@@ -945,10 +1103,12 @@ class SwarmSearchController extends ChangeNotifier {
       ? commandQuery
       : isHelpMode
       ? helpQuery
-      : isGroupMode || isModelMode || isStoreMode
+      : isGroupMode || isModelMode || isStoreMode || isAgentMode
       ? query.trimLeft().substring(1).trimLeft()
       : query;
-  String get title => isCommandMode
+  String get title => isAgentMode
+      ? 'Agents'
+      : isCommandMode
       ? 'Commands'
       : isHelpMode
       ? 'Quick access'
@@ -1096,7 +1256,9 @@ class SwarmSearchController extends ChangeNotifier {
       sessionFilter == SessionFilter.all &&
       query.trim().isEmpty;
   bool get showsTypeHints => _emptyFinder && selected == null;
-  String get hint => isCommandMode
+  String get hint => isAgentMode
+      ? 'Search agents'
+      : isCommandMode
       ? 'Search commands'
       : isHelpMode
       ? 'Search help'
@@ -1179,7 +1341,7 @@ class SwarmSearchController extends ChangeNotifier {
           app.swarms.any(
             (swarm) =>
                 swarm.id == targetId &&
-                !swarm.isStore &&
+                !swarm.isUtility &&
                 !swarm.isOrchestrator &&
                 swarm.panes.length < AppNotifier.maxPanes,
           )) &&
@@ -1195,10 +1357,20 @@ class SwarmSearchController extends ChangeNotifier {
         null => 'Open Harness',
       };
 
-  String actionLabel(SwarmDestination? row) => row?.isCreate == true
+  String actionLabel(SwarmDestination? row) => row?.isAgentChoice == true
+      ? 'Change agent'
+      : row?.isCreate == true
       ? isModelMode
             ? 'Add'
             : row!.title
+      : isGridSetupRow(row)
+      ? models!.manager.settingUpGrid
+            ? 'Setting up…'
+            : app.signingIn
+            ? 'Signing in…'
+            : app.isGuest
+            ? 'Sign in'
+            : 'Set up'
       : isModelDownloadsRow(row)
       ? modelDownloadsVisible
             ? 'Show fewer'
@@ -1229,7 +1401,7 @@ class SwarmSearchController extends ChangeNotifier {
                       (agent) => agent.id == row.agentId && agent.isStopped,
                     ) ==
                 true
-      ? 'Resume & open'
+      ? 'Open'
       : sessionFilter == SessionFilter.needsInput && row?.agentId != null
       ? 'Answer'
       : placement != null && row != null && alreadyHere(row)
@@ -1263,6 +1435,11 @@ class SwarmSearchController extends ChangeNotifier {
       : 'No room for another harness.';
 
   void _refresh({bool force = false}) {
+    if (isAgentMode) {
+      _filter();
+      notifyListeners();
+      return;
+    }
     final storeChanged = isStoreMode && _refreshStore();
     final next = navigating
         ? _locations.read(app, projects?.projects ?? const [])
@@ -1331,9 +1508,11 @@ class SwarmSearchController extends ChangeNotifier {
 
   bool _refreshStore() {
     final entries = {
-      for (final machine in app.machineStates.values)
-        for (final entry in machine.dsh.byId.values)
-          if (!entry.isViewerPackage) entry.id: entry,
+      for (final entry in storeVisibleHarnesses(
+        app.machineStates.values.expand((machine) => machine.dsh.byId.values),
+        app.experimentalFeatures,
+      ))
+        if (!entry.isViewerPackage) entry.id: entry,
     };
     if (mapEquals(entries, _storeEntries)) return false;
     _storeEntries = entries;
@@ -1419,6 +1598,48 @@ class SwarmSearchController extends ChangeNotifier {
 
   void _filter({bool keepOrder = false}) {
     final previous = rows;
+    if (isAgentMode) {
+      final engines = [...allEngines]
+        ..sort(
+          (a, b) => a.id == b.id
+              ? 0
+              : a.id == 'opencode'
+              ? -1
+              : b.id == 'opencode'
+              ? 1
+              : a.label.compareTo(b.label),
+        );
+      rows = [
+        for (final engine in engines)
+          if ('${engine.label} ${engine.id}'.toLowerCase().contains(
+            matchQuery.toLowerCase(),
+          ))
+            SwarmDestination(
+              id: 'engine:${engine.id}',
+              agentEngine: engine.id,
+              engine: engine.id,
+              title: engine.id == 'claude' ? 'Claude Code' : engine.label,
+              detail: agentSelection == null
+                  ? 'Focus a harness to change its agent'
+                  : !canSelectAgent(engine.id)
+                  ? 'Not supported by this harness'
+                  : agentSelection?.engine == engine.id
+                  ? 'Current agent'
+                  : engine.id == 'opencode'
+                  ? 'Muse Spark 1.3 · continue with recent context'
+                  : supportsAgentHandoff(engine.id)
+                  ? 'Continue this project with recent context'
+                  : 'New conversation in the same project',
+              swarmId: null,
+              current: agentSelection?.engine == engine.id,
+            ),
+      ];
+      total = engines.length;
+      matchCount = rows.length;
+      cursor = rows.isEmpty ? 0 : cursor.clamp(0, rows.length - 1);
+      _selectedId = selected?.id;
+      return;
+    }
     if (isHelpMode) {
       // The modes keep the order they are taught in; what follows `?` only
       // narrows them, the way a quick-open's own `?` does.
@@ -1696,6 +1917,17 @@ class SwarmSearchController extends ChangeNotifier {
       if (matchQuery.trim().isEmpty && _downloadCount > shownDownloads) {
         rows = [...rows, _downloadsRow];
       }
+      if (gridSetupOffered) {
+        // Local and shared models are this one row until Grid is set up: a downloaded file, a
+        // download or a model shared on a grid cannot be used before then, and a list of them
+        // beside "Set up" read as if they could.
+        rows = rows.where((row) {
+          final section = modelSection(row);
+          return section == ModelSearchSection.subscriptions ||
+              section == ModelSearchSection.apis;
+        }).toList();
+        if (_offersGridSetupFor(matchQuery)) rows = [...rows, _gridSetupRow];
+      }
       // An API's models are listed under its row, as a group: a search that matches a model and not
       // its API still shows the API above it, and the models of two APIs never interleave.
       final shown = {for (final row in rows) row.modelId};
@@ -1797,7 +2029,11 @@ class SwarmSearchController extends ChangeNotifier {
     _selectedId = selected?.id;
     matchCount = rows
         .where(
-          (row) => !row.isCreate && !row.isNote && !isModelDownloadsRow(row),
+          (row) =>
+              !row.isCreate &&
+              !row.isNote &&
+              !isModelDownloadsRow(row) &&
+              !isGridSetupRow(row),
         )
         .length;
   }
@@ -1878,6 +2114,14 @@ class SwarmSearchController extends ChangeNotifier {
       if (index >= 0) {
         cursor = index;
         _selectedId = selected!.id;
+      }
+      notifyListeners();
+      return null;
+    }
+    if (isGridSetupRow(destination)) {
+      final manager = models!.manager;
+      if (!manager.settingUpGrid && !app.signingIn) {
+        unawaited(manager.setUpGrid());
       }
       notifyListeners();
       return null;
@@ -1976,14 +2220,17 @@ class SwarmSearchController extends ChangeNotifier {
     return harnessSessionUnavailable(machine, agent);
   }
 
-  bool canSubmit(SwarmDestination? row) =>
-      row?.isNote == true ||
-          sessionUnavailable(row) != null ||
-          sessionFilter == SessionFilter.needsInput &&
-              _unavailableAttentionIds.contains(row?.id)
+  bool canSubmit(SwarmDestination? row) => row?.agentEngine != null
+      ? canSelectAgent(row!.agentEngine!)
+      : row?.isNote == true ||
+            sessionUnavailable(row) != null ||
+            sessionFilter == SessionFilter.needsInput &&
+                _unavailableAttentionIds.contains(row?.id)
       ? false
       : isModelDownloadsRow(row)
       ? true
+      : isGridSetupRow(row)
+      ? !models!.manager.settingUpGrid && !app.signingIn
       : row?.pickerQuery != null
       ? isHelpMode && _commandIds.contains(row!.id)
       : row?.isModel == true
@@ -2026,7 +2273,7 @@ class SwarmSearchController extends ChangeNotifier {
                 app.swarms.any(
                   (swarm) =>
                       swarm.id == targetId &&
-                      !swarm.isStore &&
+                      !swarm.isUtility &&
                       !swarm.isOrchestrator &&
                       swarm.panes.length < AppNotifier.maxPanes,
                 ))
@@ -2047,7 +2294,7 @@ class SwarmSearchController extends ChangeNotifier {
                         app.swarms.any(
                           (swarm) =>
                               swarm.id == targetId &&
-                              !swarm.isStore &&
+                              !swarm.isUtility &&
                               !swarm.isOrchestrator &&
                               swarm.panes.length + _missingCount(row) <=
                                   AppNotifier.maxPanes,
@@ -2059,7 +2306,9 @@ class SwarmSearchController extends ChangeNotifier {
       ? SwarmSearchSelection(selected!, SwarmSearchAction.addHere)
       : null;
 
-  static String action(SwarmDestination row) => row.isCommand
+  static String action(SwarmDestination row) => row.isAgentChoice
+      ? 'Change agent'
+      : row.isCommand
       ? 'Run command'
       : row.isCreate
       ? row.title
@@ -2070,7 +2319,7 @@ class SwarmSearchController extends ChangeNotifier {
       : row.closedId != null
       ? 'Reopen'
       : row.isSwarm && !row.isStore && row.members.length != 1
-      ? 'Go to Swarm'
+      ? 'Go to Tab'
       : 'Open Harness';
 
   @override
@@ -2081,6 +2330,7 @@ class SwarmSearchController extends ChangeNotifier {
     _modelUseTimer?.cancel();
     if (_modelUseWait?.isCompleted == false) _modelUseWait!.complete();
     app.removeListener(_refresh);
+    app.experimentalFeatures.removeListener(_refresh);
     projects?.removeListener(_refresh);
     models?.removeListener(_modelsChanged);
     app.gridPictures.removeListener(_modelChoicesChanged);

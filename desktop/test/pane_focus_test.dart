@@ -5,7 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
+import 'package:harness/shared/theme/appearance_prefs_store.dart';
 import 'package:harness/state/pane_preset.dart';
+import 'package:harness/state/terminal_pane.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/widgets/terminal_panel.dart';
 
@@ -18,6 +20,11 @@ import 'workspace_activity_test.dart' show captureWorkspace;
 
 void main() {
   final capture = Platform.environment['HARNESS_PANE_FOCUS_CAPTURE_DIR'];
+  setUp(() {
+    final previous = appearancePrefsStore.value;
+    addTearDown(() => appearancePrefsStore.value = previous);
+    appearancePrefsStore.value = previous.copyWith(shadeInactivePanes: true);
+  });
   setUpAll(() async {
     await loadRealFonts();
     if (capture != null && Platform.isMacOS) {
@@ -33,6 +40,100 @@ void main() {
       }
     }
   });
+
+  testWidgets(
+    'viewers and their owner share emphasis without sharing keyboard input',
+    (tester) async {
+      final app = createApp(connected: true);
+      final input = List.generate(2, (_) => <TerminalBinaryFrame>[]);
+      final terminals = [
+        for (var i = 0; i < 2; i++)
+          app.adoptSessionForTest(terminal('a$i', input[i])),
+      ];
+      final viewers = [
+        for (var i = 0; i < 2; i++)
+          TerminalPane(
+            id: 100 + i,
+            machineId: 'm',
+            kind: PaneKind.web,
+            ownerAgentId: 'a$i',
+            url: 'http://fixture.invalid/viewer-$i',
+          ),
+      ];
+      final otherMachine = TerminalPane(
+        id: 102,
+        machineId: 'n',
+        kind: PaneKind.web,
+        ownerAgentId: 'a0',
+        url: 'http://fixture.invalid/remote-viewer',
+      );
+      app.panes.addAll([...viewers, otherMachine]);
+      app.focusPane(terminals[0].id);
+      await mount(tester, app);
+      tester.view.physicalSize = const Size(1500, 900);
+      await tester.pump();
+
+      Finder frame(TerminalPane pane) =>
+          find.byKey(ValueKey('pane-frame:${pane.id}'));
+      Finder panel(TerminalPane pane) => find.descendant(
+        of: frame(pane),
+        matching: find.byType(TerminalPanel),
+      );
+      final renderers = [
+        for (final pane in terminals) tester.state(panel(pane)),
+      ];
+      void expectEmphasis(Set<TerminalPane> clear) {
+        for (final pane in app.panes) {
+          final veil =
+              tester.widget<Container>(frame(pane)).foregroundDecoration
+                  as BoxDecoration;
+          expect(veil.color, clear.contains(pane) ? isNull : isNotNull);
+        }
+        for (var i = 0; i < 2; i++) {
+          expect(tester.state(panel(terminals[i])), same(renderers[i]));
+        }
+      }
+
+      expectEmphasis({terminals[0], viewers[0]});
+      await tester.tapAt(tester.getCenter(frame(viewers[0])));
+      await tester.pump();
+      expect(app.focusedPaneId, viewers[0].id);
+      expect(
+        tester.widget<TerminalPanel>(panel(terminals[0])).focused,
+        isFalse,
+      );
+      expectEmphasis({terminals[0], viewers[0]});
+
+      // Both terminals have keyboard focus=false across this move. Their
+      // cached presentations must still repaint the change of focused owner.
+      await tester.tapAt(tester.getCenter(frame(viewers[1])));
+      await tester.pump();
+      expect(app.focusedPaneId, viewers[1].id);
+      expectEmphasis({terminals[1], viewers[1]});
+      expect(input.every((frames) => frames.isEmpty), isTrue);
+
+      await tester.tap(panel(terminals[1]));
+      await tester.pump();
+      await key(tester, LogicalKeyboardKey.arrowLeft);
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(input[1].single.bytes, [27, 91, 68]);
+      expect(input[0], isEmpty);
+      expectEmphasis({terminals[1], viewers[1]});
+
+      app.focusPane(otherMachine.id);
+      await tester.pump();
+      expectEmphasis({otherMachine});
+      app.focusPane(viewers[0].id);
+      app.railFocused = true;
+      app.notifyListeners();
+      await tester.pump();
+      expectEmphasis({terminals[0], viewers[0]});
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+    },
+  );
 
   testWidgets(
     'pane emphasis follows clicks and keys without remounting terminals',

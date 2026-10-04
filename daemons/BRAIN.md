@@ -21,13 +21,15 @@ Paths are in `cli/src` unless they say otherwise.
 
 0. **Template line**, said at once, from the daemon's roster `lines` (slot templates, filled from the
    event).
-1. **One small model call** per new question, OPT-IN (`pair.jsonc` `"model": true`, off by default), on
-   the warm router pool (`runRouterOneShot`, Haiku for Claude): about 1k tokens in, 80 out, 2.5 s budget.
+1. **One small model call** per new question, using the collection DSH's observed engine, model and
+   effort (`pair/intelligence.ts`): about 1k tokens in, 80 out, 30 s budget. The experiment and watching
+   consent gate it; there is no separate model opt-in. Until the DSH is set up, templates keep working.
    Its words replace the template line in place when they come back in time; the line is never delayed
    for them. Cached per `requestId`, capped per hour, only while you are at the computer. Replays,
    sub-agents, terminals, deny-class prompts and the pair harness itself are skipped. A brief never asks
    a model.
-2. **A persistent pair harness**, woken only when you talk to it, paused when idle. Not a session fed
+2. **One persistent Companions DSH for the collection**, opened with its viewer on the left and its
+   real agent terminal on the right, paused when idle. Not a session fed
    every event: that would resend a ~20k-token prefix on every wake, grow without end, and hold write
    tools all the time.
 
@@ -44,6 +46,7 @@ One implementation, `pair/control.ts`, behind a local-only `pair` request. Expos
 | `list_harnesses` | owner: registry + stopped + sensor state | `pair_list` | read |
 | `read_harness` (state, question, recaps, asks) | owner: sensor + mirror | `pair_read` | read |
 | `brief` | journal | `pair_journal` (fleet) | read |
+| `recall_memory` | development-gated coding memory; current collection's personal scope and launch token only | – | read |
 | `answer_question` | owner → `answer({ requestId })` | `pair_answer` (allow-class only) | write |
 | `send_prompt`, `stop_turn` | owner → message (deliveryId), cancel | – (`REMOTE_ANSWERS_ONLY`) | write |
 | `start_harness` | owner → create, mode `ask`, never bypass | – (`REMOTE_ANSWERS_ONLY`) | write |
@@ -52,6 +55,28 @@ One implementation, `pair/control.ts`, behind a local-only `pair` request. Expos
 
 Every write, local or remote, runs through the owning machine's `PairOwner` (`pair/owner.ts`), so the
 floor and the journal live where the harness does.
+
+The experimental coding-memory service is enabled in **Settings → Experimental → Coding memory**,
+in addition to the companion and watching controls. The choice is local to this computer and account,
+defaults off, and takes effect without restarting. `HARNESS_CODING_MEMORY=1` remains a migration default
+only until the owner saves a choice; an explicit off wins. `recall_memory { query, conditions? }` is an agent read, bound by
+the host to the current collection, with a byte-bounded historical-context packet and an unverified
+delivery receipt. Its token is required even at `watch`; it cannot select an owner, project, session,
+or avatar. It cannot inspect the owner's whole library, correct records, change privacy, or forget.
+
+The separate `pair { verb: "memory", action: … }` control is for the person. Even reads require a
+verified loopback process outside Harness panes and belonging to the daemon's OS user; a pair token
+is refused. Unix-socket callers whose PID cannot be established are refused, not assumed to be the
+person. `harness pair memory list|status|show <id> --json` exposes the initial read-only CLI.
+The internal owner API also supplies paginated listing, retained evidence, and correction/forget/
+Learn/Recall previews. Applying a change needs a two-minute, one-use capability bound to owner,
+process, connection, exact command, and the unchanged library snapshot. `confirmed: true` never
+counts. The desktop viewer uses this transport in **Companions → Memories**. Two preference actions,
+`experiment` and `configure_experiment { enabled, expected }`, remain available while companions are off;
+the latter checks the saved revision. Neither can access memories or start learning with companions off.
+Turning Coding memory off cancels its background work and keeps saved records. Real-model quality and
+the rollout gates remain unverified. Like existing lesson approval, process checks do not defend against
+arbitrary malware running as the same OS user with access to the memory files.
 
 **Autonomy dial** (zoo op `zoo.autonomy`, default `watch`): `watch` (read tools only, facts; lines
 carry only `[g]`) · `suggest` (it recommends, every action waits for your key) · `act-on-key` (it may
@@ -293,13 +318,16 @@ restart is a baseline, not a return.
   `-c mcp_servers.harnessd.*`); instructions carry the paired daemon's lore, first words, family, line
   templates, the tools, the dial's answers and the floor. Started by `daemon_talk` (new token),
   resumed if paused (new token), words forwarded if live; paused through the guarded stop after 10 minutes
-  without a turn or a talk; a new paired daemon, engine or CLI path is a new harness (the old one paused,
-  never deleted). Its turns carry `subagent` (no notification; silent on the dial), are not zoo turns, and
-  the sensor never watches it.
+  without a turn or a talk. Switching individuals, renaming, and package updates keep the same agent,
+  model choice, terminal, and conversation. A verified `UserPromptSubmit` hook supplies the current
+  character's context to Claude/Codex without sending an artificial turn. On upgrade the selected
+  individual's chat is adopted; other per-individual chat pointers and transcripts remain archived.
+  Collection membership keeps account/guest conversations separate. Its turns carry `subagent`
+  (no notification; silent on the dial), are not zoo turns, and the notification sensor never watches it.
 - **Autonomy and rules** (P5): `zoo.autonomy { level }` (backend `lib/zoo.ts`; an unknown level is dropped;
   default `watch`), a request the gate lets through (`pair/gate.ts`, "Security" 4). `pair.jsonc` at
   `$XDG_CONFIG_HOME/harness/pair.jsonc` (else `~/.config/…`), JSON with comments, re-read when it changes
-  (and every 30 s): `model` (the opt-in above), `learn` (`borrow`, `export`, `agentsMd`:
+  (and every 30 s): legacy `model` (accepted for compatibility; intelligence follows the DSH), `learn` (`borrow`, `export`, `agentsMd`:
   [LEARNING.md](LEARNING.md)) and `rules: [{ name?, harness? (glob), engine?, project? (folder, `~`),
   question (regex over the question text), choice }]` — all of it applied once the person confirmed that
   exact text. Under `act-within-rules` the first matching rule answers a question as it opens on the
@@ -324,17 +352,19 @@ Notice, propose, teach, revert (L1); borrow, check, export (L2); person-only app
 and — except usage tracking and the `lessons` verbs — only while pairing is on.
 
 - **Notice** (`signals.ts`, no model): from the same session events the sensor reads — never replays,
-  sub-agents, terminals or the pair harness — three signals: the person's next prompt after a turn
+  sub-agents, terminals or archived pair chats; the active collection DSH's real work is included —
+  three signals: the person's next prompt after a turn
   corrects the agent (`no, …`, `don't …`, `stop, …`, `that's wrong`, `instead …`, `not like that`,
   `revert …`; a prompt the daemon sent never counts); the same failing test or command on two engines or
   harnesses in one project within 7 days; the same 3–5 command steps in three turns of one project. Each
   carries provenance (engine, machine, agent, session, turn, the project hashed) and redacted evidence;
   `ADAPTER_DATA_DIR/pair/learn/signals.json` keeps the week (redacted). Default: nothing.
 - **Distill** (`distill.ts`): queued, three at a time while nothing works (or after an hour), into at most
-  one lesson each — a skill (≤ 30-line body) or a project note (≤ 5 lines). Without `pair.jsonc`
-  `"model": true` only one template: steps repeated 3+ times across 2+ sessions, each an inert code span; a
-  failure or a correction teaches nothing. With it, one capped `runPairOneShot` whose expected answer is
-  `{"lesson": null}`, its prompt redacted whole. Every lesson passes `guard.ts` (refused for a pipe to a
+  one lesson each — a skill (≤ 30-line body) or a project note (≤ 5 lines). The collection's durable
+  queue waits until its DSH model is ready. One bounded review uses that same engine/model/effort;
+  there is no fallback to the voice router or another agent. Its expected answer is `{"lesson": null}`,
+  its prompt redacted whole. Failures and rate limits keep evidence for a later review. Every lesson
+  passes `guard.ts` (refused for a pipe to a
   shell, a credential, a safety switched off, exfiltration or injected instructions; emails and home paths
   redacted), and the rendered file is guarded again before it is kept.
 - **Store** (`store.ts`): `HARNESS_LESSONS_DIR`, default `~/.harness/lessons/`, outside any repo:
@@ -343,6 +373,13 @@ and — except usage tracking and the `lessons` verbs — only while pairing is 
   approval, `git revert` per revert, and `stale:` (empty), `archive:`, `restore:` commits from the curator;
   no global git config, author `Harness`; without git a plain journal, and it says so. Everything written
   is redacted.
+- **Conversation review** (`conversationReview.ts`): an explicit 1–24 hour lookback over
+  up to 300 dated local indexed turns, excluding tools and reasoning. Bounded project
+  batches share the collection DSH's selected model and the distiller's rate limit.
+  Progress and reviewed hashes survive restarts; incomplete coverage and waiting states
+  are visible. Every cited candidate stays pending in the Memories inbox. Its verified
+  window receives a one-use, expiring capability bound to the lesson text; approval still
+  requires `daemon_shown`, the arming delay and the person-only key verdict.
 - **Propose** (`propose.ts`, `PairLearner`): `daemon_say { mood: 'ask', actions: [y teach, n skip, s show] }`,
   e.g. `[y/n/s] teach your agents "run-migrations-safely"? you corrected codex.` At most one an hour,
   never while a `need` shows, never about the focused pane (`PairBrain.isFocused`), never at `watch`,

@@ -1,3 +1,4 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -6,6 +7,7 @@ import '../shared/theme/app_type.dart';
 import '../terminal/terminal_text.dart';
 import '../terminal/terminal_search.dart';
 import 'box_chrome.dart';
+import 'desktop_chrome.dart';
 import 'pane_menu.dart';
 
 class TerminalFindBar extends StatefulWidget {
@@ -167,31 +169,72 @@ class TerminalFindBarState extends State<TerminalFindBar> {
         Widget option(
           String label,
           String hint,
-          VoidCallback action,
-        ) => paneMenuItem(
+          VoidCallback action, {
+          bool? checked,
+        }) => paneMenuItem(
           onTap: () => close(action),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(label, style: AppType.body(color: boxText(1))),
-                ),
-                const SizedBox(width: 16),
-                Text(hint, style: kBoxFaintStyle),
-              ],
+          builder: (context, active) => Semantics(
+            toggled: checked,
+            child: Builder(
+              builder: (context) {
+                grid.AppTheme.watch(context);
+                return Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 16,
+                        child: checked == true
+                            ? Icon(
+                                AppIcons.check,
+                                size: 16,
+                                color: active
+                                    ? grid.AppDesktop.onSelection
+                                    : DesktopChrome.foreground,
+                              )
+                            : null,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          label,
+                          style: DesktopChrome.control(
+                            color: active ? grid.AppDesktop.onSelection : null,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 140),
+                        child: Text(
+                          hint,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: DesktopChrome.metadata(
+                            color: active ? grid.AppDesktop.onSelection : null,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
             ),
           ),
         );
         return [
           option(
             'Match case',
-            _activeSearch?.caseSensitive == true ? 'on' : 'off',
+            _activeSearch?.caseSensitive == true ? 'On' : 'Off',
             _toggleCase,
+            checked: _activeSearch?.caseSensitive == true,
           ),
           if ((_activeSearch?.count ?? 0) > 0) ...[
-            option('Next match', 'enter', () => widget.onStep(1)),
-            option('Previous match', 'shift-enter', () => widget.onStep(-1)),
+            option('Next match', 'Enter', () => widget.onStep(1)),
+            option('Previous match', 'Shift+Enter', () => widget.onStep(-1)),
           ],
         ];
       },
@@ -205,9 +248,13 @@ class TerminalFindBarState extends State<TerminalFindBar> {
   @override
   Widget build(BuildContext context) {
     TerminalFontScope.watch(context);
-    return ListenableBuilder(
-      listenable: terminalFontStore,
-      builder: (context, _) => _buildBar(context),
+    // Find is part of the terminal's fixed-grid chrome. Its desktop options are
+    // inserted in the root Overlay and retain that overlay's platform text size.
+    return MediaQuery.withNoTextScaling(
+      child: ListenableBuilder(
+        listenable: terminalFontStore,
+        builder: (context, _) => _buildBar(context),
+      ),
     );
   }
 
@@ -305,7 +352,7 @@ class TerminalFindBarState extends State<TerminalFindBar> {
                       Tooltip(
                         message: 'This terminal is read only',
                         child: Icon(
-                          Icons.lock_outline,
+                          AppIcons.lock,
                           size: 14,
                           color: boxText(.54),
                         ),
@@ -358,7 +405,7 @@ class TerminalFindBarState extends State<TerminalFindBar> {
                       Builder(
                         builder: (context) => button(
                           'Find options',
-                          const Icon(Icons.more_horiz),
+                          const Icon(AppIcons.ellipsis),
                           () => _openOptions(context),
                         ),
                       )
@@ -380,7 +427,7 @@ class TerminalFindBarState extends State<TerminalFindBar> {
                       ),
                       button(
                         'Previous match (Shift-Enter)',
-                        const Icon(Icons.keyboard_arrow_up),
+                        const Icon(AppIcons.chevronUp),
                         count > 0
                             ? () {
                                 widget.onStep(-1);
@@ -390,7 +437,7 @@ class TerminalFindBarState extends State<TerminalFindBar> {
                       ),
                       button(
                         'Next match (Enter)',
-                        const Icon(Icons.keyboard_arrow_down),
+                        const Icon(AppIcons.chevronDown),
                         count > 0
                             ? () {
                                 widget.onStep(1);
@@ -401,7 +448,7 @@ class TerminalFindBarState extends State<TerminalFindBar> {
                     ],
                     button(
                       'Close find (Esc)',
-                      const Icon(Icons.close),
+                      const Icon(AppIcons.close),
                       widget.onClose,
                     ),
                   ],

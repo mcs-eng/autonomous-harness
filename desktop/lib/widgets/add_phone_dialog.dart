@@ -5,20 +5,16 @@ import 'dart:math' as math;
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:qr/qr.dart';
-import 'package:xterm/xterm.dart' show TerminalTheme;
 
+import '../shared/widgets/qr_code_view.dart';
 import '../api/api_client.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shortcuts/app_keymap.dart';
 import '../state/app_state.dart';
 import '../ws/ws_conn.dart' show WsRequestFailure, WsRequestTimeout;
-import '../terminal/terminal_text.dart';
-import '../terminal/terminal_theme.dart';
-import '../terminal/terminal_theme_store.dart';
-import 'box_chrome.dart';
+import 'desktop_chrome.dart';
+import 'desktop_prompt_surface.dart';
 import 'terminal_prompt.dart';
-import 'terminal_text_action.dart';
 
 /// Harness ▸ Add Phone… — a QR the phone scans to sign in to this account AND
 /// pair with this computer, end to end encrypted, with no password typed.
@@ -48,8 +44,7 @@ Future<void> showAddPhoneDialog(
   PhonePairCall? pair,
   PhoneSignInCodeCall? signInCode,
   VoidCallback? onConnectMachine,
-  PairedDevicesCall? listDevices,
-  RemovePairedDeviceCall? removeDevice,
+  VoidCallback? onManageDevices,
 }) => showTerminalPrompt<void>(
   context,
   keymap: keymap,
@@ -58,8 +53,7 @@ Future<void> showAddPhoneDialog(
     pair: pair,
     signInCode: signInCode ?? app.api.phoneSignInCode,
     onConnectMachine: onConnectMachine,
-    listDevices: listDevices ?? app.api.pairedDevices,
-    removeDevice: removeDevice ?? app.api.removePairedDevice,
+    onManageDevices: onManageDevices,
   ),
 );
 
@@ -236,13 +230,6 @@ PhonePairCall phonePairOverRelay(AppNotifier app, String machineId) =>
 /// null when there is none to be had (see [ApiClient.phoneSignInCode]).
 typedef PhoneSignInCodeCall = Future<({String code, Duration ttl})?> Function();
 
-/// The devices paired with this computer, or null when the daemon cannot say
-/// (see [ApiClient.pairedDevices]).
-typedef PairedDevicesCall = Future<List<PairedDevice>?> Function();
-
-/// Unpair one device by its fingerprint; true when it is done.
-typedef RemovePairedDeviceCall = Future<bool> Function(String fingerprint);
-
 class AddPhoneDialog extends StatefulWidget {
   const AddPhoneDialog({
     super.key,
@@ -250,8 +237,7 @@ class AddPhoneDialog extends StatefulWidget {
     this.pair,
     required this.signInCode,
     this.onConnectMachine,
-    this.listDevices,
-    this.removeDevice,
+    this.onManageDevices,
   });
 
   final AppNotifier app;
@@ -259,10 +245,9 @@ class AddPhoneDialog extends StatefulWidget {
   final PhoneSignInCodeCall signInCode;
   final VoidCallback? onConnectMachine;
 
-  /// The list under the QR — who can already reach this computer — with a way
-  /// to take a device's access back. Null shows no list.
-  final PairedDevicesCall? listDevices;
-  final RemovePairedDeviceCall? removeDevice;
+  /// Opens Settings ▸ Your devices — where the account's devices are listed and
+  /// removed, on every device at once. Null shows no link.
+  final VoidCallback? onManageDevices;
 
   @override
   State<AddPhoneDialog> createState() => _AddPhoneDialogState();
@@ -317,16 +302,6 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
   bool _signInAsked = false;
   Timer? _signInTimer;
 
-  /// The devices paired with this computer, newest first; null until the
-  /// daemon answers, or when it cannot.
-  List<PairedDevice>? _devices;
-  bool _allDevices = false;
-  final _removing = <String>{};
-
-  /// How many devices show before "+ N more": the dialog is the QR and a
-  /// line, and the list must not outweigh it.
-  static const _devicesShown = 3;
-
   /// No pairing to be had from this daemon — asking stopped for good.
   bool _stopped = false;
   String? _connected;
@@ -343,7 +318,6 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
     app.addListener(_appChanged);
     _syncLoop();
     unawaited(_renewSignIn());
-    unawaited(_loadDevices());
   }
 
   @override
@@ -416,8 +390,6 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
           _connected = label;
           _message = null;
         });
-        // The phone that just joined is on the list now.
-        unawaited(_loadDevices());
         if (await _sleep(_connectedHold) && mounted) {
           Navigator.of(context).pop();
         }
@@ -496,45 +468,6 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
     );
   }
 
-  Future<void> _loadDevices() async {
-    final list = widget.listDevices;
-    if (list == null) return;
-    List<PairedDevice>? devices;
-    try {
-      devices = await list();
-    } catch (_) {
-      devices = null;
-    }
-    if (_closed || !mounted) return;
-    setState(() => _devices = devices);
-  }
-
-  /// Takes [device]'s access away. One click, no confirmation: undoing it is
-  /// scanning the QR above again, and a device that is not yours should be
-  /// gone in one move.
-  Future<void> _remove(PairedDevice device) async {
-    final remove = widget.removeDevice;
-    if (remove == null || _removing.contains(device.fingerprint)) return;
-    setState(() => _removing.add(device.fingerprint));
-    bool removed;
-    try {
-      removed = await remove(device.fingerprint);
-    } catch (_) {
-      removed = false;
-    }
-    if (_closed || !mounted) return;
-    setState(() {
-      _removing.remove(device.fingerprint);
-      if (removed) {
-        _devices = [
-          for (final kept in _devices ?? const <PairedDevice>[])
-            if (kept.fingerprint != device.fingerprint) kept,
-        ];
-      }
-    });
-    if (!removed) _say("Couldn't remove ${device.name}. Try again.");
-  }
-
   void _say(String message, {bool sticky = false}) => setState(() {
     _message = message;
     _sticky = sticky;
@@ -554,78 +487,37 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
 
   void _close() => Navigator.of(context).maybePop();
 
-  TerminalTheme get _theme =>
-      terminalThemeFor(grid.AppTheme.palette.value, terminalThemeStore.value);
-  Color get _faint => _theme.muted;
-  TextStyle _ink([Color? color]) =>
-      terminalContentStyle(color: color ?? _theme.foreground);
+  Color get _faint => DesktopChrome.muted;
+  TextStyle _ink([Color? color]) => DesktopChrome.text(color: color);
 
   @override
   Widget build(BuildContext context) {
-    TerminalFontScope.watch(context);
-    // Live font and colour changes reach an open dialog too — see the dialog
-    // guide, design/terminal-dialogs.md.
-    return ListenableBuilder(
-      listenable: Listenable.merge([
-        terminalFontStore,
-        terminalThemeStore,
-        grid.AppTheme.palette,
-      ]),
-      builder: (context, _) => _dialog(context),
-    );
+    grid.AppTheme.watch(context);
+    return _dialog(context);
   }
 
   Widget _dialog(BuildContext context) {
-    // The grid: margins in whole character columns, spacing in whole rows.
-    final cell = terminalCellSizeOf(context);
-    final margin = cell.width * 2;
-    final row = cell.height;
-    // The window is the QR and one line: 240 points — a phone camera reads that
-    // from across a desk — in a whole number of rows, so the line under it stays
-    // on the grid, and the window just wider than the code.
-    final qrSide = (240 / row).ceil() * row;
-    final width = math.min(
-      qrSide + margin * 4,
-      MediaQuery.sizeOf(context).width - 32,
-    );
     return TerminalPromptKeys(
       cancel: _close,
-      child: Dialog(
-        insetPadding: const EdgeInsets.all(16),
-        elevation: 0,
-        backgroundColor: Colors.transparent,
-        child: SizedBox(
-          width: width,
-          child: Material(
-            elevation: 0,
-            color: _theme.background,
-            surfaceTintColor: Colors.transparent,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(kTerminalCornerRadius),
-              side: terminalPaneBorder(focused: true),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: DefaultTextStyle.merge(
-              style: _ink(),
-              child: SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(margin, row, margin, row),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Add your phone',
-                      textAlign: TextAlign.center,
-                      style: _ink(),
-                    ),
-                    SizedBox(height: row),
-                    ..._body(qrSide, row),
-                  ],
+      child: DesktopPromptSurface(
+        width: 440,
+        body: LayoutBuilder(
+          builder: (context, constraints) => DesktopPromptScrollBody(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Semantics(
+                  header: true,
+                  child: Text('Add your phone', style: DesktopChrome.heading()),
                 ),
-              ),
+                const SizedBox(height: 24),
+                ..._body(math.min(240, constraints.maxWidth), 16),
+              ],
             ),
           ),
         ),
+        actions: [TextButton(onPressed: _close, child: const Text('Done'))],
       ),
     );
   }
@@ -641,12 +533,12 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
           Text('Connect a computer to add your phone.', style: _ink()),
           if (widget.onConnectMachine case final connect?) ...[
             SizedBox(height: row),
-            TerminalTextAction(
-              label: 'Connect a machine',
+            TextButton(
               onPressed: () {
                 Navigator.of(context).pop();
                 connect();
               },
+              child: const Text('Connect a machine'),
             ),
           ],
         ];
@@ -662,7 +554,16 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
     }
     // A moment's wait for the sign-in code, in the QR's own space: a QR that
     // changed right after it appeared would be one scanned without it.
-    if (!_signInAsked) return [SizedBox(height: qrSide + row * 2)];
+    if (!_signInAsked) {
+      return [
+        SizedBox(
+          height: qrSide + row * 2,
+          child: Center(
+            child: Text('Preparing your code…', style: _ink(_faint)),
+          ),
+        ),
+      ];
+    }
     final link = phonePairLink(
       email: target.email,
       machineId: target.machineId,
@@ -689,71 +590,26 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
       // One line, and it is the status too: what to do, then that it worked.
       // The phone's own screen says the rest (Yes — scan to connect).
       _status(),
-      ..._devicesList(row),
-    ];
-  }
-
-  /// Who can already reach this computer, with a way to take it back: the
-  /// safety net for a QR somebody else scanned.
-  List<Widget> _devicesList(double row) {
-    final devices = _devices;
-    if (devices == null || devices.isEmpty) return const [];
-    final shown = _allDevices ? devices : devices.take(_devicesShown).toList();
-    final more = devices.length - shown.length;
-    return [
-      SizedBox(height: row),
-      Text(
-        'Paired with this ${_thisComputer()}',
-        key: const ValueKey('add-phone-devices'),
-        style: _ink(_faint),
-      ),
-      for (final device in shown) _deviceRow(device),
-      if (more > 0)
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TerminalTextAction(
-            key: const ValueKey('add-phone-more-devices'),
-            label: '+ $more more',
-            padding: EdgeInsets.zero,
-            onPressed: () => setState(() => _allDevices = true),
-          ),
-        ),
-    ];
-  }
-
-  Widget _deviceRow(PairedDevice device) {
-    final removing = _removing.contains(device.fingerprint);
-    return Row(
-      key: ValueKey('add-phone-device-${device.fingerprint}'),
-      children: [
-        Expanded(
-          child: Text(
-            device.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: _ink(),
-          ),
-        ),
-        Text(
-          device.online ? 'online' : _pairedAgo(device.pairedAt),
-          style: _ink(device.online ? _theme.green : _faint),
-        ),
-        TerminalTextAction(
-          label: removing ? 'removing…' : 'remove',
-          onPressed: removing || widget.removeDevice == null
-              ? null
-              : () => unawaited(_remove(device)),
+      if (widget.onManageDevices case final manage?) ...[
+        SizedBox(height: row),
+        TextButton(
+          key: const ValueKey('add-phone-manage-devices'),
+          onPressed: () {
+            Navigator.of(context).pop();
+            manage();
+          },
+          child: const Text('Manage devices…'),
         ),
       ],
-    );
+    ];
   }
 
   Widget _status() {
     final connected = _connected;
     final (text, color) = connected != null
-        ? ('✓ Connected $connected', _theme.green)
+        ? ('✓ Connected $connected', grid.AppPalette.online)
         : _message != null
-        ? (_message!, _theme.red)
+        ? (_message!, Theme.of(context).colorScheme.error)
         : ('Scan with Harness on your iPhone', _faint);
     return Semantics(
       liveRegion: true,
@@ -767,27 +623,12 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
   }
 }
 
-/// How long ago [at] was, in one short word: `now`, `5m`, `3h`, `2d`, `6w`.
-String _pairedAgo(DateTime at) {
-  final ago = DateTime.now().difference(at);
-  if (ago.inMinutes < 1) return 'now';
-  if (ago.inHours < 1) return '${ago.inMinutes}m';
-  if (ago.inDays < 1) return '${ago.inHours}h';
-  if (ago.inDays < 14) return '${ago.inDays}d';
-  return '${ago.inDays ~/ 7}w';
-}
-
 /// "Mac" where the menu says Harness ▸ Add Phone…; the command palette also
 /// reaches this dialog on Linux, where "this Mac" would be wrong.
 String _thisComputer() =>
     defaultTargetPlatform == TargetPlatform.macOS ? 'Mac' : 'computer';
 
-/// [data] as a QR code: dark modules on a white square with its quiet zone.
-///
-/// ⚠️ White and black whatever the theme. A dark-mode QR — light modules on a
-/// dark field — is one many phone cameras will not read, and the four-module
-/// white margin (the "quiet zone") is part of the code, not decoration: it is
-/// how a scanner finds the edges. So the white square stays, on every palette.
+/// The Add Phone QR — [QrCodeView], named for the one thing it is here.
 class PhonePairQr extends StatelessWidget {
   const PhonePairQr({super.key, required this.data, required this.side});
 
@@ -795,82 +636,10 @@ class PhonePairQr extends StatelessWidget {
   final String data;
   final double side;
 
-  static const _quietModules = 4;
-
-  // One entry: the dialog rebuilds on every font or palette change, and
-  // choosing the best of eight mask patterns is not free.
-  static (String, QrImage)? _cached;
-
-  static QrImage _imageOf(String data) {
-    if (_cached case (final cachedData, final image) when cachedData == data) {
-      return image;
-    }
-    final image = QrImage(
-      QrCode.fromData(data: data, errorCorrectLevel: QrErrorCorrectLevel.M),
-    );
-    _cached = (data, image);
-    return image;
-  }
-
   @override
-  Widget build(BuildContext context) {
-    final image = _imageOf(data);
-    final module = side / (image.moduleCount + _quietModules * 2);
-    return Semantics(
-      image: true,
-      label: 'QR code to add your phone',
-      child: Container(
-        width: side,
-        height: side,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(module * 2),
-        ),
-        child: CustomPaint(painter: _QrPainter(image, data)),
-      ),
-    );
-  }
-}
-
-class _QrPainter extends CustomPainter {
-  _QrPainter(this.image, this.data);
-
-  final QrImage image;
-  final String data;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final count = image.moduleCount;
-    final total = count + PhonePairQr._quietModules * 2;
-    // Snapped to half a point — a whole device pixel on a Retina screen — so
-    // neighbouring modules meet exactly instead of leaving hairline seams.
-    final module = (size.shortestSide / total * 2).floorToDouble() / 2;
-    final origin = Offset(
-      (size.width - module * count) / 2,
-      (size.height - module * count) / 2,
-    );
-    final path = Path();
-    for (var y = 0; y < count; y++) {
-      for (var x = 0; x < count; x++) {
-        if (!image.isDark(y, x)) continue;
-        path.addRect(
-          Rect.fromLTWH(
-            origin.dx + x * module,
-            origin.dy + y * module,
-            module,
-            module,
-          ),
-        );
-      }
-    }
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = Colors.black
-        ..isAntiAlias = false,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_QrPainter oldDelegate) => oldDelegate.data != data;
+  Widget build(BuildContext context) => QrCodeView(
+    data: data,
+    side: side,
+    semanticLabel: 'QR code to add your phone',
+  );
 }

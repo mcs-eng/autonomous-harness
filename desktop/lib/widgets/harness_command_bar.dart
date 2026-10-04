@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
+import '../shortcuts/app_shortcuts.dart' show linuxKeyLabels;
 import '../state/command_bar.dart';
 
 class HarnessCommandBar extends StatefulWidget {
@@ -171,7 +173,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                       PopupMenuButton<String>(
                         tooltip: 'Create or explore',
                         icon: const Icon(
-                          Icons.add,
+                          AppIcons.plus,
                           color: grid.AppPalette.commandInk,
                           size: 24,
                         ),
@@ -230,9 +232,9 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                           onPressed: controller.dismiss,
                           tooltip: 'Cancel command',
                           icon: const Icon(
-                            Icons.close,
+                            AppIcons.close,
                             color: grid.AppPalette.commandMuted,
-                            size: 19,
+                            size: 20,
                           ),
                         ),
                       if (!narrow)
@@ -265,8 +267,8 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                               children: [
                                 Icon(
                                   _findOnly
-                                      ? Icons.search
-                                      : Icons.auto_awesome_outlined,
+                                      ? AppIcons.search
+                                      : AppIcons.sparkles,
                                   size: 17,
                                   color: grid.AppPalette.commandInk,
                                 ),
@@ -295,7 +297,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                                 ),
                               )
                             : const Icon(
-                                Icons.arrow_upward_rounded,
+                                AppIcons.arrowUp,
                                 size: 22,
                                 color: grid.AppPalette.commandInk,
                               ),
@@ -324,7 +326,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Icon(
-                            Icons.auto_awesome,
+                            AppIcons.sparkles,
                             size: 12,
                             color: grid.AppPalette.textFaint,
                           ),
@@ -347,10 +349,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                       icon: Badge(
                         isLabelVisible: controller.watchMatches > 0,
                         label: Text('${controller.watchMatches}'),
-                        child: const Icon(
-                          Icons.notifications_active_outlined,
-                          size: 14,
-                        ),
+                        child: const Icon(AppIcons.bellRing, size: 14),
                       ),
                       label: Text(
                         '${controller.watches.length} ${controller.watches.length == 1 ? 'watch' : 'watches'}',
@@ -362,7 +361,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                     ),
                   if (!widget.compact && !watchesVisible)
                     Text(
-                      '⌘⇧J · toggle   Esc · close',
+                      '${linuxKeyLabels ? 'Alt+Shift+J' : '⌘⇧J'} · toggle   Esc · close',
                       style: grid.AppType.monoMeta(
                         color: grid.AppPalette.textFaint,
                       ),
@@ -400,8 +399,8 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                 Icon(
                   controller.phase == CommandPhase.done &&
                           controller.error == null
-                      ? Icons.check_circle_outline
-                      : Icons.auto_awesome_outlined,
+                      ? AppIcons.circleCheck
+                      : AppIcons.sparkles,
                   size: 15,
                   color: grid.AppPalette.swarmAccent,
                 ),
@@ -431,7 +430,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                       ? null
                       : controller.dismiss,
                   tooltip: 'Dismiss results',
-                  icon: const Icon(Icons.close, size: 15),
+                  icon: const Icon(AppIcons.close, size: 16),
                 ),
               ],
             ),
@@ -461,7 +460,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                     unawaited(controller.startWatch());
                     setState(() => _showWatches = true);
                   },
-                  icon: const Icon(Icons.notifications_none, size: 16),
+                  icon: const Icon(AppIcons.bell, size: 16),
                   label: const Text('Watch for this'),
                 ),
               ),
@@ -626,8 +625,8 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                 Row(
                   children: [
                     Icon(
-                      Icons.notifications_none,
-                      size: 17,
+                      AppIcons.bell,
+                      size: 16,
                       color: grid.AppPalette.swarmAccent,
                     ),
                     const SizedBox(width: 10),
@@ -642,7 +641,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                     IconButton(
                       onPressed: () => controller.stopWatch(watch),
                       tooltip: 'Stop watch',
-                      icon: const Icon(Icons.close, size: 16),
+                      icon: const Icon(AppIcons.close, size: 16),
                     ),
                   ],
                 ),
@@ -663,7 +662,7 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
                 for (final match in watch.matches)
                   TextButton.icon(
                     onPressed: () => unawaited(controller.choose(match)),
-                    icon: const Icon(Icons.arrow_forward, size: 14),
+                    icon: const Icon(AppIcons.arrowRight, size: 14),
                     label: Text(match.title, overflow: TextOverflow.ellipsis),
                   ),
               ],
@@ -675,10 +674,10 @@ class _HarnessCommandBarState extends State<HarnessCommandBar> {
 }
 
 IconData _icon(CommandKind kind) => switch (kind) {
-  CommandKind.open => Icons.terminal_rounded,
-  CommandKind.command => Icons.bolt_outlined,
-  CommandKind.send => Icons.send_outlined,
-  CommandKind.create => Icons.add_circle_outline,
-  CommandKind.search => Icons.manage_search,
-  CommandKind.watch => Icons.notifications_active_outlined,
+  CommandKind.open => AppIcons.terminal,
+  CommandKind.command => AppIcons.zap,
+  CommandKind.send => AppIcons.send,
+  CommandKind.create => AppIcons.circlePlus,
+  CommandKind.search => AppIcons.listFilter,
+  CommandKind.watch => AppIcons.bellRing,
 };

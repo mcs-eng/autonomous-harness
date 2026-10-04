@@ -314,10 +314,7 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
       builder: (context, size) {
         final commentsBeside = size.maxWidth >= _commentsBesideWidth;
         final commentsWidth = commentsBeside
-            ? (terminalCellSizeOf(context).width * 44).clamp(
-                280.0,
-                size.maxWidth * .45,
-              )
+            ? 360.0.clamp(280.0, size.maxWidth * .45)
             : size.maxWidth;
         final besideComments = _commentsSelected && commentsBeside;
         final outputWidth =

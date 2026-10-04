@@ -19,6 +19,11 @@ static uint32_t punctuation_alias(uint32_t cp)
 }
 static const ht_font_t *glyph_font(const ht_font_t *font, uint32_t cp)
 {
+    if (font == &ht_mono_24) {
+        if (cp == 0x2197) return &ht_open_24;
+        if (cp == 0x2192) return &ht_right_24;
+        if (cp == 0xe000) return &ht_bell_24;
+    }
     // Authored arrows in a recap use the same precomputed glyph as its marker.
     // Identical cell metrics: no scaling, allocation, or extra text runs.
     return cp == 0x2197 && font == &ht_mono_20 ? &ht_open_20 : font;
@@ -119,8 +124,8 @@ void ht_center(ht_scene_t *s, int y, const ht_font_t *font, uint16_t fg, const c
 static void arc_text(ht_scene_t *s, uint16_t fg, const char *text, bool bottom)
 {
     if (!text || !*text) return;
-    if (!ht_text(s, HT_ARC_X, HT_ARC_Y, HT_ARC_COLS * ht_mono_20.width,
-                 &ht_mono_20, fg, s->background, text)) return;
+    if (!ht_text(s, HT_ARC_X, HT_ARC_Y, HT_ARC_COLS * ht_mono_24.width,
+                 &ht_mono_24, fg, s->background, text)) return;
     ht_run_t *r = &s->runs[s->count - 1];
     // A long name ends at a word boundary; the pane list retains its full name.
     if (strlen(text ? text : "") > strlen(r->text)) {
@@ -219,8 +224,8 @@ ht_rect_t ht_run_bounds(const ht_run_t *r)
         int sn = arc_trig[count - 1][0], cs = arc_trig[count - 1][1];
         // Tight, conservative ink bounds. The fixed cache remains 416x128, but
         // a short name must not dirty that whole rectangle on every pane switch.
-        int half_w = ((13 * cs + 29 * sn) >> 15) + 2;
-        int half_h = ((29 * cs + 13 * sn) >> 15) + 2;
+        int half_w = (((HT_ARC_CELL_WIDTH + 1) * cs + (HT_ARC_CELL_HEIGHT + 1) * sn) >> 15) + 2;
+        int half_h = (((HT_ARC_CELL_HEIGHT + 1) * cs + (HT_ARC_CELL_WIDTH + 1) * sn) >> 15) + 2;
         int left = 233 - (205 * sn >> 14) - half_w - 1;
         int bottom = 233 - (205 * cs >> 14) + half_h + 1;
         return (ht_rect_t){left, r->arc == 2 ? HT_HEIGHT - bottom : HT_ARC_Y,
@@ -408,21 +413,21 @@ void ht_arc_fast_sampling(bool enabled)
 }
 static unsigned glyph_alpha_reference(const uint8_t *glyph, int x, int y)
 {
-    if (x < 0 || x >= 12 || y < 0 || y >= 28) return 0;
-    unsigned k = (unsigned)y * 12 + (unsigned)x;
+    if (x < 0 || x >= HT_ARC_CELL_WIDTH || y < 0 || y >= HT_ARC_CELL_HEIGHT) return 0;
+    unsigned k = (unsigned)y * HT_ARC_CELL_WIDTH + (unsigned)x;
     return (glyph[k >> 2] >> ((3 - (k & 3)) * 2)) & 3;
 }
 #endif
 
-static void glyph_coverage(const uint8_t *glyph, uint8_t padded[14 * 30])
+static void glyph_coverage(const uint8_t *glyph, uint8_t padded[(HT_ARC_CELL_WIDTH + 2) * (HT_ARC_CELL_HEIGHT + 2)])
 {
     // One glyph plus a transparent one-pixel border. Bilinear sampling below
     // then needs four byte loads instead of four checked packed-bit lookups.
-    // This 420-byte scratch lives only while a changed curved label is built.
-    memset(padded, 0, 14 * 30);
-    for (unsigned y = 0; y < 28; y++) for (unsigned x = 0; x < 12; x++) {
-        unsigned k = y * 12 + x;
-        padded[(y + 1) * 14 + x + 1] = (glyph[k >> 2] >> ((3 - (k & 3)) * 2)) & 3;
+    // This 578-byte scratch lives only while a changed curved label is built.
+    memset(padded, 0, (HT_ARC_CELL_WIDTH + 2) * (HT_ARC_CELL_HEIGHT + 2));
+    for (unsigned y = 0; y < HT_ARC_CELL_HEIGHT; y++) for (unsigned x = 0; x < HT_ARC_CELL_WIDTH; x++) {
+        unsigned k = y * HT_ARC_CELL_WIDTH + x;
+        padded[(y + 1) * (HT_ARC_CELL_WIDTH + 2) + x + 1] = (glyph[k >> 2] >> ((3 - (k & 3)) * 2)) & 3;
     }
 }
 static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
@@ -436,12 +441,12 @@ static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
     int count = 0;
     const char *p = r->text;
     while (*p && count < HT_ARC_COLS) cp[count++] = ht_utf8_next(&p);
-    uint8_t coverage[14 * 30];
+    uint8_t coverage[(HT_ARC_CELL_WIDTH + 2) * (HT_ARC_CELL_HEIGHT + 2)];
     for (int i = 0; i < count; i++) {
-        uint32_t c = font_codepoint(&ht_mono_20, cp[i]);
+        uint32_t c = font_codepoint(&ht_mono_24, cp[i]);
         if (c == ' ') continue;
-        const ht_font_t *f = glyph_font(&ht_mono_20, c);
-        const uint8_t *glyph = f->pixels + (c - f->first) * 84;
+        const ht_font_t *f = glyph_font(&ht_mono_24, c);
+        const uint8_t *glyph = f->pixels + (c - f->first) * ((HT_ARC_CELL_WIDTH * HT_ARC_CELL_HEIGHT + 3) / 4);
 #ifdef DEVICE_LAYOUT_BENCH
         if (arc_fast)
 #endif
@@ -452,18 +457,20 @@ static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
         int cy = (233 - r->y) * 256 + (r->arc == 2 ? 1 : -1) * (205 * cs * 256 >> 14);
         if (r->arc == 2) sn = -sn; // lower arc reads left-to-right with upright letters
         int sin_abs = sn < 0 ? -sn : sn;
-        int half_w = ((13 * cs + 29 * sin_abs) >> 15) + 2;
-        int half_h = ((29 * cs + 13 * sin_abs) >> 15) + 2;
+        int half_w = (((HT_ARC_CELL_WIDTH + 1) * cs + (HT_ARC_CELL_HEIGHT + 1) * sin_abs) >> 15) + 2;
+        int half_h = (((HT_ARC_CELL_HEIGHT + 1) * cs + (HT_ARC_CELL_WIDTH + 1) * sin_abs) >> 15) + 2;
         int box_x = cx, box_y = cy;
 #ifdef DEVICE_LAYOUT_BENCH
         if (arc_tight)
 #endif
         {
-            const uint8_t *ink = f == &ht_open_20 ? ht_open_20_ink[0] : ht_mono_20_ink[c - f->first];
+            const uint8_t *ink = f == &ht_open_24 ? ht_open_24_ink[0] :
+                f == &ht_right_24 ? ht_right_24_ink[0] :
+                f == &ht_bell_24 ? ht_bell_24_ink[0] : ht_mono_24_ink[c - f->first];
             // Source pixels outside this box are transparent. Include a full
             // bilinear halo and two destination pixels for fixed-point rounding.
-            int ox = (ink[0] + ink[2]) * 128 - (6 * 256 - 128);
-            int oy = (ink[1] + ink[3]) * 128 - (14 * 256 - 128);
+            int ox = (ink[0] + ink[2]) * 128 - (HT_ARC_CELL_WIDTH * 128 - 128);
+            int oy = (ink[1] + ink[3]) * 128 - (HT_ARC_CELL_HEIGHT * 128 - 128);
             box_x += (ox * cs - oy * sn) >> 14;
             box_y += (ox * sn + oy * cs) >> 14;
             int w = ink[2] - ink[0] + 2, h = ink[3] - ink[1] + 2;
@@ -474,9 +481,9 @@ static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
         int y0 = imax(0, (box_y >> 8) - half_h), y1 = imin(HT_ARC_HEIGHT, (box_y >> 8) + half_h + 1);
         for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) {
             int dx = x * 256 + 128 - cx, dy = y * 256 + 128 - cy;
-            int sx = ((dx * cs + dy * sn) >> 14) + 6 * 256 - 128;
-            int sy = ((-dx * sn + dy * cs) >> 14) + 14 * 256 - 128;
-            if (sx < -256 || sx >= 12 * 256 || sy < -256 || sy >= 28 * 256) continue;
+            int sx = ((dx * cs + dy * sn) >> 14) + HT_ARC_CELL_WIDTH * 128 - 128;
+            int sy = ((-dx * sn + dy * cs) >> 14) + HT_ARC_CELL_HEIGHT * 128 - 128;
+            if (sx < -256 || sx >= HT_ARC_CELL_WIDTH * 256 || sy < -256 || sy >= HT_ARC_CELL_HEIGHT * 256) continue;
             int gx = sx >> 8, gy = sy >> 8;
             unsigned fx = sx & 255, fy = sy & 255;
             // Fixed-point bilinear coverage preserves the existing font's soft
@@ -491,9 +498,9 @@ static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
             } else
 #endif
             {
-                const uint8_t *alpha = coverage + (gy + 1) * 14 + gx + 1;
+                const uint8_t *alpha = coverage + (gy + 1) * (HT_ARC_CELL_WIDTH + 2) + gx + 1;
                 unsigned upper = alpha[0]*(256-fx) + alpha[1]*fx;
-                unsigned lower = alpha[14]*(256-fx) + alpha[15]*fx;
+                unsigned lower = alpha[HT_ARC_CELL_WIDTH + 2]*(256-fx) + alpha[HT_ARC_CELL_WIDTH + 3]*fx;
                 a = (upper*(256-fy) + lower*fy + 32768) >> 16;
             }
             unsigned k = (unsigned)y * HT_ARC_WIDTH + (unsigned)x, shift = (3 - (k & 3)) * 2;

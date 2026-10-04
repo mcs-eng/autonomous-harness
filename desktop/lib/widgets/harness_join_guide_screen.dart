@@ -1,3 +1,4 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -58,7 +59,7 @@ class _HarnessJoinGuideScreenState extends State<HarnessJoinGuideScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(Icons.link_off, color: AppColors.warning, size: 28),
+              Icon(AppIcons.unlink, color: AppColors.warning, size: 28),
               const SizedBox(height: 14),
               Text(
                 'Harness is offline',

@@ -1,8 +1,10 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import 'runtime_platform.dart';
+import 'web_release.dart';
 
 /// The version of the build currently running.
 ///
@@ -15,10 +17,17 @@ import 'runtime_platform.dart';
 /// exists. Windows previews use the same file to retain the prerelease suffix
 /// that cannot be stamped into numeric PE version resources. Other builds
 /// fall through to [PackageInfo].
+///
+/// A browser reads its host's `release.json` instead, the version a deploy is
+/// checked against; `flutter run` serves none and falls through as well.
 Future<String> runningAppVersion({
   String? executablePath,
   Future<String> Function()? packageInfoVersion,
 }) async {
+  if (kIsWeb) {
+    final released = await webReleaseVersion();
+    if (released != null) return released;
+  }
   if (RuntimePlatform.isLinux || RuntimePlatform.isWindows) {
     final exe = File(executablePath ?? RuntimePlatform.resolvedExecutable);
     final versionFile = File('${exe.parent.path}/version.txt');

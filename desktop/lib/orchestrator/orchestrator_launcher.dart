@@ -2,15 +2,15 @@ import 'dart:async';
 
 import '../shared/widgets/labeled_field.dart';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/widgets/app_dialog.dart';
 import '../shared/widgets/app_icon_button.dart';
 import '../shared/widgets/app_select_field.dart';
+import '../shortcuts/app_shortcuts.dart' show altWorkspacePrefix;
 import '../state/app_state.dart';
 import '../ws/ws_conn.dart';
 import 'orchestrator_controller.dart';
@@ -152,18 +152,18 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
     grid.AppTheme.watch(context);
     return Dialog(
       backgroundColor: grid.AppPalette.panelBg,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       insetPadding: const EdgeInsets.all(24),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 740, maxHeight: 740),
+        constraints: const BoxConstraints(maxWidth: 680, maxHeight: 740),
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(28),
+          padding: const EdgeInsets.all(24),
           child: CallbackShortcuts(
             bindings: {
-              const SingleActivator(
+              SingleActivator(
                 LogicalKeyboardKey.enter,
-                meta: !kIsWeb,
-                alt: kIsWeb,
+                meta: !altWorkspacePrefix,
+                alt: altWorkspacePrefix,
               ): _start,
             },
             child: Column(
@@ -173,14 +173,14 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
                 Row(
                   children: [
                     Icon(
-                      LucideIcons.sparkles,
+                      AppIcons.sparkles,
                       size: 18,
                       color: grid.AppPalette.swarmAccent,
                     ),
                     const SizedBox(width: 10),
                     const Expanded(child: Text('Orchestrator')),
                     AppIconButton(
-                      icon: LucideIcons.x,
+                      icon: AppIcons.close,
                       tooltip: 'Close',
                       onPressed: () => Navigator.of(context).pop(),
                     ),
@@ -206,7 +206,7 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
                   minLines: 5,
                   maxLines: 9,
                   maxLength: 24000,
-                  style: grid.AppType.mono(height: 1.45),
+                  style: grid.AppType.body(height: 1.45),
                   onChanged: (_) => setState(() {}),
                   decoration: const InputDecoration(
                     border: InputBorder.none,
@@ -254,16 +254,14 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
                           ? null
                           : _start,
                       icon: Icon(
-                        _starting
-                            ? LucideIcons.ellipsis
-                            : LucideIcons.arrowUpRight,
+                        _starting ? AppIcons.ellipsis : AppIcons.arrowUpRight,
                         size: 16,
                       ),
                       label: Text(
                         _starting
                             ? 'Starting…'
                             : _attempt == null
-                            ? 'Start creating  ${kIsWeb ? 'Alt+↵' : '⌘↵'}'
+                            ? 'Start creating'
                             : 'Check launch',
                       ),
                     ),
@@ -322,7 +320,7 @@ class _OrchestratorLauncherState extends State<OrchestratorLauncher> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       subtitle: Text(project['state'] as String? ?? ''),
-                      trailing: const Icon(LucideIcons.arrowUpRight, size: 14),
+                      trailing: const Icon(AppIcons.arrowUpRight, size: 14),
                       onTap: _machine == null
                           ? null
                           : () {

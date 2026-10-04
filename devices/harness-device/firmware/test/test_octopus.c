@@ -217,7 +217,7 @@ static void activity_checks(void)
                     assert(r->arc == 2);
                 }
                 if (!r->text[0] || !r->arc) continue;
-                assert((r->arc == 1 || r->arc == 2) && r->font == &ht_mono_20);
+                assert((r->arc == 1 || r->arc == 2) && r->font == &ht_mono_24);
                 assert(!strchr(r->text, '+'));
                 for (int j = 0; j < i; j++) {
                     const ht_run_t *p = &after.runs[j];

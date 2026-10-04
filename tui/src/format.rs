@@ -4,6 +4,9 @@
 //! environment, as tmux finds a name; strftime first for the formats tmux expands with the time
 //! (the status line, display-message); then, when drawn, `#[…]` styles.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::style::{Modifier, Style};
@@ -29,14 +32,14 @@ pub fn text(app: &App, fmt: &str, window: Option<usize>) -> String {
 
 /// tmux's format_expand ([time]: format_expand_time) for a window and a pane.
 pub fn expand(app: &App, fmt: &str, window: usize, pane: Option<u64>, time: bool) -> String {
-    let mut es = Es { app, window, pane, time, nojobs: false, depth: 0, now: now_secs(), session: None, window_of: None, format_type: None, trace: None };
+    let mut es = Es { app, window, pane, time, nojobs: false, depth: 0, now: now_secs(), session: None, window_of: None, format_type: None, trace: None, values: Rc::default() };
     expand1(&mut es, fmt)
 }
 
 /// display-message -v prints the expansion decisions as tmux's FORMAT_VERBOSE does.
 pub fn verbose(app: &App, fmt: &str, window: usize, pane: Option<u64>) -> (String, Vec<String>) {
     let trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut es = Es { app, window, pane, time: true, nojobs: false, depth: 0, now: now_secs(), session: None, window_of: None, format_type: None, trace: Some(trace.clone()) };
+    let mut es = Es { app, window, pane, time: true, nojobs: false, depth: 0, now: now_secs(), session: None, window_of: None, format_type: None, trace: Some(trace.clone()), values: Rc::default() };
     let out = expand1(&mut es, fmt);
     let lines = trace.borrow().clone();
     (out, lines)
@@ -64,23 +67,28 @@ pub fn every(app: &App, window: usize, pane: Option<u64>) -> Vec<String> {
 /// A format for a session not in front (another client's, or a list's row): its session_*
 /// values its own, as a #{S:} loop expands them.
 pub fn expand_session(app: &App, fmt: &str, session: u32) -> String {
-    let mut es = Es { app, window: app.active, pane: None, time: false, nojobs: false, depth: 0, now: now_secs(), session: (session != app.session_id).then_some(session), window_of: None, format_type: Some(crate::tree::FORMAT_SESSION), trace: None };
+    let mut es = Es { app, window: app.active, pane: None, time: false, nojobs: false, depth: 0, now: now_secs(), session: (session != app.session_id).then_some(session), window_of: None, format_type: Some(crate::tree::FORMAT_SESSION), trace: None, values: Rc::default() };
     expand1(&mut es, fmt)
 }
 
 /// A format for window [k] (of session_windows) of a session not in front (another client's).
 pub fn expand_session_window(app: &App, fmt: &str, session: u32, k: usize) -> String {
-    let mut es = Es { app, window: app.active, pane: None, time: false, nojobs: false, depth: 0, now: now_secs(), session: Some(session), window_of: Some(k), format_type: Some(crate::tree::FORMAT_WINDOW), trace: None };
+    let mut es = Es { app, window: app.active, pane: None, time: false, nojobs: false, depth: 0, now: now_secs(), session: Some(session), window_of: Some(k), format_type: Some(crate::tree::FORMAT_WINDOW), trace: None, values: Rc::default() };
     expand1(&mut es, fmt)
 }
 
 pub fn expand_nojobs(app: &App, fmt: &str) -> String {
-    let mut es = Es { app, window: app.active, pane: app.focused(), time: false, nojobs: true, depth: 0, now: now_secs(), session: None, window_of: None, format_type: None, trace: None };
+    let mut es = Es { app, window: app.active, pane: app.focused(), time: false, nojobs: true, depth: 0, now: now_secs(), session: None, window_of: None, format_type: None, trace: None, values: Rc::default() };
     expand1(&mut es, fmt)
 }
 
 /// tmux's FORMAT_LOOP_LIMIT: formats that expand into themselves stop here.
 const LOOP_LIMIT: u32 = 100;
+
+// One expansion borrows an immutable App. Reuse its raw values within that
+// expansion only; the next render observes all model, option and job changes.
+type LookupContext = (usize, Option<u64>, Option<u32>, Option<usize>, Option<u8>, bool);
+type Values = HashMap<LookupContext, HashMap<String, Option<Val>>>;
 
 struct Es<'a> {
     app: &'a App,
@@ -98,14 +106,15 @@ struct Es<'a> {
     window_of: Option<usize>,
     format_type: Option<u8>,
     trace: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    values: Rc<RefCell<Values>>,
 }
 
 impl<'a> Es<'a> {
     fn at(&self, window: usize, pane: Option<u64>) -> Es<'a> {
-        Es { app: self.app, window, pane, time: self.time, nojobs: self.nojobs, depth: self.depth, now: self.now, session: self.session, window_of: self.window_of, format_type: self.format_type, trace: self.trace.clone() }
+        Es { app: self.app, window, pane, time: self.time, nojobs: self.nojobs, depth: self.depth, now: self.now, session: self.session, window_of: self.window_of, format_type: self.format_type, trace: self.trace.clone(), values: self.values.clone() }
     }
-    fn log(&self, text: impl AsRef<str>) {
-        if let Some(trace) = &self.trace { trace.borrow_mut().push(format!("#{}{}", " ".repeat(self.depth.min(10) as usize), text.as_ref())) }
+    fn log(&self, text: std::fmt::Arguments<'_>) {
+        if let Some(trace) = &self.trace { trace.borrow_mut().push(format!("#{}{}", " ".repeat(self.depth.min(10) as usize), text)) }
     }
 }
 
@@ -245,9 +254,9 @@ fn alias(c: u8) -> Option<&'static str> {
 fn expand1(es: &mut Es, fmt: &str) -> String {
     if fmt.is_empty() || es.depth >= LOOP_LIMIT { return String::new() }
     es.depth += 1;
-    es.log(format!("expanding format: {fmt}"));
+    es.log(format_args!("expanding format: {fmt}"));
     let timed;
-    let fmt = if es.time && fmt.contains('%') { timed = strftime(es.app, fmt, es.now); if timed != fmt { es.log(format!("after time expanded: {timed}")) } timed.as_str() } else { fmt };
+    let fmt = if es.time && fmt.contains('%') { timed = strftime(es.app, fmt, es.now); if timed != fmt { es.log(format_args!("after time expanded: {timed}")) } timed.as_str() } else { fmt };
     let b = fmt.as_bytes();
     let mut out = String::new();
     let mut i = 0;
@@ -280,7 +289,7 @@ fn expand1(es: &mut Es, fmt: &str) -> String {
             b'{' => {
                 let Some(k) = skip(&b[hash..], b"}") else { break };
                 let end = hash + k;
-                es.log(format!("found #{{}}: {}", &fmt[i..end]));
+                es.log(format_args!("found #{{}}: {}", &fmt[i..end]));
                 match replace(es, &fmt[i..end]) { Some(v) => out.push_str(&v), None => break }
                 i = end + 1;
             }
@@ -301,7 +310,7 @@ fn expand1(es: &mut Es, fmt: &str) -> String {
             _ => {
                 let name = if style_end.map(|e| i > e).unwrap_or(true) { alias(ch) } else { None };
                 match name {
-                    Some(name) => { es.log(format!("found #{}: {name}", ch as char)); match replace(es, name) { Some(v) => out.push_str(&v), None => break } },
+                    Some(name) => { es.log(format_args!("found #{}: {name}", ch as char)); match replace(es, name) { Some(v) => out.push_str(&v), None => break } },
                     None => {
                         out.push('#');
                         // Not an ASCII letter: the character goes out whole, from its first byte.
@@ -311,7 +320,7 @@ fn expand1(es: &mut Es, fmt: &str) -> String {
             }
         }
     }
-    es.log(format!("result is: {out}"));
+    es.log(format_args!("result is: {out}"));
     es.depth -= 1;
     out
 }
@@ -451,12 +460,12 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         v
     } else if f.windows && es.session.is_some() {
         // format_loop_windows in a session not in front (a #{S:} loop's): its own windows.
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let sid = es.session.unwrap_or_default();
         let current = es.app.stash_value(sid, "window_index");
         let mut v = String::new();
         for (k, (num, _, _)) in es.app.session_windows(sid).into_iter().enumerate() {
-            let use_ = if Some(num.to_string()) == current { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if Some(num.to_string()) == current { active.unwrap_or(all) } else { all };
             let mut next = es.at(es.window, None);
             next.window_of = Some(k);
             next.format_type = Some(crate::tree::FORMAT_WINDOW);
@@ -464,10 +473,10 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         }
         v
     } else if f.windows {
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let mut v = String::new();
         for w in 0..es.app.tabs.len() {
-            let use_ = if w == es.app.active { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if w == es.app.active { active.unwrap_or(all) } else { all };
             let mut next = es.at(w, None);
             next.format_type = Some(crate::tree::FORMAT_WINDOW);
             v.push_str(&expand1(&mut next, use_));
@@ -475,23 +484,23 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         v
     } else if f.panes && es.session.and_then(|id| es.app.stash_panes(id, es.window_of)).is_some() {
         // format_loop_panes in a session not in front (a #{S:} loop's): its window's own panes.
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let (panes, focus, _) = es.session.and_then(|id| es.app.stash_panes(id, es.window_of)).unwrap_or_default();
         let mut v = String::new();
         for p in panes {
-            let use_ = if Some(p) == focus { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if Some(p) == focus { active.unwrap_or(all) } else { all };
             let mut next = es.at(es.window, Some(p));
             next.format_type = Some(crate::tree::FORMAT_PANE);
             v.push_str(&expand1(&mut next, use_));
         }
         v
     } else if f.panes {
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let tab = es.app.tabs.get(es.window);
         let focus = tab.and_then(|t| t.focus);
         let mut v = String::new();
         for p in tab.map(|t| t.panes()).unwrap_or_default() {
-            let use_ = if Some(p) == focus { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if Some(p) == focus { active.unwrap_or(all) } else { all };
             let mut next = es.at(es.window, Some(p));
             next.format_type = Some(crate::tree::FORMAT_PANE);
             v.push_str(&expand1(&mut next, use_));
@@ -507,7 +516,7 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         let term = expand1(es, copy);
         search_pane(es, fm, &term)
     } else if let Some(fm) = cmp {
-        let (left, right) = choose(es, copy, true)?;
+        let (left, right) = choose_expanded(es, copy)?;
         let t = |b: bool| if b { "1".to_string() } else { "0".to_string() };
         match fm.m.as_str() {
             "||" => t(truthy(&left) || truthy(&right)),
@@ -528,15 +537,15 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
             // Not a name: expanded; if that changes nothing, false.
             None => { let v = expand1(es, condition); if v == condition { String::new() } else { v } }
         };
-        let (left, right) = choose(es, &rest[k + 1..], false)?;
-        if truthy(&found) { expand1(es, &left) } else { expand1(es, &right) }
+        let (left, right) = choose(&rest[k + 1..])?;
+        if truthy(&found) { expand1(es, left) } else { expand1(es, right) }
     } else if let Some(fm) = mexp {
         expression(es, fm, copy).unwrap_or_default()
     } else if copy.contains("#{") {
         expand1(es, copy)
     } else {
         let found = find(es, copy, &f, time_format.as_deref());
-        match &found { Some(value) => es.log(format!("format '{copy}' found: {value}")), None => es.log(format!("format '{copy}' not found")) }
+        match &found { Some(value) => es.log(format_args!("format '{copy}' found: {value}")), None => es.log(format_args!("format '{copy}' not found")) }
         found.unwrap_or_default()
     };
     if f.expand { value = expand1(es, &value) }
@@ -556,21 +565,28 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
     if width > 0 { value = pad(&value, width as usize, false) } else if width < 0 { value = pad(&value, width.unsigned_abs() as usize, true) }
     if f.length { value = value.len().to_string() }
     if f.width { value = format_width(&value).to_string() }
-    es.log(format!("replaced '{key}' with '{value}'"));
+    es.log(format_args!("replaced '{key}' with '{value}'"));
     Some(value)
 }
 
-/// `a,b`: the two sides at the first comma outside `#{…}`, expanded when asked (format_choose).
-fn choose(es: &mut Es, s: &str, expand: bool) -> Option<(String, String)> {
+/// `a,b`: borrow the two templates at the first comma outside `#{…}`. Conditions
+/// and loops expand only the selected template, without copying either side.
+fn choose(s: &str) -> Option<(&str, &str)> {
     let k = skip(s.as_bytes(), b",")?;
-    let (l, r) = (&s[..k], &s[k + 1..]);
-    Some(if expand { (expand1(es, l), expand1(es, r)) } else { (l.to_string(), r.to_string()) })
+    Some((&s[..k], &s[k + 1..]))
+}
+
+fn choose_expanded(es: &mut Es, s: &str) -> Option<(String, String)> {
+    let (l, r) = choose(s)?;
+    Some((expand1(es, l), expand1(es, r)))
 }
 
 fn truthy(v: &str) -> bool { !v.is_empty() && v != "0" }
 
-/// A name's value: an option, a variable, else the environment (format_find), with b: d: q: t:.
-fn find(es: &mut Es, key: &str, f: &Flags, time_format: Option<&str>) -> Option<String> {
+/// A name's raw value: an option, a variable, else the environment (format_find).
+fn value(es: &Es, key: &str, timestring: bool) -> Option<Val> {
+    let context = (es.window, es.pane, es.session, es.window_of, es.format_type, timestring);
+    if let Some(found) = es.values.borrow().get(&context).and_then(|values| values.get(key)) { return found.clone() }
     let app = es.app;
     let window_id = app.tabs.get(es.window).map(|t| t.id.clone()).unwrap_or_default();
     let kind = match key { "session_format" => Some(crate::tree::FORMAT_SESSION), "window_format" => Some(crate::tree::FORMAT_WINDOW), "pane_format" => Some(crate::tree::FORMAT_PANE), _ => None };
@@ -585,18 +601,23 @@ fn find(es: &mut Es, key: &str, f: &Flags, time_format: Option<&str>) -> Option<
         _ => app.stash_value(id, key),
     }));
     if found.is_none() { found = app.options.format_value(key, &window_id, es.pane) }
-    let mut t: i64 = 0;
-    if found.is_none() {
-        match table(app, key, es.window, es.pane) {
-            Some(Val::Time(v)) => t = v,
-            Some(Val::Str(v)) => found = Some(v),
-            None => {
-                // format_find: the session's environment, then the global one.
-                if !f.timestring { found = app.session_env.get(key).or_else(|| app.global_env.get(key)).and_then(|e| e.value.clone()) }
-                found.as_ref()?;
-            }
-        }
-    }
+    let found = found.map(Val::Str).or_else(|| table(app, key, es.window, es.pane)).or_else(|| {
+        // format_find: the session's environment, then the global one. Time
+        // modifiers do not resolve environment variables in tmux's format_find.
+        if timestring { None } else { app.session_env.get(key).or_else(|| app.global_env.get(key)).and_then(|e| e.value.clone()).map(Val::Str) }
+    });
+    es.values.borrow_mut().entry(context).or_default().insert(key.to_string(), found.clone());
+    found
+}
+
+/// Apply modifiers after lookup: one raw value may be quoted, shortened or timed
+/// differently at each occurrence of the same name.
+fn find(es: &mut Es, key: &str, f: &Flags, time_format: Option<&str>) -> Option<String> {
+    let app = es.app;
+    let (found, mut t) = match value(es, key, f.timestring)? {
+        Val::Str(v) => (Some(v), 0),
+        Val::Time(v) => (None, v),
+    };
     if f.timestring {
         if t == 0 { t = found.as_deref().and_then(|v| v.trim().parse().ok()).unwrap_or(0) }
         if t == 0 { return None }
@@ -725,7 +746,7 @@ fn expression(es: &mut Es, fm: &Mod, copy: &str) -> Option<String> {
     let fp = fm.argv.get(1).map(|a| a.contains('f')).unwrap_or(false);
     let mut prec: usize = if fp { 2 } else { 0 };
     if let Some(p) = fm.argv.get(2) { prec = p.trim().parse().ok()? }
-    let (l, r) = choose(es, copy, true)?;
+    let (l, r) = choose_expanded(es, copy)?;
     let num = |s: &str| -> Option<f64> { if s.is_empty() { Some(0.0) } else { s.trim_start().parse::<f64>().ok() } };
     let (mut a, mut b) = (num(&l)?, num(&r)?);
     if !fp { a = (a as i64) as f64; b = (b as i64) as f64 }
@@ -738,10 +759,41 @@ fn expression(es: &mut Es, fm: &Mod, copy: &str) -> Option<String> {
     Some(if fp { format!("{v:.prec$}") } else { format!("{:.prec$}", (v as i64) as f64) })
 }
 
+type Substitutions = std::collections::VecDeque<(String, bool, Option<Rc<regex::Regex>>)>;
+thread_local! {
+    static SUBSTITUTIONS: RefCell<Substitutions> = RefCell::new(Default::default());
+}
+
+/// Status formats reuse their patterns on every frame. Keep a small LRU of
+/// compiled expressions, never their match results. Larger expressions retain
+/// the original compiler limits and run uncached rather than growing the cache.
+fn substitution_regex(pattern: &str, icase: bool) -> Option<Rc<regex::Regex>> {
+    let uncached = || regex::RegexBuilder::new(pattern).case_insensitive(icase).build().ok().map(Rc::new);
+    if pattern.len() > 2048 { return uncached() }
+    SUBSTITUTIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(at) = cache.iter().position(|(p, i, _)| p == pattern && *i == icase) {
+            let entry = cache.remove(at).unwrap();
+            let re = entry.2.clone();
+            cache.push_front(entry);
+            return re;
+        }
+        let re = match regex::RegexBuilder::new(pattern).case_insensitive(icase)
+            .size_limit(32 * 1024).dfa_size_limit(32 * 1024).build() {
+            Ok(re) => Some(Rc::new(re)),
+            Err(regex::Error::CompiledTooBig(_)) => return uncached(),
+            Err(_) => None,
+        };
+        if cache.len() == 8 { cache.pop_back(); }
+        cache.push_front((pattern.to_string(), icase, re.clone()));
+        re
+    })
+}
+
 /// tmux's regsub: every match replaced; `\0`–`\9` in the replacement are the groups.
 fn regsub(pattern: &str, with: &str, text: &str, icase: bool) -> Option<String> {
     if text.is_empty() { return Some(String::new()) }
-    let re = regex::RegexBuilder::new(pattern).case_insensitive(icase).build().ok()?;
+    let re = substitution_regex(pattern, icase)?;
     let (mut start, mut last, end) = (0usize, 0usize, text.len());
     let mut empty = false;
     let mut buf = String::new();
@@ -978,6 +1030,7 @@ fn pretty_time(app: &App, t: i64, now: i64) -> String {
     strftime(app, "%h%y", t)
 }
 
+#[derive(Clone)]
 enum Val { Str(String), Time(i64) }
 
 /// A pane's tile in its window's layout, in the client's cells (title row included).
@@ -1004,6 +1057,50 @@ pub fn agent_mark(state: crate::fleet::State, tick: u64) -> String {
 }
 
 
+/// One remaining figure per subscription, across every machine with a reading. The local
+/// reading wins when machines share an account; unnamed accounts cannot safely be merged.
+/// Machine labels distinguish additional subscriptions without repeating them for shared ones.
+fn quota_remaining<'a>(readings: impl Iterator<Item = (&'a str, &'a crate::fleet::Usage)>, local: &str, machine_name: impl Fn(&str) -> String, marked: bool, icons: bool) -> String {
+    let mut readings: Vec<_> = readings.filter(|(_, u)| !u.windows.is_empty()).collect();
+    readings.sort_by(|(am, a), (bm, b)| (&a.provider, *am != local, machine_name(am), am).cmp(&(&b.provider, *bm != local, machine_name(bm), bm)));
+    let mut seen = std::collections::HashSet::new();
+    readings.retain(|(_, u)| u.account.as_deref().filter(|a| !a.is_empty()).map(|a| seen.insert((u.provider.as_str(), a))).unwrap_or(true));
+    readings.iter().filter_map(|(machine, u)| {
+        let used = u.windows.iter().map(|w| w.used).filter(|u| u.is_finite()).reduce(f64::max)?.clamp(0.0, 100.0);
+        let remaining = 100.0 - used;
+        // A little allowance remains: don't round it to a misleading exhausted 0%.
+        let number = if remaining > 0.0 && remaining < 1.0 { "<1%".into() } else { format!("{remaining:.0}%") };
+        let mut label = if icons { quota_icon(&u.provider) } else { quota_provider(&u.provider) };
+        if *machine != local && readings.iter().filter(|(_, other)| other.provider == u.provider).count() > 1 {
+            label.push('@'); label.push_str(&clip_middle(&machine_name(machine), 12));
+        }
+        if marked && used >= 80.0 && !crate::theme::no_color() {
+            Some(format!("{label} #[fg={}]{number}#[fg=default]", quota_color(used)))
+        } else { Some(format!("{label} {number}")) }
+    }).collect::<Vec<_>>().join("  ")
+}
+
+/// A subscription's provider as its engine's icon, in the engine's colour (`✳` Claude, `◎`
+/// Codex/OpenAI…); a provider with no engine of its own, its name.
+fn quota_icon(provider: &str) -> String {
+    let engine = match provider.to_ascii_lowercase().as_str() { "anthropic" | "claude" => "claude", "openai" | "chatgpt" | "codex" => "codex", _ => return quota_provider(provider) };
+    let (mark, colour) = crate::theme::engine_mark(engine);
+    if crate::theme::no_color() { return mark.to_string() }
+    format!("#[fg={}]{mark}#[fg=default]", crate::tmuxconf::colour_name(crate::theme::paint(colour)))
+}
+
+fn quota_provider(provider: &str) -> String {
+    let mut chars = provider.chars();
+    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+}
+
+fn quota_color(used: f64) -> &'static str {
+    match (crate::term_out::terminal_is_light().unwrap_or(false), used >= 100.0) {
+        (false, false) => "#f3cc76", (false, true) => "#ff9b8e",
+        (true, false) => "#875600", (true, true) => "#a53028",
+    }
+}
+
 /// Compact quota warning: provider plus percentage, with color only on the number.
 /// The raw format retains the reset window for scripts and custom status lines.
 fn quota_warning<'a>(readings: impl Iterator<Item = &'a crate::fleet::Usage>, marked: bool) -> String {
@@ -1013,17 +1110,13 @@ fn quota_warning<'a>(readings: impl Iterator<Item = &'a crate::fleet::Usage>, ma
     } }
     let Some((u, w)) = worst else { return String::new() };
     if !marked { return format!("{} {} {:.0}%", u.provider, w.label, w.used) }
-    let provider = match u.provider.as_str() { "claude" => "Claude", "codex" => "Codex", p => p };
-    let light = crate::term_out::terminal_is_light().unwrap_or(false);
-    let color = match (light, w.used >= 100.0) {
-        (false, false) => "#f3cc76", (false, true) => "#ff9b8e",
-        (true, false) => "#875600", (true, true) => "#a53028",
-    };
+    let provider = quota_provider(&u.provider);
+    let color = quota_color(w.used);
     format!("{provider} #[fg={color}]{:.0}%#[fg=default]", w.used)
 }
 
 pub fn pane_title(app: &App, window: usize, pane: u64) -> String {
-    let Some(p) = app.panes.get(&pane) else { return crate::app::hostname() };
+    let Some(p) = app.panes.get(&pane) else { return app.fleet.local_machine_name() };
     let tab_id = app.tabs.get(window).map(|t| t.id.clone()).unwrap_or_default();
     if !p.osc_title.is_empty() && app.options.get("allow-set-title", &tab_id, Some(pane)).as_deref() == Some("on") { return p.osc_title.clone() }
     if !p.title.is_empty() { return p.title.clone() }
@@ -1034,8 +1127,8 @@ pub fn pane_title(app: &App, window: usize, pane: u64) -> String {
         return if p.machine_id == app.fleet.local_id { crate::app::full_hostname() } else { app.fleet.machine_name(&p.machine_id) };
     }
     // A harness not heard of yet (another terminal's new one, before the list comes): what runs
-    // in it, else tmux's own title (the host) — never its id.
-    agent.map(|a| a.name.clone()).or_else(|| p.fg_command.clone()).unwrap_or_else(|| if p.machine_id == app.fleet.local_id { crate::app::full_hostname() } else { app.fleet.machine_name(&p.machine_id) })
+    // in it, else the machine's app name.
+    agent.map(|a| a.name.clone()).or_else(|| p.fg_command.clone()).unwrap_or_else(|| app.fleet.machine_name(&p.machine_id))
 }
 
 /// Keep a distinguishing suffix, such as "(3)", visible when a title is long.
@@ -1066,7 +1159,7 @@ fn pane_heading_columns(app: &App, window: usize, pane: u64) -> usize {
     if app.options.pane_look() {
         let Some(tab) = app.tabs.get(window) else { return 0 };
         let Some(tile) = tab_rect(app, window, pane) else { return 0 };
-        crate::pane_frame::frame(tile, app.window_area(tab), app.pane_status(tab)).title
+        crate::pane_frame::frame(tile, app.window_area(tab), app.box_inner(tab), app.pane_status(tab)).title
             .map(|r| r.width.saturating_sub(2) as usize).unwrap_or(0)
     } else {
         content_rect(app, window, pane).map(|r| r.width.saturating_sub(4) as usize).unwrap_or(0)
@@ -1077,8 +1170,20 @@ fn pane_heading(app: &App, window: usize, pane: u64) -> String {
     let watcher = app.panes.get(&pane).and_then(|p| match &p.phase {
         crate::pane::Phase::Watching(who) => Some(who.as_str()), _ => None,
     });
-    compact_pane_heading(&pane_title(app, window, pane), app.pane_state(pane), watcher,
-        pane_heading_columns(app, window, pane).saturating_sub(1), app.tick)
+    let columns = pane_heading_columns(app, window, pane).saturating_sub(1);
+    let title = pane_title(app, window, pane);
+    // ── models: what its model says when it will not answer now (Starting up…, offline, not
+    // served), after the name — the name keeps a dozen columns, the note is cut to what is left ──
+    if let Some(note) = app.panes.get(&pane).and_then(|p| crate::models::pane_note(app, &p.machine_id, &p.agent_id)) {
+        use unicode_width::UnicodeWidthStr;
+        let keep = title.width().min(12) + 4;
+        if columns > keep + 12 {
+            let note = clip_middle(&note, (columns - keep - 1).min(note.width()));
+            let head = compact_pane_heading(&title, app.pane_state(pane), watcher, columns - note.width() - 1, app.tick);
+            return format!("{head} #[fg=yellow]{note}#[fg=default]");
+        }
+    }
+    compact_pane_heading(&title, app.pane_state(pane), watcher, columns, app.tick)
 }
 
 /// Keep state visible after the name. Watcher detail yields before the pane's identity;
@@ -1256,6 +1361,8 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
         // gethostname(3): the whole name (mac.lan); #{host_short} is it up to the first dot.
         "host" => crate::app::full_hostname(),
         "host_short" => crate::app::full_hostname().split('.').next().unwrap_or("").to_string(),
+        // This computer's name in Harness, including app renames; never the focused pane's.
+        "local_machine" => app.fleet.local_machine_name(),
         // Harness's own: the machine a pane is on, and how many harnesses wait on you.
         "machine" => pane.map(|p| app.fleet.machine_name(&p.machine_id)).unwrap_or_default(),
         "waiting" => app.fleet.waiting().to_string(),
@@ -1272,15 +1379,20 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
             let mut parts = Vec::new();
             let n = app.fleet.count(NeedsInput);
             if n > 0 { parts.push(format!("#[bold]?{n}#[nobold]")) }
-            for (state, glyph) in [(Failed, "✗"), (Done, "✓"), (Working, crate::theme::spinner(app.tick))] {
+            for state in [Failed, Done, Working] {
                 let n = app.fleet.count(state);
-                if n > 0 { parts.push(format!("{glyph}{n}")) }
+                if n > 0 {
+                    let glyph = match state { Failed => "✗", Done => "✓", _ => crate::theme::spinner(app.tick) };
+                    parts.push(format!("{glyph}{n}"));
+                }
             }
             parts.join(" ")
         }
         // The spinner's frame now, for a format of your own.
         "spinner" => crate::theme::spinner(app.tick).to_string(),
         "daemon_down" => app.daemon_down.then_some("1").unwrap_or("0").into(),
+        // A model being got for a harness, while it is: `↻ qwen3-coder 42%` (empty otherwise).
+        "model_progress" => crate::models::status_text(app).unwrap_or_default(),
         // The pane is another window's to type in (this one watches), when it is the only one.
         "pane_watching" => (pane.map(|p| matches!(p.phase, crate::pane::Phase::Watching(_))).unwrap_or(false) && tab.map(|t| t.panes().len() < 2).unwrap_or(false)).then_some("1").unwrap_or("0").into(),
         // However many panes the window has: whether another window has the pane to type in, and who.
@@ -1290,8 +1402,8 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
         // The harness's symbol as its title draws it (#{pane_agent_icon}, styled): in its state's
         // colour, needs you bold, idle dim.
         "pane_agent_mark" => pane.and_then(|p| app.pane_state(p.id)).map(|s| agent_mark(s, app.tick)).unwrap_or_default(),
-        // Where the harness works: `project ⑂ branch`, then progressively shorter context
-        // as the pane narrows. The Unicode fork needs no patched icon font. A folder with
+        // Where the harness works: `machine:project ⎇ branch`, then progressively shorter context
+        // as the pane narrows. The Unicode branch marker needs no patched icon font. A folder with
         // no git shows its name.
         "pane_where" => pane.zip(agent).and_then(|(p, a)| {
             if a.branch.is_empty() && a.project.is_empty() { return None }
@@ -1299,14 +1411,15 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
             let width = |s: &str| unicode_width::UnicodeWidthStr::width(s);
             let left = 1 + crate::draw::format_width(&pane_heading(app, window, p.id));
             let pr = a.pr.as_ref().map(|p| format!(" {}", p.label())).unwrap_or_default();
-            // A pane on another machine says which (scp's way: gpu-box:ml-lab).
-            let far = (p.machine_id != app.fleet.local_id && !a.project.is_empty()).then(|| format!("{}:", app.fleet.machine_name(&p.machine_id))).filter(|m| m.len() > 1);
-            let far_project = far.as_ref().map(|m| format!("{m}{}", a.project));
-            // A folder that is not a git repository: its name alone (and the machine's).
-            if a.branch.is_empty() { return [far_project, Some(a.project.clone())].into_iter().flatten().find(|c| room >= left + width(c) + 3) }
-            [far_project.as_ref().filter(|_| !pr.is_empty()).map(|fp| format!("{fp} ⑂ {}{pr}", a.branch)), far_project.as_ref().map(|fp| format!("{fp} ⑂ {}", a.branch)),
-                (!a.project.is_empty() && !pr.is_empty()).then(|| format!("{} ⑂ {}{pr}", a.project, a.branch)), (!a.project.is_empty()).then(|| format!("{} ⑂ {}", a.project, a.branch)),
-                (!pr.is_empty()).then(|| format!("⑂ {}{pr}", a.branch)), Some(format!("⑂ {}", a.branch)), Some(a.branch.clone())]
+            // Both local and remote panes name their machine when there is room.
+            // Drop it before project, branch or PR context as the pane narrows.
+            let machine = app.fleet.machine_name(&p.machine_id);
+            let qualified_project = (!machine.is_empty() && !a.project.is_empty()).then(|| format!("{machine}:{}", a.project));
+            if a.branch.is_empty() { return [qualified_project, Some(a.project.clone())].into_iter().flatten().find(|c| room >= left + width(c) + 3) }
+            [qualified_project.as_ref().filter(|_| !pr.is_empty()).map(|p| format!("{p} ⎇ {}{pr}", a.branch)),
+                (!a.project.is_empty() && !pr.is_empty()).then(|| format!("{} ⎇ {}{pr}", a.project, a.branch)),
+                qualified_project.as_ref().map(|p| format!("{p} ⎇ {}", a.branch)), (!a.project.is_empty()).then(|| format!("{} ⎇ {}", a.project, a.branch)),
+                (!pr.is_empty()).then(|| format!("⎇ {}{pr}", a.branch)), Some(format!("⎇ {}", a.branch)), Some(a.branch.clone())]
                 .into_iter().flatten().find(|c| room >= left + width(c) + 3)
         }).unwrap_or_default(),
         // A pane's harness at a glance, as its title shows it (empty for a plain shell), and what it
@@ -1332,6 +1445,14 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
             let m = pane.map(|p| p.machine_id.clone()).unwrap_or_else(|| app.fleet.local_id.clone());
             app.usage.get(&m).map(|u| u.iter().map(|x| x.line()).collect::<Vec<_>>().join(" · ")).unwrap_or_default()
         }
+        // Compact remaining allowance for every subscription, not just the one in danger.
+        "usage_remaining" | "usage_remaining_mark" => quota_remaining(
+            app.usage.iter().flat_map(|(machine, readings)| readings.iter().map(move |u| (machine.as_str(), u))),
+            &app.fleet.local_id, |id| app.fleet.machine_name(id), name == "usage_remaining_mark", false),
+        // The same, each subscription by its engine's icon (`✳ 43%  ◎ 80%`): the side bar's.
+        "usage_remaining_icons" => quota_remaining(
+            app.usage.iter().flat_map(|(machine, readings)| readings.iter().map(move |u| (machine.as_str(), u))),
+            &app.fleet.local_id, |id| app.fleet.machine_name(id), true, true),
         "usage_high" | "usage_high_mark" => quota_warning(app.usage.values().flatten(), name == "usage_high_mark"),
         "fleet_tokens" => { let t: u64 = app.fleet.agents.values().map(|a| a.tokens).sum(); if t > 0 { crate::fleet::compact(t) } else { String::new() } }
         "pane_branch" => agent.map(|a| a.branch.clone()).unwrap_or_default(),
@@ -1566,7 +1687,7 @@ fn harness_value(app: &App, machine: &str, id: &str, key: &str) -> Option<Val> {
 /// failed, paused, offline.
 fn state_word(s: crate::fleet::State) -> &'static str {
     use crate::fleet::State::*;
-    match s { NeedsInput => "needs", Working => "working", Done => "done", Ready => "idle", Starting => "starting", Failed => "failed", Paused => "paused", Offline => "offline" }
+    match s { NeedsInput => "needs", Working => "working", Done => "done", Unknown => "unknown", Ready => "idle", Starting => "starting", Failed => "failed", Paused => "paused", Offline => "offline" }
 }
 
 /// `#{window_raw_flags}`: `#` activity, `!` bell, `~` silence, `*` current, `-` last, `M` the
@@ -1631,6 +1752,153 @@ fn restyle(mut style: Style, base: Style, spec: &str) -> Style {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn fleet_only_requests_animation_while_working_and_motion_is_enabled() {
+        let mut app = status_fixture(1, 1);
+        for working in [false, true, false] {
+            app.fleet.agents.values_mut().next().unwrap().working = working;
+            crate::theme::begin_animation_frame(true);
+            super::expand(&app, "#{fleet}/#{fleet}", 0, Some(1), false);
+            assert_eq!(crate::theme::needs_animation_frame(), working);
+        }
+        app.fleet.agents.values_mut().next().unwrap().working = true;
+        crate::theme::begin_animation_frame(false);
+        assert_eq!(super::expand(&app, "#{fleet}", 0, Some(1), false), "⠋1");
+        assert!(!crate::theme::needs_animation_frame());
+    }
+
+    fn status_fixture(windows: usize, agents: usize) -> crate::app::App {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(19789, sink, (200, 60));
+        app.fleet.local_id = "render-test".into();
+        app.fleet.machines.push(crate::fleet::Machine { id: "render-test".into(), name: "Render test".into(), local: true, status: "running".into(), reach: crate::fleet::Reach::Ready });
+        for i in 0..agents {
+            let row = serde_json::json!({ "id": format!("agent-{i}"), "name": format!("Review project {i}"), "engine": "codex", "status": "active" });
+            let mut agent = crate::fleet::agent_from("render-test", &row, None);
+            agent.working = true;
+            app.fleet.agents.insert(agent.key(), agent);
+        }
+        app.tabs = (0..windows).map(|i| {
+            let mut tab = crate::app::Tab::with_wid(&format!("Project {i}"), i as u64);
+            tab.focus = Some(i as u64 + 1);
+            let mut pane = crate::pane::Pane::new(i as u64 + 1, "render-test", &format!("agent-{i}"), 80, 24);
+            pane.phase = crate::pane::Phase::Live;
+            app.panes.insert(pane.id, pane);
+            tab
+        }).collect();
+        app
+    }
+
+    /// An opt-in, repeatable CPU workload; no daemon, real sessions, or terminal is opened.
+    #[test]
+    #[ignore = "run with cargo test --release benchmark_status_formats -- --ignored --nocapture"]
+    fn benchmark_status_formats() {
+        for (windows, agents) in [(6, 32), (24, 512)] {
+            let app = status_fixture(windows, agents);
+            let fmt = app.options.get("status-format[0]", &app.tabs[0].id, None).unwrap();
+            let iterations = 2000;
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                std::hint::black_box(super::expand(&app, &fmt, 0, Some(1), true));
+            }
+            eprintln!("status windows={windows} agents={agents}: {:.1} us/expansion", start.elapsed().as_micros() as f64 / iterations as f64);
+        }
+    }
+
+    #[test]
+    fn repeated_values_keep_window_pane_and_loop_type_context() {
+        let mut app = status_fixture(2, 2);
+        for (i, tab) in app.tabs.iter_mut().enumerate() {
+            tab.root = Some(crate::layout::Node::new(i as u64 + 1, 80, 24));
+            app.options.windows.entry(tab.id.clone()).or_default().insert("@label".into(), format!("label-{i}"));
+        }
+        let fmt = "#{W:#{window_name}=#{@label}/#{window_format}/#{P:#{window_name}=#{@label}/#{window_format}/#{pane_format}/#{pane_id};}}";
+        assert_eq!(super::expand(&app, fmt, 0, Some(1), false),
+            "Project 0=label-0/1/Project 0=label-0/0/1/%0;Project 1=label-1/1/Project 1=label-1/0/1/%1;");
+        app.active = 1;
+        assert_eq!(super::expand(&app, "#{window_name}/#{window_active}/#{pane_id}", 1, Some(2), false), "Project 1/1/%1");
+    }
+
+    #[test]
+    fn loop_alternatives_keep_nested_commas_and_only_expand_the_selected_branch() {
+        let mut app = status_fixture(2, 2);
+        app.options.global_session.insert("@selected".into(), "live,✓".into());
+        let fmt = "#{W:#{window_name},#{?window_active,#{@selected},#(printf unexpected)}}";
+        assert_eq!(super::expand(&app, fmt, 0, None, false), "live,✓Project 1");
+        app.active = 1;
+        app.options.global_session.insert("@selected".into(), "changed,✓".into());
+        assert_eq!(super::expand(&app, fmt, 0, None, false), "Project 0changed,✓");
+        assert!(app.jobs.borrow().is_empty(), "the untaken branch must not run its shell command");
+    }
+
+    #[test]
+    fn compiled_substitutions_keep_fresh_text_replacements_and_case_flags() {
+        assert_eq!(super::regsub("(foo)", "[\\1]", "foo FOO", false).as_deref(), Some("[foo] FOO"));
+        assert_eq!(super::regsub("(foo)", "new", "FOO foo", false).as_deref(), Some("FOO new"));
+        assert_eq!(super::regsub("(foo)", "new", "FOO foo", true).as_deref(), Some("new new"));
+        assert_eq!(super::regsub("^foo", "✓", "foo foo", false).as_deref(), Some("✓ foo"));
+        assert_eq!(super::regsub("(", "x", "text", false), None);
+        assert_eq!(super::regsub("(", "x", "", false).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn substitution_cache_stays_bounded_without_rejecting_larger_expressions() {
+        super::SUBSTITUTIONS.with(|cache| cache.borrow_mut().clear());
+        for n in 0..32 {
+            let pattern = format!("a{n}");
+            assert_eq!(super::regsub(&pattern, "hit", &pattern, false).as_deref(), Some("hit"));
+        }
+        assert_eq!(super::regsub("a0", "again", "a0", false).as_deref(), Some("again"));
+        super::SUBSTITUTIONS.with(|cache| assert!(cache.borrow().len() <= 8));
+        // Unicode word classes exceed the cache's small compiled-size budget.
+        assert_eq!(super::regsub(r"\w+", "word", "café 東京", false).as_deref(), Some("word word"));
+        let long = "a".repeat(2049);
+        assert_eq!(super::regsub(&long, "long", &long, false).as_deref(), Some("long"));
+        super::SUBSTITUTIONS.with(|cache| {
+            let cache = cache.borrow();
+            assert!(cache.len() <= 8);
+            assert!(!cache.iter().any(|(pattern, _, _)| pattern == r"\w+" || pattern == &long));
+        });
+    }
+
+    #[test]
+    fn each_expansion_observes_new_agent_option_and_environment_values() {
+        let mut app = status_fixture(1, 2);
+        app.options.global_session.insert("@label".into(), "first".into());
+        app.session_env.insert("RENDER_TEST".into(), crate::app::EnvVar { value: Some("before".into()), hidden: false });
+        let fmt = "#{fleet_working}/#{fleet_working}/#{@label}/#{@label}/#{RENDER_TEST}/#{RENDER_TEST}";
+        assert_eq!(super::expand(&app, fmt, 0, Some(1), false), "2/2/first/first/before/before");
+        app.fleet.agents.values_mut().next().unwrap().working = false;
+        app.options.global_session.insert("@label".into(), "second".into());
+        app.session_env.get_mut("RENDER_TEST").unwrap().value = Some("after".into());
+        assert_eq!(super::expand(&app, fmt, 0, Some(1), false), "1/1/second/second/after/after");
+    }
+
+    #[test]
+    fn repeated_raw_values_keep_distinct_modifiers_and_time_lookup_rules() {
+        let mut app = status_fixture(1, 1);
+        app.options.global_session.insert("@path".into(), "/tmp/project name".into());
+        app.options.global_session.insert("@clock".into(), "1700000000".into());
+        app.session_env.insert("RENDER_CLOCK".into(), crate::app::EnvVar { value: Some("1700000000".into()), hidden: false });
+        let fmt = "#{@path}|#{b:@path}|#{d:@path}|#{q:@path}|#{RENDER_CLOCK}|#{t:RENDER_CLOCK}|#{@clock}|#{t/f/%Y:@clock}";
+        assert_eq!(super::expand(&app, fmt, 0, Some(1), false), "/tmp/project name|project name|/tmp|/tmp/project\\ name|1700000000||1700000000|2023");
+        let (out, trace) = super::verbose(&app, "#{@path}/#{@path}", 0, Some(1));
+        assert_eq!(out, "/tmp/project name//tmp/project name");
+        assert_eq!(trace.iter().filter(|line| line.contains("format '@path' found: /tmp/project name")).count(), 2);
+    }
+
+    #[test]
+    fn shell_format_output_is_current_on_each_expansion() {
+        let mut app = status_fixture(1, 1);
+        app.options.global_session.insert("status-interval".into(), "0".into());
+        app.jobs.borrow_mut().insert("fixture".into(), super::Job {
+            expanded: "fixture".into(), out: Some("first".into()), generation: 1, ..Default::default()
+        });
+        assert_eq!(super::expand(&app, "#(fixture)/#(fixture)", 0, Some(1), false), "first/first");
+        app.jobs.borrow_mut().get_mut("fixture").unwrap().out = Some("second".into());
+        assert_eq!(super::expand(&app, "#(fixture)/#(fixture)", 0, Some(1), false), "second/second");
+    }
+
+    #[test]
     fn compact_headings_reserve_state_and_keep_names_distinct() {
         use crate::fleet::State;
         let title = "Investigate checkout failures across browser versions (2)";
@@ -1652,6 +1920,49 @@ mod tests {
         assert!(compact.contains("[watching]") && !compact.contains("another terminal"));
         let wide = super::compact_pane_heading("Review", None, Some("another terminal"), 80, 0);
         assert!(wide.contains("[watching — another terminal has it]"));
+    }
+
+    fn quota(provider: &str, account: Option<&str>, used: &[f64]) -> crate::fleet::Usage {
+        crate::fleet::Usage { provider: provider.into(), account: account.map(str::to_string),
+            windows: used.iter().map(|used| crate::fleet::Window { label: "limit".into(), used: *used, resets: None }).collect() }
+    }
+
+    #[test]
+    fn remaining_quota_shows_all_subscriptions_and_the_tightest_window() {
+        let claude = quota("claude", Some("a"), &[42.0, 18.0]);
+        let codex = quota("codex", Some("b"), &[3.0, 11.0]);
+        let other = quota("other", Some("c"), &[30.0]);
+        let empty = quota("missing", None, &[]);
+        let readings = [("local", &other), ("local", &codex), ("local", &empty), ("local", &claude)];
+        assert_eq!(super::quota_remaining(readings.into_iter(), "local", str::to_string, false, false), "Claude 58%  Codex 89%  Other 70%");
+        assert_eq!(super::quota_remaining(std::iter::empty(), "local", str::to_string, false, false), "");
+        // The existing per-window format continues reporting used quota for custom configs.
+        assert_eq!(claude.line(), "claude limit 42% limit 18%");
+    }
+
+    #[test]
+    fn remaining_quota_groups_shared_accounts_but_keeps_distinct_and_unknown_accounts() {
+        let local = quota("claude", Some("a"), &[42.0]);
+        let shared = quota("claude", Some("a"), &[40.0]);
+        let distinct = quota("claude", Some("b"), &[80.0]);
+        let unknown = quota("codex", None, &[11.0]);
+        let readings = [("studio", &distinct), ("shared", &shared), ("local", &local), ("studio", &unknown), ("local", &unknown)];
+        let expected = "Claude 58%  Claude@studio 20%  Codex 89%  Codex@studio 89%";
+        assert_eq!(super::quota_remaining(readings.into_iter(), "local", str::to_string, false, false), expected);
+        assert_eq!(super::quota_remaining(readings.into_iter().rev(), "local", str::to_string, false, false), expected);
+    }
+
+    #[test]
+    fn remaining_quota_is_plain_until_low_and_does_not_round_to_exhausted() {
+        for (used, number) in [(0.0, "100%"), (79.0, "21%"), (80.0, "20%"), (99.7, "<1%"), (100.0, "0%"), (120.0, "0%")] {
+            let u = quota("claude", None, &[used]);
+            let plain = format!("Claude {number}");
+            assert_eq!(super::quota_remaining(std::iter::once(("local", &u)), "local", str::to_string, false, false), plain);
+            let styled = super::quota_remaining(std::iter::once(("local", &u)), "local", str::to_string, true, false);
+            if used < 80.0 || crate::theme::no_color() { assert_eq!(styled, plain) }
+            else { assert!(styled.starts_with("Claude #[fg=")); assert!(styled.ends_with(&format!("]{number}#[fg=default]"))); }
+            assert!(!styled.contains("reverse") && !styled.contains("bg="));
+        }
     }
 
     #[test]

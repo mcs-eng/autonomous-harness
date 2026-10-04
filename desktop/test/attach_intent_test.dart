@@ -548,7 +548,7 @@ void main() {
       expect(
         asked.every((o) => o['takeover'] == false),
         isTrue,
-        reason: 'but it watches: the person is on another swarm',
+        reason: 'but it watches: the person is on another tab',
       );
       await finish(tester);
     });

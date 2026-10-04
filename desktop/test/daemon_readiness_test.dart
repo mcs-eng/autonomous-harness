@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/api/api_client.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_login.dart';
 import 'package:harness/core/config.dart';
@@ -47,6 +48,7 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
     void Function(LocalCliEndpoint endpoint)? onReady,
     void Function(LocalCliEndpoint endpoint)? onSnapshot,
     void Function(bool online)? onBackendOnline,
+    Future<void> Function(int pid)? checkOwner,
   }) {
     superviseCalls++;
     this.onReady = onReady;
@@ -126,6 +128,41 @@ class _Notifier extends AppNotifier {
   Future<bool> refreshMachines() async {
     refreshes++;
     return true;
+  }
+}
+
+/// A daemon whose copy of the device log still has one device nobody looked at.
+class _PendingDevicesApi extends ApiClient {
+  _PendingDevicesApi() : super(config: AppConfig.dev, session: AuthSession());
+
+  int reads = 0;
+
+  /// Whether the daemon has its listing ready (null otherwise: still connecting).
+  bool ready = true;
+
+  /// A daemon that predates the persisted marks: it answers, with no `pending`.
+  bool legacy = false;
+
+  @override
+  Future<Map<String, dynamic>?> daemonDevices() async {
+    reads++;
+    if (!ready) return null;
+    if (legacy) return {'members': <Object?>[]};
+    return {
+      'members': [
+        {
+          'pub': 'a',
+          'label': 'Phone',
+          'kind': 'viewer',
+          'machineId': '',
+          'addedAt': 1000,
+          'fingerprint': 'FPA',
+          'self': false,
+          'seq': 2,
+        },
+      ],
+      'pending': ['a'],
+    };
   }
 }
 
@@ -438,4 +475,79 @@ void main() {
       expect(discovery.ensureCalls, 1);
     },
   );
+
+  test('a retry that gets through reads again which devices are still waiting to be seen', () async {
+    // The boot found the daemon still connecting, so its own read of the pending devices never ran
+    // (or found nothing yet): the retry that finishes the boot reads them.
+    final notifier = _Notifier(
+      _ScriptedDiscovery([LocalCliProbe.ready(_endpoint)]),
+    )..status = AppStatus.authenticated;
+    addTearDown(notifier.dispose);
+    final api = _PendingDevicesApi();
+    notifier.api = api;
+
+    await notifier.retryMachines();
+    for (var i = 0; i < 5; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(api.reads, greaterThanOrEqualTo(1));
+    expect(notifier.newDevices.map((d) => d.pub), ['a']);
+  });
+
+  test(
+    'recovery ticks read the pending devices only until one read has succeeded',
+    () async {
+      final notifier = _Notifier(
+        _ScriptedDiscovery([LocalCliProbe.ready(_endpoint)]),
+      )..status = AppStatus.authenticated;
+      addTearDown(notifier.dispose);
+      final api = _PendingDevicesApi()..ready = false;
+      notifier.api = api;
+      Future<void> tick() async {
+        await notifier.retryMachines();
+        for (var i = 0; i < 5; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+
+      // The daemon has nothing to say yet: the next tick asks again.
+      await tick();
+      expect(api.reads, 1);
+      await tick();
+      expect(api.reads, 2);
+
+      api.ready = true;
+      await tick();
+      expect(api.reads, 3);
+      expect(notifier.newDevices.map((d) => d.pub), ['a']);
+
+      // It has been read: the log's own changes and the daemon's frames say when to read again.
+      await tick();
+      await tick();
+      expect(api.reads, 3);
+    },
+  );
+
+  test('a daemon that predates the pending list is asked once, not on every recovery tick', () async {
+    final notifier = _Notifier(
+      _ScriptedDiscovery([LocalCliProbe.ready(_endpoint)]),
+    )..status = AppStatus.authenticated;
+    addTearDown(notifier.dispose);
+    final api = _PendingDevicesApi()..legacy = true;
+    notifier.api = api;
+    Future<void> tick() async {
+      await notifier.retryMachines();
+      for (var i = 0; i < 5; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    await tick();
+    expect(api.reads, 1);
+    await tick();
+    await tick();
+    expect(api.reads, 1, reason: 'it answered; it has nothing more to say');
+    expect(notifier.newDevices, isEmpty);
+  });
 }

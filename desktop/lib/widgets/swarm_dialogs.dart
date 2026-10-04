@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
-import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/shared/theme/app_type.dart';
+
+import '../shared/theme/app_theme.dart' show AppPalette;
 
 import '../core/desktop_window.dart';
 import '../shared/widgets/app_dialog.dart';
@@ -14,6 +16,7 @@ import '../state/swarm_catalog.dart';
 import 'machines_panel.dart';
 import 'remote_folder_picker.dart';
 import 'clone_repository_dialog.dart';
+import 'desktop_chrome.dart';
 import 'terminal_name_prompt.dart';
 import 'terminal_prompt.dart';
 
@@ -25,10 +28,10 @@ Future<String?> showSwarmRenameDialog(
   context,
   keymap: keymap,
   builder: (_) => TerminalNamePrompt(
-    title: 'Rename Swarm',
+    title: 'Rename Tab',
     name: name,
     fieldKey: const Key('tab-rename-input'),
-    fieldLabel: 'Swarm name',
+    fieldLabel: 'Tab name',
     maxLength: 80,
   ),
 );
@@ -89,6 +92,7 @@ class _ProjectDialogState extends State<_ProjectDialog> {
               notifier: widget.notifier,
               machineId: id,
               initialPath: path,
+              desktop: true,
             );
       if (!mounted || revision != _machineRevision) return;
       setState(() {
@@ -155,92 +159,105 @@ class _ProjectDialogState extends State<_ProjectDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Add project'),
-      content: SizedBox(
-        width: 460,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Choose an existing working folder.',
-              style: AppType.body(
-                color: grid.AppTheme.pick(
-                  grid.AppPalette.textSecondary,
-                  Colors.white60,
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            if (machineId != null)
-              AppSelectField<String>(
-                value: machineId!,
-                options: [
-                  for (final machine in widget.notifier.machineStates.values)
-                    SelectOption(
-                      value: machine.machine.machineId,
-                      label: machine.isLocalMachine
-                          ? 'This computer'
-                          : machine.machine.displayName,
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      insetPadding: const EdgeInsets.all(24),
+      child: SizedBox(
+        width: 508,
+        child: DesktopDialogSurface(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Add project', style: DesktopChrome.heading()),
+                const SizedBox(height: 20),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Choose an existing working folder.',
+                          style: AppType.body(color: AppPalette.textSecondary),
+                        ),
+                        const SizedBox(height: 20),
+                        if (machineId != null)
+                          AppSelectField<String>(
+                            value: machineId!,
+                            options: [
+                              for (final machine
+                                  in widget.notifier.machineStates.values)
+                                SelectOption(
+                                  value: machine.machine.machineId,
+                                  label: machine.isLocalMachine
+                                      ? 'This computer'
+                                      : machine.machine.displayName,
+                                ),
+                            ],
+                            onChanged: (value) => setState(() {
+                              if (machineId == value) return;
+                              _machineRevision++;
+                              machineId = value;
+                              path = null;
+                              error = null;
+                            }),
+                          ),
+                        const SizedBox(height: 16),
+                        OutlinedButton.icon(
+                          onPressed: machineId == null || picking
+                              ? null
+                              : browse,
+                          icon: const Icon(AppIcons.folderOpen, size: 16),
+                          label: Text(
+                            path ?? 'Choose folder',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (widget.notifier
+                            .machineSharesGuiFilesystem(machineId ?? ''))
+                          TextButton(
+                            onPressed: picking ? null : clone,
+                            child: const Text('Clone repository…'),
+                          ),
+                        if (error != null)
+                          Text(
+                            error!,
+                            style: AppType.body(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                      ],
                     ),
-                ],
-                onChanged: (value) => setState(() {
-                  if (machineId == value) return;
-                  _machineRevision++;
-                  machineId = value;
-                  path = null;
-                  error = null;
-                }),
-              ),
-            const SizedBox(height: 16),
-            OutlinedButton.icon(
-              onPressed: machineId == null || picking ? null : browse,
-              icon: const Icon(Icons.folder_open, size: 17),
-              label: Text(
-                path ?? 'Choose folder',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                OverflowBar(
+                  alignment: MainAxisAlignment.end,
+                  spacing: 8,
+                  overflowSpacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Cancel'),
+                    ),
+                    FilledButton(
+                      onPressed: path == null || folderName.isEmpty || picking
+                          ? null
+                          : _save,
+                      child: const Text('Add project'),
+                    ),
+                  ],
+                ),
+              ],
             ),
-            if (widget.notifier.machineSharesGuiFilesystem(machineId ?? ''))
-              TextButton(
-                onPressed: picking ? null : clone,
-                style: TextButton.styleFrom(
-                  foregroundColor: grid.AppTheme.pick(
-                    grid.AppPalette.textSecondary,
-                    Colors.white70,
-                  ),
-                ),
-                child: const Text('Clone repository…'),
-              ),
-            if (error != null)
-              // Pale orange only reads on a dark dialog; a light one takes
-              // the deep warning ink.
-              Text(
-                error!,
-                style: AppType.body(
-                  color: grid.AppTheme.pick(
-                    grid.AppPalette.warn,
-                    Colors.orangeAccent,
-                  ),
-                ),
-              ),
-          ],
+          ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: path == null || folderName.isEmpty || picking
-              ? null
-              : _save,
-          child: const Text('Add project'),
-        ),
-      ],
     );
   }
 }

@@ -12,7 +12,7 @@ import 'package:harness/state/swarm.dart';
 import 'package:harness/state/terminal_pane.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/widgets/agent_drag.dart' show PaneCloseButton;
-import 'package:harness/widgets/workspace_bar_control.dart';
+import 'package:harness/widgets/desktop_workspace_tab.dart';
 import 'package:harness/widgets/workspace_welcome.dart';
 import 'package:xterm/xterm.dart' show TerminalView;
 
@@ -301,7 +301,7 @@ void main() {
       if (native) 'pane menu',
       if (native) 'viewer toggle',
       'tab shortcut',
-      if (native) 'tab strip close',
+      'tab strip close',
     ]) {
       testWidgets(
         'closing by $road leaves the keyboard on the tab strip until Enter '
@@ -386,8 +386,23 @@ void main() {
               });
             case 'tab shortcut':
               await chord(tester, LogicalKeyboardKey.keyW);
-            case 'tab strip close':
+            case 'tab strip close' when native:
               await nativeCommand(tester, 'close', {'id': closingTab.id});
+            case 'tab strip close':
+              final mouse = await tester.createGesture(
+                kind: PointerDeviceKind.mouse,
+              );
+              await mouse.addPointer(location: const Offset(1200, 700));
+              await mouse.moveTo(
+                tester.getCenter(find.byKey(ValueKey(closingTab.id))),
+              );
+              await tester.pump();
+              final close = find
+                  .byKey(ValueKey('tab-close:${closingTab.id}'))
+                  .hitTestable();
+              await tester.tap(close);
+              await mouse.removePointer();
+              await tester.pump();
           }
 
           expect(app.swarms, [keptTab]);
@@ -567,10 +582,10 @@ final arrowAndWord = [27, 91, 68, ...utf8.encode('next')];
 Map<Object?, Object?> lastUpdate(List<MethodCall> calls) =>
     calls.lastWhere((call) => call.method == 'update').arguments as Map;
 
-WorkspaceBarControl stripTab(WidgetTester tester, String id) =>
-    tester.widget<WorkspaceBarControl>(
+DesktopWorkspaceTab stripTab(WidgetTester tester, String id) =>
+    tester.widget<DesktopWorkspaceTab>(
       find.descendant(
         of: find.byKey(ValueKey(id)),
-        matching: find.byType(WorkspaceBarControl),
+        matching: find.byType(DesktopWorkspaceTab),
       ),
     );

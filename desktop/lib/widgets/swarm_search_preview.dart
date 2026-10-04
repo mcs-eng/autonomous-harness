@@ -1,8 +1,8 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness/terminal/terminal_text.dart';
 import 'package:xterm/xterm.dart' show TerminalTheme;
 
@@ -19,6 +19,7 @@ import '../state/swarm_search.dart';
 import '../terminal/terminal_theme.dart';
 import '../terminal/terminal_theme_store.dart';
 import 'box_chrome.dart';
+import 'desktop_chrome.dart';
 import 'engine_identity.dart';
 import 'search_result_text.dart' show SessionSnippetText;
 import 'session_tail_view.dart';
@@ -111,7 +112,9 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
   SwarmPreviewScrollController _scrollController() =>
       SwarmPreviewScrollController(
         search: widget.search,
-        lineHeight: () => terminalCellSizeOf(context).height,
+        lineHeight: () => DesktopChrome.of(context)
+            ? MediaQuery.textScalerOf(context).scale(13) * 1.5
+            : terminalCellSizeOf(context).height,
       );
 
   @override
@@ -189,12 +192,23 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
     Size cell,
     TerminalTheme theme,
   ) {
-    final terminal = widget.terminal;
-    final muted = terminal ? terminalContentStyle(color: theme.muted) : _muted;
-    final body = terminal
+    final desktop = DesktopChrome.of(context);
+    final terminal = widget.terminal && !desktop;
+    final muted = desktop
+        ? DesktopChrome.text(size: 12, color: DesktopChrome.muted)
+        : terminal
+        ? terminalContentStyle(color: theme.muted)
+        : _muted;
+    final body = desktop
+        ? _desktopBody
+        : terminal
         ? terminalContentStyle(color: theme.foreground)
         : _body;
-    final warning = terminal ? theme.yellow : _waitingInk;
+    final warning = desktop
+        ? grid.AppPalette.warn
+        : terminal
+        ? theme.yellow
+        : _waitingInk;
     final gap = terminal ? cell.height : 12.0;
     final key = _externalKey(row)!;
     final tail = app.sessionTails.read(key);
@@ -204,7 +218,9 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
       children: [
         Text(
           row.title,
-          style: terminal
+          style: desktop
+              ? DesktopChrome.text(size: 15, medium: true)
+              : terminal
               ? body
               : AppType.monoLabel(fontWeight: FontWeight.w600, height: 1.25),
         ),
@@ -248,31 +264,26 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
       );
     }
     _scroll.reversed = true;
-    return Column(
+    return _tailLayout(
       key: ValueKey('preview-content:${row.id}'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: padding.copyWith(bottom: gap),
-          child: header,
-        ),
-        Expanded(
-          child: SessionTailView(
-            tail: tail,
-            tails: app.sessionTails,
-            tailKey: key,
-            controller: _scroll,
-            words: [
-              for (final word in widget.search.wordsQuery.split(RegExp(r'\s+')))
-                if (word.length > 1) word,
-            ],
-            body: body,
-            muted: muted,
-            gap: gap,
-            padding: padding.copyWith(top: 0),
-          ),
-        ),
-      ],
+      header: Padding(
+        padding: padding.copyWith(bottom: gap),
+        child: header,
+      ),
+      content: SessionTailView(
+        tail: tail,
+        tails: app.sessionTails,
+        tailKey: key,
+        controller: _scroll,
+        words: [
+          for (final word in widget.search.wordsQuery.split(RegExp(r'\s+')))
+            if (word.length > 1) word,
+        ],
+        body: body,
+        muted: muted,
+        gap: gap,
+        padding: padding.copyWith(top: 0),
+      ),
     );
   }
 
@@ -304,9 +315,16 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
       );
     }
     _scroll.reversed = true;
-    final terminal = widget.terminal;
-    final muted = terminal ? terminalContentStyle(color: theme.muted) : _muted;
-    final body = terminal
+    final desktop = DesktopChrome.of(context);
+    final terminal = widget.terminal && !desktop;
+    final muted = desktop
+        ? DesktopChrome.text(size: 12, color: DesktopChrome.muted)
+        : terminal
+        ? terminalContentStyle(color: theme.muted)
+        : _muted;
+    final body = desktop
+        ? _desktopBody
+        : terminal
         ? terminalContentStyle(color: theme.foreground)
         : _body;
     final gap = terminal ? cell.height : 12.0;
@@ -323,70 +341,95 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
                 found.turn < tail.rows.first.turn)
         ? found
         : null;
-    return Column(
+    return _tailLayout(
       key: ValueKey('preview-content:${row.id}'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: padding.copyWith(bottom: gap),
-          child: _AgentPreview(
-            app: app,
-            item: item,
-            dense: widget.compactHeader,
-            terminal: terminal,
-            part: _Part.header,
-          ),
-        ),
-        if (earlier != null)
+      header: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
           Padding(
-            padding: EdgeInsets.fromLTRB(padding.left, 0, padding.right, gap),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  [
-                    'Matched earlier',
-                    if (earlier.at case final at?)
-                      '${harnessActivityAge(at, DateTime.now())} ago',
-                  ].join(' · '),
-                  style: muted,
-                ),
-                SessionSnippetText(
-                  earlier,
-                  key: ValueKey('preview-found:${earlier.destinationId}'),
-                  style: body,
-                  maxLines: 2,
-                ),
-              ],
+            padding: padding.copyWith(bottom: gap),
+            child: _AgentPreview(
+              app: app,
+              item: item,
+              dense: widget.compactHeader,
+              terminal: terminal,
+              part: _Part.header,
             ),
           ),
-        Expanded(
-          child: SessionTailView(
-            tail: tail,
-            tails: app.sessionTails,
-            tailKey: key,
-            controller: _scroll,
-            words: [
-              for (final word in widget.search.wordsQuery.split(RegExp(r'\s+')))
-                if (word.length > 1) word,
-            ],
-            body: body,
-            muted: muted,
-            gap: gap,
-            padding: padding.copyWith(top: 0),
-            footer: live
-                ? _AgentPreview(
-                    app: app,
-                    item: item,
-                    terminal: terminal,
-                    part: _Part.footer,
-                  )
-                : null,
-          ),
-        ),
-      ],
+          if (earlier != null)
+            Padding(
+              padding: EdgeInsets.fromLTRB(padding.left, 0, padding.right, gap),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    [
+                      'Matched earlier',
+                      if (earlier.at case final at?)
+                        sessionPreviewAge(at, DateTime.now()),
+                    ].join(' · '),
+                    style: muted,
+                  ),
+                  SessionSnippetText(
+                    earlier,
+                    key: ValueKey('preview-found:${earlier.destinationId}'),
+                    style: body,
+                    maxLines: 2,
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+      content: SessionTailView(
+        tail: tail,
+        tails: app.sessionTails,
+        tailKey: key,
+        controller: _scroll,
+        words: [
+          for (final word in widget.search.wordsQuery.split(RegExp(r'\s+')))
+            if (word.length > 1) word,
+        ],
+        body: body,
+        muted: muted,
+        gap: gap,
+        padding: padding.copyWith(top: 0),
+        footer: live
+            ? _AgentPreview(
+                app: app,
+                item: item,
+                terminal: terminal,
+                part: _Part.footer,
+              )
+            : null,
+      ),
     );
   }
+
+  Widget _tailLayout({
+    required Key key,
+    required Widget header,
+    required Widget content,
+  }) => LayoutBuilder(
+    key: key,
+    builder: (context, constraints) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (DesktopChrome.of(context))
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: constraints.maxHeight * .42),
+            child: ScrollConfiguration(
+              behavior: ScrollConfiguration.of(context)
+                  .copyWith(scrollbars: false),
+              child: SingleChildScrollView(primary: false, child: header),
+            ),
+          )
+        else
+          header,
+        Expanded(child: content),
+      ],
+    ),
+  );
 
   @override
   void dispose() {
@@ -400,8 +443,11 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
+    final desktop = DesktopChrome.of(context);
     final cell = widget.terminal ? terminalCellSizeOf(context) : Size.zero;
-    final padding = widget.terminal
+    final padding = desktop
+        ? const EdgeInsets.all(18)
+        : widget.terminal
         ? EdgeInsets.symmetric(
             horizontal: cell.width * 2,
             vertical: cell.height,
@@ -427,18 +473,28 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
               children: [
                 Text(
                   row.title,
-                  style: terminalContentStyle(color: theme.foreground),
+                  style: desktop
+                      ? DesktopChrome.text(size: 15, medium: true)
+                      : terminalContentStyle(color: theme.foreground),
                 ),
                 if (row.detail.isNotEmpty)
                   Text(
                     row.detail,
-                    style: terminalContentStyle(color: theme.muted),
+                    style: desktop
+                        ? DesktopChrome.text(
+                            size: 12,
+                            color: DesktopChrome.muted,
+                          )
+                        : terminalContentStyle(color: theme.muted),
                   ),
                 if (row.shortcut case final shortcut?) ...[
-                  SizedBox(height: cell.height),
+                  SizedBox(height: desktop ? 12 : cell.height),
                   Text(
                     shortcut,
-                    style: terminalContentStyle(color: theme.muted),
+                    style: desktop
+                        ? grid.AppType.monoMeta(color: DesktopChrome.muted)
+                              .copyWith(fontSize: 12)
+                        : terminalContentStyle(color: theme.muted),
                   ),
                 ],
               ],
@@ -467,7 +523,11 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
                 itemBuilder: (context, index) => index == 0
                     ? Padding(
                         padding: EdgeInsets.only(
-                          bottom: widget.terminal ? cell.height : 24,
+                          bottom: desktop
+                              ? 16
+                              : widget.terminal
+                              ? cell.height
+                              : 24,
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -475,7 +535,9 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
                             Text(
                               row.title,
                               // The list leads the eye; this confirms it.
-                              style: widget.terminal
+                              style: desktop
+                                  ? DesktopChrome.text(size: 15, medium: true)
+                                  : widget.terminal
                                   ? terminalContentStyle(
                                       color: theme.foreground,
                                     )
@@ -483,10 +545,16 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
                                       fontWeight: FontWeight.w600,
                                     ),
                             ),
-                            if (!widget.terminal) const SizedBox(height: 6),
+                            if (desktop || !widget.terminal)
+                              const SizedBox(height: 6),
                             Text(
                               row.detail,
-                              style: widget.terminal
+                              style: desktop
+                                  ? DesktopChrome.text(
+                                      size: 12,
+                                      color: DesktopChrome.muted,
+                                    )
+                                  : widget.terminal
                                   ? terminalContentStyle(color: theme.muted)
                                   : _muted,
                             ),
@@ -495,11 +563,20 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
                             if (agents.isEmpty && !row.isCreate)
                               Padding(
                                 padding: EdgeInsets.only(
-                                  top: widget.terminal ? cell.height : 24,
+                                  top: desktop
+                                      ? 16
+                                      : widget.terminal
+                                      ? cell.height
+                                      : 24,
                                 ),
                                 child: Text(
                                   'No recent harness text available.',
-                                  style: widget.terminal
+                                  style: desktop
+                                      ? DesktopChrome.text(
+                                          size: 12,
+                                          color: DesktopChrome.muted,
+                                        )
+                                      : widget.terminal
                                       ? terminalContentStyle(color: theme.muted)
                                       : _muted,
                                 ),
@@ -559,6 +636,10 @@ TextStyle get _body => AppType.monoLabel(
     const Color(0xffe1e1e4),
   ),
 );
+TextStyle get _desktopBody => grid.AppType.mono(
+  color: DesktopChrome.foreground,
+  height: 1.5,
+).copyWith(fontSize: 12);
 
 // The non-terminal preview's state colours. The dark ones are pale tints that
 // vanish on a light ground, where the matching status tokens take over.
@@ -599,13 +680,21 @@ class _AgentPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
+    final desktop = DesktopChrome.of(context);
+    final terminal = this.terminal && !desktop;
     final cell = terminal ? terminalCellSizeOf(context) : Size.zero;
     final theme = terminalThemeFor(
       grid.AppTheme.palette.value,
       terminalThemeStore.value,
     );
-    final muted = terminal ? terminalContentStyle(color: theme.muted) : _muted;
-    final body = terminal
+    final muted = desktop
+        ? DesktopChrome.text(size: 12, color: DesktopChrome.muted)
+        : terminal
+        ? terminalContentStyle(color: theme.muted)
+        : _muted;
+    final body = desktop
+        ? _desktopBody
+        : terminal
         ? terminalContentStyle(color: theme.foreground)
         : _body;
     Widget section(String label, String text, {int? maxLines}) =>
@@ -627,6 +716,12 @@ class _AgentPreview extends StatelessWidget {
             : 'Ready');
     final color = offline
         ? muted.color!
+        : desktop
+        ? waiting != null
+              ? grid.AppPalette.warn
+              : working
+              ? DesktopChrome.accent
+              : grid.AppPalette.online
         : waiting != null
         ? terminal
               ? theme.yellow
@@ -672,7 +767,9 @@ class _AgentPreview extends StatelessWidget {
               children: [
                 Text(
                   'Needs your input',
-                  style: terminal
+                  style: desktop
+                      ? DesktopChrome.text(size: 12, medium: true, color: color)
+                      : terminal
                       ? terminalContentStyle(color: color)
                       : AppType.monoLabel(
                           fontWeight: FontWeight.w600,
@@ -698,7 +795,42 @@ class _AgentPreview extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (terminal) ...[
+        if (desktop) ...[
+          Tooltip(
+            message: agent.displayName,
+            child: Text(
+              agent.displayName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: DesktopChrome.text(size: 15, medium: true),
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            [
+              machine.machine.displayName,
+              if (project?.label case final name? when name.isNotEmpty) name,
+              ?project?.shownBranch,
+            ].join(' · '),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: grid.AppType.monoMeta(color: DesktopChrome.muted)
+                .copyWith(fontSize: 11),
+          ),
+          const SizedBox(height: 6),
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: state,
+                  style: TextStyle(color: color),
+                ),
+                TextSpan(text: ' · ${agentIdentity(agent).label}'),
+              ],
+            ),
+            style: muted,
+          ),
+        ] else if (terminal) ...[
           Text(agent.displayName, style: body),
           Text(
             statusLineParts(
@@ -750,7 +882,7 @@ class _AgentPreview extends StatelessWidget {
               ],
             ],
           ),
-        if (!dense && !terminal) ...[
+        if (!desktop && !dense && !terminal) ...[
           const SizedBox(height: 10),
           Wrap(
             spacing: 8,
@@ -767,9 +899,7 @@ class _AgentPreview extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      waiting != null
-                          ? LucideIcons.hand300
-                          : LucideIcons.circle300,
+                      waiting != null ? AppIcons.hand : AppIcons.circle,
                       size: 10,
                       color: color,
                     ),
@@ -791,7 +921,8 @@ class _AgentPreview extends StatelessWidget {
           ),
         ],
         if (part == _Part.header) ...[
-          if (!terminal &&
+          if (!desktop &&
+              !terminal &&
               (project?.label.isNotEmpty == true || project?.branch != null))
             Padding(
               padding: const EdgeInsets.only(top: 6),
@@ -814,7 +945,7 @@ class _AgentPreview extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: excerpt == null ? muted : body,
           ),
-          if (project != null && !terminal)
+          if (project != null && !terminal && !desktop)
             Padding(
               padding: EdgeInsets.only(top: terminal ? cell.height : 8),
               child: Text(
@@ -826,6 +957,8 @@ class _AgentPreview extends StatelessWidget {
           SizedBox(
             height: terminal
                 ? cell.height
+                : desktop
+                ? 16
                 : dense
                 ? 16
                 : 26,
@@ -839,7 +972,7 @@ class _AgentPreview extends StatelessWidget {
                   _ => 'Found in what you asked',
                 },
                 if (found.at case final at?)
-                  '${harnessActivityAge(at, DateTime.now())} ago',
+                  sessionPreviewAge(at, DateTime.now()),
               ].join(' · '),
               style: terminal
                   ? muted
@@ -915,17 +1048,13 @@ class _AgentPreview extends StatelessWidget {
             ),
           if (!terminal) const SizedBox(height: 8),
           if (project?.cwd case final cwd?) Text(cwd, style: muted),
-          if (!terminal)
+          if (!terminal && !desktop)
             if (project?.branch case final branch?)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: Row(
                   children: [
-                    Icon(
-                      LucideIcons.gitBranch300,
-                      size: 12,
-                      color: muted.color,
-                    ),
+                    Icon(AppIcons.gitBranch, size: 12, color: muted.color),
                     const SizedBox(width: 6),
                     Expanded(child: Text(branch, style: muted)),
                   ],
@@ -953,27 +1082,40 @@ class _Section extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
+    final desktop = DesktopChrome.of(context);
     final theme = terminalThemeFor(
       grid.AppTheme.palette.value,
       terminalThemeStore.value,
     );
     return Padding(
       padding: EdgeInsets.only(
-        bottom: terminal ? terminalCellSizeOf(context).height : 24,
+        bottom: desktop
+            ? 16
+            : terminal
+            ? terminalCellSizeOf(context).height
+            : 24,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             label,
-            style: terminal
+            style: desktop
+                ? DesktopChrome.text(
+                    size: 12,
+                    medium: true,
+                    color: DesktopChrome.muted,
+                  )
+                : terminal
                 ? terminalContentStyle(color: theme.muted)
                 : _muted.copyWith(fontWeight: FontWeight.w500),
           ),
-          if (!terminal) const SizedBox(height: 7),
+          if (desktop || !terminal) const SizedBox(height: 6),
           Text(
             _displayText(text),
-            style: terminal
+            style: desktop
+                ? _desktopBody
+                : terminal
                 ? terminalContentStyle(color: theme.foreground)
                 : _body,
             maxLines: maxLines,

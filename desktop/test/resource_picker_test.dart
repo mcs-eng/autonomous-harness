@@ -16,11 +16,11 @@ import 'package:harness/models/api_connections_controller.dart';
 import 'package:harness/models/model_search_catalog.dart'
     show ModelSearchSection;
 import 'package:harness/widgets/api_picker_form.dart';
+import 'package:harness/widgets/desktop_chrome.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/shared/theme/color_palette.dart';
 import 'package:harness/state/swarm_search.dart';
 import 'package:harness/terminal/terminal_text.dart';
-import 'package:harness/terminal/terminal_theme.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
 import 'package:harness/widgets/swarm_resource_preview.dart';
 import 'package:harness/widgets/machine_picker_form.dart';
@@ -39,6 +39,25 @@ import 'swarm_search_preview_test.dart' show seedPreviews;
 final field = find.byKey(const ValueKey('swarm-search-input'));
 SwarmSearchController search(WidgetTester tester) =>
     tester.widget<SwarmSearchResults>(find.byType(SwarmSearchResults)).search;
+
+Future<void> tabTo(
+  WidgetTester tester,
+  Finder target, {
+  bool backwards = false,
+}) async {
+  for (var attempt = 0; attempt < 40; attempt++) {
+    final targets = target.evaluate().toSet();
+    final focused = FocusManager.instance.primaryFocus?.context;
+    var contains = targets.contains(focused);
+    focused?.visitAncestorElements((element) {
+      if (targets.contains(element)) contains = true;
+      return !contains;
+    });
+    if (contains) return;
+    await key(tester, LogicalKeyboardKey.tab, shift: backwards);
+  }
+  fail('Tab could not reach $target');
+}
 
 Future<ModelManagerTestApp> fixture({ModelManagerTestApp? provided}) async {
   final app = provided ?? ModelManagerTestApp(ModelManagerConnection());
@@ -299,7 +318,18 @@ void main() {
         expect(origin.managing, isTrue);
         await tester.enterText(password, 'fixture password');
         await key(tester, LogicalKeyboardKey.tab);
-        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+        expect(
+          tester
+              .widget<TextButton>(
+                find.descendant(
+                  of: find.byKey(const ValueKey('machine-form:Connect')),
+                  matching: find.byType(TextButton),
+                ),
+              )
+              .focusNode!
+              .hasFocus,
+          isTrue,
+        );
         expect(origin.selected!.machineId, 'other');
         expect(app.edits, isEmpty);
         await key(tester, LogicalKeyboardKey.tab, shift: true);
@@ -400,15 +430,15 @@ void main() {
           const ValueKey('swarm-search-resource-actions'),
         );
         expect(
-          find.descendant(of: actions, matching: find.text('[ Password ]')),
+          find.descendant(of: actions, matching: find.text('Password')),
           findsOneWidget,
         );
         expect(
-          find.descendant(of: actions, matching: find.text('[ Rename ]')),
+          find.descendant(of: actions, matching: find.text('Rename')),
           findsOneWidget,
         );
         expect(
-          find.descendant(of: actions, matching: find.text('[ Actions… ]')),
+          find.descendant(of: actions, matching: find.text('Actions…')),
           findsNothing,
         );
         await key(tester, LogicalKeyboardKey.enter);
@@ -440,7 +470,7 @@ void main() {
         expect(controller.selected!.id, selectedId);
         expect(controller.managing, isTrue);
         await key(tester, LogicalKeyboardKey.tab);
-        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+        expect(button('picker.resource_settings').focusNode!.hasFocus, isTrue);
         await key(tester, LogicalKeyboardKey.tab, shift: true);
         expect(button('picker.resource_view').focusNode!.hasFocus, isTrue);
         await key(tester, LogicalKeyboardKey.escape);
@@ -467,7 +497,10 @@ void main() {
           findsNothing,
         );
         expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
-        await key(tester, LogicalKeyboardKey.tab);
+        await tabTo(
+          tester,
+          find.byKey(const ValueKey('resource-action:picker.model_download')),
+        );
         expect(controller.managing, isTrue);
         expect(button('picker.model_download').focusNode!.hasFocus, isTrue);
         expect(app.actions, isEmpty);
@@ -678,7 +711,7 @@ void main() {
         await tester.enterText(field, ':Qwen3.8-27B');
         await tester.pumpAndSettle();
         final origin = search(tester);
-        expect(find.text('Enter Get  ·  Tab pane'), findsOneWidget);
+        expect(find.text('Enter Get  ·  Tab controls'), findsOneWidget);
         await key(tester, LogicalKeyboardKey.enter);
         expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
         expect(app.downloads, [(machine: 'm', model: 'qwen')]);
@@ -770,10 +803,24 @@ void main() {
           'Get models',
           'Shared with you',
         ]) {
-          expect(
+          await tester.scrollUntilVisible(
             find.byKey(ValueKey('model-section:$heading')),
-            findsOneWidget,
+            120,
+            scrollable: find.descendant(
+              of: find.byKey(const ValueKey('swarm-search-result-list')),
+              matching: find.byType(Scrollable),
+            ),
           );
+          final section = find.byKey(ValueKey('model-section:$heading'));
+          await tester.scrollUntilVisible(
+            section,
+            160,
+            scrollable: find.descendant(
+              of: find.byKey(const ValueKey('swarm-search-result-list')),
+              matching: find.byType(Scrollable),
+            ),
+          );
+          expect(section, findsOneWidget);
         }
         // Four catalog models all fit in the list, so nothing is folded behind "More models".
         expect(
@@ -818,16 +865,17 @@ void main() {
               .map((row) => '${row.id}: ${row.title}')
               .join('\n'),
         );
-        expect(find.text('Enter Use  ·  Tab pane'), findsOneWidget);
+        expect(find.text('Enter Use  ·  Tab controls'), findsOneWidget);
         expect(find.text('M2'), findsOneWidget);
-        expect(find.text('15 GB'), findsOneWidget);
+        // The memory estimate is visible in both the row and its preview.
+        expect(find.text('15 GB'), findsNWidgets(2));
         await capture(tester, 'remote-model-select');
         final origin = search(tester);
-        await key(tester, LogicalKeyboardKey.tab);
-        expect(origin.managing, isTrue);
         final stop = find.byKey(
           const ValueKey('resource-action:picker.model_stop'),
         );
+        await tabTo(tester, stop);
+        expect(origin.managing, isTrue);
         final button = tester.widget<TextButton>(
           find.descendant(of: stop, matching: find.byType(TextButton)),
         );
@@ -863,10 +911,16 @@ void main() {
           'Get models',
           'Shared with you',
         ]) {
-          expect(
-            find.byKey(ValueKey('model-section:$heading')),
-            findsOneWidget,
+          final section = find.byKey(ValueKey('model-section:$heading'));
+          await tester.scrollUntilVisible(
+            section,
+            160,
+            scrollable: find.descendant(
+              of: find.byKey(const ValueKey('swarm-search-result-list')),
+              matching: find.byType(Scrollable),
+            ),
           );
+          expect(section, findsOneWidget);
         }
         await capture(tester, 'model-sections');
         await tester.enterText(field, ':gemma-4-12B');
@@ -944,7 +998,7 @@ void main() {
         await configured.mount(tester, app, keymap);
         final mac = defaultTargetPlatform == TargetPlatform.macOS;
         final pane = app.focusedPaneId;
-        await key(tester, LogicalKeyboardKey.keyI, cmd: mac, ctrl: !mac);
+        await key(tester, LogicalKeyboardKey.keyI, cmd: mac, alt: !mac);
         expect(search(tester).isModelMode, isTrue);
         expect(tester.widget<TextField>(field).controller!.text, ':');
         expect(
@@ -963,7 +1017,7 @@ void main() {
         expect(find.text('mac.lan'), findsOneWidget);
         if (mac) await capture(tester, 'own-machine-model');
         await key(tester, LogicalKeyboardKey.escape);
-        await key(tester, LogicalKeyboardKey.keyO, cmd: mac, ctrl: !mac);
+        await key(tester, LogicalKeyboardKey.keyO, cmd: mac, alt: !mac);
         expect(field, findsOneWidget);
         expect(search(tester).scopePrefix, '#');
         final editor = tester.widget<TextField>(field).controller!;
@@ -975,12 +1029,18 @@ void main() {
         expect(search(tester).hint, 'Search harnesses');
         expect(search(tester).rows.any((row) => row.isCreate), isFalse);
         await key(tester, LogicalKeyboardKey.escape);
-        await key(tester, LogicalKeyboardKey.keyP, cmd: mac, ctrl: !mac);
+        await key(
+          tester,
+          LogicalKeyboardKey.keyP,
+          cmd: mac,
+          alt: !mac,
+          shift: !mac,
+        );
         expect(search(tester).scopePrefix, '');
         expect(tester.widget<TextField>(field).controller!.text, isEmpty);
         expect(tester.widget<TextField>(field).cursorWidth, 2);
         expect(find.byKey(const ValueKey('swarm-search-prompt')), findsNothing);
-        final hints = find.byKey(const ValueKey('swarm-search-type-hints'));
+        final hints = find.byKey(const ValueKey('search-category-Harnesses'));
         expect(hints, findsOneWidget);
         expect(search(tester).selected, isNull);
         await key(tester, LogicalKeyboardKey.enter);
@@ -990,12 +1050,18 @@ void main() {
         expect(search(tester).rows.any((row) => row.agentId != null), isTrue);
         await tester.enterText(field, ':qwen');
         await tester.pump();
-        expect(hints, findsNothing);
+        expect(hints, findsOneWidget);
         expect(search(tester).isModelMode, isTrue);
         await key(tester, LogicalKeyboardKey.escape);
-        await key(tester, LogicalKeyboardKey.keyP, cmd: mac, ctrl: !mac);
+        await key(
+          tester,
+          LogicalKeyboardKey.keyP,
+          cmd: mac,
+          alt: !mac,
+          shift: !mac,
+        );
         final origin = search(tester);
-        await key(tester, LogicalKeyboardKey.keyI, cmd: mac, ctrl: !mac);
+        await key(tester, LogicalKeyboardKey.keyI, cmd: mac, alt: !mac);
         expect(search(tester), same(origin));
         expect(search(tester).isModelMode, isTrue);
         expect(tester.widget<TextField>(field).controller!.text, ':');
@@ -1008,7 +1074,7 @@ void main() {
           shift: true,
         );
         expect(search(tester).isCommandMode, isTrue);
-        expect(hints, findsNothing);
+        expect(hints, findsOneWidget);
         await key(tester, LogicalKeyboardKey.escape);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -1023,7 +1089,7 @@ void main() {
   );
 
   testWidgets(
-    'empty search shows hints in the preview until a result is selected',
+    'empty search keeps visible native scopes without selecting a result',
     (tester) async {
       final app = await fixture();
       final originalFont = terminalFontStore.value;
@@ -1036,43 +1102,34 @@ void main() {
       });
       await mount(tester, app);
       await key(tester, LogicalKeyboardKey.keyP, cmd: true);
-      final hints = find.byKey(const ValueKey('swarm-search-type-hints'));
+      final harnesses = find.byKey(const ValueKey('search-category-Harnesses'));
       final input = tester.widget<TextField>(field);
       final inputPosition = tester.getTopLeft(field);
       final listPosition = tester.getTopLeft(
         find.byKey(const ValueKey('swarm-search-result-list')),
       );
-      const hintLabels = [
-        '@  machines',
-        '#  projects',
-        ':  models',
-        '*  store',
-        '>  commands',
-      ];
-      expect(
-        tester
-            .widgetList<Text>(
-              find.descendant(of: hints, matching: find.byType(Text)),
-            )
-            .map((text) => text.data),
-        hintLabels,
-      );
+      for (final category in [
+        'Harnesses',
+        'Machines',
+        'Projects',
+        'Models',
+        'Store',
+        'Commands',
+      ]) {
+        expect(
+          find.byKey(ValueKey('search-category-$category')),
+          findsOneWidget,
+        );
+      }
       final controller = search(tester);
       expect(controller.selected, isNull);
       expect(controller.rows.any((row) => row.isCreate), isFalse);
-      expect(find.text('New Harness'), findsNothing);
-      expect(
-        tester.getRect(hints).left,
-        greaterThanOrEqualTo(
-          tester
-              .getRect(find.byKey(const ValueKey('swarm-search-result-list')))
-              .right,
-        ),
-      );
+      expect(find.byType(SwarmResourcePreview), findsNothing);
+      expect(tester.getBottomLeft(harnesses).dy, lessThan(listPosition.dy));
       for (final row in controller.rows) {
         final line = find.byKey(ValueKey('swarm-search-line:${row.id}'));
         if (line.evaluate().isNotEmpty) {
-          expect(tester.widget<Container>(line).color, Colors.transparent);
+          expect(tester.widget<Material>(line).color, Colors.transparent);
         }
       }
       app.machineStates['m']!.agents.add(
@@ -1085,19 +1142,19 @@ void main() {
       app.notifyListeners();
       await tester.pump();
       expect(controller.selected, isNull);
-      await capture(tester, 'empty-type-hints');
+      await capture(tester, 'empty-native-scopes');
 
       await key(tester, LogicalKeyboardKey.arrowDown);
       expect(controller.selected, controller.rows.first);
-      expect(hints, findsNothing);
+      expect(find.byType(SwarmResourcePreview), findsOneWidget);
       await key(tester, LogicalKeyboardKey.tab);
       expect(controller.selected, controller.rows.first);
-      expect(controller.managing, isTrue);
-      await key(tester, LogicalKeyboardKey.escape);
+      expect(controller.managing, isFalse);
+      await key(tester, LogicalKeyboardKey.tab, shift: true);
+      expect(input.focusNode!.hasFocus, isTrue);
 
       await tester.enterText(field, 'search');
       await tester.pump();
-      expect(hints, findsNothing);
       expect(controller.selected!.isCreate, isFalse);
       expect(
         controller.selected,
@@ -1119,16 +1176,16 @@ void main() {
       await tester.enterText(field, '');
       await tester.pump();
       expect(controller.selected, isNull);
-      expect(hints, findsOneWidget);
+      expect(find.byType(SwarmResourcePreview), findsNothing);
       await key(tester, LogicalKeyboardKey.arrowUp);
       expect(controller.selected, controller.rows.last);
       for (final prefix in ['@', '#', ':', '*']) {
         await tester.enterText(field, prefix);
         await tester.pump();
-        expect(hints, findsNothing);
+        expect(controller.showsTypeHints, isFalse);
         expect(controller.selected!.isCreate, isFalse);
         await key(tester, LogicalKeyboardKey.backspace);
-        expect(hints, findsOneWidget);
+        expect(controller.showsTypeHints, isTrue);
         expect(controller.selected, isNull);
       }
 
@@ -1140,21 +1197,19 @@ void main() {
       );
       tester.view.physicalSize = const Size(480, 600);
       await tester.pumpAndSettle();
-      final compact = find
-          .descendant(of: hints, matching: find.byType(Text))
-          .first;
-      final compactStyle = DefaultTextStyle.of(tester.element(compact)).style;
-      expect(tester.widget<Text>(compact).data, hintLabels.first);
-      expect(compactStyle.fontSize, 18);
-      expect(
-        compactStyle.color,
-        terminalThemeFor(
-          grid.AppTheme.palette.value,
-          terminalThemeStore.value,
-        ).foreground.withValues(alpha: .54),
+      final compact = find.descendant(
+        of: harnesses,
+        matching: find.byType(Text),
       );
+      final text = tester.widget<Text>(compact);
+      final style = DefaultTextStyle.of(tester.element(compact)).style
+          .merge(text.style);
+      expect(text.data, 'Harnesses');
+      expect(style.fontSize, grid.AppType.bodySize);
+      expect(style.fontFamily, grid.AppType.sansFamily);
+      expect(style.color, DesktopChrome.foreground);
       expect(tester.takeException(), isNull);
-      await capture(tester, 'narrow-type-hints');
+      await capture(tester, 'narrow-native-scopes');
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
@@ -1441,7 +1496,10 @@ void main() {
         await key(tester, LogicalKeyboardKey.arrowDown, shift: true);
         expect(
           position().pixels,
-          closeTo(terminalCellSizeOf(tester.element(field)).height, .01),
+          closeTo(
+            MediaQuery.textScalerOf(tester.element(field)).scale(13) * 1.5,
+            .01,
+          ),
         );
         await key(tester, LogicalKeyboardKey.arrowUp, shift: true);
         await key(tester, LogicalKeyboardKey.arrowUp, shift: true);
@@ -1455,7 +1513,10 @@ void main() {
         await key(tester, LogicalKeyboardKey.arrowDown, shift: true);
         expect(
           position().pixels,
-          closeTo(terminalCellSizeOf(tester.element(field)).height, .01),
+          closeTo(
+            MediaQuery.textScalerOf(tester.element(field)).scale(13) * 1.5,
+            .01,
+          ),
         );
         controller.scrollPreview(10000);
         await tester.pumpAndSettle();
@@ -1490,7 +1551,7 @@ void main() {
       await tester.pump();
       expect(controller.selected, isNull);
       expect(
-        find.byKey(const ValueKey('swarm-search-type-hints')),
+        find.byKey(const ValueKey('search-category-Harnesses')),
         findsOneWidget,
       );
       controller.setQuery('*blender');
@@ -1527,7 +1588,13 @@ void main() {
       expect(origin.managing, isTrue);
       expect(origin.scopedMachineId, isNull);
       expect(tester.getTopLeft(field), inputPosition);
-      expect(find.text(origin.title), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(SwarmResourcePreview),
+          matching: find.text(origin.title),
+        ),
+        findsNothing,
+      );
       expect(find.byType(TextField), findsOneWidget);
       expect(app.actions, isEmpty);
       await capture(tester, 'machine-management');
@@ -1637,7 +1704,10 @@ void main() {
     await key(tester, LogicalKeyboardKey.enter);
     expect(controller.managing, isFalse);
     expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
-    await key(tester, LogicalKeyboardKey.tab);
+    await tabTo(
+      tester,
+      find.byKey(const ValueKey('resource-action:picker.resource_settings')),
+    );
     expect(controller.managing, isTrue);
     expect(find.byType(ApiPickerForm), findsNothing);
     await key(tester, LogicalKeyboardKey.enter);
@@ -1654,28 +1724,21 @@ void main() {
     expect(focused(find.byKey(const ValueKey('api-form-input:url'))), isTrue);
     await key(tester, LogicalKeyboardKey.tab);
     expect(focused(find.byKey(const ValueKey('api-form-input:key'))), isTrue);
-    await key(tester, LogicalKeyboardKey.tab);
-    expect(
-      tester
-          .widget<Focus>(
-            find
-                .descendant(
-                  of: find.byKey(const ValueKey('api-form:save')),
-                  matching: find.byType(Focus),
-                )
-                .first,
-          )
-          .focusNode!
-          .hasFocus,
-      isTrue,
-    );
+    // The fixed action row follows the fields and visibility control.
+    final save = find.byKey(const ValueKey('api-form:save'));
+    for (var step = 0; step < 5; step++) {
+      await key(tester, LogicalKeyboardKey.tab);
+      if (tester.widget<FilledButton>(save).focusNode!.hasFocus) break;
+    }
+    expect(tester.widget<FilledButton>(save).focusNode!.hasFocus, isTrue);
+    expect(save.hitTestable(), findsOneWidget);
     expect(controller.managing, isTrue);
-    await key(tester, LogicalKeyboardKey.tab);
+    await tabTo(tester, field);
     expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
     expect(controller.managing, isFalse);
     await key(tester, LogicalKeyboardKey.enter);
     expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
-    await key(tester, LogicalKeyboardKey.tab, shift: true);
+    await tabTo(tester, name, backwards: true);
     expect(tester.widget<TextField>(name).focusNode!.hasFocus, isTrue);
     expect(tester.widget<TextField>(name).controller!.text, 'Draft API');
     await capture(tester, 'api-edit-inline');
@@ -1723,10 +1786,6 @@ void main() {
         height: 1.4,
       );
       await tester.pumpAndSettle();
-      final theme = terminalThemeFor(
-        grid.AppTheme.palette.value,
-        terminalThemeStore.value,
-      );
       final previewText = find.descendant(
         of: find.byType(SwarmResourcePreview),
         matching: find.byType(Text),
@@ -1735,14 +1794,14 @@ void main() {
       for (final element in previewText.evaluate()) {
         final text = element.widget as Text;
         final style = DefaultTextStyle.of(element).style.merge(text.style);
-        expect(style.fontSize, 18);
-        expect(style.height, 1.4);
+        expect(style.fontFamily, grid.AppType.sansFamily);
+        expect(style.fontSize, isIn([11.0, 12.0, 13.0, 14.0, 15.0]));
         expect(
           style.color,
           isIn([
-            theme.foreground,
-            theme.foreground.withValues(alpha: .54),
-            theme.foreground.withValues(alpha: .28),
+            DesktopChrome.foreground,
+            DesktopChrome.muted,
+            Theme.of(element).colorScheme.error,
           ]),
         );
       }
@@ -1763,21 +1822,19 @@ void main() {
       grid.AppTheme.palette.value = HarnessPalette.midnight;
       terminalFontStore.value = originalFont;
       await tester.pumpAndSettle();
-      final commandTheme = terminalThemeFor(
-        grid.AppTheme.palette.value,
-        terminalThemeStore.value,
-      );
       final line = find.byKey(ValueKey('swarm-search-line:$commandId'));
-      final cell = terminalCellSizeOf(tester.element(commandField));
-      expect(tester.getSize(line).height, closeTo(cell.height, .01));
-      expect(tester.widget<Container>(line).color, commandTheme.selection);
+      expect(tester.getSize(line).height, greaterThanOrEqualTo(32));
+      expect(
+        tester.widget<Material>(line).color,
+        DesktopChrome.activeSelection,
+      );
       expect(
         tester
             .widget<Dialog>(
               find.byKey(const ValueKey('resource-command-picker')),
             )
             .backgroundColor,
-        commandTheme.background,
+        DesktopChrome.surface,
       );
       expect(commandSearch.selected!.id, commandId);
       expect(
@@ -1854,14 +1911,13 @@ void main() {
           ),
           findsWidgets,
         );
-        final cell = terminalCellSizeOf(tester.element(field));
         final visibleRows = [
           for (final row in controller.rows)
             if (find.byKey(ValueKey(row.id)).evaluate().isNotEmpty) row,
         ];
         for (final row in visibleRows) {
           final result = find.byKey(ValueKey(row.id));
-          expect(tester.getSize(result).height, closeTo(cell.height, .01));
+          expect(tester.getSize(result).height, greaterThanOrEqualTo(44));
           expect(
             tester
                 .widgetList<SearchResultText>(
@@ -1871,20 +1927,25 @@ void main() {
                   ),
                 )
                 .map((text) => text.text),
-            row.isCreate ? isEmpty : [row.title],
+            contains(
+              row.isCreate && controller.isModelMode
+                  ? 'Add API connection'
+                  : controller.isModelDownloadsRow(row)
+                  ? controller.modelDownloadsVisible
+                        ? 'Hide catalog'
+                        : 'Get models'
+                  : row.title,
+            ),
           );
         }
         for (var i = 1; i < visibleRows.length; i++) {
-          final sectionBreak =
-              controller.isModelMode &&
-              controller.modelSection(visibleRows[i]) !=
-                  controller.modelSection(visibleRows[i - 1]);
           expect(
-            tester.getTopLeft(find.byKey(ValueKey(visibleRows[i].id))).dy -
-                tester
-                    .getTopLeft(find.byKey(ValueKey(visibleRows[i - 1].id)))
-                    .dy,
-            closeTo(cell.height * (sectionBreak ? 3 : 1), .01),
+            tester.getTopLeft(find.byKey(ValueKey(visibleRows[i].id))).dy,
+            greaterThanOrEqualTo(
+              tester
+                  .getBottomLeft(find.byKey(ValueKey(visibleRows[i - 1].id)))
+                  .dy,
+            ),
           );
         }
         expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);

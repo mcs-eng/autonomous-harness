@@ -13,6 +13,7 @@ import { basename, delimiter, isAbsolute, join, normalize, sep } from 'node:path
 import { promisify } from 'node:util'
 import { env } from '../config/env.js'
 import { ENGINES, PROCESS_ENGINES, type AgentEngine } from '../engines/types.js'
+import { engineInstallPaths, engineInstallRecipe } from './engineInstall.js'
 
 // Keep this historical import surface for callers, but never duplicate the
 // catalog here. `engines/types.ts` is the one iterable source of truth.
@@ -216,13 +217,16 @@ export function executableFileIdentity(path: string): ExecutableFileIdentity | n
     // Stat through the supplied path first. `/proc/<pid>/exe` keeps the running inode reachable even
     // after an auto-updater replaces its pathname; realpath may then end in "(deleted)" and be
     // unstatable despite the process image still being valid.
-    const stat = statSync(path)
+    // OverlayFS (including a live USB) can assign 64-bit inode numbers above
+    // Number.MAX_SAFE_INTEGER. Rounded Numbers made unrelated executables
+    // share one owner, so a shell could be promoted to an installed agent.
+    const stat = statSync(path, { bigint: true })
     if (!stat.isFile()) return null
     let realPath: string
     try { realPath = realpathSync(path) } catch {
       try { realPath = readlinkSync(path) } catch { realPath = normalize(path) }
     }
-    return { path: normalize(path), realPath, fileKey: `${String(stat.dev)}:${String(stat.ino)}` }
+    return { path: normalize(path), realPath, fileKey: `${stat.dev}:${BigInt.asUintN(64, stat.ino)}` }
   } catch {
     return null
   }
@@ -252,22 +256,12 @@ function addAll(target: Set<string>, identities: readonly ExecutableFileIdentity
 }
 
 function vendorFallbackCommands(engine: AgentEngine): string[] {
-  const home = homedir()
+  const recipe = engineInstallRecipe(engine)
+  const paths = recipe ? engineInstallPaths(recipe) : []
   switch (engine) {
-    case 'claude': return [join(home, '.local', 'bin', 'claude')]
-    case 'codex': return [join(home, '.local', 'bin', 'codex')]
-    case 'cursor': return [join(home, '.local', 'bin', 'cursor-agent'), join(home, '.local', 'bin', 'agent')]
-    case 'opencode': return [join(home, '.opencode', 'bin', 'opencode')]
-    case 'hermes': return [join(home, '.local', 'bin', 'hermes')]
-    case 'devin': return [join(home, '.local', 'bin', 'devin')]
-    case 'muse': return [join(home, '.local', 'bin', 'muse')]
-    case 'amp': return [join(home, '.amp', 'bin', 'amp'), join(home, '.local', 'bin', 'amp')]
-    case 'kilo': return [join(home, '.kilo', 'bin', 'kilo'), join(home, '.local', 'bin', 'kilo')]
-    case 'grok': return [join(env.GROK_HOME, 'bin', 'grok'), join(home, '.local', 'bin', 'grok')]
-    case 'agy': return [join(home, '.local', 'bin', 'agy')]
-    case 'copilot': return [join(home, '.local', 'bin', 'copilot')]
-    case 'cline': return [join(home, '.local', 'bin', 'cline')]
-    default: return []
+    case 'cursor': return [...paths, join(homedir(), '.local', 'bin', 'agent')]
+    case 'grok': return [join(env.GROK_HOME, 'bin', 'grok'), ...paths]
+    default: return paths
   }
 }
 

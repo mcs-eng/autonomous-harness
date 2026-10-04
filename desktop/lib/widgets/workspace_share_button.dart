@@ -17,7 +17,7 @@ class WorkspaceShareButton extends StatelessWidget {
   final String tooltip;
   final VoidCallback? onPressed;
 
-  static const text = '[ Share ]';
+  static const text = 'Share';
 
   static double widthOf(BuildContext context) =>
       workspaceBarTextSizeOf(context, text).width +

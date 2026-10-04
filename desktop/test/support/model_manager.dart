@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:harness/auth/auth_session.dart';
+import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/dsh_catalog.dart';
 import 'package:harness/core/models.dart';
@@ -148,13 +149,45 @@ class ModelManagerTestApp extends AppNotifier {
 
   bool localReadFails = false, actionReplyLost = false;
   Completer<Map<String, dynamic>>? actionReply;
+
+  /// Harness sign-ins started ([login]), and whether the next one lands — the browser completing it
+  /// — or is cancelled.
+  int logins = 0;
+  bool loginLands = true;
+
+  @override
+  Future<void> login([SignInProvider? provider]) async {
+    logins++;
+    signingIn = true;
+    notifyListeners();
+    await Future<void>.delayed(Duration.zero);
+    if (loginLands) signedIn = true;
+    signingIn = false;
+    notifyListeners();
+  }
+
+  /// Machines Grid was set up on, in order — a list read carrying `setup`.
+  final gridSetups = <String>[];
+
+  /// What the daemon says when setting Grid up fails; null sets it up.
+  String? gridSetupFailure;
+
   @override
   Future<Map<String, dynamic>> localModels(
     String machineId, {
     bool refresh = false,
+    bool setup = false,
   }) async {
     localReads++;
     inventoryReads.add(machineId);
+    if (setup) {
+      gridSetups.add(machineId);
+      final inventory = inventoryFor(machineId);
+      if (gridSetupFailure != null) {
+        return {...inventory, 'gridSetupError': gridSetupFailure};
+      }
+      setInventoryFor(machineId, {...inventory}..remove('gridSetupNeeded'));
+    }
     final held = localReply;
     if (held != null) {
       localReply = null;

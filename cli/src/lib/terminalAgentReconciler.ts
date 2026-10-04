@@ -25,6 +25,9 @@ export interface TerminalAgentReconcilerDeps {
   transaction?: <T>(apply: () => T | Promise<T>) => Promise<T>
   probe?: (hints: ReadonlyMap<string, AgentEngine>) => Promise<TerminalAgentProbe>
   daemonPid?: number
+  /** Hooks may arrive while reboot restoration is still allocating panes. Keep their hints,
+   * but do not scan or retire any saved owners until start() opens discovery. */
+  deferUntilStart?: boolean
 }
 
 function currentProcessKey(session: RegisteredSession): string | null {
@@ -108,8 +111,11 @@ export class TerminalAgentReconciler {
   private pending = false
   private inFlight: Promise<void> | null = null
   private timer: NodeJS.Timeout | null = null
+  private waitingForStart: boolean
 
-  constructor(private readonly deps: TerminalAgentReconcilerDeps) {}
+  constructor(private readonly deps: TerminalAgentReconcilerDeps) {
+    this.waitingForStart = deps.deferUntilStart === true
+  }
 
   /**
    * Arm the interval FIRST, then run the opening pass.
@@ -120,6 +126,7 @@ export class TerminalAgentReconciler {
    * pass is reported and dropped; the interval retries it a few seconds later.
    */
   async start(intervalMs: number): Promise<void> {
+    this.waitingForStart = false
     this.timer = setInterval(() => { void this.trigger() }, intervalMs)
     this.timer.unref?.()
     await this.trigger().catch((error) => {
@@ -202,6 +209,9 @@ export class TerminalAgentReconciler {
 
   trigger(): Promise<void> {
     this.pending = true
+    // Return promptly to startup hooks: waiting for start() here can hold up the very engines
+    // restore is trying to launch. The opening pass consumes every retained hint after restore.
+    if (this.waitingForStart) return Promise.resolve()
     if (!this.inFlight) this.inFlight = this.drain().finally(() => { this.inFlight = null })
     return this.inFlight
   }

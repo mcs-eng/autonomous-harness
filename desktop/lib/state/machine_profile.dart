@@ -9,7 +9,7 @@ import 'swarm.dart';
 /// stay, so there is always a place to start one.
 bool swarmMatchesMachineProfile(Swarm swarm, String? machineId) {
   if (machineId == null || machineId.isEmpty) return true;
-  if (swarm.isStore) return true;
+  if (swarm.isUtility) return true;
   final paneIds = <String>{
     for (final pane in swarm.panes)
       if (pane.machineId.isNotEmpty) pane.machineId,

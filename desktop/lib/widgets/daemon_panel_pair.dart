@@ -5,10 +5,7 @@ part of 'daemon_panel.dart';
 /// waiting answer.
 const daemonAutonomyWords = <String, (String, String)>{
   'watch': ('watch', 'reads and tells you. it answers nothing.'),
-  'suggest': (
-    'suggest',
-    'recommends. every action waits for your key.',
-  ),
+  'suggest': ('suggest', 'recommends. every action waits for your key.'),
   'act-on-key': (
     'act on key',
     'your key approves one waiting answer at a time; '
@@ -41,16 +38,15 @@ const daemonRulesPath = '~/.config/harness/pair.jsonc';
 /// until the brain says it has armed (a moment later).
 mixin _PairSections on State<DaemonPanel> {
   // The panel's own drawing, shared.
-  Size get _cell;
   TerminalTheme get _theme;
   Color get _muted;
   TextStyle _ink([Color? color]);
+  ButtonStyle get _buttonStyle;
   FocusNode _node(String key);
   Widget _action(
     String key,
     String label,
     VoidCallback? onPressed, {
-    Color? color,
     String? tooltip,
   });
   DaemonFace get face;
@@ -154,14 +150,27 @@ mixin _PairSections on State<DaemonPanel> {
   /// Whether a key on [id] counts yet (no brain: nothing to wait for).
   bool _armed(String id) => _brain?.armed(id) ?? true;
 
+  TextStyle get _detailStyle => AppType.mono(color: _muted, height: 1.4);
+  double get _detailRowHeight =>
+      MediaQuery.textScalerOf(context).scale(13) * 1.4;
+  int get _detailRows =>
+      (MediaQuery.sizeOf(context).height * .22 / _detailRowHeight)
+          .floor()
+          .clamp(2, 10);
+
   // ── rows ───────────────────────────────────────────────────────────────────
 
   Widget _header(String title, {Widget? trailing, Key? key}) => Padding(
     key: key,
-    padding: EdgeInsets.only(top: _cell.height),
+    padding: const EdgeInsets.only(top: 24),
     child: Row(
       children: [
-        Expanded(child: Text(title, style: _ink(_muted))),
+        Expanded(
+          child: Text(
+            title,
+            style: AppType.heading(color: DesktopChrome.foreground),
+          ),
+        ),
         ?trailing,
       ],
     ),
@@ -187,11 +196,9 @@ mixin _PairSections on State<DaemonPanel> {
     List<String> listing = const [],
   }) {
     final split = splitDaemonKeys(line, actions);
-    final ink = color ?? _theme.foreground;
     final armed = shownId == null || _armed(shownId);
-    TextStyle style([bool emphasized = false]) => _ink(ink).copyWith(
-      fontWeight: emphasized ? FontWeight.w600 : null,
-    );
+    TextStyle style([bool emphasized = false]) =>
+        _ink().copyWith(fontWeight: emphasized ? FontWeight.w600 : null);
     void press(String k) {
       final action = actions.where((a) => a.key == k).firstOrNull;
       if (action == null) return;
@@ -227,37 +234,84 @@ mixin _PairSections on State<DaemonPanel> {
         builder: (context) {
           final focused = Focus.of(context).hasFocus;
           return Container(
-            color: focused ? _theme.selection.withValues(alpha: .5) : null,
-            child: Row(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: focused ? DesktopChrome.selection : DesktopChrome.field,
+              borderRadius: BorderRadius.circular(DesktopChrome.controlRadius),
+              border: Border.all(
+                width: 1.5,
+                color: focused ? DesktopChrome.accent : Colors.transparent,
+              ),
+            ),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (split.keys.isNotEmpty)
-                  DaemonKeys(
-                    keys: split.keys,
-                    actions: actions,
-                    style: style,
-                    live: live,
-                    armed: armed,
-                    height: _cell.height,
-                    idPrefix: 'daemon-key-$key',
-                    onAnswer: press,
-                  ),
-                Expanded(
-                  child: Text.rich(
-                    TextSpan(
-                      children: [
-                        if (fromPair && name != null)
-                          TextSpan(
-                            text: daemonPairNick(name),
-                            style: style(true),
-                          ),
-                        TextSpan(text: split.rest),
-                      ],
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (color != null) ...[
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Icon(
+                          color == _theme.red
+                              ? AppIcons.circleAlert
+                              : color == _theme.yellow
+                              ? AppIcons.ellipsis
+                              : AppIcons.info,
+                          size: 16,
+                          color: color == _theme.red
+                              ? Theme.of(context).colorScheme.error
+                              : color == _theme.yellow
+                              ? DesktopChrome.accent
+                              : _muted,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    Expanded(
+                      child: Text.rich(
+                        TextSpan(
+                          children: [
+                            if (fromPair && name != null)
+                              TextSpan(text: '$name: ', style: style(true)),
+                            TextSpan(text: split.rest),
+                          ],
+                        ),
+                        // Whole: harnessd bounds a line (140 characters).
+                        style: _ink(),
+                      ),
                     ),
-                    // Whole: harnessd bounds a line (140 characters).
-                    style: _ink(ink),
-                  ),
+                  ],
                 ),
+                if (split.keys.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final shortcut in split.keys)
+                        if (actions.where((a) => a.key == shortcut).firstOrNull
+                            case final action?)
+                          TextButton(
+                            key: ValueKey(
+                              'daemon-key-$key-$shortcut${shortcut != 'g' && live && !armed ? '-arming' : ''}',
+                            ),
+                            onPressed: shortcut == 'g' || (live && armed)
+                                ? () => press(shortcut)
+                                : null,
+                            style: _buttonStyle,
+                            child: Text(
+                              '${action.label} (${shortcut.toUpperCase()})',
+                              style: DesktopChrome.control(
+                                color: shortcut == 'g' || (live && armed)
+                                    ? DesktopChrome.foreground
+                                    : _muted,
+                              ),
+                            ),
+                          ),
+                    ],
+                  ),
+                ],
               ],
             ),
           );
@@ -267,28 +321,28 @@ mixin _PairSections on State<DaemonPanel> {
     final extra = [
       if (harness != null)
         Padding(
-          padding: EdgeInsets.only(left: _cell.width * 2),
+          padding: const EdgeInsets.only(left: 16),
           child: Text(
             harness,
             key: ValueKey('daemon-harness-$key'),
-            style: _ink(_muted),
+            style: AppType.monoMeta(color: _muted),
           ),
         ),
       for (final item in listing)
         Padding(
-          padding: EdgeInsets.only(left: _cell.width * 2),
+          padding: const EdgeInsets.only(left: 16),
           child: Text('- $item', style: _ink()),
         ),
       if (detail != null && detail.isNotEmpty)
         Padding(
-          padding: EdgeInsets.only(left: _cell.width * 2),
+          padding: const EdgeInsets.only(left: 16),
           child: DaemonDetailBox(
             key: ValueKey('daemon-detail-$key'),
             text: detail,
-            style: _ink(_muted),
-            rowHeight: _cell.height,
-            maxRows: 10,
-            background: Color.lerp(_theme.background, _theme.foreground, .05),
+            style: _detailStyle,
+            rowHeight: _detailRowHeight,
+            maxRows: _detailRows,
+            background: DesktopChrome.field,
           ),
         ),
     ];
@@ -316,7 +370,7 @@ mixin _PairSections on State<DaemonPanel> {
     final key = 'confirm:${confirm.id}';
     order.add(key);
     return Padding(
-      padding: EdgeInsets.only(top: _cell.height / 2),
+      padding: const EdgeInsets.only(top: 8),
       child: _keyRow(
         key,
         line: confirm.line,
@@ -458,11 +512,7 @@ mixin _PairSections on State<DaemonPanel> {
   /// own, and the lessons it taught, newest first. A lesson reverts with one
   /// `harness pair lessons revert`; an answer typed into a harness cannot be
   /// taken back, and it says so.
-  List<Widget> _didSection(
-    List<String> order,
-    DaemonBrain brain,
-    String name,
-  ) {
+  List<Widget> _didSection(List<String> order, DaemonBrain brain, String name) {
     final acted = brain.state!.acted;
     final lessons = _lessons;
     final taught = [
@@ -492,18 +542,24 @@ mixin _PairSections on State<DaemonPanel> {
       for (final a in acted.take(5))
         Text(
           '${who(a.by)}: ${a.name} '
-          '${a.text.isNotEmpty ? a.text : a.action.isNotEmpty ? a.action : 'acted'}'
+          '${a.text.isNotEmpty
+              ? a.text
+              : a.action.isNotEmpty
+              ? a.action
+              : 'acted'}'
           '${ago(a.at)}',
-          key: ValueKey('daemon-did-${a.machineId}-${a.agentId}-${a.at?.millisecondsSinceEpoch}'),
+          key: ValueKey(
+            'daemon-did-${a.machineId}-${a.agentId}-${a.at?.millisecondsSinceEpoch}',
+          ),
           style: _ink(_muted),
         ),
       if (acted.isNotEmpty)
         Padding(
-          padding: EdgeInsets.only(left: _cell.width * 2),
+          padding: const EdgeInsets.only(left: 16),
           child: Text(
             'an answer typed into a harness cannot be taken back.',
             key: const ValueKey('daemon-did-no-revert'),
-            style: _ink(_muted.withValues(alpha: .45)),
+            style: _ink(_muted),
           ),
         ),
       for (final lesson in taught.take(5))
@@ -522,7 +578,7 @@ mixin _PairSections on State<DaemonPanel> {
               ),
               _action(
                 'did-revert:${lesson.id}',
-                '[ revert ]',
+                'Revert',
                 lessons!.busy
                     ? null
                     : () => unawaited(lessons.revert(lesson.id)),
@@ -576,7 +632,7 @@ mixin _PairSections on State<DaemonPanel> {
       ),
       for (final entry in talk.skip(max(0, talk.length - 4)))
         Text(
-          entry.you ? 'you > ${entry.text}' : '<$name> ${entry.text}',
+          entry.you ? 'You: ${entry.text}' : '$name: ${entry.text}',
           style: _ink(entry.you ? _muted : null),
           maxLines: 3,
           overflow: TextOverflow.ellipsis,
@@ -587,15 +643,13 @@ mixin _PairSections on State<DaemonPanel> {
           key: const ValueKey('daemon-talk-status'),
           style: _ink(
             brain.talkPhase == DaemonTalkPhase.failed && wait == null
-                ? _theme.red
+                ? Theme.of(context).colorScheme.error
                 : _muted,
           ),
         ),
       Row(
-        crossAxisAlignment: CrossAxisAlignment.baseline,
-        textBaseline: TextBaseline.alphabetic,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Text('> ', style: _ink(_muted)),
           Expanded(
             child: TextField(
               key: const ValueKey('daemon-talk-input'),
@@ -605,9 +659,7 @@ mixin _PairSections on State<DaemonPanel> {
               maxLines: 1,
               maxLength: 2000,
               style: _ink(),
-              cursorWidth: _cell.width,
-              cursorHeight: _cell.height,
-              cursorColor: _theme.cursor,
+              cursorColor: DesktopChrome.accent,
               textInputAction: TextInputAction.send,
               decoration: InputDecoration(
                 hintText: wait == null
@@ -615,19 +667,23 @@ mixin _PairSections on State<DaemonPanel> {
                     : 'wait ${(wait.inMilliseconds / 1000).ceil()}s',
                 hintStyle: _ink(_muted.withValues(alpha: .4)),
                 counterText: '',
-                isDense: true,
-                filled: false,
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                disabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                contentPadding: EdgeInsets.zero,
               ),
               onSubmitted: (_) {
                 _send();
                 _talkFocus.requestFocus();
               },
             ),
+          ),
+          const SizedBox(width: 8),
+          DesktopPill(
+            key: const ValueKey('daemon-talk-send'),
+            label: 'Send',
+            onPressed: wait == null
+                ? () {
+                    _send();
+                    _talkFocus.requestFocus();
+                  }
+                : null,
           ),
         ],
       ),
@@ -638,12 +694,12 @@ mixin _PairSections on State<DaemonPanel> {
             'each talk is a turn of $name\'s harness on your engine: '
                 'it spends your model usage.',
         key: const ValueKey('daemon-talk-cost'),
-        style: _ink(_muted.withValues(alpha: .45)),
+        style: _ink(_muted),
       ),
       if (canOpen)
         _action(
           'conversation',
-          '[ open the conversation ]',
+          'Open conversation',
           widget.onOpenConversation,
           tooltip: "$name's own harness, with everything it said",
         ),
@@ -688,19 +744,19 @@ mixin _PairSections on State<DaemonPanel> {
       if (liveIds.contains(lesson.id)) continue;
       rows.add(
         Padding(
-          padding: EdgeInsets.only(top: _cell.height / 2),
+          padding: const EdgeInsets.only(top: 8),
           child: Text(
             '${lesson.pending ? 'pending' : 'learned'} ${lesson.title}'
             '${lesson.approved == null ? '' : ' · ${lesson.approved}'}',
             key: ValueKey('daemon-lesson-${lesson.id}'),
-            style: _ink(lesson.pending ? _theme.yellow : null),
+            style: _ink(),
           ),
         ),
       );
       if (lesson.description.isNotEmpty) {
         rows.add(
           Padding(
-            padding: EdgeInsets.only(left: _cell.width * 2),
+            padding: const EdgeInsets.only(left: 16),
             child: Text(lesson.description, style: _ink(_muted)),
           ),
         );
@@ -708,14 +764,14 @@ mixin _PairSections on State<DaemonPanel> {
       if (lessons.shownId == lesson.id && lessons.shownText != null) {
         rows.add(
           Padding(
-            padding: EdgeInsets.only(left: _cell.width * 2),
+            padding: const EdgeInsets.only(left: 16),
             child: DaemonDetailBox(
               key: ValueKey('daemon-lesson-text-${lesson.id}'),
               text: lessons.shownText!,
-              style: _ink(_muted),
-              rowHeight: _cell.height,
-              maxRows: 14,
-              background: Color.lerp(_theme.background, _theme.foreground, .04),
+              style: _detailStyle,
+              rowHeight: _detailRowHeight,
+              maxRows: _detailRows,
+              background: DesktopChrome.field,
             ),
           ),
         );
@@ -725,7 +781,7 @@ mixin _PairSections on State<DaemonPanel> {
       final buttons = <Widget>[
         _action(
           'lesson-show:$id',
-          lessons.shownId == id ? '[ hide ]' : '[ show ]',
+          lessons.shownId == id ? 'Hide' : 'Show',
           lessons.busy ? null : () => unawaited(lessons.show(id)),
         ),
       ];
@@ -734,7 +790,7 @@ mixin _PairSections on State<DaemonPanel> {
         buttons.add(
           _action(
             'lesson-skip:$id',
-            '[ skip ]',
+            'Skip',
             lessons.busy ? null : () => unawaited(lessons.skip(id)),
             tooltip: 'Never proposed again',
           ),
@@ -744,7 +800,7 @@ mixin _PairSections on State<DaemonPanel> {
         buttons.add(
           _action(
             'lesson-revert:$id',
-            '[ revert ]',
+            'Revert',
             lessons.busy ? null : () => unawaited(lessons.revert(id)),
             tooltip: 'One git revert: every agent forgets it',
           ),
@@ -752,8 +808,8 @@ mixin _PairSections on State<DaemonPanel> {
       }
       rows.add(
         Padding(
-          padding: EdgeInsets.only(left: _cell.width * 2),
-          child: Wrap(spacing: _cell.width * 2, children: buttons),
+          padding: const EdgeInsets.only(left: 16),
+          child: Wrap(spacing: 8, runSpacing: 8, children: buttons),
         ),
       );
       // Teaching is the person's alone: the lesson's own line, or a
@@ -761,12 +817,12 @@ mixin _PairSections on State<DaemonPanel> {
       if (lesson.pending) {
         rows.add(
           Padding(
-            padding: EdgeInsets.only(left: _cell.width * 2),
+            padding: const EdgeInsets.only(left: 16),
             child: Text(
               'to teach it: its [y] when $name proposes it, or '
               '`${DaemonLessons.approveCommand(id)}` in a terminal.',
               key: ValueKey('daemon-lesson-how-$id'),
-              style: _ink(_muted.withValues(alpha: .45)),
+              style: _ink(_muted),
             ),
           ),
         );
@@ -781,7 +837,7 @@ mixin _PairSections on State<DaemonPanel> {
       ...rows,
       if (lessons.message != null)
         Padding(
-          padding: EdgeInsets.only(top: _cell.height / 2),
+          padding: const EdgeInsets.only(top: 8),
           child: Text(
             lessons.message!,
             key: const ValueKey('daemon-lessons-message'),
@@ -815,25 +871,45 @@ mixin _PairSections on State<DaemonPanel> {
       )) ...[
         () {
           order.add('autonomy:$id');
-          final mark = acting == id
-              ? '(*)'
-              : asked == id
-              ? '(~)'
-              : '( )';
-          return _action(
-            'autonomy:$id',
-            '$mark $label${asked == id && acting != id ? '  waits for your yes' : ''}',
-            watching ? () => zooController.autonomy(id) : null,
-            color: acting == id
-                ? _theme.cursor
-                : asked == id
-                ? _theme.yellow
-                : _theme.foreground,
-            tooltip: words,
+          final selected = acting == id;
+          final waiting = asked == id && !selected;
+          return Semantics(
+            selected: selected,
+            inMutuallyExclusiveGroup: true,
+            child: TextButton(
+              key: ValueKey('daemon-autonomy:$id'),
+              focusNode: _node('autonomy:$id'),
+              onPressed: watching ? () => zooController.autonomy(id) : null,
+              style: _buttonStyle.copyWith(
+                backgroundColor: WidgetStatePropertyAll(
+                  selected ? DesktopChrome.selection : null,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    selected
+                        ? AppIcons.circleDot
+                        : waiting
+                        ? AppIcons.clock
+                        : AppIcons.circle,
+                    size: 18,
+                    color: selected ? DesktopChrome.accent : _muted,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '$label${waiting ? ' · waits for your yes' : ''}',
+                      style: _ink(watching ? null : _muted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           );
         }(),
         Padding(
-          padding: EdgeInsets.only(left: _cell.width * 4),
+          padding: const EdgeInsets.only(left: 24),
           child: Text(words, style: _ink(_muted)),
         ),
         for (final confirm in confirms)
@@ -846,7 +922,7 @@ mixin _PairSections on State<DaemonPanel> {
             !daemonAutonomyWords.containsKey(confirm.level))
           _confirmRow(order, confirm),
       Padding(
-        padding: EdgeInsets.only(top: _cell.height / 2),
+        padding: const EdgeInsets.only(top: 8),
         child: Text(
           'the floor, at every level: $daemonFloorLine',
           key: const ValueKey('daemon-panel-floor'),
@@ -858,7 +934,7 @@ mixin _PairSections on State<DaemonPanel> {
           order.add('rules');
           return _action(
             'rules',
-            '[ rules: $daemonRulesPath ]',
+            'Open rules file',
             widget.onOpenRules,
             tooltip: 'What act within rules may answer, per harness',
           );
@@ -881,7 +957,7 @@ mixin _PairSections on State<DaemonPanel> {
     final step = _consentStep;
     final controller = face.zoo;
     Widget screen(DaemonConsentStep step) => Padding(
-      padding: EdgeInsets.only(top: _cell.height / 2),
+      padding: const EdgeInsets.only(top: 8),
       child: DaemonConsent(
         name: name,
         step: step,
@@ -927,7 +1003,7 @@ mixin _PairSections on State<DaemonPanel> {
         ),
         _action(
           'consent',
-          '[ review what $name sees ]',
+          'Review what $name sees',
           () => setState(() => _consentStep = DaemonConsentStep.watch),
         ),
       ];
@@ -952,9 +1028,7 @@ mixin _PairSections on State<DaemonPanel> {
       ),
       _action(
         'consent',
-        consent?.watching == true
-            ? '[ stop watching ]'
-            : '[ review what $name sees ]',
+        consent?.watching == true ? 'Stop watching' : 'Review what $name sees',
         consent?.watching == true
             ? () => controller.consent(watching: false)
             : () => setState(() => _consentStep = DaemonConsentStep.watch),

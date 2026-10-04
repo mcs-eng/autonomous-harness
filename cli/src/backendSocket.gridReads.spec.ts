@@ -218,13 +218,15 @@ describe('grid_models_list — computers of mine that seem offline (issue 03)', 
     clock += 60_000
     observeMachineList(studioOffline, 'computer-here')
 
-    await vi.waitFor(() => expect(frames.some((f) => f.type === 'grid_models_changed')).toBe(true), { timeout: 5_000 })
-    await vi.waitFor(() => expect(old.some((f) => f.type === 'grid_models_changed')).toBe(true), { timeout: 5_000 })
-    // The initial inventory may still have a coalesced push in flight. Assert the
-    // latest post-observation picture, not that earlier legitimate inventory.
+    // Setup can already have pushed the serving/asleep picture to either window.
+    // The coalesced offline update must reach both; their first push need not be it.
     await vi.waitFor(() => {
-      expect(rows(frames.findLast((f) => f.type === 'grid_models_changed')!.payload)).toEqual([expect.objectContaining({ node: 'studio', unavailable: expect.anything() })])
-      expect(rows(old.findLast((f) => f.type === 'grid_models_changed')!.payload)).toEqual([{ id: 'big-model', node: 'Studio · seems offline' }])
+      const current = frames.filter((f) => f.type === 'grid_models_changed').at(-1)
+      const legacy = old.filter((f) => f.type === 'grid_models_changed').at(-1)
+      expect(current).toBeDefined()
+      expect(legacy).toBeDefined()
+      expect(rows(current!.payload)).toEqual([expect.objectContaining({ node: 'studio', unavailable: expect.anything() })])
+      expect(rows(legacy!.payload)).toEqual([{ id: 'big-model', node: 'Studio · seems offline' }])
     }, { timeout: 5_000 })
     await socket.unregisterLocalClient('local:old-build')
   })

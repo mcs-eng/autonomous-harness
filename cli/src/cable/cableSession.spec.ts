@@ -128,6 +128,24 @@ async function connect(host: CableHost = makeHost(), log = tmpLog()) {
 const settle = () => new Promise((r) => setTimeout(r, 0))
 
 describe('cable session', () => {
+  const companionSettings = {
+    brightness: 40, character: 2, face: 466, muted: true, quiet: false,
+    straightTitle: false, focusFace: false, scrollReversed: false, round: true,
+    voiceLang: 'en', followCompanion: true, companion: null as string | null,
+  }
+
+  it('preserves dial settings and sends no automatic companion presentation', async () => {
+    const { session, port } = await connect()
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', proto: 3, settings: companionSettings })
+      await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+      await session.focusAgent('a1')
+      await settle()
+      expect(port.types().filter(type => type.startsWith('companion.'))).toEqual([])
+      expect(port.types()).not.toContain('settings.set')
+    } finally { await session.stop() }
+  })
+
   it('recovers the selected terminal footer without a transcript start event and bounds captures', async () => {
     const activityText = vi.fn(async () => 'Coalescing...')
     const { session, port } = await connect(makeHost({ activityText }))
@@ -723,6 +741,42 @@ describe('cable session', () => {
     await settle()
     expect(host.sendTurn).toHaveBeenCalledWith('a2', 'flash it')
     await session.stop()
+  })
+
+  it('says so when the port is another product\'s, or never speaks at all, and never of a real dial', async () => {
+    // Told to whoever owns discovery, so a second ESP32 on the desk stops being opened every minute.
+    // A port that has been a dial is never reported: a hung or rebooting dial goes quiet and comes back.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    try {
+      const reports: Array<[string, string]> = []
+      const host = makeHost({ onForeignPort: (path, why) => { reports.push([path, why]) } })
+
+      // 1. Another product's greeting.
+      const other = await connect(host)
+      other.port.say({ t: 'hello', product: 'grid', fw: '0.1.2', proto: 1, mac: 'aa:bb' })
+      await settle()
+      expect(reports).toEqual([['/dev/loopback', "greeted as 'grid'"]])
+      await other.session.stop()
+
+      // 2. A port that never says anything.
+      reports.length = 0
+      const quiet = await connect(host)
+      await settle()
+      for (let sec = 0; sec < 25; sec++) { vi.advanceTimersByTime(1_000); await settle() }
+      expect(reports).toEqual([['/dev/loopback', 'silent']])
+      await quiet.session.stop()
+
+      // 3. A real dial that then goes quiet is not written off.
+      reports.length = 0
+      const dial = await connect(host)
+      dial.port.say({ t: 'hello', product: 'harness', fw: '0.1.0', proto: 1, mac: 'aa:bb' })
+      await settle()
+      for (let sec = 0; sec < 25; sec++) { vi.advanceTimersByTime(1_000); await settle() }
+      expect(reports).toEqual([])
+      await dial.session.stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("refuses a dial that names another product, and lets go of its port", async () => {

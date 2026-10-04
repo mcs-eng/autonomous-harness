@@ -85,6 +85,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("confirm-before", "confirm", "Ask y/n before a command"),
     ("new-harness", "newh", "New harness: [engine] [@machine] [folder] — or choose"),
     ("new-terminal", "newt", "A shell on this pane's machine"),
+    ("choose-command", "choosec", "Every command and setting by name (C-b Enter)"),
+    ("take-control", "take", "Reclaim control of all panes across the TUI's tabs"),
     ("clone-harness", "cloneh", "A second harness with this one's history"),
     ("restart-harness", "restarth", "Restart this harness"),
     ("pause-harness", "pauseh", "Pause this harness (the conversation is kept)"),
@@ -295,11 +297,11 @@ fn respawn(app: &mut App, p: u64, command: Option<String>, cwd: Option<String>) 
     let Some((machine, agent)) = app.panes.get(&p).map(|x| (x.machine_id.clone(), x.agent_id.clone())) else { return };
     let Some(link) = app.link(&machine) else { return app.say("That machine is not connected", theme::WARN) };
     if crate::local::is_local(&machine) {
+        let previous_exit = app.panes.get(&p).and_then(|pane| pane.dead.as_ref().map(|exit| exit.id.clone()));
         app.spawn(async move { link.rpc("agent_restart", serde_json::json!({"agentId":agent,"command":command,"cwd":cwd}), std::time::Duration::from_secs(30)).await }, move |app, reply| match reply {
             Ok(_) => {
                 if let Some(pane) = app.panes.get_mut(&p) {
-                    pane.dead = None;
-                    if start_command.is_some() { pane.start_command = start_command; }
+                    pane.complete_restart(previous_exit.as_deref(), start_command);
                 }
                 app.relist(&machine); app.open_stream(p, true);
             }
@@ -448,7 +450,7 @@ fn menu_position(app: &App, args: &crate::cmd::Args, target: Option<(usize, u64)
 
 
 pub fn is_command_name(name: &str) -> bool {
-    COMMANDS.iter().any(|(full, alias, _)| *full == name || *alias == name)
+    name == "os-action" || COMMANDS.iter().any(|(full, alias, _)| *full == name || *alias == name)
         || matches!(name, "display" | "send" | "neww" | "splitw" | "killp" | "killw" | "selectw" | "selectp" | "lsw" | "lsp" | "ls" | "capturep" | "showw" | "show" | "set" | "bind" | "unbind" | "source" | "run" | "if"
             | "run-shell" | "if-shell" | "wait-for" | "wait" | "pipe-pane" | "pipep" | "set-hook" | "show-hooks" | "resize-window" | "resizew" | "kill-session" | "send-prefix" | "display-menu" | "menu"
             | "set-option" | "set-window-option" | "setw" | "bind-key" | "unbind-key" | "source-file" | "kill-server" | "detach-client" | "detach"
@@ -1202,7 +1204,7 @@ fn rest(words: &Words) -> String {
 
 /// hn's own commands, and the tmux names hn gives its own meaning (checked before tmux's table).
 pub fn hn_owned(name: &str) -> bool {
-    COMMANDS.iter().any(|(full, alias, _)| (*full == name || *alias == name) && crate::cmd::find(full).map(|e| e.name != *full).unwrap_or(true))
+    name == "os-action" || COMMANDS.iter().any(|(full, alias, _)| (*full == name || *alias == name) && crate::cmd::find(full).map(|e| e.name != *full).unwrap_or(true))
 }
 
 /// A command that names another session (`-t work:2`, `has-session -t work`, a pane's `%12`)
@@ -1242,6 +1244,11 @@ fn run_words(app: &mut App, words: &[String]) {
 fn after_set(app: &mut App, name: &str, now: Option<String>, global: bool, tab: Option<usize>) {
     let name = name.to_string();
     if name == "@hn-look" { app.redraw_all = true; app.fit_panes(); app.push_theme(); }
+    // (Set by hand too — `set -g @hn-theme …`, `@hn-lists fzf`: the colours and lists follow.)
+    if matches!(name.as_str(), "@hn-accent" | "@hn-theme" | "@hn-lists") { app.sync_accent(); app.redraw_all = true }
+    // (The bar down a side and the pane frames change the panes' room.)
+    if matches!(name.as_str(), "@hn-status-bar" | "@hn-border" | "@hn-focus") { app.redraw_all = true; app.fit_panes(); }
+    if name == "@hn-dim" { app.redraw_all = true }
     // alerts_reset_all: every window's silence timer starts again.
     if name == "monitor-silence" { for t in app.tabs.iter_mut() { t.last_output = std::time::Instant::now() } }
     if name.starts_with('@') && now.is_none() { app.opts.user.remove(&name); return }
@@ -1302,7 +1309,7 @@ fn harness_target(app: &App, words: &Words) -> Result<Option<(String, String)>, 
 fn find_harness(app: &App, t: &str) -> Result<(String, String), String> {
     if let Some((m, a)) = t.split_once(':') {
         if app.fleet.agent(m, a).is_some() { return Ok((m.to_string(), a.to_string())) }
-        if let Some(machine) = app.fleet.machines.iter().find(|x| x.name == m) { if app.fleet.agent(&machine.id, a).is_some() { return Ok((machine.id.clone(), a.to_string())) } }
+        if let Some(machine) = app.fleet.machines.iter().find(|x| app.fleet.machine_name(&x.id) == m && app.fleet.agent(&x.id, a).is_some()) { return Ok((machine.id.clone(), a.to_string())) }
     }
     if let Some(a) = app.fleet.agents.values().find(|a| a.id == t) { return Ok(a.key()) }
     if t.starts_with('%') || t.contains([':', '.']) {
@@ -1801,10 +1808,14 @@ fn run_words_in(app: &mut App, words: &[String]) {
         _ => &Words::plain(list),
     };
     let command = resolve(&words[0]);
+    if app.os_session && !app.headless && matches!(command, "detach-client" | "suspend-client") {
+        return app.error("hn is the OS session; open a Terminal with C-b N")
+    }
     // A client's own command where no terminal is attached: tmux's cmd_find_client finds none.
     let client_only = matches!(command, "switch-client" | "detach-client" | "refresh-client" | "suspend-client" | "lock-client" | "display-panes" | "command-prompt" | "confirm-before" | "display-menu" | "display-popup");
     if app.headless && client_only && !(command == "detach-client" && opt(words, "-s").is_some()) { return app.error("no current client") }
     match command {
+        "os-action" => crate::os_welcome::command(app, &words[1..]),
         "new-window" => {
             // tmux's new-window [-abdkPS] [-c dir] [-n name] [-t index] [-F fmt] [command]: a
             // window with a shell, at -t's index (else the first free one); -a after the target
@@ -1859,7 +1870,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
             if app.capture.is_some() { app.tab_mut().size = app.cli_size; }
             if bare {
                 app.tab_mut().home = true;
-                app.home_from = from.clone();
+                crate::new_harness::ensure_welcome(app, from.clone(), cwd.clone());
                 let tab = app.tab().id.clone();
                 input::new_shell_from(app, from, Placement::Fill(tab), cwd, command);
                 return;
@@ -2049,7 +2060,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
                 // that window made current by nothing (tmux zooms it where it is).
                 if w != app.active {
                     app.tabs[w].set_active(p);
-                    if app.tabs[w].panes().len() > 1 { app.tabs[w].zoomed = !app.tabs[w].zoomed; app.fit_panes(); app.layout_changed(w) }
+                    if app.tabs[w].panes().len() > 1 { app.tabs[w].zoomed = !app.tabs[w].zoomed; app.fit_panes(); app.view_layout_changed(w) }
                     return;
                 }
                 if app.focused() != Some(p) { app.focus_pane(w, p) }
@@ -2203,13 +2214,17 @@ fn run_words_in(app: &mut App, words: &[String]) {
             // tmux's paste-buffer [-dpr] [-s separator] [-b buffer-name] [-t target-pane]: the
             // buffer (the newest automatic one without -b) into the pane — its newlines as -s, a
             // newline with -r, else a carriage return; -p bracketed; -d the buffer then deleted.
-            let Some((_, pane)) = target_pane(app, words) else { return };
             let name = match opt(words, "-b") {
                 Some(b) => { if app.paste.get(&b).is_none() { return app.error(format!("no buffer {b}")) } Some(b) }
                 None => app.paste.top().map(|b| b.name.clone()),
             };
             let Some(name) = name else { return };
             let text = app.paste.get(&name).map(|b| b.data.clone()).unwrap_or_default();
+            if app.capture.is_none() && opt(words, "-t").is_none() && input::paste_form(app, &text) {
+                if flag(words, "-d") { app.paste.free(&name) }
+                return;
+            }
+            let Some((_, pane)) = target_pane(app, words) else { return };
             let sep = opt(words, "-s").unwrap_or_else(|| if flag(words, "-r") { "\n".into() } else { "\r".into() });
             input::paste_into(app, pane, &text, &sep, flag(words, "-p"));
             if flag(words, "-d") { app.paste.free(&name) }
@@ -2891,7 +2906,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
             app.tabs[w].size = Some(size);
             app.options.windows.entry(app.tabs[w].id.clone()).or_default().insert("window-size".into(), "manual".into());
             app.fit_panes();
-            if app.headless && old != size { app.layout_changed(w) }
+            if app.headless && old != size { app.view_layout_changed(w) }
         }
         "respawn-window" => {
             // tmux's respawn-window: refused while anything runs in the window, unless -k.
@@ -3479,6 +3494,8 @@ fn run_words_in(app: &mut App, words: &[String]) {
         }
         "new-harness" => { if words.len() < 2 { input::run(app, "new") } else { input::new_harness_words(app, &words[1..]) } }
         "new-terminal" => input::run(app, "terminal"),
+        "choose-command" => input::run(app, "commands"),
+        "take-control" => app.take_control(),
         // A harness's verbs, on -t's harness (the hook's in a harness-* hook), else the focused
         // pane's; from a shell -t is needed, and one mid-turn is restarted or paused only with -y
         // (the keys ask first).
@@ -3610,6 +3627,35 @@ fn run_words_in(app: &mut App, words: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn os_session_refuses_detach_and_suspend_including_aliases() {
+        for command in ["detach-client", "detach", "detach -E sh", "suspend-client", "suspendc", "quit"] {
+            let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(19789, sink, (80, 24));
+            app.os_session = true;
+            app.handed_over = true;
+            execute(&mut app, command);
+            assert!(!app.quit, "{command}");
+            assert!(!app.suspend, "{command}");
+            assert!(app.exec_after.is_none(), "{command}");
+            assert_eq!(app.errors, 1, "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_client_can_still_detach_and_suspend() {
+        for command in ["detach", "suspendc"] {
+            let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(19789, sink, (80, 24));
+            app.os_session = false;
+            app.handed_over = true;
+            execute(&mut app, command);
+            assert_eq!(app.quit, command == "detach");
+            assert_eq!(app.suspend, command == "suspendc");
+            assert_eq!(app.errors, 0);
+        }
+    }
 
     #[test]
     fn splits_like_tmux() {

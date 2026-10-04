@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
@@ -10,12 +11,8 @@ import '../shortcuts/app_keymap.dart';
 import '../shortcuts/keymap.dart';
 import '../shortcuts/keymap_commands.dart';
 import '../shortcuts/keymap_keyboard.dart';
-import '../terminal/terminal_text.dart';
-import '../terminal/terminal_theme.dart';
-import '../terminal/terminal_theme_store.dart';
-import '../widgets/box_chrome.dart';
 import '../widgets/terminal_prompt.dart';
-import '../widgets/terminal_text_action.dart';
+import '../widgets/desktop_chrome.dart';
 import 'harness_comments.dart';
 import '../state/app_state.dart';
 import '../ws/ws_conn.dart';
@@ -66,7 +63,6 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
   _ShareRow _row = _ShareRow.copy;
   bool _options = false, _picking = false, _hideChoices = false;
   int _choice = 0;
-  double _column = 8, _line = 20;
 
   final _emails = TextEditingController();
   List<Map<String, dynamic>> _shares = [];
@@ -81,6 +77,9 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
   @override
   void initState() {
     super.initState();
+    // The dialog veil autofocuses its own Escape scope first, and only one
+    // autofocus wins per scope — so the form asks for the keys itself.
+    _focusPane();
     unawaited(_load());
     _presence = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!_busy) unawaited(_load(quiet: true));
@@ -307,7 +306,7 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
       _shares.isEmpty
           ? 'Only you'
           : '${_shares.length} ${_shares.length == 1 ? 'person' : 'people'}',
-    _ShareRow.options => _options ? '[-]' : '[+]',
+    _ShareRow.options => _options ? 'Hide' : 'Show',
     _ShareRow.expiry => '$_days days',
     _ShareRow.comments => 'Open discussion',
     _ => null,
@@ -537,31 +536,10 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
-    TerminalFontScope.watch(context);
-    return ListenableBuilder(
-      listenable: Listenable.merge([terminalFontStore, terminalThemeStore]),
-      builder: (context, _) {
-        final cell = terminalCellSizeOf(context);
-        _column = cell.width;
-        _line = cell.height;
-        final theme = terminalThemeFor(
-          grid.AppTheme.palette.value,
-          terminalThemeStore.value,
-        );
-        final style = terminalContentStyle(color: theme.foreground);
-        final muted = theme.muted;
-        Widget surface(Key key, Widget child) => Material(
-          key: key,
-          color: theme.background,
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(kTerminalCornerRadius),
-            side: terminalPaneBorder(focused: true),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: DefaultTextStyle(style: style, child: child),
-        );
-        return KeymapRegion(
+    return DesktopChrome(
+      child: DefaultTextStyle(
+        style: DesktopChrome.text(size: 13),
+        child: KeymapRegion(
           contextKind: KeymapContext.picker,
           composing: () => _composing,
           actions: _keyActions,
@@ -570,97 +548,44 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
             autofocus: true,
             onKeyEvent: _key,
             child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: _column * 2,
-                vertical: _line,
-              ),
+              padding: const EdgeInsets.all(20),
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final columns = math.max(
-                    1,
-                    (constraints.maxWidth / _column).floor(),
-                  );
-                  final formColumns = math.min(56, columns);
-                  final left = (columns - formColumns) ~/ 2;
-                  final available = columns - left - formColumns - 1;
-                  final beside = available >= 28;
+                  final formWidth = math.min(480.0, constraints.maxWidth);
+                  final left = (constraints.maxWidth - formWidth) / 2;
+                  final available =
+                      constraints.maxWidth - left - formWidth - 16;
+                  final beside = available >= 280;
                   final showChoices = _hasChoices && !_hideChoices;
                   final replaceForm = _picking && !beside;
-                  final formWidth = formColumns * _column;
-                  final rows = _rows;
-                  var formRows = 5 + rows.length + 3;
-                  if (rows.contains(_ShareRow.people)) formRows++;
-                  // Copy follows the fields with one blank row; notices get their own rows.
-                  for (final message in _messages) {
-                    final painter =
-                        TextPainter(
-                          text: TextSpan(text: message, style: style),
-                          textDirection: TextDirection.ltr,
-                          textScaler: MediaQuery.textScalerOf(context),
-                        )..layout(
-                          maxWidth: math.max(_column, formWidth - _column * 4),
-                        );
-                    formRows += 1 + (painter.height / _line).ceil();
-                    painter.dispose();
-                  }
-                  final formHeight = math.min(
-                    constraints.maxHeight,
-                    formRows * _line,
-                  );
-                  final sideHeight = math.min(
-                    constraints.maxHeight,
-                    ((_row == _ShareRow.access
-                                ? 12
-                                : _row == _ShareRow.expiry
-                                ? 11
-                                : _row == _ShareRow.people
-                                ? math.min(20, 12 + _shares.length * 4)
-                                : 20) +
-                            (replaceForm ? 2 : 0)) *
-                        _line,
-                  );
-                  final top = math.max(
-                    0.0,
-                    ((constraints.maxHeight - formHeight) / (2 * _line))
-                            .floor() *
-                        _line,
-                  );
-                  final sideTop = math.min(
-                    top,
-                    constraints.maxHeight - sideHeight,
-                  );
+                  // Opening a chooser leaves the form in place. Narrow windows
+                  // show that same chooser in the form's frame instead.
                   return Stack(
                     children: [
-                      Positioned(
-                        left: left * _column,
-                        top: replaceForm ? sideTop : top,
-                        width: formWidth,
-                        height: replaceForm ? sideHeight : formHeight,
-                        child: surface(
-                          const ValueKey('share-form-surface'),
-                          replaceForm
-                              ? _sidePane(
-                                  theme.foreground,
-                                  muted,
-                                  theme.selection,
-                                  narrow: true,
-                                )
-                              : _formPane(
-                                  theme.foreground,
-                                  muted,
-                                  theme.selection,
-                                ),
+                      Align(
+                        alignment: Alignment.center,
+                        child: SizedBox(
+                          width: formWidth,
+                          child: DesktopDialogSurface(
+                            key: const ValueKey('share-form-surface'),
+                            child: replaceForm
+                                ? _sidePane(narrow: true)
+                                : _formPane(),
+                          ),
                         ),
                       ),
                       if (showChoices && beside)
                         Positioned(
-                          left: (left + formColumns + 1) * _column,
-                          top: sideTop,
-                          width: math.min(40, available) * _column,
-                          height: sideHeight,
-                          child: surface(
-                            const ValueKey('share-choices-surface'),
-                            _sidePane(theme.foreground, muted, theme.selection),
+                          left: left + formWidth + 16,
+                          top: 0,
+                          bottom: 0,
+                          width: math.min(360.0, available),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: DesktopDialogSurface(
+                              key: const ValueKey('share-choices-surface'),
+                              child: _sidePane(),
+                            ),
                           ),
                         ),
                     ],
@@ -669,8 +594,8 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
               ),
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -685,153 +610,237 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
     if (_manualCopy && _link?['url'] is String) _link!['url'] as String,
   ];
 
+  /// These controls use the form's existing row/choice keyboard selection.
+  /// Excluding their own focus keeps Tab switching panes and preserves the
+  /// email editor's IME ownership; pointer and accessibility activation remain.
   Widget _plainRow({
     required String label,
     String? value,
     required bool selected,
     required bool enabled,
-    required Color foreground,
-    required Color muted,
-    required Color selection,
     required VoidCallback onTap,
+    bool primary = false,
+    bool destructive = false,
+    bool? checked,
+    IconData? icon,
+    IconData? disclosure,
     Key? key,
     Key? rowKey,
-  }) => Semantics(
-    key: key,
-    label: value == null ? label : '$label, $value',
-    button: true,
-    selected: selected,
-    enabled: enabled,
-    onTap: enabled ? onTap : null,
-    excludeSemantics: true,
-    child: MouseRegion(
-      cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: enabled ? onTap : null,
-        child: Container(
-          key: rowKey,
-          height: _line,
-          color: selected && enabled ? selection : Colors.transparent,
-          padding: EdgeInsets.symmetric(horizontal: _column),
-          alignment: Alignment.centerLeft,
-          child: value == null
-              ? Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: terminalContentStyle(
-                    color: enabled ? foreground : muted,
-                  ),
+  }) {
+    final foreground = !enabled
+        ? DesktopChrome.muted
+        : primary
+        ? Theme.of(context).colorScheme.onPrimary
+        : destructive
+        ? Theme.of(context).colorScheme.error
+        : DesktopChrome.foreground;
+    final content = Row(
+      children: [
+        if (checked != null || icon != null) ...[
+          SizedBox(
+            width: 18,
+            child: checked == false
+                ? null
+                : Icon(checked == true ? AppIcons.check : icon, size: 18),
+          ),
+          const SizedBox(width: DesktopChrome.controlGap),
+        ],
+        Expanded(
+          child: Text(label, style: DesktopChrome.control(color: foreground)),
+        ),
+        if (value != null) ...[
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.end,
+              style: DesktopChrome.control(color: DesktopChrome.muted),
+            ),
+          ),
+        ],
+        if (disclosure != null) ...[
+          const SizedBox(width: DesktopChrome.controlGap),
+          Icon(disclosure, size: 18, color: DesktopChrome.muted),
+        ],
+      ],
+    );
+    final style = ButtonStyle(
+      minimumSize: const WidgetStatePropertyAll(Size(0, 36)),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      ),
+      shape: WidgetStatePropertyAll(
+        RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(DesktopChrome.controlRadius),
+        ),
+      ),
+      foregroundColor: WidgetStatePropertyAll(foreground),
+      side: WidgetStateProperty.resolveWith(
+        (states) => BorderSide(
+          color: selected && enabled
+              ? primary
+                    ? Colors.white.withValues(alpha: .85)
+                    : DesktopChrome.focusRing
+              : DesktopChrome.rim,
+          width: selected && enabled ? 2 : 1,
+        ),
+      ),
+      backgroundColor: primary
+          ? null
+          : WidgetStateProperty.resolveWith((states) {
+              if (selected && enabled) return DesktopChrome.selection;
+              if (enabled && states.contains(WidgetState.hovered)) {
+                return grid.AppGlass.rowHoverFill;
+              }
+              return DesktopChrome.field;
+            }),
+    );
+    return Semantics(
+      key: key,
+      label: value == null ? label : '$label, $value',
+      button: true,
+      selected: selected,
+      checked: checked,
+      enabled: enabled,
+      onTap: enabled ? onTap : null,
+      excludeSemantics: true,
+      child: KeyedSubtree(
+        key: rowKey,
+        child: ExcludeFocus(
+          child: primary
+              ? FilledButton(
+                  onPressed: enabled ? onTap : null,
+                  style: style,
+                  child: content,
                 )
-              : Row(
-                  children: [
-                    SizedBox(
-                      width: _column * 11,
-                      child: Text(
-                        label,
-                        style: terminalContentStyle(color: muted),
-                      ),
-                    ),
-                    Expanded(
-                      child: Text(
-                        value,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: terminalContentStyle(
-                          color: enabled ? foreground : muted,
-                        ),
-                      ),
-                    ),
-                  ],
+              : TextButton(
+                  onPressed: enabled ? onTap : null,
+                  style: style,
+                  child: content,
                 ),
         ),
       ),
-    ),
+    );
+  }
+
+  Widget _formRow(_ShareRow row) => _plainRow(
+    key: ValueKey('share-field-${row.name}'),
+    rowKey: _rowKeys[row],
+    label: _label(row),
+    value: _value(row),
+    selected: _row == row && !_picking,
+    enabled: _enabled(row),
+    primary: row == _ShareRow.copy,
+    destructive: row == _ShareRow.stop,
+    icon: row == _ShareRow.copy ? AppIcons.link2 : null,
+    disclosure: switch (row) {
+      _ShareRow.options => _options ? AppIcons.chevronUp : AppIcons.chevronDown,
+      _ShareRow.access ||
+      _ShareRow.people ||
+      _ShareRow.expiry ||
+      _ShareRow.comments => AppIcons.chevronRight,
+      _ => null,
+    },
+    onTap: () {
+      _select(row);
+      _activate();
+    },
   );
 
-  Widget _formPane(Color foreground, Color muted, Color selection) =>
-      SingleChildScrollView(
-        controller: _formScroll,
-        padding: EdgeInsets.symmetric(horizontal: _column, vertical: _line),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: _column),
-              child: Text(
-                'Share ${widget.name}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: terminalContentStyle(color: foreground)
-                    .copyWith(fontWeight: FontWeight.bold),
+  Widget _formPane() => Padding(
+    padding: const EdgeInsets.all(DesktopChrome.panelPadding),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(
+          child: Scrollbar(
+            controller: _formScroll,
+            thumbVisibility: true,
+            child: SingleChildScrollView(
+              controller: _formScroll,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('Share harness', style: DesktopChrome.heading()),
+                  const SizedBox(height: 8),
+                  Text(
+                    widget.name,
+                    style: DesktopChrome.text(size: 14, medium: true),
+                  ),
+                  const SizedBox(height: DesktopChrome.groupGap),
+                  for (final row in _rows)
+                    if (row != _ShareRow.copy && row != _ShareRow.retry) ...[
+                      if (row == _ShareRow.options) const SizedBox(height: 8),
+                      _formRow(row),
+                      const SizedBox(height: DesktopChrome.controlGap),
+                    ],
+                  if (!_picking) ..._messageWidgets(),
+                ],
               ),
             ),
-            SizedBox(height: _line),
-            for (final row in _rows) ...[
-              if (row == _ShareRow.people ||
-                  row == _ShareRow.options ||
-                  row == _ShareRow.copy)
-                SizedBox(height: _line),
-              _plainRow(
-                key: ValueKey('share-field-${row.name}'),
-                rowKey: _rowKeys[row],
-                label: _label(row),
-                value: _value(row),
-                selected: _row == row && !_picking,
-                enabled: _enabled(row),
-                foreground: foreground,
-                muted: muted,
-                selection: selection,
-                onTap: () {
-                  _select(row);
-                  _activate();
-                },
-              ),
-            ],
-            if (!_picking) ..._messageWidgets(foreground),
-            SizedBox(height: _line),
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: _column),
+          ),
+        ),
+        const SizedBox(height: DesktopChrome.groupGap),
+        _formRow(_ShareRow.copy),
+        if (_rows.contains(_ShareRow.retry)) ...[
+          const SizedBox(height: DesktopChrome.controlGap),
+          _formRow(_ShareRow.retry),
+        ],
+        const SizedBox(height: DesktopChrome.groupGap),
+        Row(
+          children: [
+            Expanded(
               child: Text(
                 'Keep your machine online.',
-                style: terminalContentStyle(color: muted),
+                style: DesktopChrome.metadata(),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ExcludeFocus(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Close'),
               ),
             ),
           ],
         ),
-      );
+      ],
+    ),
+  );
 
-  List<Widget> _messageWidgets(Color foreground) => [
+  List<Widget> _messageWidgets() => [
     for (final message in _messages) ...[
-      SizedBox(height: _line),
-      Padding(
-        padding: EdgeInsets.symmetric(horizontal: _column),
-        child: Semantics(
-          liveRegion: true,
-          child: _manualCopy && message == _link?['url']
-              ? SelectableText(
-                  message,
-                  style: terminalContentStyle(color: foreground),
-                )
-              : Text(message, style: terminalContentStyle(color: foreground)),
-        ),
+      const SizedBox(height: 12),
+      Semantics(
+        liveRegion: true,
+        child: _manualCopy && message == _link?['url']
+            ? SelectableText(message, style: grid.AppType.monoMeta())
+            : Text(
+                message,
+                style: DesktopChrome.text(
+                  size: 13,
+                  color: message == _error || message == _link?['error']
+                      ? Theme.of(context).colorScheme.error
+                      : _link?['pending'] == true
+                      ? grid.AppPalette.warn
+                      : DesktopChrome.muted,
+                ),
+              ),
       ),
     ],
   ];
 
-  Widget _sidePane(
-    Color foreground,
-    Color muted,
-    Color selection, {
-    bool narrow = false,
-  }) {
+  Widget _sidePane({bool narrow = false}) {
     Widget choice(
       String label,
       int index,
       VoidCallback activate, {
       bool enabled = true,
       String? value,
+      bool primary = false,
+      bool destructive = false,
+      bool? checked,
     }) => _plainRow(
       key: ValueKey('share-choice-$index'),
       rowKey: _choiceKeys.putIfAbsent(index, GlobalKey.new),
@@ -839,9 +848,9 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
       value: value,
       selected: _picking && _choice == index,
       enabled: enabled && !_disabled,
-      foreground: foreground,
-      muted: muted,
-      selection: selection,
+      primary: primary,
+      destructive: destructive,
+      checked: checked,
       onTap: () {
         setState(() {
           _picking = true;
@@ -850,131 +859,198 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
         activate();
       },
     );
-    Widget note(String text) => Padding(
-      padding: EdgeInsets.symmetric(horizontal: _column),
-      child: Text(text, style: terminalContentStyle(color: muted)),
+    Widget note(String text, {Color? color}) => Text(
+      text,
+      style: DesktopChrome.text(size: 13, color: color ?? DesktopChrome.muted),
     );
+    final title = switch (_row) {
+      _ShareRow.access => 'Link access',
+      _ShareRow.people => 'People',
+      _ShareRow.expiry => 'Invitation expiry',
+      _ShareRow.comments => 'Comments',
+      _ => 'Sharing options',
+    };
+    final backControl = TextButton.icon(
+      key: narrow ? const ValueKey('share-back') : null,
+      onPressed: _backToForm,
+      icon: const Icon(AppIcons.arrowLeft, size: 16),
+      label: const Text('Back'),
+    );
+    final back = _row == _ShareRow.comments && _picking
+        ? backControl
+        : ExcludeFocus(child: backControl);
     if (_row == _ShareRow.comments && _picking) {
       return TerminalPromptKeys(
         focusNode: _commentsFocus,
         cancel: _backToForm,
-        child: Padding(
-          padding: EdgeInsets.all(_column * 2),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TerminalTextAction(
-                  label: 'Back',
-                  onPressed: _backToForm,
-                ),
-              ),
-              SizedBox(height: _line),
-              Expanded(
-                child: HarnessComments(
-                  key: _commentsKey,
-                  manage: widget.manage,
-                ),
-              ),
-            ],
+        child: SizedBox(
+          height: 560,
+          child: HarnessComments(
+            key: _commentsKey,
+            manage: widget.manage,
+            headerAction: back,
+            padding: const EdgeInsets.all(DesktopChrome.panelPadding),
           ),
         ),
       );
     }
-    return SingleChildScrollView(
-      controller: _sideScroll,
-      padding: EdgeInsets.symmetric(horizontal: _column, vertical: _line),
+    final fieldBorder = OutlineInputBorder(
+      borderRadius: BorderRadius.circular(DesktopChrome.controlRadius),
+      borderSide: BorderSide(color: DesktopChrome.rim),
+    );
+    return Padding(
+      padding: const EdgeInsets.all(DesktopChrome.panelPadding),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (narrow) ...[
-            _plainRow(
-              key: const ValueKey('share-back'),
-              label: '< Back',
-              selected: false,
-              enabled: true,
-              foreground: foreground,
-              muted: muted,
-              selection: selection,
-              onTap: _backToForm,
-            ),
-            SizedBox(height: _line),
-          ],
-          if (_row == _ShareRow.access) ...[
-            choice('Private', 0, () => unawaited(_chooseVisibility(0))),
-            note('Only invited emails can view and comment.'),
-            SizedBox(height: _line),
-            choice('Public', 1, () => unawaited(_chooseVisibility(1))),
-            note('Anyone with the link can view. Sign in to comment.'),
-            SizedBox(height: _line),
-            note('Viewers cannot control your harness.'),
-          ],
-          if (_row == _ShareRow.expiry) ...[
-            for (var i = 0; i < 3; i++)
-              choice('${const [7, 30, 90][i]} days', i, () {
-                setState(() => _days = const [7, 30, 90][i]);
-                _backToForm(selectCopy: true);
-              }),
-            SizedBox(height: _line),
-            note(
-              'Applies to new invitations. Your link stays active until you stop sharing.',
-            ),
-          ],
-          if (_row == _ShareRow.people) ...[
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: _column),
-              child: TextField(
-                key: _choiceKeys.putIfAbsent(0, GlobalKey.new),
-                controller: _emails,
-                focusNode: _emailFocus,
-                enabled: !_disabled,
-                keyboardType: TextInputType.emailAddress,
-                style: terminalContentStyle(color: foreground),
-                cursorWidth: 2,
-                decoration: InputDecoration(
-                  hintText: 'Add emails',
-                  hintStyle: terminalContentStyle(color: muted),
-                  isDense: true,
-                  filled: false,
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  contentPadding: EdgeInsets.zero,
-                ),
-                onTap: () => setState(() {
-                  _picking = true;
-                  _choice = 0;
-                }),
-                onChanged: (_) => setState(() {}),
-                onSubmitted: (_) {
-                  if (!_composing && !_disabled) unawaited(_invite());
-                },
-              ),
-            ),
-            choice(
-              'Add people',
-              1,
-              () => unawaited(_invite()),
-              enabled: _emails.text.trim().isNotEmpty,
-            ),
-            note('Invited for $_days days. Copy and send them the link.'),
-            SizedBox(height: _line),
-            if (_shares.isEmpty) note('No invited people yet.'),
-            for (final (index, share) in _shares.indexed) ...[
-              note('${share['email']}'),
-              note(_recipientStatus(share)),
-              choice(
-                'Remove ${share['email']}',
-                index + 2,
-                () => unawaited(_remove(share['id'] as String)),
-              ),
-              SizedBox(height: _line),
+          Row(
+            children: [
+              Expanded(child: Text(title, style: DesktopChrome.heading())),
+              back,
             ],
-            note('Viewers can comment; they cannot control your harness.'),
-          ],
-          if (_row == _ShareRow.comments) note('Enter to open the discussion.'),
-          if (_picking) ..._messageWidgets(foreground),
+          ),
+          const SizedBox(height: DesktopChrome.groupGap),
+          Flexible(
+            child: Scrollbar(
+              controller: _sideScroll,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: _sideScroll,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_row == _ShareRow.access) ...[
+                      choice(
+                        'Private',
+                        0,
+                        () => unawaited(_chooseVisibility(0)),
+                        checked: !_isPublic,
+                      ),
+                      const SizedBox(height: 8),
+                      note('Only invited emails can view and comment.'),
+                      const SizedBox(height: DesktopChrome.groupGap),
+                      choice(
+                        'Public',
+                        1,
+                        () => unawaited(_chooseVisibility(1)),
+                        checked: _isPublic,
+                      ),
+                      const SizedBox(height: 8),
+                      note(
+                        'Anyone with the link can view. Sign in to comment.',
+                      ),
+                      const SizedBox(height: DesktopChrome.groupGap),
+                      note('Viewers cannot control your agent.'),
+                    ],
+                    if (_row == _ShareRow.expiry) ...[
+                      for (var i = 0; i < 3; i++) ...[
+                        choice('${const [7, 30, 90][i]} days', i, () {
+                          setState(() => _days = const [7, 30, 90][i]);
+                          _backToForm(selectCopy: true);
+                        }, checked: _days == const [7, 30, 90][i]),
+                        const SizedBox(height: DesktopChrome.controlGap),
+                      ],
+                      const SizedBox(height: 8),
+                      note(
+                        'Applies to new invitations. Your link stays active until you stop sharing.',
+                      ),
+                    ],
+                    if (_row == _ShareRow.people) ...[
+                      Text(
+                        'Email addresses',
+                        style: DesktopChrome.control(medium: true),
+                      ),
+                      const SizedBox(height: DesktopChrome.controlGap),
+                      TextField(
+                        key: _choiceKeys.putIfAbsent(0, GlobalKey.new),
+                        controller: _emails,
+                        focusNode: _emailFocus,
+                        enabled: !_disabled,
+                        keyboardType: TextInputType.emailAddress,
+                        style: DesktopChrome.text(size: 14),
+                        cursorColor: DesktopChrome.accent,
+                        decoration: InputDecoration(
+                          hintText: 'Add emails',
+                          hintStyle: DesktopChrome.text(
+                            size: 14,
+                            color: DesktopChrome.muted,
+                          ),
+                          isDense: true,
+                          filled: true,
+                          fillColor: DesktopChrome.field,
+                          border: fieldBorder,
+                          enabledBorder: fieldBorder,
+                          focusedBorder: fieldBorder.copyWith(
+                            borderSide: BorderSide(
+                              color: DesktopChrome.focusRing,
+                              width: 2,
+                            ),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                        ),
+                        onTap: () => setState(() {
+                          _picking = true;
+                          _choice = 0;
+                        }),
+                        onChanged: (_) => setState(() {}),
+                        onSubmitted: (_) {
+                          if (!_composing && !_disabled) unawaited(_invite());
+                        },
+                      ),
+                      const SizedBox(height: DesktopChrome.controlGap),
+                      choice(
+                        'Add people',
+                        1,
+                        () => unawaited(_invite()),
+                        enabled: _emails.text.trim().isNotEmpty,
+                        primary: true,
+                      ),
+                      const SizedBox(height: 8),
+                      note(
+                        'Invited for $_days days. Copy and send them the link.',
+                      ),
+                      const SizedBox(height: DesktopChrome.groupGap),
+                      if (_shares.isEmpty) note('No invited people yet.'),
+                      for (final (index, share) in _shares.indexed) ...[
+                        Text(
+                          '${share['email']}',
+                          style: DesktopChrome.text(size: 13, medium: true),
+                        ),
+                        const SizedBox(height: 4),
+                        note(
+                          _recipientStatus(share),
+                          color: share['error'] != null
+                              ? Theme.of(context).colorScheme.error
+                              : share['pending'] == true ||
+                                    share['expired'] == true
+                              ? grid.AppPalette.warn
+                              : DesktopChrome.muted,
+                        ),
+                        const SizedBox(height: 8),
+                        choice(
+                          'Remove ${share['email']}',
+                          index + 2,
+                          () => unawaited(_remove(share['id'] as String)),
+                          destructive: true,
+                        ),
+                        const SizedBox(height: DesktopChrome.groupGap),
+                      ],
+                      note(
+                        'Viewers can comment; they cannot control your agent.',
+                      ),
+                    ],
+                    if (_row == _ShareRow.comments)
+                      note('Open Comments to join the discussion.'),
+                    if (_picking) ..._messageWidgets(),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

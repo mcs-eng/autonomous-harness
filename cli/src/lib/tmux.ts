@@ -16,6 +16,8 @@ import {
 } from './engineBin.js'
 import { BYPASS_PERMISSION_FLAGS, PERMISSION_MODES, permissionModeApproves } from './engineLaunch.js'
 import { psEnv } from './childLocale.js'
+import { nativeProcessImages } from './nativeProcessImages.js'
+export { captureTmuxPane, tmuxCaptureArgs } from './tmuxCapture.js'
 
 function cleanPaneTitle(title: string): string | null {
   const cleaned = title
@@ -80,6 +82,13 @@ export interface ProcessRow extends ProcessIdentity {
   entrypointFileKey?: string
 }
 
+const ARGV_TOKEN = /"[^"]*"|'[^']*'|\S+/g
+
+function unquoteArgvToken(token: string): string {
+  const quoted = (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
+  return quoted ? token.slice(1, -1) : token
+}
+
 export function argvTokens(args: string): string[] {
   // Escape-aware split, symmetric with the repair's quote() (review cycle-2/3, P1 security).
   // Inside DOUBLE quotes: `\\` is one literal backslash, `\"` is a literal quote (never a
@@ -127,6 +136,25 @@ export function argvTokens(args: string): string[] {
   return tokens
 }
 
+/** Discovery only needs a command prefix. Do not tokenize a shell script or
+ * prompt suffix once per candidate engine. Keep the same token grammar as
+ * argvTokens, but stop scanning as soon as the consumer has enough evidence. */
+function argvPrefix(args: string): () => string | undefined {
+  const pattern = new RegExp(ARGV_TOKEN)
+  let done = false
+  return () => {
+    if (done) return undefined
+    const match = pattern.exec(args)
+    if (match) return unquoteArgvToken(match[0])
+    done = true // RegExp.exec resets lastIndex at EOF; never restart the prefix.
+    return undefined
+  }
+}
+
+const ORI_FLAGS_WITH_VALUE = new Set(['--model', '--log-level', '--completions'])
+const INTERPRETER_OPTIONS_WITH_VALUE = new Set(['-r', '--require', '--loader', '--import', '--conditions', '--inspect-port'])
+const INLINE_CODE_OPTIONS = new Set(['-c', '--command', '-e', '--eval', '--print'])
+
 /**
  * Return only the executable/script portion of argv, never prompt text or later CLI arguments.
  *
@@ -135,60 +163,78 @@ export function argvTokens(args: string): string[] {
  * shell in `comm`, so for those interpreters the first non-option token is the real entrypoint. Absolute
  * prefixes are deliberately retained only for suffix/package-layout checks and are never hard-coded.
  */
-function processEntrypoint(args: string): string {
-  const tokens = argvTokens(args)
-  if (!tokens.length) return ''
-  let index = 0
-  let command = basename(tokens[index]).toLowerCase()
+function processEntrypoint(args: string, next = argvPrefix(args)): string {
+  let token = next() ?? ''
+  let command = basename(token).toLowerCase()
   if (command === 'env') {
-    index++
-    while (index < tokens.length && (tokens[index].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index]))) index++
-    command = basename(tokens[index] ?? '').toLowerCase()
+    token = next() ?? ''
+    while (token.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) token = next() ?? ''
+    command = basename(token).toLowerCase()
   }
   // `ori <engine>` (OpenRouter's launcher) computes an environment and then `execve`s the vendor binary
   // away, so a pane running it looks exactly like a bare `claude`/`codex` for all but the ~100ms before
   // the exec. Reading through the wrapper covers that window — and keeps the pane resolvable if a future
   // ori ever spawns a child instead. Its own flags are skipped; everything after them is the engine.
   if (command === 'ori') {
-    index++
-    const oriFlagsWithValue = new Set(['--model', '--log-level', '--completions'])
-    while (index < tokens.length && tokens[index].startsWith('-')) {
-      index += oriFlagsWithValue.has(tokens[index]) && index + 1 < tokens.length ? 2 : 1
+    token = next() ?? ''
+    while (token.startsWith('-')) {
+      if (ORI_FLAGS_WITH_VALUE.has(token)) next()
+      token = next() ?? ''
     }
-    command = basename(tokens[index] ?? '').toLowerCase()
+    command = basename(token).toLowerCase()
   }
   if (!/^(?:node|nodejs|bun|deno|python(?:\d+(?:\.\d+)*)?|bash|zsh|sh)(?:\.exe)?$/.test(command)) return tokens[index] ?? ''
 
-  index++
-  const optionsWithValue = new Set(['-r', '--require', '--loader', '--import', '--conditions', '--inspect-port'])
-  const inlineCodeOptions = new Set(['-c', '--command', '-e', '--eval', '--print'])
-  while (index < tokens.length) {
-    const token = tokens[index]
-    if (token === '--') { index++; break }
-    if (token === '-m' && index + 1 < tokens.length) return tokens[index + 1]
+  token = next() ?? ''
+  while (token) {
+    if (token === '--' || token === '-m') return next() ?? ''
     // Inline shell/Node/Python source is not an executable entrypoint. Its text can legitimately mention
     // an engine command; the real child process, if one is launched, will be discovered from its own row.
-    if (inlineCodeOptions.has(token)) return ''
+    if (INLINE_CODE_OPTIONS.has(token)) return ''
     if (!token.startsWith('-')) break
-    index += optionsWithValue.has(token) && index + 1 < tokens.length ? 2 : 1
+    if (INTERPRETER_OPTIONS_WITH_VALUE.has(token)) next()
+    token = next() ?? ''
   }
-  return tokens[index] ?? ''
+  return token
+}
+
+/** A launcher's capability check is not the interactive engine it is about to start.
+ * In particular, Codex startup runs `codex --help` before the real resume. Adopting
+ * that short-lived PID ends a restart too early and discovery then evicts its pane.
+ * Only a standalone probe argument counts: prompt text and option values do not. */
+function engineCapabilityProbe(args: string): boolean {
+  const next = argvPrefix(args)
+  if (!processEntrypoint(args, next)) return false
+  const option = next()
+  return (option === '--help' || option === '-h' || option === '--version' || option === '-V')
+    && next() === undefined
 }
 
 function hasCursorPackageEntrypoint(args: string): boolean {
   // Cursor's launcher uses `exec -a "$0" node .../index.js`, so argv[0] may stay `agent` instead of
   // `node`. Restrict this scan to the executable prefix: prompt text can appear later and is not proof.
-  return argvTokens(args).slice(0, 8).some((token) =>
-    /cursor-agent[\/\\]versions[\/\\][^/\\]+[\/\\]index\.js$/i.test(token))
+  const next = argvPrefix(args)
+  for (let seen = 0; seen < 8; seen++) {
+    const token = next()
+    if (token === undefined) break
+    if (/cursor-agent[\/\\]versions[\/\\][^/\\]+[\/\\]index\.js$/i.test(token)) return true
+  }
+  return false
 }
 
 /** Hermes' managed launchers exec Python -I -c with a path bootstrap, then either import main
  * or run it through runpy. Require that executable prefix and actual code, never a script argument
  * or a quoted mention. argv[0] is authoritative here: macOS can truncate an absolute `comm` path.
  * Keep the standalone hook's copy in sync. */
+/** macOS `ps` prints argv through vis(3): a newline as `\\012`, a backslash as `\\\\`. Read those back
+ * so a multi-line `-c` source is the source it runs. Linux `ps` prints argv as it is, without them. */
+function unvisArgs(args: string): string {
+  return args.replace(/\\([0-7]{3}|\\)/g, (_, code: string) => code === '\\' ? '\\' : String.fromCharCode(parseInt(code, 8)))
+}
+
 function hermesInlineLauncher(row: Pick<ProcessRow, 'args'>): boolean {
-  const args = row.args.trim()
-  if (!/^python(?:\d+(?:\.\d+)*)?$/.test(basename(argvTokens(args)[0] ?? '').toLowerCase())) return false
+  const args = unvisArgs(row.args).trim()
+  if (!/^python(?:\d+(?:\.\d+)*)?$/.test(basename(argvPrefix(args)() ?? '').toLowerCase())) return false
   const prefix = /^(?:"[^"]+"|'[^']+'|\S+)(?:\s+-(?:I|E|s|S|u|B|O{1,2}|q))*\s+-c\s+/.exec(args)
   if (!prefix) return false
   const source = args.slice(prefix[0].length).replace(/^["']/, '')
@@ -522,26 +568,68 @@ function execText(command: string, args: string[], timeout: number): Promise<str
   })
 }
 
-/** macOS has no /proc; one lsof call resolves every collision candidate's executable image. */
-async function darwinProcessImages(pids: readonly number[]): Promise<Map<number, string>> {
-  if (!pids.length) return new Map()
-  const stdout = await execText('lsof', ['-a', '-p', pids.join(','), '-d', 'txt', '-Fn'], 3000)
+function parseDarwinProcessImages(stdout: string | null): Map<number, string> {
   const images = new Map<number, string>()
   if (stdout === null) return images
+  const seen = new Set<number>()
   let pid: number | null = null
   let textFile = false
-  for (const line of stdout.split('\n')) {
+  // A killed/buffer-limited helper may end halfway through a path.
+  for (const line of stdout.slice(0, stdout.lastIndexOf('\n') + 1).split('\n')) {
     if (/^p\d+$/.test(line)) {
       pid = Number(line.slice(1))
       textFile = false
     } else if (line === 'ftxt') {
       textFile = true
-    } else if (textFile && pid && line.startsWith('n') && !images.has(pid)) {
-      images.set(pid, line.slice(1))
+    } else if (textFile && pid && line.startsWith('n')) {
+      // The first text region is the executable. An error record must not let
+      // a later dylib masquerade as it; incomplete probes use the fallback.
+      if (!seen.has(pid) && line.startsWith('n/')) images.set(pid, line.slice(1))
+      seen.add(pid)
       textFile = false
     }
   }
   return images
+}
+
+/** macOS has no /proc. Prefer the bundled read-only kernel image probe; retain
+ * both lsof readers for missing paths, inside the same total 3s budget.
+ * Never cache by PID: exec can replace an image without changing its birth. */
+async function darwinProcessImages(rows: readonly ProcessRow[]): Promise<{
+  images: Map<number, string>; stale: Set<number>
+}> {
+  const images = new Map<number, string>()
+  const stale = new Set<number>()
+  if (!rows.length) return { images, stale }
+  const deadline = performance.now() + 3000
+  const pids = rows.map(row => row.pid)
+  const native = await nativeProcessImages(pids, 500)
+  const normalizeStart = (marker: string) => marker.trim().split(/\s+/)
+    .map((part, index) => index === 2 ? String(Number(part)) : part).join(' ')
+  for (const row of rows) {
+    const image = native.get(row.pid)
+    if (!image) continue
+    if (normalizeStart(image.startMarker) === normalizeStart(row.startMarker)) images.set(row.pid, image.path)
+    // The PID changed owners since ps. Do not combine the new executable with
+    // old ancestry/arguments, or let the fallback reintroduce that stale row.
+    else stale.add(row.pid)
+  }
+  const args = (selected: readonly number[]) => ['-a', '-p', selected.join(','), '-d', 'txt', '-Fn']
+  let missing = pids.filter(pid => !images.has(pid) && !stale.has(pid))
+  let remaining = Math.floor(deadline - performance.now())
+  if (missing.length && remaining > 0) {
+    for (const [pid, path] of parseDarwinProcessImages(
+      await execText('lsof', ['-b', ...args(missing)], Math.min(1000, remaining)),
+    )) images.set(pid, path)
+  }
+  missing = missing.filter(pid => !images.has(pid))
+  remaining = Math.floor(deadline - performance.now())
+  if (missing.length && remaining > 0) {
+    for (const [pid, path] of parseDarwinProcessImages(await execText('lsof', args(missing), remaining))) {
+      images.set(pid, path)
+    }
+  }
+  return { images, stale }
 }
 
 /**
@@ -558,6 +646,7 @@ export async function enrichProcessRows(
   if (!candidates.length) return rows
   const imagePaths = new Map<number, string>()
   const imageIdentities = new Map<number, ReturnType<typeof executableFileIdentity>>()
+  let stale = new Set<number>()
   if (platform() === 'linux') {
     await Promise.all(candidates.map(async (row) => {
       const procImage = `/proc/${row.pid}/exe`
@@ -570,13 +659,15 @@ export async function enrichProcessRows(
       }
     }))
   } else if (platform() === 'darwin') {
-    for (const [pid, path] of await darwinProcessImages(candidates.map((row) => row.pid))) {
+    const result = await darwinProcessImages(candidates)
+    stale = result.stale
+    for (const [pid, path] of result.images) {
       imagePaths.set(pid, path)
       imageIdentities.set(pid, executableFileIdentity(path.replace(/ \(deleted\)$/, '')))
     }
   }
 
-  return rows.map((row) => {
+  return rows.filter(row => !stale.has(row.pid)).map((row) => {
     if (!selectedPids.has(row.pid)) return row
     const imagePath = imagePaths.get(row.pid)
     const image = imageIdentities.get(row.pid) ?? null
@@ -613,13 +704,28 @@ export function processTreePids(rows: readonly ProcessRow[], rootPids: readonly 
 }
 
 
-function panePid(pane: string): Promise<number | null> {
+/**
+ * The pane's root pid; `'missing'` when tmux answered that it has no such pane; null when tmux could
+ * not be asked (a timeout, no server, a socket it cannot reach) — which says nothing about the pane.
+ * tmux 3.7 answers `display-message -t` for an unknown pane with an empty line and exit 0; older
+ * versions say "can't find pane".
+ */
+function panePidLookup(pane: string): Promise<number | 'missing' | null> {
   return new Promise((resolve) => {
-    execFile('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}'], { timeout: 2000 }, (err, stdout) => {
-      const pid = Number(stdout.trim())
-      resolve(!err && Number.isSafeInteger(pid) && pid > 0 ? pid : null)
+    execFile('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}'], { timeout: 2000 }, (err, stdout, stderr) => {
+      const text = String(stdout ?? '').trim()
+      const pid = Number(text)
+      if (!err && Number.isSafeInteger(pid) && pid > 0) resolve(pid)
+      else if (!err && text === '') resolve('missing')
+      else if (err && /can't find pane/.test(String(stderr ?? ''))) resolve('missing')
+      else resolve(null)
     })
   })
+}
+
+async function panePid(pane: string): Promise<number | null> {
+  const found = await panePidLookup(pane)
+  return typeof found === 'number' ? found : null
 }
 
 /**
@@ -790,6 +896,7 @@ export function engineProcessMatch(
   engine: RegisteredSession['engine'],
   ownership = agentCommandOwnershipSnapshot(),
 ): EngineProcessMatch {
+  if (engineCapabilityProbe(row.args)) return { score: 0, evidence: 'none' }
   const owners = engineFileOwners([row.imageFileKey, row.entrypointFileKey], ownership)
   if (owners.length === 1) {
     return owners[0] === engine
@@ -828,6 +935,7 @@ export function ambiguousAgentProcess(
   row: Pick<ProcessRow, 'executable' | 'args' | 'imageFileKey' | 'entrypointFileKey'>,
   ownership = agentCommandOwnershipSnapshot(),
 ): boolean {
+  if (engineCapabilityProbe(row.args)) return false
   if (!agentAliasCandidate(row) || hasCursorPackageEntrypoint(row.args)) return false
   const executable = basename(row.executable).toLowerCase()
   const entrybase = basename(processEntrypoint(row.args)).toLowerCase()
@@ -1103,9 +1211,11 @@ export async function lookupPaneEngineProcess(
   pane: string,
   engine: RegisteredSession['engine'],
 ): Promise<PaneProcessLookup> {
-  const rootPid = await panePid(pane)
-  // The caller already confirmed the pane is in `tmux list-panes`, so a failure here is the tmux call,
-  // not a missing pane.
+  const rootPid = await panePidLookup(pane)
+  // tmux saying it has no such pane is an answer: the pane is gone. The reconciler asks exactly when a
+  // pane has dropped out of `tmux list-panes`, and reading that as "could not ask" kept an agent whose
+  // pane was killed counted as active for good. A failed call is still no evidence either way.
+  if (rootPid === 'missing') return { ok: false, unknown: false, reason: `tmux has no pane ${pane}` }
   if (!rootPid) return { ok: false, unknown: true, reason: `tmux could not resolve pane ${pane}` }
   const rows = await processRows()
   if (!rows) return { ok: false, unknown: true, reason: 'the process table could not be read' }
@@ -1463,32 +1573,5 @@ export function pasteRawIntoTmux(pane: string, text: string): Promise<boolean> {
 export function sendKeyToTmux(pane: string, key: string): Promise<boolean> {
   return new Promise((resolve) => {
     execFile('tmux', ['send-keys', '-t', pane, key], { timeout: 2000 }, (err) => resolve(!err))
-  })
-}
-
-export function tmuxCaptureArgs(
-  pane: string,
-  historyLines = 100,
-  options: { visible?: boolean; ansi?: boolean } = {},
-): string[] {
-  const bounded = Math.max(20, Math.min(300, Math.floor(historyLines)))
-  const args = ['capture-pane', '-p']
-  if (options.ansi !== false) args.push('-e')
-  args.push('-J', '-t', pane)
-  if (!options.visible) args.push('-S', `-${bounded}`)
-  return args
-}
-
-/** Capture terminal text; SGR and bounded history are independently selectable by backend consumers. */
-export function captureTmuxPane(
-  pane: string,
-  historyLines = 100,
-  options: { visible?: boolean; ansi?: boolean } = {},
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile('tmux', tmuxCaptureArgs(pane, historyLines, options), { timeout: 2000 }, (err, stdout) => {
-      if (err) { resolve(null); return }
-      resolve(stdout)
-    })
   })
 }

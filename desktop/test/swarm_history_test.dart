@@ -109,7 +109,7 @@ void main() {
   });
 
   test(
-    'swarm History counts distinct machines, including offline and closed work',
+    'tab History counts distinct machines, including offline and closed work',
     () async {
       final app = createApp();
       addTearDown(app.dispose);
@@ -248,13 +248,10 @@ void main() {
 
         // The mark a History row draws for the store, never the group grid.
         Future<void> expectFlutterRow() async {
-          // History is an unbound command; Cmd-Y no longer opens it by default.
-          await openHarnessPicker(tester);
-          await tester.enterText(jumpField, '> history');
+          await chord(tester, LogicalKeyboardKey.keyP, shift: true);
+          await tester.enterText(jumpField, '> Show full history');
           await tester.pump();
-          await tester.tap(
-            find.byKey(const ValueKey('command:navigation.history')),
-          );
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
           await tester.pump();
           final row = find.ancestor(
             of: find.text(Swarm.storeName),
@@ -341,7 +338,7 @@ void main() {
   });
 
   test(
-    'a chosen closed Swarm restores independently and stale tokens stay inert',
+    'a chosen closed Tab restores independently and stale tokens stay inert',
     () async {
       final app = createApp();
       addTearDown(app.dispose);
@@ -384,13 +381,13 @@ void main() {
         const Agent(id: 'a0', name: 'Renamed agent', terminalAvailable: true),
         const Agent(id: 'a1', name: 'Agent 1', terminalAvailable: true),
       ];
-      app.renameSwarm(app.activeSwarmId, 'Renamed Swarm');
+      app.renameSwarm(app.activeSwarmId, 'Renamed Tab');
       final renamed = history.menuDestinations(app);
       expect(
         renamed.firstWhere((e) => e.agentId == 'a0').title,
         'Renamed agent',
       );
-      expect(renamed.firstWhere((e) => e.isSwarm).title, 'Renamed Swarm');
+      expect(renamed.firstWhere((e) => e.isSwarm).title, 'Renamed Tab');
       app.machineStates['m']!.nodeOnline = false;
       expect(history.menuDestinations(app).first.detail, contains('Offline'));
       await app.closePane(first.id);

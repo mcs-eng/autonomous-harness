@@ -19,7 +19,7 @@ store/
 ```
 
 Both a reusable Store package and its running sessions are called **harnesses**.
-A **swarm** groups running harnesses. See [product terminology](../docs/terminology.md).
+A **tab** groups running harnesses. See the [Naming System](../docs/naming-system.md).
 In code and on the wire a package is still a **DSH**, a domain-specific harness: `harness dsh …`,
 `dsh_list`, `cli/src/dsh/`. Those names are the CLI's public contract and stay.
 
@@ -50,6 +50,14 @@ what lets hundreds of packages exist without any of them touching the app or the
 | `.harness/verdict.json` | the one file the domain writes and Harness reads: ready or not, findings, phases |
 
 ## Build one
+
+**Workspace layout is required:** every DSH with a viewer opens with the viewer
+on the left at **70%** and the real agent chat on the right at **30%**. Keep both
+slots during loading and failed setup; show chat recovery in the chat slot.
+Use the shared canvas and preserve user resizing. Follow the
+[DSH workspace contract](../desktop/design/dsh-workspace.md), including its
+failure, reconnect, and release checks. This applies equally to native utility
+dashboards and web viewers.
 
 **First time?** Follow [Hello World](../CONTRIBUTING.md#your-first-harness): copy a tiny package,
 install it locally, and change a greeting in a live HTML preview. It includes the viewer in
@@ -323,7 +331,21 @@ The sidebar starts with Search, followed by Discover and six broad sections: Des
 Media, Science, Games and Code. Cards show Get, Update or Open for each harness; its page manages installation
 on this computer. Package manifests keep their precise domain labels, grouped only for browsing.
 
-Updates are explicit. The Store shows **Update** when a matching catalog source publishes a different
+Core app harnesses are part of each CLI release: Harness Monitor, Devices and Model Manager are
+installed or refreshed automatically before their viewers are restored. Existing official Store
+copies of these packages move onto this release-managed path on the next CLI update; their previous
+files, workspaces and conversations are retained. Companions refresh their generated package when
+the saved collection's identity is restored, without sending a prompt or replacing its conversation.
+Linked developer checkouts and custom forks remain owner-managed. Core resources are versioned
+beside the CLI, so a CLI rollback restores its corresponding core package revision as well.
+
+Devices and Companions appear in the desktop Store and its search only while the current account's
+**Devices tab** and **Focus-bar creature** experiments, respectively, are enabled. Switching either
+off hides its listing immediately. Their **Open** action reuses the app workspace; these bundled
+resources have no Store Get, Update or Remove action. They remain absent from the public daemon
+catalog, so an account opt-in never publishes them to other users.
+
+Other Store applications, such as Blender, keep explicit updates. The Store shows **Update** when a matching catalog source publishes a different
 commit with changed package content. Built-in catalog entries carry their package folder's Git tree
 revision, so a change elsewhere in the monorepo does not flag every installed harness. Hover over the
 short installed version on a package page to see the installed and available commits.

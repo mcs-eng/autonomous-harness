@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:xterm/xterm.dart' show TerminalTheme;
 
-import '../terminal/terminal_text.dart';
-import 'daemon_slot.dart';
+import '../shared/theme/app_theme.dart';
+import 'desktop_chrome.dart';
 
 /// Where the first-day consent is.
 enum DaemonConsentStep {
@@ -52,15 +51,11 @@ class DaemonConsent extends StatefulWidget {
     required this.onSuggest,
     required this.onKeepWatch,
     this.autofocus = true,
-    this.ink,
   });
   final String name;
   final DaemonConsentStep step;
   final VoidCallback onWatch, onNotNow, onSuggest, onKeepWatch;
   final bool autofocus;
-
-  /// The ink it is drawn in (the reveal's stage may be black).
-  final Color? ink;
 
   @override
   State<DaemonConsent> createState() => _DaemonConsentState();
@@ -98,51 +93,18 @@ class _DaemonConsentState extends State<DaemonConsent> {
   Widget _button(
     String key,
     String label,
-    VoidCallback onPressed,
-    TerminalTheme theme,
-    TextStyle ink,
-    Size cell, {
+    VoidCallback onPressed, {
     FocusNode? focusNode,
-    Color? color,
-  }) => TextButton(
+  }) => DesktopPill(
     key: ValueKey(key),
+    label: label,
     focusNode: focusNode,
     onPressed: onPressed,
-    style:
-        TextButton.styleFrom(
-          minimumSize: Size.zero,
-          fixedSize: Size.fromHeight(cell.height),
-          padding: EdgeInsets.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          foregroundColor: ink.color,
-          shape: const RoundedRectangleBorder(),
-          splashFactory: NoSplash.splashFactory,
-        ).copyWith(
-          overlayColor: WidgetStateProperty.resolveWith(
-            (states) =>
-                states.any(
-                  {
-                    WidgetState.hovered,
-                    WidgetState.focused,
-                    WidgetState.pressed,
-                  }.contains,
-                )
-                ? theme.selection.withValues(alpha: .5)
-                : Colors.transparent,
-          ),
-        ),
-    child: Text(label, style: ink.copyWith(color: color ?? theme.cursor)),
   );
 
   @override
   Widget build(BuildContext context) {
-    final theme = currentTerminalTheme();
-    final cell = terminalCellSizeOf(context);
-    final fg = widget.ink ?? theme.foreground;
-    final ink = terminalContentStyle(
-      color: fg,
-    ).copyWith(fontFeatures: daemonTextFeatures);
-    final muted = ink.copyWith(color: fg.withValues(alpha: .62));
+    AppTheme.watch(context);
     final name = widget.name;
     if (widget.step == DaemonConsentStep.suggest) {
       return Column(
@@ -150,93 +112,79 @@ class _DaemonConsentState extends State<DaemonConsent> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Let $name suggest answers?', style: ink),
-          SizedBox(height: cell.height / 2),
+          Text('Let $name suggest answers?', style: DesktopChrome.heading()),
+          const SizedBox(height: 12),
           Text(
-            'at suggest, $name proposes answers to prompts it can read with '
+            'At suggest, $name proposes answers to prompts it can read with '
             'certainty (reads, tests, builds, in-project edits), and every '
-            'one waits for your key. it never approves a push, rm -rf, sudo, '
+            'one waits for your key. It never approves a push, rm -rf, sudo, '
             'deploy, publish, drop or merge.',
-            style: muted,
+            style: DesktopChrome.text(size: 13),
           ),
-          SizedBox(height: cell.height / 2),
+          const SizedBox(height: 12),
           Text(
-            'change it any time: its panel, 4:settings.',
-            style: muted,
+            'Change it any time in the daemon’s Settings tab.',
+            style: DesktopChrome.metadata(),
           ),
-          SizedBox(height: cell.height),
+          const SizedBox(height: 20),
           Wrap(
-            spacing: cell.width * 2,
+            spacing: 8,
+            runSpacing: 8,
             children: [
               _button(
                 'daemon-consent-suggest-yes',
-                '[ Let $name suggest ]',
+                'Let $name suggest',
                 widget.onSuggest,
-                theme,
-                ink,
-                cell,
                 focusNode: _yes,
-                color: theme.green,
               ),
               _button(
                 'daemon-consent-keep-watch',
-                '[ Keep it at watch ]',
+                'Keep it at watch',
                 widget.onKeepWatch,
-                theme,
-                ink,
-                cell,
               ),
             ],
           ),
         ],
       );
     }
-    final label = cell.width * 8;
     return Column(
       key: const ValueKey('daemon-consent'),
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('What $name sees', style: ink),
-        SizedBox(height: cell.height / 2),
+        Text('What $name sees', style: DesktopChrome.heading()),
+        const SizedBox(height: 16),
         for (final (what, words) in daemonConsentRows(name))
           Padding(
-            padding: EdgeInsets.only(bottom: cell.height / 4),
-            child: Row(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SizedBox(width: label, child: Text(what, style: ink)),
-                Expanded(child: Text(words, style: muted)),
+                Text(
+                  '${what[0].toUpperCase()}${what.substring(1)}',
+                  style: DesktopChrome.control(medium: true),
+                ),
+                const SizedBox(height: 4),
+                Text(words, style: DesktopChrome.text(size: 13)),
               ],
             ),
           ),
-        SizedBox(height: cell.height / 2),
         Text(
-          'nothing is watched until you say yes.',
-          style: muted,
+          'Nothing is watched until you say yes.',
+          style: DesktopChrome.metadata(),
         ),
-        SizedBox(height: cell.height),
+        const SizedBox(height: 20),
         Wrap(
-          spacing: cell.width * 2,
+          spacing: 8,
+          runSpacing: 8,
           children: [
             _button(
               'daemon-consent-watch',
-              '[ Let $name watch ]',
+              'Let $name watch',
               widget.onWatch,
-              theme,
-              ink,
-              cell,
               focusNode: _yes,
-              color: theme.green,
             ),
-            _button(
-              'daemon-consent-not-now',
-              '[ Not now ]',
-              widget.onNotNow,
-              theme,
-              ink,
-              cell,
-            ),
+            _button('daemon-consent-not-now', 'Not now', widget.onNotNow),
           ],
         ),
       ],

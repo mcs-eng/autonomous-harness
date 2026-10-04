@@ -1,3 +1,4 @@
+import { readCompanionIdentity, type CompanionIdentity } from './companionProtocol.js'
 // The message layer: what the daemon and the dial SAY to each other, on top of the bytes serial.ts moves.
 //
 // Written twice — here and in devices/harness-device/firmware/main/cable_client.c — with no shared code, because one half
@@ -337,6 +338,13 @@ export interface CableHost {
   onDialAttached?(): void
   onDialGone?(): void
   /**
+   * The port this session opened turned out not to be a Harness dial: it talked in something else, or
+   * never said anything at all. Told once, so whoever owns discovery can stop offering the port — a
+   * second ESP32 board on the desk is somebody's work in progress, not ours to keep probing.
+   * Never called for a device that has been a dial.
+   */
+  onForeignPort?(path: string, why: string): void
+  /**
    * The dial as a window would draw it: there or not, on which firmware, and whether an update is
    * going over the cable right now. Fired on every change and never on a keepalive — the window
    * shows this in its rail, and a rail that redraws four times a minute to say "still here" is a rail
@@ -367,10 +375,16 @@ export interface DeviceSettings {
   scrollReversed: boolean
   round: boolean
   voiceLang: string
+  /** Presence advertises companion.set support. Omitted by older firmware. */
+  followCompanion?: boolean
+  /** Active transient companion; null means the saved device skin is showing. */
+  companion?: string | null
+  companionProtocol?: number
+  companionDetails?: CompanionIdentity | null
 }
 
 /** The fields a `settings.set` may name. Absent means unchanged — see handle_settings_set on the device. */
-export type DeviceSettingsPatch = Partial<Omit<DeviceSettings, 'round' | 'face'>>
+export type DeviceSettingsPatch = Partial<Omit<DeviceSettings, 'round' | 'face' | 'companion' | 'companionProtocol' | 'companionDetails'>>
 
 /** What a window needs to draw the device row. `updating` names the version on its way over. */
 export interface DialStatus {
@@ -460,6 +474,10 @@ function readSettings(value: unknown): DeviceSettings | undefined {
     scrollReversed: raw.scrollReversed as boolean,
     round: raw.round as boolean,
     voiceLang: raw.voiceLang,
+    ...(raw.companionProtocol === 2 ? {companionProtocol:2, companionDetails:readCompanionIdentity(raw.companionDetails)} : {}),
+    ...(typeof raw.followCompanion === 'boolean' &&
+        (raw.companion === null || typeof raw.companion === 'string')
+      ? { followCompanion: raw.followCompanion, companion: raw.companion as string | null } : {}),
   }
 }
 
@@ -468,6 +486,9 @@ export class CableSession {
   private decoder = new CableDecoder()
   private timer: NodeJS.Timeout | null = null
   private greetedMac: string | null = null
+  /** This session has spoken with a real dial at least once. Never reset: a port that has been a dial
+   *  can go quiet (a hung firmware, a reboot) without ever becoming somebody else's. */
+  private everGreeted = false
   /** The board this device says it is (`hello.hw`). Decides which firmware it may be offered. */
   private greetedHw: string | undefined
   /** What the device last SAID its settings are. Never what this computer last asked for. */
@@ -604,6 +625,11 @@ export class CableSession {
 
   // ── port lifecycle ────────────────────────────────────────────────────────────────────────────────
 
+  private reportForeign(path: string, why: string): void {
+    if (this.everGreeted) return
+    this.host.onForeignPort?.(path, why)
+  }
+
   private async tick(): Promise<void> {
     if (this.stopped) return
     // The firmware beats once a minute; the gap is marked in the dial's own log, where it is read.
@@ -627,12 +653,17 @@ export class CableSession {
       // dial if the user unplugged theirs and plugged ours into the same socket.
       this.foreignRetryAt = Date.now() + 60_000
       this.log(`cable: ${this.link.path} is not a Harness dial (${this.bytesSinceOpen} B, no frames) — releasing it`)
+      this.reportForeign(this.link.path, `${this.bytesSinceOpen} B, no frames`)
       await this.link.close('not ours')
       this.link = null
       return
     }
     // Rule 2. The read never fails on a dead handle, so silence is the only symptom there is.
     if (Date.now() - this.lastRx > SILENCE_MS) {
+      // Silent since the moment it opened and never a dial: a board with nothing to say to us. Reopening
+      // it every few seconds for ever is how a second ESP32 on the desk gets its serial port stolen
+      // mid-flash, so say so instead of retrying.
+      if (this.framesSinceOpen === 0 && !this.everGreeted) this.reportForeign(this.link.path, 'silent')
       this.log('cable: silent, reopening the port')
       // close() runs onClosed, which is where onDialGone fires — one path for "the dial is not there",
       // whether the cable was pulled or the far end simply stopped answering.
@@ -860,6 +891,7 @@ export class CableSession {
           }
           this.foreignPort = this.link?.path ?? null
           this.foreignRetryAt = Date.now() + 60_000
+          if (this.link) this.reportForeign(this.link.path, `greeted as '${product ?? 'nameless'}'`)
           await this.link?.close('another product')
           this.link = null
           return
@@ -903,11 +935,12 @@ export class CableSession {
         // pane: its fw and mac are the same, and without this the greeting would be treated as a keepalive.
         const settings = readSettings(msg.settings)
         const settingsChanged = JSON.stringify(settings) !== JSON.stringify(this.greetedSettings)
-        if (settings) this.greetedSettings = settings
+        this.greetedSettings = settings
         if (settingsChanged && mac === this.greetedMac && fw === this.greetedFw) this.report()
         if (mac !== this.greetedMac || fw !== this.greetedFw) {
           const returning = mac === this.greetedMac
           this.greetedMac = mac
+          this.everGreeted = true
           this.greetedFw = fw
           this.log(`cable: dial ${mac} ${returning ? 'back ' : ''}on fw ${fw} proto ${msg.proto}${hw ? ` hw ${hw}` : ''}`)
           this.dialLog.greeted()
@@ -1644,7 +1677,7 @@ export class CableSession {
    */
   async setSettings(patch: DeviceSettingsPatch): Promise<boolean> {
     // `id` addresses the DEVICE; it is not one of its settings and must not be sent as one.
-    const fields = Object.entries(patch).filter(([key, value]) => value !== undefined && key !== 'id')
+    const fields = Object.entries(patch).filter(([key, value]) => value !== undefined && key !== 'id' && key !== 'companion' && key !== 'companionDetails' && key !== 'companionProtocol')
     if (!fields.length) return true
     const sent = await this.send({ t: 'settings.set', ...Object.fromEntries(fields) })
     if (!sent) this.log('cable: settings change not written — the device is not on the wire')

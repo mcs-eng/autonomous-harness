@@ -7,12 +7,13 @@ import 'support/agent_picker.dart';
 // page, and a store whose control plane has no ratings routes at all (404).
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
+import 'package:harness/shared/widgets/app_rating_star.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness/api/api_client.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/core/config.dart';
@@ -295,7 +296,7 @@ void main() {
         );
         expect(find.text('Your projects and files are kept.'), findsOneWidget);
         expect(find.text('aaaaaaaa'), findsOneWidget);
-        expect(find.text('Resume Harness'), findsNothing);
+        expect(find.text('Open Harness'), findsNothing);
         expect(find.text('New Harness'), findsNothing);
         app.updateGate = Completer<String?>();
         await tester.tap(_key('store-primary-action'));
@@ -1065,7 +1066,7 @@ void main() {
                 matching: find.byType(Row),
               )
               .first,
-          matching: find.byIcon(LucideIcons.arrowUpRight300),
+          matching: find.byIcon(AppIcons.arrowUpRight),
         ),
         findsNothing,
       );
@@ -1171,7 +1172,7 @@ void main() {
         find
             .descendant(
               of: _key('store-review-stars'),
-              matching: find.byType(Icon),
+              matching: find.byType(AppRatingStar),
             )
             .last,
       );
@@ -1452,7 +1453,7 @@ void main() {
           );
           void expectBrowseOnly() {
             expect(_key('store-card:$id'), findsOneWidget);
-            expect(find.text('Resume Harness'), findsNothing);
+            expect(find.text('Open Harness'), findsNothing);
             expect(find.text('New Harness'), findsNothing);
             expect(find.text('Get'), findsNothing);
           }

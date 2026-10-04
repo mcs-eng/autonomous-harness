@@ -770,7 +770,7 @@ class _LinkAnotherMachineDialogState extends State<_LinkAnotherMachineDialog> {
                                         Padding(
                                           padding: const EdgeInsets.all(8),
                                           child: Text(
-                                            'Already linked. Open its harnesses from New Swarm or New Pane.',
+                                            'Already linked. Open its harnesses from New Tab or New Pane.',
                                             style: boxMonoStyle(
                                               color: kBoxFaint,
                                             ),

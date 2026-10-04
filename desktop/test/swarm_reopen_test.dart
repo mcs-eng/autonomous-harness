@@ -24,7 +24,7 @@ class _NoopLogin extends CliLogin {
 }
 
 void main() {
-  test('recently closed agents and swarms do not survive sign-out', () async {
+  test('recently closed agents and tabs do not survive sign-out', () async {
     final login = _NoopLogin();
     final app = AppNotifier(
       config: AppConfig.dev,

@@ -446,6 +446,33 @@ describe('tmux process primitives', () => {
   })
 
   it.each([
+    'codex --help',
+    '/opt/bin/codex -h',
+    'codex --version',
+    'codex -V',
+    'node /opt/node_modules/@openai/codex/bin/codex.js --help',
+    'node --require setup.js /opt/node_modules/@openai/codex/bin/codex.js --help',
+    'env CODEX_HOME=/tmp/profile codex --help',
+    'ori --log-level debug codex --help',
+  ])('does not adopt a capability probe as the restarted engine: %s', args => {
+    const commands: AgentCommandOwnershipSnapshot = {
+      ...ownership(), engineFileKeys: new Map([['codex', new Set(['codex-file'])]]),
+    }
+    // A known binary is still only a probe. File ownership must not override argv.
+    expect(engineProcessMatchScore({ executable: 'codex', args, imageFileKey: 'codex-file' }, 'codex', commands)).toBe(0)
+  })
+
+  it.each([
+    'codex resume 01234567-89ab-cdef-0123-456789abcdef',
+    'codex --no-daemon resume 01234567-89ab-cdef-0123-456789abcdef',
+    'codex "explain --help"',
+    'codex -- "--help"',
+    'codex --model --help',
+  ])('keeps interactive launches and prompt text: %s', args => {
+    expect(engineProcessMatchScore({ executable: 'codex', args }, 'codex')).toBeGreaterThan(0)
+  })
+
+  it.each([
     ['codex', 'codex-aarch64-apple-darwin'],
     ['codex', 'codex-x86_64-unknown-linux-musl'],
     ['kilo', 'kilo-darwin-arm64'],
@@ -539,6 +566,29 @@ describe('tmux process primitives', () => {
     // And the shapes that already worked keep working.
     expect(engineProcessMatchScore({ executable: 'hermes', args: 'hermes --resume 20260728_115628_f2c86a' }, 'hermes')).toBe(3)
     expect(engineProcessMatchScore({ executable: comm, args: `${python} -m hermes_cli.main` }, 'hermes')).toBe(2)
+  })
+
+  it('reads Hermes out of its launcher as macOS `ps` really prints it, newlines as \\012', () => {
+    // 0.21.5's launcher is a multi-line `-c` script, and macOS `ps` writes argv through vis(3): each
+    // newline arrives as the four characters `\012`, a backslash as `\\`. Matching that text as Python
+    // found no statement separator after `import os, re, sys`, so a running Hermes scored 0 — its pane
+    // was restored as a terminal, and every hook it sent was "not a descendant of that engine process".
+    const python = '/Users/demo/.hermes/tools/python-3.14.7+20260901-darwin-arm64/bin/python3'
+    const source = [
+      'import os, re, sys',
+      "os.environ.pop('PYTHONHOME', None)",
+      "os.environ.pop('PYTHONPATH', None)",
+      "sys.path.insert(0, '/Users/demo/.hermes/hermes-agent')",
+      "if sys.argv[1:2] == ['--print-runtime-command']: sys.dont_write_bytecode = True",
+      'from hermes_constants import get_default_hermes_root',
+      "os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or str(get_default_hermes_root())",
+      'import hermes_bootstrap',
+      "sys.exit('a path with a \\\\ in it') if False else None",
+      'from hermes_cli.main import main',
+      'sys.exit(main())',
+    ].join('\\012') + '\\012'
+    expect(engineProcessMatchScore({ executable: '/Users/demo', args: `${python} -I -c ${source}` }, 'hermes')).toBe(2)
+    expect(engineProcessMatchScore({ executable: '/Users/demo', args: `${python} -I -c ${source.replace('hermes_cli.main', 'acp_adapter.entry')}` }, 'hermes')).toBe(0)
   })
 
   it('recognizes managed Hermes runpy launchers without relying on their install directory', () => {

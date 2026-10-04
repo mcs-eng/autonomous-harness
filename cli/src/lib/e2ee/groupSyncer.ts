@@ -16,6 +16,15 @@ import type { LinkedPeer } from './manager.js'
 import type { PairedClient } from './store.js'
 import { parseMember, parseRoster, rosterDigest, type GroupMember, type MergeResult, type Roster, type TrustGroupStore } from './trustGroup.js'
 
+/** The device key log's side of a `group_sync` (deviceLogSyncer.ts): its head rides every exchange, so
+ *  two devices shown different logs find out, and one that is behind is handed what it is missing. */
+export interface GroupSyncLogGossip {
+  /** What this machine sends with its roster. */
+  gossip: () => Record<string, unknown> | undefined
+  /** What a peer sent; returns what to answer with (a responder's own head, and entries the peer lacks). */
+  heard: (peerPub: string, raw: unknown) => Record<string, unknown> | undefined
+}
+
 export const GROUP_SYNC = 'group_sync'
 /** The stamp a device's description of ITSELF carries: older than anything, so any removal beats it and
  *  a removed device cannot sync its way back in — only a new link (stamped now) can. */
@@ -45,6 +54,8 @@ export interface GroupSyncerDeps {
   /** Close every open relay session to a machine the group removed — a lingering one would otherwise
    *  keep working after its pin is gone, since a pooled session is reused without looking again. */
   dropSessions?: (machineId: string) => void
+  /** Keys a fork put out of trust here until reviewed (deviceLogSyncer.ts): never pinned, trusted or dialed. */
+  suspended?: () => ReadonlySet<string>
   /** Machines worth dialing now; null = unknown, try every member. */
   reachable?: () => Set<string> | null
   now?: () => number
@@ -58,6 +69,11 @@ export class GroupSyncer {
   private fanOutTimer: ReturnType<typeof setTimeout> | null = null
   private periodic: ReturnType<typeof setInterval> | null = null
   private retryRound = 0
+  /** Set once the device key log is wired up; the exchange works without it, as with an older peer. */
+  devlog: GroupSyncLogGossip | null = null
+  /** A member the GROUP removed (a tombstone that arrived by `group_sync` — from a device that
+   *  predates the device key log, say): the log must hear of it too, or it would trust the key again. */
+  onDropped: ((pub: string) => void) | null = null
 
   constructor(private readonly deps: GroupSyncerDeps) {
     this.now = deps.now ?? (() => Date.now())
@@ -104,11 +120,52 @@ export class GroupSyncer {
     return known || result.dropped.length > 0
   }
 
+  /** A fork put these keys out of trust here: unpin, untrust and stop dialing them — locally only (no
+   *  tombstone, so nothing is removed for anyone else) until `resume`. */
+  suspend(pubs: readonly string[]): void {
+    for (const pub of pubs) this.forget(pub)
+  }
+
+  /** The suspension was lifted (a review): pin and trust the roster again. */
+  resume(): void {
+    this.applyAll()
+  }
+
   /** This machine's user unpaired `pub` (`harness unpair`): stop trusting and dialing it HERE, and keep
    *  it that way — without this the next round would put back what the roster still names. */
   unpaired(pub: string): void {
     this.deps.store.block(pub)
     this.forget(pub)
+  }
+
+  /** Keys the device key log holds (deviceLogSyncer.ts): members of the group like any link, stamped
+   *  when they joined the log, so a device that predates the log hears of them through the group. */
+  adoptFromLog(members: Array<{ pub: string; kind: GroupMember['kind']; machineId: string; label: string; addedAt: number }>): void {
+    const now = this.now()
+    const parsed = members
+      .map((m) => parseMember({ pub: m.pub, kind: m.kind, label: m.label, at: Math.min(m.addedAt, now), ...(m.machineId ? { machineId: m.machineId } : {}) }, now))
+      .filter((m): m is GroupMember => m !== null)
+    if (!parsed.length) return
+    const before = rosterDigest(this.deps.store.read())
+    const result = this.deps.store.merge({ members: parsed, removed: [] }, this.selfPub())
+    this.apply(result)
+    if (rosterDigest(result.roster) !== before) this.scheduleFanOut(1_000)
+  }
+
+  /** Whether the group removed `pub` and nothing has put it back. */
+  tombstoned(pub: string): boolean {
+    const roster = this.deps.store.read()
+    return roster.removed.some((t) => t.pub === pub) && !roster.members.some((m) => m.pub === pub)
+  }
+
+  /** Whether `pub` is a member of the group. */
+  isMember(pub: string): boolean {
+    return this.deps.store.read().members.some((m) => m.pub === pub)
+  }
+
+  /** Whether this machine's user unpaired `pub` here. */
+  isBlocked(pub: string): boolean {
+    return this.deps.store.blocked().has(pub)
   }
 
   /** A session to `machineId` just opened: a good moment to compare rosters, unless we just did. */
@@ -132,7 +189,8 @@ export class GroupSyncer {
     // dialed it before it had heard of us (remoteRelay.ts unlinks a peer that answers e2e_denied).
     this.applyAll()
     if (rosterDigest(result.roster) !== before) this.scheduleFanOut(1_000)
-    return { self: this.deps.self(), ...result.roster, digest: rosterDigest(result.roster) }
+    const devlog = this.devlog?.heard(peerPub, payload.devlog)
+    return { self: this.deps.self(), ...result.roster, digest: rosterDigest(result.roster), ...(devlog ? { devlog } : {}) }
   }
 
   /** Initiator side: exchange rosters with one machine; true when it answered. Never throws. */
@@ -153,8 +211,9 @@ export class GroupSyncer {
     const reachable = this.deps.reachable?.() ?? null
     const self = this.deps.self().machineId
     const targets = new Set<string>()
-    for (const m of this.deps.store.read().members) if (m.kind === 'machine' && m.machineId) targets.add(m.machineId)
-    for (const p of this.deps.peers.list()) targets.add(p.machineId)
+    const suspended = this.deps.suspended?.() ?? new Set<string>()
+    for (const m of this.deps.store.read().members) if (m.kind === 'machine' && m.machineId && !suspended.has(m.pub)) targets.add(m.machineId)
+    for (const p of this.deps.peers.list()) if (!suspended.has(p.pub)) targets.add(p.machineId)
     if (self) targets.delete(self)
     // All at once: one machine that never answers (offline, or too old to know the frame) must not
     // hold up the rest for its whole timeout.
@@ -173,9 +232,13 @@ export class GroupSyncer {
     const pin = this.deps.peers.get(machineId)
     if (!pin) return false
     const local = this.deps.store.read()
+    const devlog = this.devlog?.gossip()
     const reply = await this.deps.request(machineId, {
       type: GROUP_SYNC,
-      payload: { requestId: `gs-${this.now()}-${Math.random().toString(36).slice(2, 8)}`, self: this.deps.self(), ...local, digest: rosterDigest(local) },
+      payload: {
+        requestId: `gs-${this.now()}-${Math.random().toString(36).slice(2, 8)}`, self: this.deps.self(), ...local, digest: rosterDigest(local),
+        ...(devlog ? { devlog } : {}),
+      },
     }, SYNC_TIMEOUT_MS).catch(() => null)
     if (!reply) return false
     this.lastSynced.set(machineId, this.now())
@@ -186,6 +249,7 @@ export class GroupSyncer {
     const theirSelf = parseMember(payload.self, now)
     // The answering machine may describe only itself, as the key this machine dialed and verified.
     if (theirSelf && theirSelf.pub === pin.pub && theirSelf.machineId === machineId) incoming.members.push(theirSelf)
+    if (payload.devlog !== undefined) this.devlog?.heard(pin.pub, payload.devlog)
     // Compared with the roster as it is now, not the one sent: a link can land while this was in flight.
     const before = rosterDigest(this.deps.store.read())
     const result = this.deps.store.merge(incoming, this.selfPub())
@@ -236,8 +300,9 @@ export class GroupSyncer {
   private apply(result: MergeResult): void {
     const selfMachine = this.deps.self().machineId
     const blocked = this.deps.store.blocked()
+    const suspended = this.deps.suspended?.() ?? new Set<string>()
     for (const m of result.upserted) {
-      if (blocked.has(m.pub)) continue
+      if (blocked.has(m.pub) || suspended.has(m.pub)) continue
       try {
         if (m.kind === 'machine' && m.machineId && m.machineId !== selfMachine) {
           const pin = this.deps.peers.get(m.machineId)
@@ -248,7 +313,10 @@ export class GroupSyncer {
         this.deps.log?.(`[group] could not apply ${m.pub.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
-    for (const m of result.dropped) this.forget(m.pub)
+    for (const m of result.dropped) {
+      this.forget(m.pub)
+      try { this.onDropped?.(m.pub) } catch { /* the removal here stands */ }
+    }
   }
 
   private forget(pub: string): void {

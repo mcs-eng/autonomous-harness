@@ -10,6 +10,7 @@ import 'package:harness/core/config.dart';
 import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
+import 'package:harness/shared/theme/color_palette.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/environment_setup_screen.dart';
 
@@ -85,6 +86,7 @@ Future<void> _mount(
   WidgetTester tester,
   AppNotifier app, {
   double textScale = 1,
+  Brightness brightness = Brightness.dark,
 }) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = const Size(880, 560);
@@ -92,7 +94,7 @@ Future<void> _mount(
   await tester.pumpWidget(
     MaterialApp(
       theme: grid
-          .buildAppTheme(brightness: Brightness.dark)
+          .buildAppTheme(brightness: brightness)
           .copyWith(platform: TargetPlatform.macOS),
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(
@@ -122,6 +124,35 @@ AppNotifier _app(SetupProvisioner provisioner) =>
       )
       ..status = AppStatus.preparingEnvironment
       ..environmentReadiness = setupReview;
+
+void _expectReadableText(WidgetTester tester, Finder finder) {
+  final text = tester.widget<Text>(finder);
+  final foreground = text.style!.color!;
+  Color? background;
+  tester.element(finder).visitAncestorElements((element) {
+    final widget = element.widget;
+    if (widget case DecoratedBox(
+      decoration: BoxDecoration(color: final color?),
+    )) {
+      background = color;
+      return false;
+    }
+    return true;
+  });
+  expect(
+    background,
+    isNotNull,
+    reason: 'Measure against the painted setup surface.',
+  );
+  final fg = foreground.computeLuminance();
+  final bg = background!.computeLuminance();
+  final ratio = fg > bg ? (fg + .05) / (bg + .05) : (bg + .05) / (fg + .05);
+  expect(
+    ratio,
+    greaterThanOrEqualTo(4.5),
+    reason: '${text.data} must remain readable.',
+  );
+}
 
 void main() {
   testWidgets(
@@ -195,6 +226,126 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     app.dispose();
   });
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'setup details and recovery text have readable contrast in ${brightness.name}',
+      (tester) async {
+        final previousBrightness = grid.AppTheme.brightness.value;
+        final previousPalette = grid.AppTheme.palette.value;
+        addTearDown(() {
+          grid.AppTheme.brightness.value = previousBrightness;
+          grid.AppTheme.palette.value = previousPalette;
+        });
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              throw PlatformException(code: 'clipboard_unavailable');
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        for (final palette in HarnessPalette.values) {
+          grid.AppTheme.brightness.value = brightness;
+          grid.AppTheme.palette.value = palette;
+          final provisioner = SetupProvisioner();
+          final app = _app(provisioner);
+          try {
+            await _mount(tester, app, brightness: brightness);
+            for (final item in setupReview.plan) {
+              _expectReadableText(tester, find.text(item.detail));
+            }
+            app.environmentReadiness = setupReview.copyWith(
+              phase: EnvironmentSetupPhase.failed,
+              output: const ['Synthetic setup diagnostic'],
+            );
+            app.notifyListeners();
+            await tester.pump();
+            _expectReadableText(
+              tester,
+              find.textContaining('Required for every harness'),
+            );
+            _expectReadableText(
+              tester,
+              find.text('~/.harness/runtime · harness version'),
+            );
+            for (var i = 0; i < find.text('Missing').evaluate().length; i++) {
+              _expectReadableText(tester, find.text('Missing').at(i));
+            }
+            await tester.ensureVisible(find.text('Copy diagnostics'));
+            await tester.tap(find.text('Copy diagnostics'));
+            await tester.pump();
+            final error = find.text(
+              'Could not copy. Select the text to copy it, or try again.',
+            );
+            expect(error.hitTestable(), findsOneWidget);
+            _expectReadableText(tester, error);
+            expect(find.text('Retry').hitTestable(), findsOneWidget);
+            expect(provisioner.attempts, isEmpty);
+            expect(tester.takeException(), isNull);
+          } finally {
+            await tester.pumpWidget(const SizedBox());
+            app.dispose();
+          }
+        }
+      },
+    );
+  }
+
+  testWidgets(
+    'Retry after a launch check failure checks, then installs unasked',
+    (tester) async {
+      final provisioner = SetupProvisioner();
+      final app = _app(provisioner)
+        ..environmentReadiness = setupReview.copyWith(
+          phase: EnvironmentSetupPhase.failed,
+          mode: EnvironmentSetupMode.automatic,
+          failure: const EnvironmentFailure(
+            title: 'Checking this computer took too long',
+            detail: 'A required tool did not respond.',
+          ),
+        );
+      await _mount(tester, app);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, hasLength(1));
+      expect(provisioner.attempts.single.install, isFalse);
+      provisioner.attempts.single.finish(setupReview);
+      await tester.pump();
+      // Everything on the plan installs in-app, so the install follows the
+      // check without stopping on the review and its Install button.
+      expect(provisioner.attempts, hasLength(2));
+      expect(provisioner.attempts.last.install, isTrue);
+      expect(find.text('Install 2 tools'), findsNothing);
+      expect(find.text('Preparing this computer'), findsOneWidget);
+      provisioner.attempts.last.finish(
+        const EnvironmentReadiness(
+          steps: {
+            EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
+            EnvironmentStep.tmux: EnvironmentStepStatus.ready,
+            EnvironmentStep.harness: EnvironmentStepStatus.ready,
+          },
+          phase: EnvironmentSetupPhase.ready,
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      // Past setup: the wizard has handed off to the rest of bootstrap.
+      expect(app.status, isNot(AppStatus.preparingEnvironment));
+      expect(provisioner.attempts.map((attempt) => attempt.install), [
+        false,
+        true,
+      ]);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+    },
+  );
 
   testWidgets('manual setup keeps keyboard focus and never starts an install', (
     tester,

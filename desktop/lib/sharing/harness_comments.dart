@@ -3,8 +3,8 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
-import '../terminal/terminal_text.dart';
-import '../widgets/terminal_text_action.dart';
+import '../shared/theme/app_theme.dart' as grid;
+import '../widgets/desktop_chrome.dart';
 import '../ws/ws_conn.dart';
 
 typedef CommentAction = Future<Map<String, dynamic>> Function(
@@ -19,10 +19,14 @@ class HarnessComments extends StatefulWidget {
     required this.manage,
     this.updates,
     this.onSignIn,
+    this.headerAction,
+    this.padding = const EdgeInsets.all(16),
   });
   final CommentAction manage;
   final Listenable? updates;
   final VoidCallback? onSignIn;
+  final Widget? headerAction;
+  final EdgeInsetsGeometry padding;
   @override
   State<HarnessComments> createState() => _HarnessCommentsState();
 }
@@ -155,110 +159,233 @@ class _HarnessCommentsState extends State<HarnessComments> {
 
   @override
   Widget build(BuildContext context) {
-    final cell = terminalCellSizeOf(context);
-    final style = terminalContentStyle(
-      color: DefaultTextStyle.of(context).style.color,
-    );
-    return DefaultTextStyle(
-      style: style,
+    grid.AppTheme.watch(context);
+    return DesktopChrome(
       child: Padding(
-        padding: EdgeInsets.all(cell.width * 2),
+        padding: widget.padding,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              'Comments${_comments.isEmpty ? '' : ' (${_comments.length})'}',
-            ),
-            SizedBox(height: cell.height),
-            Expanded(
-              child: _loading
-                  ? const Text('Loading comments…')
-                  : _comments.isEmpty
-                  ? const Text('Start the conversation.')
-                  : ListView.separated(
-                      itemCount: _comments.length,
-                      separatorBuilder: (_, _) => SizedBox(height: cell.height),
-                      itemBuilder: (context, index) {
-                        final c = _comments[index];
-                        final date = DateTime.tryParse('${c['createdAt']}')
-                            ?.toLocal();
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    '${c['authorName']}',
-                                    overflow: TextOverflow.ellipsis,
-                                    style: style.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                                if (date != null)
-                                  Text(
-                                    '${date.month}/${date.day} ${date.hour}:${date.minute.toString().padLeft(2, '0')}',
-                                  ),
-                                if (c['canDelete'] == true)
-                                  TerminalTextAction(
-                                    label: 'Remove',
-                                    onPressed: _busy
-                                        ? null
-                                        : () => _act('comment_remove', {
-                                            'id': c['id'],
-                                          }),
-                                  ),
-                              ],
-                            ),
-                            SelectionArea(
-                              child: Text('${c['text']}', style: style),
-                            ),
-                          ],
-                        );
-                      },
+            Row(
+              children: [
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(
+                      text: 'Comments',
+                      children: [
+                        if (_comments.isNotEmpty)
+                          TextSpan(
+                            text: ' (${_comments.length})',
+                            style: DesktopChrome.metadata(),
+                          ),
+                      ],
                     ),
+                    key: const ValueKey('comments-heading'),
+                    style: DesktopChrome.heading(),
+                  ),
+                ),
+                if (widget.headerAction case final action?) ...[
+                  const SizedBox(width: DesktopChrome.controlGap),
+                  action,
+                ],
+              ],
             ),
-            if (_error != null)
-              Semantics(liveRegion: true, child: Text(_error!)),
-            SizedBox(height: cell.height),
-            if (_canComment) ...[
-              TextField(
-                key: const Key('comment-input'),
-                controller: _text,
-                readOnly: _busy,
-                style: style,
-                minLines: 1,
-                maxLines: 3,
-                maxLength: 4000,
-                decoration: InputDecoration(
-                  hintText: 'Leave a comment…',
-                  hintStyle: style,
-                  border: InputBorder.none,
-                  filled: false,
-                  contentPadding: EdgeInsets.zero,
-                  counterText: '',
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TerminalTextAction(
-                  label: _busy ? 'Saving…' : 'Comment',
-                  onPressed: _busy || _text.text.trim().isEmpty ? null : _post,
-                ),
-              ),
-            ] else if (widget.onSignIn != null)
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TerminalTextAction(
-                  label: 'Sign in to comment',
-                  onPressed: widget.onSignIn,
+            const SizedBox(height: DesktopChrome.groupGap),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(child: _discussion()),
+                    if (_error != null ||
+                        _canComment ||
+                        widget.onSignIn != null)
+                      ConstrainedBox(
+                        // Keep history visible while allowing a long failure or
+                        // an enlarged composer to scroll inside a short pane.
+                        constraints: BoxConstraints(
+                          maxHeight: constraints.maxHeight * .65,
+                        ),
+                        child: SingleChildScrollView(
+                          primary: false,
+                          child: _composer(
+                            maxLines:
+                                constraints.maxHeight <
+                                    MediaQuery.textScalerOf(context).scale(240)
+                                ? 2
+                                : 3,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _discussion() {
+    if (_loading || _comments.isEmpty) {
+      return SingleChildScrollView(
+        primary: false,
+        child: Text(
+          _loading
+              ? 'Loading comments…'
+              : _error != null
+              ? 'Comments are unavailable.'
+              : 'Start the conversation.',
+          style: DesktopChrome.text(size: 13, color: DesktopChrome.muted),
+        ),
+      );
+    }
+    return ListView.separated(
+      key: const ValueKey('comments-list'),
+      primary: false,
+      itemCount: _comments.length,
+      separatorBuilder: (_, _) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Divider(height: 1, color: DesktopChrome.rim),
+      ),
+      itemBuilder: (context, index) {
+        final comment = _comments[index];
+        final author = '${comment['authorName']}';
+        final date = DateTime.tryParse('${comment['createdAt']}')?.toLocal();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Tooltip(
+                        message: author,
+                        child: Text(
+                          author,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: DesktopChrome.control(medium: true),
+                        ),
+                      ),
+                      if (date != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '${date.month}/${date.day} ${date.hour}:${date.minute.toString().padLeft(2, '0')}',
+                          style: DesktopChrome.metadata(),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (comment['canDelete'] == true) ...[
+                  const SizedBox(width: DesktopChrome.controlGap),
+                  DesktopPill(
+                    label: 'Remove',
+                    tooltip: 'Remove comment by $author',
+                    quiet: true,
+                    compact: true,
+                    onPressed: _busy
+                        ? null
+                        : () => _act('comment_remove', {'id': comment['id']}),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: DesktopChrome.controlGap),
+            SelectionArea(
+              child: Text(
+                '${comment['text']}',
+                style: DesktopChrome.text(size: 13),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _composer({required int maxLines}) {
+    final border = OutlineInputBorder(
+      borderRadius: BorderRadius.circular(DesktopChrome.controlRadius),
+      borderSide: BorderSide(color: DesktopChrome.rim),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Divider(height: 1, color: DesktopChrome.rim),
+        ),
+        if (_error != null) ...[
+          Semantics(
+            liveRegion: true,
+            child: SelectableText(
+              _error!,
+              style: DesktopChrome.text(
+                size: 13,
+                color: Theme.of(context).colorScheme.error,
+              ),
+            ),
+          ),
+          const SizedBox(height: DesktopChrome.controlGap),
+        ],
+        if (_canComment) ...[
+          TextField(
+            key: const Key('comment-input'),
+            controller: _text,
+            readOnly: _busy,
+            style: DesktopChrome.text(size: 13),
+            cursorColor: DesktopChrome.accent,
+            minLines: 1,
+            maxLines: maxLines,
+            maxLength: 4000,
+            decoration: InputDecoration(
+              hintText: 'Leave a comment…',
+              hintStyle: DesktopChrome.text(
+                size: 13,
+                color: DesktopChrome.muted,
+              ),
+              border: border,
+              enabledBorder: border,
+              focusedBorder: border.copyWith(
+                borderSide: BorderSide(
+                  color: DesktopChrome.focusRing,
+                  width: 1.5,
+                ),
+              ),
+              filled: true,
+              fillColor: DesktopChrome.field,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              counterText: '',
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: DesktopChrome.controlGap),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(
+              key: const ValueKey('comment-post'),
+              onPressed: _busy || _text.text.trim().isEmpty ? null : _post,
+              child: Text(_busy ? 'Saving…' : 'Comment'),
+            ),
+          ),
+        ] else if (widget.onSignIn != null)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: DesktopPill(
+              label: 'Sign in to comment',
+              onPressed: widget.onSignIn,
+            ),
+          ),
+      ],
     );
   }
 }

@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
@@ -139,7 +140,7 @@ void main() {
   }
 
   testWidgets(
-    'tabs omit close buttons and redundant hints; Command-W closes the active tab',
+    'tabs show names, reveal hover close and Command hints, and preserve Command-W',
     (tester) async {
       final app = createApp();
       final first = app.activeSwarm;
@@ -147,18 +148,40 @@ void main() {
       app.newSwarm(name: 'Second tab');
       final second = app.activeSwarm;
       await mount(tester, app);
-      expect(find.byKey(ValueKey('tab-close:${first.id}')), findsNothing);
-      expect(find.byKey(ValueKey('tab-close:${second.id}')), findsNothing);
-      final label = find.text('2:Second tab');
+      final close = find.byKey(ValueKey('tab-close:${second.id}'));
+      expect(close.hitTestable(), findsNothing);
+      final label = find.byKey(ValueKey('tab-label:${second.id}'));
       final tab = find.byKey(ValueKey(second.id));
+      final nameBounds = tester.getRect(label);
+      expect(nameBounds.left, greaterThan(tester.getRect(tab).left));
+      expect(nameBounds.center.dx, closeTo(tester.getCenter(tab).dx, .01));
+      expect(find.text('2:Second tab'), findsNothing);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(1200, 700));
+      await mouse.moveTo(tester.getCenter(label));
+      await tester.pumpAndSettle();
+      expect(close.hitTestable(), findsOneWidget);
+      expect(tester.getRect(label), nameBounds);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pump();
+      expect(find.text('⌘1'), findsOneWidget);
+      expect(find.text('⌘2'), findsOneWidget);
+      expect(close.hitTestable(), findsOneWidget);
+      final commandName = tester.getRect(label);
+      final commandHint = tester.getRect(find.text('⌘2'));
+      expect(commandHint.left - commandName.right, closeTo(6, .1));
       expect(
-        find.descendant(of: tab, matching: find.byType(Tooltip)),
-        findsNothing,
+        (commandName.left + commandHint.right) / 2,
+        closeTo(tester.getCenter(tab).dx, .1),
       );
-      expect(
-        tester.getCenter(label).dx,
-        closeTo(tester.getCenter(tab).dx, .01),
-      );
+      expect(commandName.size, nameBounds.size);
+      expect(app.activeSwarm, same(second));
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pump();
+      expect(close.hitTestable(), findsOneWidget);
+      await mouse.removePointer();
+      await tester.pump();
+      expect(close.hitTestable(), findsNothing);
       Focus.of(tester.element(label)).requestFocus();
       await tester.pumpAndSettle();
       await chord(tester, LogicalKeyboardKey.keyW);
@@ -267,7 +290,7 @@ void main() {
           isFalse,
         );
       } else {
-        expect(find.text('1:store'), findsOneWidget);
+        expect(find.text('store'), findsOneWidget);
       }
     });
 
@@ -352,7 +375,7 @@ void main() {
           expect(row['engine'], isNull);
           expect(row['iconAsset'], isNull);
         } else {
-          expect(find.text('2:Leftovers'), findsOneWidget);
+          expect(find.text('Leftovers'), findsOneWidget);
         }
         final session = terminal('gone', []);
         other.session = session;
@@ -363,7 +386,7 @@ void main() {
           expect(row['engine'], 'codex');
           expect(row['iconAsset'], 'assets/engine-icons/codex.png');
         } else {
-          expect(find.text('2:Leftovers again'), findsOneWidget);
+          expect(find.text('Leftovers again'), findsOneWidget);
         }
         tab.panes.removeWhere((pane) => pane.id == 900);
         leftovers.panes.clear();
@@ -425,7 +448,7 @@ void main() {
           final position = tester.state<ScrollableState>(strip).position;
           position.jumpTo(position.maxScrollExtent);
           await tester.pump();
-          expect(find.text('42:store'), findsOneWidget);
+          expect(find.text('store'), findsOneWidget);
         }
         await tester.pumpWidget(const SizedBox());
         app.dispose();
@@ -452,7 +475,7 @@ void main() {
       final app = createApp();
       final tab = app.activeSwarm;
       await mount(tester, app, nativeTabs: native);
-      expect(tab.name, 'New Swarm');
+      expect(tab.name, 'New Tab');
       expect(
         find.byKey(const ValueKey('harness-start-search')),
         findsOneWidget,
@@ -479,14 +502,14 @@ void main() {
           url: 'http://127.0.0.1:1/',
         ),
       );
-      app.renameSwarm(tab.id, 'New Swarm');
+      app.renameSwarm(tab.id, 'New Tab');
       await tester.pump();
       if (native) {
         final row = (updates.last['tabs'] as List).single as Map;
         expect(row['agentCount'], 1);
         expect(row['engine'], 'codex');
       } else {
-        expect(find.text('New Swarm'), findsOneWidget);
+        expect(find.text('New Tab'), findsOneWidget);
         expect(find.byKey(ValueKey('tab-group:${tab.id}')), findsNothing);
       }
       tab.panes.removeWhere((pane) => pane.id == 900);
@@ -498,7 +521,7 @@ void main() {
         expect(row['agentCount'], 2);
         expect(row['engine'], isNull);
       } else {
-        expect(find.text('New Swarm'), findsOneWidget);
+        expect(find.text('New Tab'), findsOneWidget);
       }
 
       await app.closePane(app.panes.last.id);
@@ -509,7 +532,7 @@ void main() {
           'codex',
         );
       } else {
-        expect(find.text('New Swarm'), findsOneWidget);
+        expect(find.text('New Tab'), findsOneWidget);
         expect(find.byKey(ValueKey('tab-group:${tab.id}')), findsNothing);
       }
       expect(app.activeSwarm, same(tab));
@@ -792,7 +815,7 @@ void main() {
   );
 
   testWidgets(
-    'attention shortcut opens current questions in Harnesses and their originating swarm',
+    'attention shortcut opens current questions in Harnesses and their originating tab',
     (tester) async {
       final app = createApp();
       app.machineStates['m']!

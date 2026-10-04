@@ -1,9 +1,9 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
-import '../shared/theme/workspace_bar_style.dart';
-import '../widgets/terminal_text_action.dart';
-import '../widgets/workspace_bar_control.dart';
+import '../shared/widgets/app_icon_button.dart';
+import '../widgets/desktop_chrome.dart';
 
 /// What a reader of a shared harness is looking at, most urgent first.
 enum SharedPaneStatus {
@@ -41,8 +41,8 @@ enum SharedPaneStatus {
 }
 
 /// The one bar above a shared harness: name, state and read-only label on the
-/// left, the reader's actions on the right. Workspace bar type and height, so a
-/// shared pane reads like any other pane header.
+/// left, the reader's actions on the right. Actions wrap when the pane or text
+/// size needs more room, without changing how the output below is sized.
 class SharedHarnessBar extends StatelessWidget {
   const SharedHarnessBar({
     super.key,
@@ -71,41 +71,56 @@ class SharedHarnessBar extends StatelessWidget {
 
   /// Below this width the actions move to a second row instead of squeezing
   /// the name to nothing.
-  static const narrowWidth = 640.0;
+  static const narrowWidth = 800.0;
 
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
-    final cell = workspaceBarCellSizeOf(context);
-    final height = workspaceBarControlHeight(context);
-    Widget row(List<Widget> children) => SizedBox(
-      height: height,
-      child: Row(children: children),
-    );
     return Container(
-      padding: EdgeInsets.symmetric(horizontal: cell.width),
-      color: grid.AppSurface.recess,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: grid.AppSurface.recess,
+        border: Border(bottom: BorderSide(color: DesktopChrome.rim)),
+      ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final identity = _identity(cell);
-          final actions = _actions(cell);
-          if (constraints.maxWidth >= narrowWidth) {
-            return row([Expanded(child: Row(children: identity)), ...actions]);
+          final close = AppIconButton(
+            icon: AppIcons.close,
+            tooltip: 'Close shared harness',
+            onPressed: onClose,
+          );
+          final actions = Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: _actions(),
+          );
+          if (constraints.maxWidth >=
+              narrowWidth * grid.appTextScaleOf(context)) {
+            return Row(
+              children: [
+                Expanded(child: _identity()),
+                const SizedBox(width: 16),
+                actions,
+                const SizedBox(width: 8),
+                close,
+              ],
+            );
           }
           return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              row(identity),
-              Align(
-                alignment: Alignment.centerRight,
-                child: Wrap(
-                  alignment: WrapAlignment.end,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    for (final action in actions)
-                      SizedBox(height: height, child: action),
-                  ],
-                ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: _identity()),
+                  const SizedBox(width: 8),
+                  close,
+                ],
               ),
+              const SizedBox(height: 8),
+              actions,
             ],
           );
         },
@@ -113,99 +128,85 @@ class SharedHarnessBar extends StatelessWidget {
     );
   }
 
-  List<Widget> _identity(Size cell) {
-    final muted = workspaceBarTextStyle(color: grid.AppPalette.textSecondary);
-    return [
-      Flexible(
+  Widget _identity() => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Tooltip(
+        message: name,
         child: Text(
           name,
-          maxLines: 1,
+          maxLines: 2,
           overflow: TextOverflow.ellipsis,
-          style: workspaceBarTextStyle(
-            color: grid.AppPalette.textPrimary,
-            emphasized: true,
-          ),
+          style: DesktopChrome.control(medium: true),
         ),
       ),
-      if (detail case final detail?)
-        Text(' · $detail', maxLines: 1, style: muted),
-      SizedBox(width: cell.width * 2),
-      Text('●', style: workspaceBarTextStyle(color: status.color)),
-      SizedBox(width: cell.width),
-      Text(status.label, style: muted),
-      Text(' · ', style: muted),
-      Text('View only', style: muted),
-    ];
-  }
+      if (detail case final detail?) ...[
+        const SizedBox(height: 4),
+        Tooltip(
+          message: detail,
+          child: Text(
+            detail,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: DesktopChrome.metadata(),
+          ),
+        ),
+      ],
+      const SizedBox(height: 4),
+      Wrap(
+        spacing: 12,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ExcludeSemantics(
+                child: Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: status.color,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(status.label, style: DesktopChrome.metadata()),
+            ],
+          ),
+          Text('View only', style: DesktopChrome.metadata()),
+        ],
+      ),
+    ],
+  );
 
-  List<Widget> _actions(Size cell) {
+  List<Widget> _actions() {
     final viewer = viewerSelected;
     return [
       if (viewer != null && onSelectViewer != null) ...[
-        _ViewTab(
+        DesktopPill(
           label: 'Terminal',
           selected: !viewer,
+          compact: true,
           onPressed: () => onSelectViewer!(false),
         ),
-        _ViewTab(
+        DesktopPill(
           label: 'Viewer',
           selected: viewer,
+          compact: true,
           onPressed: () => onSelectViewer!(true),
         ),
-        SizedBox(width: cell.width),
       ],
       if (onRetry case final retry?)
-        TerminalTextAction(label: 'Retry', onPressed: retry),
-      TerminalTextAction(
+        DesktopPill(label: 'Retry', onPressed: retry, compact: true),
+      DesktopPill(
         label: commentsSelected ? 'Watch' : 'Comments',
         onPressed: onToggleComments,
-      ),
-      Tooltip(
-        message: 'Close shared harness',
-        child: TerminalTextAction(label: 'Close', onPressed: onClose),
+        compact: true,
       ),
     ];
-  }
-}
-
-/// A Terminal/Viewer choice drawn like a workspace tab: the selection is a
-/// fill, hover and focus are bold text.
-class _ViewTab extends StatelessWidget {
-  const _ViewTab({
-    required this.label,
-    required this.selected,
-    required this.onPressed,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final cell = workspaceBarCellSizeOf(context);
-    final size = workspaceBarTextSizeOf(context, label);
-    return WorkspaceBarControl(
-      label: label,
-      selected: selected,
-      selectedBackground: grid.AppPalette.windowBg,
-      onPressed: onPressed,
-      builder: (context, emphasized) => SizedBox(
-        width: size.width + cell.width * 2,
-        height: workspaceBarControlHeight(context),
-        child: Center(
-          child: Text(
-            label,
-            style: workspaceBarTextStyle(
-              color: selected
-                  ? grid.AppPalette.textPrimary
-                  : grid.AppPalette.textSecondary,
-              emphasized: emphasized,
-            ),
-          ),
-        ),
-      ),
-    );
   }
 }
 
@@ -218,20 +219,13 @@ class SharedHarnessNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
-    final cell = workspaceBarCellSizeOf(context);
     return Container(
       width: double.infinity,
-      padding: EdgeInsets.symmetric(
-        horizontal: cell.width,
-        vertical: cell.height / 2,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: grid.AppPalette.divider)),
       ),
-      child: Text(
-        message,
-        style: workspaceBarTextStyle(color: grid.AppPalette.textSecondary),
-      ),
+      child: Text(message, style: DesktopChrome.metadata()),
     );
   }
 }

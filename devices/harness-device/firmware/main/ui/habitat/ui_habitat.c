@@ -1,4 +1,5 @@
 // Habitat: bounded state + text runs. Protocol callbacks update data, never create widgets.
+#include <limits.h>
 #include "runtime.h"
 #include "scroll.h"
 #include "workspace.h"
@@ -13,6 +14,7 @@
 #include "perf_bench.h"
 #include "command_face.h"
 #include "theme.h"
+#include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
 #include "creature_gallery.h"
 static ht_gallery_t gallery;
@@ -57,6 +59,9 @@ static ht_gallery_t gallery;
 #define TAB_ROWS 4
 #define TAB_ROW_HEIGHT 64
 #define TAB_TOP 112
+// Focus's pane list: four cards, 58 tall and 8 apart; a drag moves one per 66 px.
+#define PANE_PITCH 66
+#define PANE_ROWS 4
 #define LIST_HIT_X 59
 #define LIST_HIT_W 348
 #define LIST_TEXT_X 71
@@ -97,10 +102,11 @@ typedef enum {
     A_QUESTION,
     A_CHOICE,
     A_ANSWER, A_QUESTION_READ, A_QUESTION_CHOICES, A_QUESTION_REVIEW, A_QUESTION_BACK, A_QUESTION_SAY,
+    A_TAB_LIST,
     A_INBOX,
     A_NOTICE,
     A_TABS,
-    A_TAB, A_TAB_REFRESH,
+    A_TAB, A_TAB_REFRESH, A_TAB_DONE,
     A_MACHINES,
     A_MACHINE,
     A_VOICE,
@@ -195,7 +201,7 @@ static EXT_RAM_BSS_ATTR struct {
     int pet_pose;
     uint32_t pet_until, nap_until, last_celebration;
     cable_swarm_t tabs[SWARMS_MAX];
-    int tab_count, tab_drag;
+    int tab_count, tab_drag, pane_pos;
     char selected_tab[ID_MAX];
     cable_machine_t machines[CABLE_MAX_MACHINES];
     int machine_count;
@@ -210,6 +216,7 @@ static EXT_RAM_BSS_ATTR struct {
     question_t q;
     char message[256], title[80], pending_focus[ID_MAX], opening_notice[ID_MAX];
     char voice_target[CABLE_NAME_MAX];
+    char voice_engine[12];   // the engine of whoever this voice turn is for; empty for Find, forms and drafts
     uint32_t voice_retry_until;
     model_item_t models[48];
     int model_count;
@@ -233,6 +240,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t coast_until;
     uint32_t character_activity;
     uint8_t status_phase;
+    uint32_t pet_next_ms;   // when the pet's (or the voice screen's listening scene's) drawn frame next changes (clock_ms), 0 = never
     int start_x, start_y, last_x, last_y;
     uint32_t touch_started;
 } s;
@@ -251,6 +259,28 @@ static ht_draft_t draft;
 static bool selection_emit(const ht_select_command_t *command, void *ctx);
 static ht_gesture_t gesture;
 static ht_character_t character;
+static ht_character_id_t device_skin, desktop_companion = HT_CHARACTER_COUNT;
+static bool follow_companion = true, companion_celebrating;
+/*
+ * FOCUS ONLY, until the companion skins are finished (owner, 2026-09-30). The device build defines
+ * HABITAT_FOCUS_ONLY (main/CMakeLists.txt): whatever skin or companion the flash holds, the glass
+ * wears Focus, the app is told so, and a frame asking for another is taken as asking for nothing.
+ * The stored choice is left alone, so dropping the define brings it back as it was.
+ */
+
+static ui_companion_t desktop_identity, celebration_identity;
+static uint32_t celebration_began;
+static char celebration_tokens[8][96], celebration_label[64];
+static unsigned celebration_next;
+static void select_companion(void)
+{
+    const ui_companion_t *identity=companion_celebrating?&celebration_identity:&desktop_identity;
+    ht_character_id_t selected=companion_celebrating?ht_character_companion(identity->id):desktop_companion;
+    ht_character_select(&character, follow_companion && selected < HT_CHARACTER_COUNT ? selected : device_skin);
+    character.companion_style=(ht_companion_style_t){
+        .stage=!strcmp(identity->version,"0.1")?0:!strcmp(identity->version,"1.0")?1:2,
+        .colour=identity->colour<0?255:(uint8_t)identity->colour,.mark=identity->mark};
+}
 static ht_character_caption_t home_caption;
 static action_t pressed_action;
 static bool queue(action_t a);
@@ -322,10 +352,19 @@ static void change(void)
     s.dirty = true;
     habitat_render_notify();
 }
-static unsigned notice_unread(void)
+/*
+ * What the bell counts: unread notices about any agent EXCEPT the one on the face.
+ *
+ * That agent's news is already on the glass — its recap, or its question in the recap's place — so
+ * counting it too told a person something else had happened, somewhere else (owner, 2026-09-30:
+ * people took the +1 for another agent's news). Nothing is marked read by this: look away from that agent
+ * and its unanswered question counts again, until it is answered.
+ */
+static unsigned notice_unread(const char *except)
 {
     unsigned count = 0;
-    for (int i = 0; i < s.notice_count; i++) count += !s.notice[i].read_on_dial;
+    for (int i = 0; i < s.notice_count; i++)
+        count += !s.notice[i].read_on_dial && !(except && !strcmp(s.notice[i].agent_id, except));
     return count;
 }
 static bool notice_was_read(const cable_notif_t *n)
@@ -373,17 +412,6 @@ static void notice_mark_read(cable_notif_t *n)
     notice_flush_reads(ms());
     // Read is not answered, removed or focused. Keep this exact card in place.
     change();
-}
-// Put one agent's question on the glass: its inbox card, which is the prompt whole and nothing to
-// press but the card, whose tap opens the pane on the desktop. The answer is given there.
-static void notice_show_question(const char *id)
-{
-    for (int i = 0; i < s.notice_count; i++)
-        if (s.notice[i].question && !strcmp(s.notice[i].agent_id, id)) {
-            view(INBOX);
-            s.offset = i;
-            return;
-        }
 }
 static void notice_open(void)
 {
@@ -527,6 +555,7 @@ static void view(view_t v)
     s.view = v;
     s.offset = 0;
     s.pressed = -1;
+    s.pane_pos = 0;
     change();
 }
 static void voice_close(void)
@@ -554,6 +583,34 @@ static void workspace_failed(const char *message)
     s.loading=false; s.active=-1;
     COPY(s.title,"Workspaces"); COPY(s.message,message); view(MESSAGE);
 }
+static void tab_request(const char *id, bool browsing)
+{
+    if (!s.connected || s.voice_open || (!browsing && s.loading) || workspace_index(id)<0) return;
+    if (workspace.phase!=HT_WORKSPACE_IDLE) {
+        if (!browsing || !strcmp(id,workspace.pending)) return;
+        // A newer page supersedes both queued selects and their roster receipts.
+        ht_workspace_cancel_request(&workspace);
+    } else if (!strcmp(id,s.selected_tab)) {
+        if (!browsing) view(HOME);
+        return;
+    }
+    if (!ht_workspace_request(&workspace,id,ms())) return;
+    action_t a={.kind=A_TAB,.revision=workspace.serial}; COPY(a.id,id);
+    if (!queue(a)) { workspace_failed("Device busy. Choose the tab again."); return; }
+    ht_visit_close(&visit); s.pending_focus[0]=0;
+    s.loading=true;
+    if (!browsing) {
+        COPY(s.title,"Switching tab"); COPY(s.message,"Opening your workspace...");
+        view(MESSAGE);
+    }
+    change();
+}
+static void tabs_sync(void)
+{
+    if (s.view!=TABS || (s.touch_down && s.touch_cancelled)) return;
+    int index=ht_tab_carousel_index(&tab_carousel);
+    if (index>=0 && index<s.tab_count) tab_request(s.tabs[index].id,true);
+}
 static int waiting(void)
 {
     int n = 0;
@@ -568,6 +625,14 @@ static int working(void)
         n += s.agents[i].busy;
     return n;
 }
+// The open question's prompt for this agent, as its notice carries it; NULL when it has none open.
+static const char *question_prompt(const char *id)
+{
+    for (int i = 0; i < s.notice_count; i++)
+        if (s.notice[i].question && !strcmp(id, s.notice[i].agent_id))
+            return s.notice[i].summary[0] ? s.notice[i].summary : "Needs your answer";
+    return NULL;
+}
 static bool is_question(const char *id)
 {
     for (int i = 0; i < s.notice_count; i++)
@@ -577,7 +642,8 @@ static bool is_question(const char *id)
 }
 static uint16_t color(unsigned rgb)
 {
-    unsigned b = s.brightness < 8 ? 8 : s.brightness;
+    // Hardware brightness dims text and illustrated pixels equally.
+    unsigned b = 100;
     if (rgb == HT_THEME_CANVAS) {
         // RGB565 has an extra green bit. Independently truncating a dim gray
         // makes it green; the neutral range has exact steps of 8.
@@ -614,16 +680,179 @@ static uint16_t color(unsigned rgb)
  */
 #define FACE_CX(w) ((HT_WIDTH - (w)) / 2)
 #define UI_FONT (&ht_mono_28)
+/*
+ * THE FOCUS SKIN SETS EVERY PAGE IN INTER (owner, 2026-10-02: "all pages, one font, drop Geist").
+ *
+ * The helpers below are the one seam: on Focus they measure proportional Inter (25 for what the mono
+ * 28 cell said, 20 for the mono 20 chrome) instead of counting cells, cut a line that runs long with "…"
+ * at whole letters, wrap at words, and keep every line inside the glass (r 230) by clipping it to the
+ * chord at its own rows. Hit rects are never touched: a label is drawn inside the rect it was always
+ * tapped in. Every other skin takes the mono branch it always had, byte for byte.
+ */
+static bool focus_skin(void)
+{
+    return character.id == HT_CHARACTER_FOCUS;
+}
+// The Inter face that stands in for a mono cell font on Focus: 20 for mono_20's chrome, 25 for the rest.
+static const ht_font_t *focus_face_for(const ht_font_t *mono)
+{
+    return mono == &ht_mono_20 ? &ht_lv_inter_20.base : &ht_lv_inter_25.base;
+}
+// The x span a line of `h` px at `y` may ink inside r 230 (its far edge decides).
+static void focus_chord(int y, int h, int *left, int *right)
+{
+    int a = abs(y - 233), b = abs(y + h - 233), dy = a > b ? a : b;
+    int d2 = 230 * 230 - dy * dy, half = 0;
+    while (d2 > 0 && (half + 1) * (half + 1) <= d2) half++;
+    *left = 233 - half;
+    *right = 233 + half;
+}
+// One Focus line in [x, x + w] and inside the chord at its rows: whole letters, "…" when it runs long.
+// An empty line still makes its run (width 1), so a page keeps the same run count.
+static void focus_put(ht_scene_t *f, int x, int y, int w, const ht_font_t *font, uint16_t ink, uint16_t bg,
+                      const char *t, bool centred)
+{
+    int l, r;
+    focus_chord(y, font->height, &l, &r);
+    int left = x > l ? x : l, right = x + w < r ? x + w : r;
+    char line[HT_TEXT_BYTES];
+    int room = right - left;
+    int tw = room > 0 ? ht_fit_width(line, sizeof line, t, room, font) : 0;
+    if (tw <= 0) { line[0] = 0; tw = 1; }
+    ht_text(f, centred ? left + (room - tw) / 2 : left, y, tw, font, ink, bg, line);
+}
+// Width of the `len` bytes at `p` in `font`; INT_MAX when they are too long for one run.
+static int focus_span(const ht_font_t *font, const char *p, size_t len)
+{
+    char buf[HT_TEXT_BYTES];
+    if (len >= sizeof buf) return INT_MAX;
+    memcpy(buf, p, len);
+    buf[len] = 0;
+    return ht_measure(font, buf);
+}
+/*
+ * The next wrapped line of `*cursor` in `w` px: words that fit, then the cursor moves past the spaces
+ * (or the newline) it broke at. A word wider than the line is cut at a letter. Returns the line's end.
+ */
+static const char *focus_take(const char **cursor, const ht_font_t *font, int w)
+{
+    const char *start = *cursor, *fit = start, *q = start;
+    bool have = false;
+    for (;;) {
+        const char *end = q;
+        while (*end && *end != ' ' && *end != '\n') ht_utf8_next(&end);
+        if (focus_span(font, start, (size_t)(end - start)) > w) {
+            if (!have) {
+                const char *c = start, *last = start;
+                for (;;) {
+                    const char *n = c;
+                    if (!*n || *n == '\n') break;
+                    ht_utf8_next(&n);
+                    if (focus_span(font, start, (size_t)(n - start)) > w) break;
+                    last = c = n;
+                }
+                if (last == start && *start && *start != '\n') ht_utf8_next(&last);
+                *cursor = last;
+                return last;
+            }
+            while (*fit == ' ') fit++;
+            const char *stop = fit;
+            while (stop > start && stop[-1] == ' ') stop--;
+            *cursor = fit;
+            return stop;
+        }
+        if (end > start) { fit = end; have = true; }
+        if (!*end) { *cursor = end; return end; }
+        if (*end == '\n') { *cursor = end + 1; return end; }
+        q = end;
+        while (*q == ' ') q++;
+    }
+}
+static int focus_rows(const char *text, const ht_font_t *font, int w)
+{
+    const char *p = text ? text : "";
+    int rows = 0;
+    while (*p) { focus_take(&p, font, w); rows++; }
+    return rows;
+}
+// ht_text_rows, in the face the page is set in.
+static int ui_rows(const char *text, const ht_font_t *mono, int width)
+{
+    return focus_skin() ? focus_rows(text, focus_face_for(mono), width) : ht_text_rows(text, mono, width);
+}
+// ht_can_display, in the face the page is set in: on Focus every letter must be one Inter draws.
+static bool ui_can_display(const char *text, const ht_font_t *mono, int width, int lines)
+{
+    if (!focus_skin()) return ht_can_display(text, mono, width, lines);
+    const ht_pfont_t *face = ht_pfont(focus_face_for(mono));
+    for (const char *p = text ? text : ""; *p;) {
+        uint32_t cp = ht_utf8_next(&p);
+        if (cp == '\n' || cp == ' ') continue;
+        if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0) || cp > 0xffff) return false;
+        int lo = 0, hi = face->count - 1;
+        bool found = false;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (face->codes[mid] == cp) { found = true; break; }
+            if (face->codes[mid] < cp) lo = mid + 1; else hi = mid - 1;
+        }
+        if (!found) return false;
+    }
+    return focus_rows(text, &face->base, width) <= lines;
+}
+// ht_wrap, in the face the page is set in: left-aligned lines at the face's own pitch, `lines` runs always.
+static int ui_wrap(ht_scene_t *f, int x, int y, int w, int lines, int skip, const ht_font_t *mono,
+                   uint16_t fg, const char *text)
+{
+    if (!focus_skin()) return ht_wrap(f, x, y, w, lines, skip, mono, fg, text);
+    const ht_font_t *font = focus_face_for(mono);
+    const char *p = text ? text : "";
+    int row = 0, shown = 0;
+    while (*p && shown < lines) {
+        const char *start = p, *end = focus_take(&p, font, w);
+        if (row++ < skip) continue;
+        char line[HT_TEXT_BYTES];
+        size_t n = (size_t)(end - start);
+        if (n >= sizeof line) n = sizeof line - 1;
+        memcpy(line, start, n);
+        line[n] = 0;
+        focus_put(f, x, y + shown * font->height, w, font, fg, BG, line, false);
+        shown++;
+    }
+    while (*p) { focus_take(&p, font, w); row++; }   // the rows past the page, for the scroll limit
+    while (shown < lines) {
+        ht_text(f, x, y + shown * font->height, 1, font, fg, BG, "");
+        shown++;
+    }
+    return row;
+}
+// One line of a page's own text: left-aligned at x, or centred in [x, x + w] when `centred`.
+static void text_in(ht_scene_t *f, int x, int y, int w, const ht_font_t *mono, const char *t, uint16_t c,
+                    bool centred)
+{
+    if (!focus_skin()) { ht_text(f, x, y, w, mono, c, BG, t); return; }
+    const ht_font_t *font = focus_face_for(mono);
+    focus_put(f, x, y + (mono->height - font->height) / 2, w, font, c, BG, t, centred);
+}
+// The FACE_CX(w) blocks were meant centred; the others (a title beside its back arrow) start at x.
 static void text(ht_scene_t *f, int x, int y, int w, const char *t, uint16_t c)
 {
-    ht_text(f, x, y, w, UI_FONT, c, BG, t);
+    text_in(f, x, y, w, UI_FONT, t, c, abs(2 * x + w - HT_WIDTH) <= 1);
 }
 static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
 {
-    ht_center(f, y, UI_FONT, c, t);
+    if (!focus_skin()) { ht_center(f, y, UI_FONT, c, t); return; }
+    text_in(f, 40, y, HT_WIDTH - 80, UI_FONT, t, c, true);
 }
+// The wordmark shown while connecting, loading and updating. On Focus it is Inter 36, like every word on the face.
 static void render_brand(ht_scene_t *f)
 {
+    if (character.id == HT_CHARACTER_FOCUS) {
+        const ht_font_t *font = &ht_lv_inter_36.base;
+        int w = ht_measure(font, "Harness");
+        ht_text(f, (HT_WIDTH - w) / 2, (HT_HEIGHT - font->height) / 2, w, font, FG, BG, "Harness");
+        return;
+    }
     center(f, (466 - UI_FONT->height) / 2, "Harness", FG);
 }
 static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
@@ -635,8 +864,14 @@ static void control(ht_scene_t *f, int x, int y, int w, const char *label, actio
     // 66, not 60: the target is the line plus a thumb's margin, and the line is ten pixels taller now.
     // Keeping 60 would have made the control smaller than its own text.
     s.hits[n] = (hit_t){{x, y - 14, w, 66}, a, value, enabled};
-    ht_text(f, x, y, w, UI_FONT, enabled ? (a == A_STOP_YES ? ERROR : n == s.pressed ? ACCENT : FG) : DIM,
-            n == s.pressed ? SEL : BG, label);
+    uint16_t ink = enabled ? (a == A_STOP_YES ? ERROR : n == s.pressed ? ACCENT : FG) : DIM,
+             ground = n == s.pressed ? SEL : BG;
+    if (focus_skin()) {   // Inter, centred in the rect it is tapped in
+        const ht_font_t *font = focus_face_for(UI_FONT);
+        focus_put(f, x, y + (UI_FONT->height - font->height) / 2, w, font, ink, ground, label, true);
+        return;
+    }
+    ht_text(f, x, y, w, UI_FONT, ink, ground, label);
 }
 static bool home_footer(action_kind_t action)
 {
@@ -644,7 +879,7 @@ static bool home_footer(action_kind_t action)
     // bracket control is pressed and released like every other one, while A_PET reads a TAP as a boop
     // and only starts speech on a 650 ms hold — which is the creature's gesture, not a button's.
     return action == A_TABS || action == A_INBOX || action == A_AGENTS || action == A_RETURN ||
-           action == A_CARRY_DROP || action == A_VOICE;
+           action == A_CARRY_DROP || action == A_VOICE || action == A_TAB_LIST;
 }
 static bool hit_contains(const hit_t *hit, int x, int y, bool surface)
 {
@@ -667,10 +902,12 @@ static void footer_control(ht_scene_t *f, int x, int w, const char *label,
     s.hits[n] = (hit_t){{x, (inbox ? 359 : 389), w, inbox ? 80 : 50}, action, 0, enabled};
     // These short footer labels are ASCII. The two targets stay separate and
     // retain a full finger-height hit area even at the bottom of the circle.
-    int width = (int)strlen(label) * ht_mono_20.width;
+    // Focus sets them in Inter 20, measured; the other skins keep the mono cell.
+    const ht_font_t *font = character.id == HT_CHARACTER_FOCUS ? &ht_lv_inter_20.base : &ht_mono_20;
+    int width = ht_pfont(font) ? ht_measure(font, label) : (int)strlen(label) * ht_mono_20.width;
     if (inbox && width > 276) width = 276;
-    ht_text(f, x + (w - width) / 2, (inbox ? 385 : 399), width, &ht_mono_20,
-            enabled ? (inbox || n == s.pressed ? ACCENT : FG) : DIM,
+    ht_text(f, x + (w - width) / 2, (inbox ? 385 : 399) + (ht_pfont(font) ? (ht_mono_20.height - font->height) / 2 : 0),
+            width, font, enabled ? (inbox || n == s.pressed ? ACCENT : FG) : DIM,
             inbox && n == s.pressed ? SEL : BG, label);
 }
 static void heading(ht_scene_t *f, const char *title)
@@ -741,10 +978,19 @@ static void dispatch(action_t a);   // the hold below acts at once; defined with
 static void surface_tick(uint32_t now)
 {
     notice_flush_reads(now);
-    if (s.view == TABS && !display_is_asleep() && ht_tab_carousel_tick(&tab_carousel, now)) change();
+    if (companion_celebrating && (now-celebration_began>=2400 || s.view!=HOME || s.quiet || !follow_companion || display_is_asleep() || character_mood()==HT_CHARACTER_ATTENTION)) {
+        companion_celebrating=false; select_companion(); change();
+    }
+    if (s.view == TABS && !display_is_asleep()) {
+        if (ht_tab_carousel_tick(&tab_carousel, now)) change();
+        tabs_sync();
+    }
     if (home_caption_tick(now)) change();
     uint8_t phase = status_animated() ? ht_shimmer_phase(now * status_speed()) : 0;
     if (phase != s.status_phase) { s.status_phase = phase; change(); }
+    // The voice screen's listening scene runs while the finger is down (hold-to-talk); the pets do not.
+    if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE) &&
+        (int32_t)(now - s.pet_next_ms) >= 0) { s.pet_next_ms = 0; change(); }
     bool main = s.view == HOME || s.view == AGENT;
     bool visible = !display_is_asleep() &&
         ((main && s.connected && !s.loading) || s.view == VOICE);
@@ -765,7 +1011,7 @@ static void surface_tick(uint32_t now)
     }
     ht_character_mood_t mood = s.view == VOICE ?
         (!s.voice_start_pending && !s.voice_waiting && audio_client_recording() ? HT_CHARACTER_LISTENING : HT_CHARACTER_WORKING) :
-        character_mood();
+        companion_celebrating ? HT_CHARACTER_DONE : character_mood();
     if (ht_character_tick(&character, now, mood, s.quiet, visible,
                            s.touch_down && !s.touch_cancelled, s.last_x,
                            mood == HT_CHARACTER_LISTENING ? audio_client_input_level() : 0, s.character_activity))
@@ -799,15 +1045,63 @@ static void render_workspace_preview(ht_scene_t *f)
     int i=workspace.choice;
     if (i<0 || i>=s.tab_count) return;
     hit_t links[4]={0};
+    const char *primary = i==workspace.origin ? "release to stay" : "release to open";
+    if (focus_skin()) {
+        /*
+         * The same face as command_face, in Inter: the heading, the workspace's name (30, two lines
+         * centred, "..." past them), the context row (empty here), the primary line and the way out,
+         * each centred in its target and clipped to the glass. The four targets are the same rects.
+         */
+        const ht_font_t *small = &ht_lv_inter_20.base, *big = &ht_lv_inter_30.base;
+        const ht_rect_t *t = ht_command_targets;
+        uint16_t ground[4];
+        for (int k = 0; k < 4; k++) ground[k] = s.pressed == k ? SEL : BG;
+        focus_put(f, t[0].x, t[0].y + (t[0].h - small->height) / 2, t[0].w, small, FG, ground[0], "workspaces", true);
+        ht_lv_label_t l;
+        ht_lv_label(&l, big, s.tabs[i].name[0] ? s.tabs[i].name : "Untitled", 340, 2, true);
+        int top = t[1].y + (t[1].h - l.lines * big->height) / 2;
+        for (int n = 0; n < l.lines; n++) {
+            char line[HT_TEXT_BYTES];
+            size_t len = l.line[n].len < sizeof line ? l.line[n].len : sizeof line - 1;
+            memcpy(line, l.text + l.line[n].at, len);
+            line[len] = 0;
+            focus_put(f, 63, top + n * big->height, 340, big, FG, s.pressed == 1 ? SEL : BG, line, true);
+        }
+        focus_put(f, t[2].x, t[2].y + (t[2].h - small->height) / 2, t[2].w, small, ACCENT, ground[2], primary, true);
+        focus_put(f, t[3].x, t[3].y + (t[3].h - small->height) / 2, t[3].w, small, FG, ground[3],
+                  "slide back to cancel", true);
+        for (int k = 0; k < 4; k++) { links[k].rect = t[k]; s.hits[s.hit_count++] = links[k]; }   // as command_face's
+        return;
+    }
     command_face(f,"workspaces",s.tabs[i].name,"",
-        i==workspace.origin ? "release to stay" : "release to open","slide back to cancel",false,links);
+        primary,"slide back to cancel",false,links);
+}
+/*
+ * THE BLUE BELL — the Focus skin's notification pill, as the LVGL firmware drew it: #006fff, fully
+ * round, padded 13 px, always 32 px tall: the bell (FontAwesome, montserrat_14, the one icon face) and, 6 px on,
+ * the count in Inter 20, each centred vertically in it. Three runs: box, bell, count. It sits at the bottom edge, where the
+ * microphone was: the top belongs to the curved name. `bell_y` is 400, or 376 where the working scene's status
+ * is on the lower arc and the pill steps up to clear it.
+ */
+static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
+{
+    enum { BELL_H = 32, BELL_PAD_H = 13, BELL_GAP = 6 };
+    const ht_font_t *bf = &ht_lv_montserrat_14.base, *cf = &ht_lv_inter_20.base;
+    char text[16];
+    snprintf(text, sizeof text, "%u", count);
+    int bw = ht_measure(bf, HT_LV_BELL), cw = ht_measure(cf, text);
+    int h = BELL_H, box_w = 2 * BELL_PAD_H + bw + BELL_GAP + cw;
+    int x = (HT_WIDTH - box_w) / 2;
+    uint16_t blue = color(0x006fff), ink = color(0xeaeaf0);
+    ht_box(f, x, bell_y, box_w, h, h / 2, blue, blue);
+    ht_text(f, x + BELL_PAD_H, bell_y + (h - bf->height) / 2, bw, bf, ink, blue,
+            HT_LV_BELL);
+    ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, bell_y + (h - cf->height) / 2, cw, cf, ink, blue, text);
 }
 static void render_home(ht_scene_t *f)
 {
-    // Where the Focus face's microphone target begins: a little above the mark's ink at 377, so the
-    // top of the mark is not its edge. A_PET ends here on Focus.
-    enum { FOCUS_MIC_TOP = 366 };
     s.caption_arc = (ht_rect_t){0};
+    s.pet_next_ms = 0;
     if (!s.connected || s.loading) { render_brand(f); return; }
     if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
     agent_t *a = active();
@@ -815,6 +1109,15 @@ static void render_home(ht_scene_t *f)
     // a recap. The bell has its own lower target, outside the voice surface.
     const char *recap = a && !a->busy && a->recap_ready && s.connected && !s.loading &&
         !s.nap && !s.voice_retry_until && !carry.active && !carry.error[0] ? a->preview : NULL;
+    /*
+     * An open question takes the recap's place, on this face, where the person already is. It is
+     * shown to be READ: the answer is given in the app, so the face grows no buttons and no other
+     * screen opens for it. A turn's recap would be last turn's news; the question is what the agent
+     * is waiting on now.
+     */
+    const char *asked = a && s.connected && !s.loading && !carry.active && !carry.error[0] ?
+        question_prompt(a->id) : NULL;
+    if (asked) recap = asked;
     // A live turn can outlast its terminal footer (or have no readable footer).
     // Keep its busy state visible while more specific activity is unavailable.
     // An agent with a question open is not working, whatever its turn says: it is waiting on this
@@ -831,7 +1134,7 @@ static void render_home(ht_scene_t *f)
     bool rotating = home_caption_rotates() && character.id != HT_CHARACTER_FOCUS;
     const char *caption = rotating && home_caption.activity ? activity : a ? a->name : "Choose a pane";
     bool bell = !s.voice_retry_until && !carry.active && !carry.error[0] && !visit.available;
-    unsigned unread = notice_unread();
+    unsigned unread = notice_unread(a ? a->id : NULL);
     bell = bell && unread > 0;
     char status[100];
     if (s.voice_retry_until) COPY(status, "Try again");
@@ -841,14 +1144,19 @@ static void render_home(ht_scene_t *f)
     // turn nobody is running any more.
     uint32_t since = a && a->busy && a->busy_ms && !is_question(a->id) ? (ms() - a->busy_ms) / 1000 : 0;
     int tab_index = workspace_index(s.selected_tab);
+    uint32_t clock = ms() | 1;
     ht_character_face_t f_ = {.recipient = caption, .status = bell ? "" : status,
-        .hint = "",
+        // The lower text seat belongs to notifications and useful status.
+        // A companion's name lives in the desktop Zoo, not a permanent footer.
+        .hint = companion_celebrating && !bell && !status[0] ? celebration_label : "",
         .tab = tab_index >= 0 ? s.tabs[tab_index].name : "",
         .engine = a ? a->engine : "",
         .activity = activity,
         .elapsed = since > 65535 ? 65535 : (uint16_t)since,
         .detail = "",
-        .mood = character_mood(), .pose = character.motion.reaction.pose,
+        .mood = companion_celebrating ? HT_CHARACTER_DONE : character_mood(), .pose = character.motion.reaction.pose,
+        .asking = a && is_question(a->id),
+        .clock_ms = (s.quiet || display_is_asleep()) ? 0 : clock,   // the pet's loop
         .straight_title = s.straight_title,
         .footer_action = carry.active || carry.error[0] || visit.available,
         .ink = FG, .foreground = FG, .dim = DIM,
@@ -863,8 +1171,11 @@ static void render_home(ht_scene_t *f)
     if (visit.available) f_.hint = "";
     bool focus_face = character.id == HT_CHARACTER_FOCUS;
     ht_character_face(f, &character, &f_, ACCENT, recap);
+    s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
+    // The pill sits at 400..432, or at 376..408 above the working scene's arc status.
+    int bell_y = focus_face && ht_focus_scene_shown(&f_, recap) ? 376 : 400;
     if (bell) {
-        if (focus_face) ht_notification_bell_at(f, unread, f_.ink, 14);
+        if (focus_face) focus_bell(f, unread, bell_y);
         else ht_notification_bell(f, unread, f_.ink);
     }
     s.status_phase = status_animated() ? ht_shimmer_phase(ms()) : 0;
@@ -884,74 +1195,182 @@ static void render_home(ht_scene_t *f)
     } else if (visit.available) {
         footer_control(f, 113, 240, "[ return ]", A_RETURN, s.connected && !visit.pending);
     }
-    /*
-     * A SKIN WITH NO COMPANION NEEDS SOMETHING TO PRESS.
-     *
-     * The centre rect below has always started voice, on every skin — but on a creature face the
-     * creature IS the affordance, and Focus has none. One footer label, and only when nothing else
-     * has claimed the footer. Artwork still owns no action: the hit rect is registered here.
-     */
-    /*
-     * THE MICROPHONE, drawn rather than labelled.
-     *
-     * `[ say ]` was a bracket label because bracket labels are what this firmware has; the device
-     * drew a mic here before habitat and a mic is what the thing is. It goes through ht_text with its
-     * own 26 px cell instead of footer_control's ht_mono_20, for the same reason the footer bell does
-     * — an icon routed into a text run has to match that run's cell exactly or the raster overreads.
-     * The hit rect is still registered here: artwork owns no action.
-     */
-    if (focus_face && !carry.active && !carry.error[0] && !visit.available) {
-        bool can_say = s.connected && !s.loading && a != NULL;
-        int n = s.hit_count++;
-        /*
-         * THE TARGET RUNS TO THE BOTTOM OF THE GLASS, and that is the whole point of it.
-         *
-         * It was {143, 389, 180, 50} — 50 px tall around a 48 px glyph drawn at y 392, so three
-         * pixels of slack above the mark and NONE below it. A thumb pressing the lower half of a
-         * circle held in the hand rolls downward, and the roll left the rect. That loses the entire
-         * contact rather than just the release: the press path records `pressed_action` from the
-         * FIRST sample, and both the scroll guard above and the release rule below ask
-         * home_footer(pressed_action.kind), so a DOWN one pixel low makes the contact a terminal
-         * scroll and nothing can recover it. Pressing the TOP of the mark worked immediately because
-         * the row above is A_PET, whose tap opens the microphone too.
-         *
-         * Nothing else on the Focus face claims this band — A_PET is cut short to end where it
-         * starts (see the bottom of this function), the bell sits at the top — so the rect takes it
-         * whole, down to the bottom edge. The corners fall outside the round glass, which costs
-         * nothing: a touch out there does not exist.
-         */
-        s.hits[n] = (hit_t){{143, FOCUS_MIC_TOP, 180, HT_HEIGHT - FOCUS_MIC_TOP}, A_VOICE, 0, can_say};
-        // Cell at 370 puts the mark's ink at y 377..411 — the design's own rows (mockup/newdesign.html,
-        // "Agent — recap"). It sat 22 px lower before, close enough to the bezel to read as crowded.
-        ht_text(f, (HT_WIDTH - ht_mic_footer.width) / 2, 370, ht_mic_footer.width, &ht_mic_footer,
-                // The design's own green, which is also the recording meter's: the thing that starts
-                // speech and the thing that shows it are one colour. HT_THEME_DONE, which this used to
-                // be, is the terminal's "finished" teal and read on glass as a different button.
-                !can_say ? DIM : n == s.pressed ? ACCENT : color(HT_THEME_VOICE), BG, HT_MIC);
-    }
     if (!carry.active && !carry.error[0] && !visit.available) {
-        // Both phases of the caption open the same pane picker. On Focus the caption is the pill,
-        // which sits below where the arc would have been.
-        s.hits[s.hit_count++] = focus_face ? (hit_t){{83, 54, 300, 40}, A_AGENTS, 0, true}
-                                           : (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+        // Both phases of the caption open the pane picker — on Focus too, whose name is on the same
+        // curve. The tab list is a hold on the face (A_PET below), on every skin.
+        s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
         for (int i = 0; i < f->count; i++) if (f->runs[i].arc == 1) {
             ht_rect_t r = ht_run_bounds(&f->runs[i]);
             s.caption_arc = (ht_rect_t){r.x - 14, r.y - 14, r.w + 28, r.h + 28};
             break;
         }
     }
-    // The badge's own target follows it. On Focus that is the top strip, clear of the tab pill below.
-    if (bell)
-        s.hits[s.hit_count++] = focus_face ? (hit_t){{83, 0, 300, 54}, A_INBOX, 0, unread > 0}
-                                           : (hit_t){{83, 382, 300, 84}, A_INBOX, 0, unread > 0};
+    // The badge's own target follows it, at the bottom on every skin.
+    if (bell) s.hits[s.hit_count++] = (hit_t){{83, bell_y - 18, 300, 84}, A_INBOX, 0, unread > 0};
     // The bell and the creature never share a target, even when the bell is
-    // hidden or its count changes under a finger. Centre always starts voice.
-    // On Focus it stops where the microphone's target starts; nothing is drawn between the last recap
-    // row (y 335) and the mic, so the band belongs to the button rather than to a tap-anywhere.
-    s.hits[s.hit_count++] = (hit_t){{33, 66, 400, focus_face ? FOCUS_MIC_TOP - 66 : 316}, A_PET, 0, true};
+    // hidden or its count changes under a finger. Centre always starts voice. On Focus the whole face
+    // below the name does, down to the bottom edge; the bell's target, registered above, wins there.
+    s.hits[s.hit_count++] = focus_face ? (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true}
+                                       : (hit_t){{33, 66, 400, 316}, A_PET, 0, true};
+}
+/*
+ * FOCUS'S LISTS SPEAK THE AGENT SCREEN'S TYPE (owner, 2026-09-30), in the one font of the "Kindle dark" layout (owner,
+ * 2026-10-03: Inter, SF Compact's open look-alike, everywhere): Inter 20 for the grey title straight across the top, Inter 30 for a
+ * pane or tab row, and the one button the tab pill's own shape in Inter 25, not the terminal skin's mono.
+ */
+static void focus_centred(ht_scene_t *f, int y, int room, const ht_font_t *font, uint16_t ink,
+                          uint16_t bg, const char *text)
+{
+    // One line of at most `room` px: whole letters, then "..." when the name runs past it.
+    char line[HT_TEXT_BYTES];
+    snprintf(line, sizeof line, "%s", text);
+    int w = ht_measure(font, line);
+    if (w > room) {
+        size_t n = strlen(line);
+        for (;;) {
+            while (n && ((uint8_t)line[n - 1] & 0xc0) == 0x80) n--;   // back over a letter's tail
+            if (n) n--;
+            while (n && line[n - 1] == ' ') n--;
+            if (n + 4 > sizeof line) continue;
+            memcpy(line + n, "...", 4);
+            w = ht_measure(font, line);
+            if (w <= room || !n) break;
+        }
+    }
+    if (w <= 0) w = 1;
+    ht_text(f, (HT_WIDTH - w) / 2, y, w, font, ink, bg, line);
+}
+/*
+ * One line of a moving name, cut to whole letters between x `left` and `right` so it stays on the
+ * round glass. A letter's share is measured with its neighbours, so kerning is kept.
+ */
+static void focus_clipped(ht_scene_t *f, int x, int y, const ht_font_t *font, uint16_t ink,
+                          const char *line, size_t len, int left, int right)
+{
+    char text[HT_TEXT_BYTES];
+    if (len >= sizeof text) len = sizeof text - 1;
+    memcpy(text, line, len);
+    text[len] = 0;
+    char probe[HT_TEXT_BYTES];
+    const char *p = text;
+    while (*p && x < left) {
+        const char *q = p;
+        ht_utf8_next(&q);
+        snprintf(probe, sizeof probe, "%.*s", (int)(q - text), text);
+        int to = ht_measure(font, probe);
+        snprintf(probe, sizeof probe, "%.*s", (int)(p - text), text);
+        x += to - ht_measure(font, probe);
+        p = q;
+    }
+    const char *end = p;
+    for (const char *q = p; *q;) {
+        ht_utf8_next(&q);
+        snprintf(probe, sizeof probe, "%.*s", (int)(q - p), p);
+        if (x + ht_measure(font, probe) > right) break;
+        end = q;
+    }
+    snprintf(probe, sizeof probe, "%.*s", (int)(end - p), p);
+    int w = ht_measure(font, probe);
+    if (w > 0) ht_text(f, x, y, w, font, ink, BG, probe);
+}
+/*
+ * The top of Focus's lists: the 60 x 32 close pill at y 16 (tabs use Done below) —
+ * the way back, in place of a ← — and the list's name in grey Inter 20 (inter_20: the "Kindle dark"
+ * style of the curved name and the pane names, in Inter since owner 2026-10-03), letter-spaced 2, at y 62.
+ */
+static void focus_header(ht_scene_t *f, const char *title)
+{
+    enum { CLOSE_X = 203, CLOSE_Y = 16, CLOSE_W = 60, CLOSE_H = 32, TITLE_Y = 62 };
+    const ht_font_t *small = &ht_lv_inter_20.base, *cross = &ht_lv_montserrat_22.base;
+    uint16_t fg = color(0xeaeaf0), close = color(0x171718);
+    // make_close_pill: COL_FG at 10 % over black, the cross centred in it.
+    if (s.view != TABS) {
+        int cw = ht_measure(cross, HT_LV_CROSS);
+        ht_box(f, CLOSE_X, CLOSE_Y, CLOSE_W, CLOSE_H, CLOSE_H / 2, close, close);
+        ht_text(f, CLOSE_X + (CLOSE_W - cw) / 2, CLOSE_Y + (CLOSE_H - cross->height) / 2, cw, cross, fg,
+                close, HT_LV_CROSS);
+        s.hits[s.hit_count++] = (hit_t){{CLOSE_X - 40, 0, CLOSE_W + 80, CLOSE_Y + CLOSE_H + 12}, A_HOME, 0, true};
+    }
+    // A letter to a run, which is how the spacing is drawn.
+    int tw = 0;
+    for (const char *c = title; *c; c++) { char one[2] = {*c, 0}; tw += ht_measure(small, one) + 2; }
+    int tx = (HT_WIDTH - (tw - 2)) / 2;
+    for (const char *c = title; *c; c++) {
+        char one[2] = {*c, 0};
+        int w = ht_measure(small, one);
+        ht_text(f, tx, TITLE_Y, w, small, color(0x4c4c4c), BG, one);
+        tx += w + 2;
+    }
+}
+/*
+ * FOCUS'S PANE LIST, in the LVGL firmware's TABS picker (swarm_picker_build / _rebuild at
+ * e96fc50c^), one line to a row (owner, 2026-10-01): black, the 60 x 32 close pill at the top, a
+ * grey spaced "PANES" at y 62 (Inter 20), then a column of cards 8 apart — the pane's name in
+ * Inter 30 (the recap's face, owner 2026-10-02) centred, padded 16 x 10, radius 16,
+ * #16161c at 60 % — the pane on the face at full fill with a 1 px Focus-green rim.
+ * The column is centred 10 px below the middle. Four rows is what a 360 px card keeps inside the
+ * round glass; past four the list scrolls a row at a time. Each card is its own tap; the cross, back.
+ */
+static void render_focus_panes(ht_scene_t *f)
+{
+    enum { CARD_X = 53, CARD_W = 360, CARD_H = 58, CARD_GAP = 8, CARD_R = 16 };
+    const ht_font_t *font = &ht_lv_inter_30.base;
+    // The cards wear the recap/inbox card's 0x23252f so they stand off the black (owner, 2026-10-02);
+    // the chosen one adds the green rim, a press lightens one step.
+    uint16_t fg = color(0xeaeaf0), card = color(0x23252f), rest = color(0x23252f),
+             pressed_fill = color(0x30333f), rim = color(HT_THEME_VOICE);   // Focus green (owner, 2026-10-01)
+    focus_header(f, "PANES");
+    if (!s.count) {
+        focus_centred(f, 180, 348, font, FG, BG, s.loading ? "Loading..." : "No panes in this tab.");
+        // "Choose a tab", in the tab pill's shape and face: the door to the tab list looks like one.
+        const ht_font_t *pf = &ht_lv_inter_25.base;
+        int n = s.hit_count++, w = ht_measure(pf, "Choose a tab"), box = w + 2 * 12 + 2;
+        int x = (HT_WIDTH - box) / 2, y = 250;
+        s.hits[n] = (hit_t){{x - 20, y - 12, box + 40, 41 + 24}, A_TABS, 0, s.connected};
+        uint16_t pill = n == s.pressed ? pressed_fill : color(0x141519);
+        ht_box(f, x, y, box, 41, 20, pill, color(0x3a3f4b));
+        ht_text(f, x + 13, y + (41 - pf->height) / 2, w, pf, s.connected ? fg : DIM, pill, "Choose a tab");
+        return;
+    }
+    int last = s.count > PANE_ROWS ? s.count - PANE_ROWS : 0;
+    if (s.offset > last) s.offset = last;
+    if (s.offset < 0) s.offset = 0;
+    int rows = s.count - s.offset < PANE_ROWS ? s.count - s.offset : PANE_ROWS;
+    int h = rows * CARD_H + (rows - 1) * CARD_GAP, top = (HT_HEIGHT - h) / 2 + 10;
+    for (int row = 0; row < rows; row++) {
+        int i = s.offset + row, y = top + row * (CARD_H + CARD_GAP);
+        agent_t *a = &s.agents[i];
+        int hit = s.hit_count++;
+        s.hits[hit] = (hit_t){{CARD_X, y, CARD_W, CARD_H}, A_AGENT, i, s.connected};
+        bool here = i == s.active, pressed = hit == s.pressed;
+        uint16_t fill = pressed ? pressed_fill : here ? card : rest;
+        ht_box(f, CARD_X, y, CARD_W, CARD_H, CARD_R, fill, here ? rim : fill);
+        focus_centred(f, y + (CARD_H - font->height) / 2, CARD_W - 2 - 32, font, s.connected ? fg : DIM, fill,
+                      a->name[0] ? a->name : "Untitled");
+    }
+}
+// A drag on the Focus pane list: a row per pitch travelled, and only when there are more than fit.
+static void panes_move(int dy)
+{
+    int last = s.count > PANE_ROWS ? s.count - PANE_ROWS : 0;
+    if (!last) { s.pane_pos = 0; return; }
+    s.pane_pos += dy;
+    int step = s.pane_pos / PANE_PITCH;
+    if (!step) return;
+    s.pane_pos %= PANE_PITCH;
+    int next = s.offset + step;
+    if (next < 0) next = 0;
+    if (next > last) next = last;
+    if (next != s.offset) { s.offset = next; change(); }
+    else s.pane_pos = 0;   // no overscroll to undo on reversal
+}
+static void panes_settle(void)
+{
+    s.pane_pos = 0;
 }
 static void render_agents(ht_scene_t *f)
 {
+    if (character.id == HT_CHARACTER_FOCUS) { render_focus_panes(f); return; }
     heading(f, "panes");
     int last = s.count > TAB_ROWS ? s.count - TAB_ROWS : 0;
     if (s.offset > last) s.offset = last;
@@ -987,20 +1406,20 @@ static bool question_view(view_t v)
 #define Q_ROWS 3
 static int question_rows(const char *value)
 {
-    return ht_text_rows(value, UI_FONT, 348);
+    return ui_rows(value, UI_FONT, 348);
 }
 static void question_text(ht_scene_t *f, const char *value)
 {
     int rows = question_rows(value), last = rows > Q_ROWS ? rows - Q_ROWS : 0;
     if (s.offset > last) s.offset = last;
     if (s.offset < 0) s.offset = 0;
-    ht_wrap(f, FACE_CX(348), 146, 348, Q_ROWS, s.offset, UI_FONT, FG, value);
+    ui_wrap(f, FACE_CX(348), 146, 348, Q_ROWS, s.offset, UI_FONT, FG, value);
     char position[40];
     if (rows > Q_ROWS) snprintf(position,sizeof position,"%d-%d / %d  drag to read",s.offset+1,s.offset+Q_ROWS,rows);
     else if (s.view==CHOICE) COPY(position,"drag for choices");
     else position[0] = 0;
     // mono_20 at 276: this is chrome ABOUT the text, not the text.
-    if (!s.q.speech_error[0]) ht_text(f, FACE_CX(296), 276, 296, &ht_mono_20, DIM, BG, position);
+    if (!s.q.speech_error[0]) text_in(f, FACE_CX(296), 276, 296, &ht_mono_20, position, DIM, true);
 }
 static void render_question(ht_scene_t *f)
 {
@@ -1011,7 +1430,7 @@ static void render_question(ht_scene_t *f)
         return;
     }
     if (s.q.error[0] || !s.q.valid || !s.q.supported) {
-        ht_wrap(f, FACE_CX(336), 173, 336, 5, 0, UI_FONT, DIM,
+        ui_wrap(f, FACE_CX(336), 173, 336, 5, 0, UI_FONT, DIM,
             s.q.error[0] ? s.q.error : !s.q.valid ? "Answered elsewhere." : "This question needs the desktop.");
         control(f, 116, 346, 238, "[ on desktop ]", A_DESKTOP, 1, s.connected);
         return;
@@ -1020,7 +1439,7 @@ static void render_question(ht_scene_t *f)
     char label[40]; snprintf(label,sizeof label,"question %d / %d",s.q.index+1,s.q.count);
     text(f, FACE_CX(216), 109, 216, label, DIM);
     question_text(f, q->prompt);
-    if (s.q.speech_error[0]) ht_wrap(f,FACE_CX(312),319,312,2,0,&ht_mono_20,ERROR,s.q.speech_error);
+    if (s.q.speech_error[0]) ui_wrap(f,FACE_CX(312),319,312,2,0,&ht_mono_20,ERROR,s.q.speech_error);
     if (q->can_text) {
         /*
      * UP TO y=336, AND THE RIM IS WHY.
@@ -1058,7 +1477,7 @@ static void render_answer_review(ht_scene_t *f)
 {
     heading(f, s.q.name);
     if (s.q.error[0]) {
-        ht_wrap(f,FACE_CX(336),166,336,5,0,UI_FONT,DIM,s.q.error);
+        ui_wrap(f,FACE_CX(336),166,336,5,0,UI_FONT,DIM,s.q.error);
         control(f, 116, 346,238,"[ on desktop ]",A_DESKTOP,1,s.connected);
         return;
     }
@@ -1066,7 +1485,7 @@ static void render_answer_review(ht_scene_t *f)
     char label[40]; snprintf(label,sizeof label,"answer %d / %d",s.q.index+1,s.q.count);
     text(f,FACE_CX(216),109,216,label,DIM);
     question_text(f,q->answer);
-    if (s.q.speech_error[0]) ht_wrap(f,FACE_CX(312),319,312,2,0,&ht_mono_20,ERROR,s.q.speech_error);
+    if (s.q.speech_error[0]) ui_wrap(f,FACE_CX(312),319,312,2,0,&ht_mono_20,ERROR,s.q.speech_error);
     if (s.q.pending) { center(f, 346, "Waiting...", DIM); return; }
     int footer_y = q->draft[0] ? 332 : 366;
     control(f,q->draft[0] ? 54 : 88,footer_y,102,"[back]",A_QUESTION_BACK,0,true);
@@ -1150,8 +1569,57 @@ static void tab_name(ht_scene_t *f, const char *name, int center_x, uint16_t ink
         r->w = cells * UI_FONT->width;
     }
 }
+/*
+ * FOCUS'S TABS: "TABS" on top (focus_header), then the same carousel, in Inter 30 — the name on at most two lines of 204 px, as
+ * the mono version wrapped at twelve cells, ending in "..." past that; neighbours peek in at the
+ * edges, cut to whole letters inside x 42..424. The tab you are in is green.
+ */
+static void render_focus_tabs(ht_scene_t *f)
+{
+    focus_header(f, "TABS");
+    const ht_font_t *font = &ht_lv_inter_30.base;
+    enum { SPAN = 204 };
+    int current = ht_tab_carousel_index(&tab_carousel);
+    if (current < 0) focus_centred(f, 214, 348, font, DIM, BG, "No tabs yet.");
+    else {
+        for (int i = current - 1; i <= current + 1; i++) {
+            if (i < 0 || i >= s.tab_count) continue;
+            int dx = i * HT_TAB_PITCH - tab_carousel.position;
+            uint16_t ink = !s.connected ? DIM : !strcmp(s.tabs[i].id, s.selected_tab) ? color(HT_THEME_VOICE) : FG;
+            int fade = abs(dx) * 140 / HT_TAB_PITCH;
+            ink = ht_character_caption_ink(ink, BG, fade < 210 ? 255 - fade : 45);
+            ht_lv_label_t l;
+            ht_lv_label(&l, font, s.tabs[i].name[0] ? s.tabs[i].name : "Untitled", SPAN, 2, true);
+            int cdx = dx < -HT_TAB_PITCH ? -HT_TAB_PITCH : dx > HT_TAB_PITCH ? HT_TAB_PITCH : dx;
+            // Centre the chosen name; a neighbour aligns toward the edge of its own page, as before.
+            int x = 233 + dx - l.w / 2 - cdx * (SPAN - l.w) / (2 * HT_TAB_PITCH);
+            int top = 233 - l.lines * font->height / 2;
+            for (int n = 0; n < l.lines; n++)
+                focus_clipped(f, x + (l.w - l.line[n].w) / 2, top + n * font->height, font, ink,
+                              l.text + l.line[n].at, l.line[n].len, 42, 424);
+        }
+        for (int n = 0; n < 3; n++) {
+            int i = current + (n == 1 ? -1 : n == 2 ? 1 : 0);
+            if (i < 0 || i >= s.tab_count) continue;
+            int cx = 233 + i * HT_TAB_PITCH - tab_carousel.position;
+            int left = i ? cx - HT_TAB_PITCH / 2 : 33;
+            int right = i + 1 < s.tab_count ? cx + HT_TAB_PITCH / 2 : 433;
+            if (left < 33) left = 33;
+            if (right > 433) right = 433;
+            if (right > left) s.hits[s.hit_count++] = (hit_t){{left, 110, right - left, 252},
+                A_TAB, i, s.connected};
+        }
+    }
+}
 static void render_tabs(ht_scene_t *f)
 {
+    // Done is shared by every face, with the same generous bottom-edge target.
+    ht_text(f, (HT_WIDTH-ht_done_28.width)/2, 400, ht_done_28.width, &ht_done_28, FG, BG, HT_DONE);
+    if (character.id == HT_CHARACTER_FOCUS) {
+        render_focus_tabs(f);
+        s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_TAB_DONE, 0, true};
+        return;
+    }
     ht_arc_title(f, DIM, "tabs");
     int current = ht_tab_carousel_index(&tab_carousel);
     if (current < 0) center(f, 214, "No tabs yet.", DIM);
@@ -1164,7 +1632,7 @@ static void render_tabs(ht_scene_t *f)
             ink = ht_character_caption_ink(ink, BG, fade < 210 ? 255 - fade : 45);
             tab_name(f, s.tabs[i].name, 233 + dx, ink);
         }
-        // Each visible name owns its tap; a swipe from any page only browses.
+        // Each visible name owns its tap; dragging selects the centered page live.
         // Keep the centered page first for stable accessibility/test ordering.
         for (int n = 0; n < 3; n++) {
             int i = current + (n == 1 ? -1 : n == 2 ? 1 : 0);
@@ -1175,11 +1643,10 @@ static void render_tabs(ht_scene_t *f)
             if (left < 33) left = 33;
             if (right > 433) right = 433;
             if (right > left) s.hits[s.hit_count++] = (hit_t){{left, 110, right - left, 252},
-                A_TAB, i, s.connected && !s.loading};
+                A_TAB, i, s.connected};
         }
     }
-    ht_text(f, 223, 400, 20, &ht_nav_32, DIM, BG, "←");
-    s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_HOME, 0, true};
+    s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_TAB_DONE, 0, true};
 }
 static void render_notice(ht_scene_t *f)
 {
@@ -1212,11 +1679,92 @@ static void render_notice(ht_scene_t *f)
     ht_text(f, FACE_CX(20), 400, 20, &ht_nav_32,
         s.pressed == body + 1 ? FG : DIM, BG, "\xe2\x86\x90");
 }
+/*
+ * THE FOCUS INBOX — the LVGL drawer (notif_rebuild), from its own numbers, on the face's black (the owner's call; LVGL's was #16161c): the 60 x 32
+ * close pill at the top, then a 360 px column of cards from (53, 107), 12 apart, down to y 427. A
+ * card is [machine, muted] over [the engine's 20 px mark, or a green dot, and the agent's name in
+ * green] over the message in white, wrapped, cut at 100 characters. Only whole cards show; a vertical
+ * swipe moves the column a card at a time (habitat_touch). A tap on a card opens that agent as it
+ * always has; a tap on the cross goes back. No age: the cable carries no time for a notice.
+ */
+static void render_focus_inbox(ht_scene_t *f)
+{
+    enum { LIST_X = 53, LIST_Y = 107, LIST_W = 360, LIST_BOTTOM = 427, LIST_GAP = 12, CARD_R = 26,
+           PAD_H = 16, PAD_V = 14, ROW_GAP = 8, MARK = 20, MARK_GAP = 8, DOT = 8, MSG_GLYPHS = 100,
+           CLOSE_X = 203, CLOSE_Y = 16, CLOSE_W = 60, CLOSE_H = 32 };
+    if (s.offset >= s.notice_count) s.offset = s.notice_count - 1;
+    if (s.offset < 0) s.offset = 0;
+    const ht_font_t *small = &ht_lv_inter_20.base, *body = &ht_lv_inter_25.base,
+                    *cross = &ht_lv_montserrat_22.base;
+    uint16_t fg = color(0xeaeaf0);
+    // make_close_pill: COL_FG at 10 % over black, the cross centred in it.
+    uint16_t close = color(0x171718);
+    int cw = ht_measure(cross, HT_LV_CROSS);
+    ht_box(f, CLOSE_X, CLOSE_Y, CLOSE_W, CLOSE_H, CLOSE_H / 2, close, close);
+    ht_text(f, CLOSE_X + (CLOSE_W - cw) / 2, CLOSE_Y + (CLOSE_H - cross->height) / 2, cw, cross, fg,
+            close, HT_LV_CROSS);
+    s.hits[s.hit_count++] = (hit_t){{CLOSE_X - 40, 0, CLOSE_W + 80, CLOSE_Y + CLOSE_H + 20}, A_HOME, 0, true};
+    uint16_t card = color(0x23252f), rim = color(0x3d3f47), green = color(0x04fe08),
+             muted = color(0x8a8a99), ink = s.connected ? fg : muted;
+    // The default theme's button shadow, 50 % #9e9e9e a couple of pixels under the card, over black.
+    uint16_t shade = color(0x202020);
+    int inner = LIST_W - 2 - 2 * PAD_H, y = LIST_Y;
+    for (int i = s.offset; i < s.notice_count && s.hit_count < 24; i++) {
+        const cable_notif_t *n = &s.notice[i];
+        const char *full = n->summary[0] ? n->summary : n->question ? "Waiting for you" : "done";
+        char msg[HT_TEXT_BYTES * 3];
+        size_t len = 0, glyphs = 0;
+        while (full[len] && glyphs < MSG_GLYPHS && len + 8 < sizeof msg) {
+            len++;
+            while (full[len] && ((uint8_t)full[len] & 0xc0) == 0x80) len++;
+            glyphs++;
+        }
+        memcpy(msg, full, len);
+        msg[len] = 0;
+        if (full[len]) strcat(msg, "\xe2\x80\xa6");
+        ht_lv_label_t m;
+        int lines = ht_lv_label(&m, body, msg, inner, HT_LV_LINES, false);
+        if (lines > HT_LV_LINES) lines = HT_LV_LINES;
+        bool machine = n->machine[0] != 0;
+        int h = 2 + 2 * PAD_V + (machine ? small->height + ROW_GAP : 0) + small->height + ROW_GAP +
+                lines * body->height;
+        if (y + h > LIST_BOTTOM && i > s.offset) break;
+        ht_box(f, LIST_X, y + 2, LIST_W, h, CARD_R, shade, shade);
+        ht_box(f, LIST_X, y, LIST_W, h, CARD_R, card, rim);
+        s.hits[s.hit_count++] = (hit_t){{LIST_X, y, LIST_W, h}, A_NOTICE, i, s.connected};
+        int x = LIST_X + 1 + PAD_H, row = y + 1 + PAD_V;
+        ht_lv_label_t l;
+        if (machine) {
+            ht_lv_label(&l, small, n->machine, inner, 1, true);
+            ht_text(f, x, row, l.w ? l.w : 1, small, muted, card, l.text);
+            row += small->height + ROW_GAP;
+        }
+        // The engine's mark when the roster knows the agent, the green dot when it does not.
+        int a = find(n->agent_id), engine = a >= 0 ? ht_focus_engine_index(s.agents[a].engine) : -1;
+        int lead = engine >= 0 ? MARK : DOT;
+        if (engine >= 0) ht_icon(f, x, row + (small->height - MARK) / 2, &ht_icon_engine20[engine]);
+        else ht_box(f, x, row + (small->height - DOT) / 2, DOT, DOT, DOT / 2, green, green);
+        ht_lv_label(&l, small, n->name[0] ? n->name : n->agent_id, inner - lead - MARK_GAP, 1, true);
+        ht_text(f, x + lead + MARK_GAP, row, l.w ? l.w : 1, small, green, card, l.text);
+        row += small->height + ROW_GAP;
+        for (int k = 0; k < lines; k++) {
+            char text[HT_TEXT_BYTES];
+            size_t n_ = m.line[k].len < sizeof text ? m.line[k].len : sizeof text - 1;
+            memcpy(text, m.text + m.line[k].at, n_);
+            text[n_] = 0;
+            ht_text(f, x, row + k * body->height, m.line[k].w ? m.line[k].w : 1, body, ink, card, text);
+        }
+        y += h + LIST_GAP;
+    }
+    const cable_notif_t *top = &s.notice[s.offset];
+    s.notice_frame = top->read_on_dial ? 0 : top->display_revision;
+}
 static void render_list(ht_scene_t *f)
 {
     if (s.view == TABS) { render_tabs(f); return; }
     if (s.view == INBOX && s.notice_count) {
-        render_notice(f);
+        if (character.id == HT_CHARACTER_FOCUS) render_focus_inbox(f);
+        else render_notice(f);
         return;
     }
     const char *title = s.view == MACHINES ? "machines" : "inbox";
@@ -1262,7 +1810,8 @@ static void render_voice(ht_scene_t *f)
     snprintf(draft_detail, sizeof draft_detail, s.voice_draft_append ? "Add to your message" : "Replace part %d / %d",
         draft.page.position, draft.page.total);
     ht_character_face_t f_ = {.recipient = s.voice_target, .status = voice_status(),
-        .hint = "",
+        .hint = "", .engine = s.voice_engine,   // whom this turn is for, not the pane on the face
+        .clock_ms = (s.quiet || display_is_asleep()) ? 0 : (ms() | 1),   // the listening scene's step (Focus)
         .mood = !s.voice_start_pending && !s.voice_waiting && audio_client_recording() ? HT_CHARACTER_LISTENING : HT_CHARACTER_WORKING,
         .pose = character.motion.reaction.pose, .ink = FG, .foreground = FG, .dim = DIM, .primary_title = true,
         .detail = s.voice_search ? "Say a phrase from the output" : s.voice_return == DRAFT ? draft_detail :
@@ -1271,6 +1820,7 @@ static void render_voice(ht_scene_t *f)
         .carrying = s.voice_carry, .voice = true};
     f_.focus = f_.detail && *f_.detail;
     ht_character_face(f, &character, &f_, ACCENT, NULL);
+    s.pet_next_ms = character.id == HT_CHARACTER_FOCUS ? ht_focus_pet_next_ms(&f_, NULL) : 0;
     s.status_phase = status_animated() ? ht_shimmer_phase(ms() * status_speed()) : 0;
     for (int i = 0; i < f->count; i++)
         if (f->runs[i].arc == 2) f->runs[i].shimmer = s.status_phase;
@@ -1287,7 +1837,7 @@ static void render_selection(ht_scene_t *f)
         return;
     }
     if (selection.error[0]) {
-        ht_wrap(f, FACE_CX(336), 180, 336, 5, 0, UI_FONT, FG, selection.error);
+        ui_wrap(f, FACE_CX(336), 180, 336, 5, 0, UI_FONT, FG, selection.error);
         control(f, FACE_CX(192), 349, 192, "[try again]", A_SELECT_BEGIN, 0, s.connected);
         return;
     }
@@ -1299,7 +1849,7 @@ static void render_selection(ht_scene_t *f)
         else COPY(status, "No matches");
     }
     center(f, 167, (selection.rows || selection.query[0]) ? status : "Look at your desktop", FG);
-    ht_wrap(f, FACE_CX(336), 203, 336, 3, 0, UI_FONT, FG,
+    ui_wrap(f, FACE_CX(336), 203, 336, 3, 0, UI_FONT, FG,
             selection.excerpt[0] ? selection.excerpt : selection.pending ? "Finding the text..." : selection.query[0] ? "Try another phrase." : "Blank line");
     if (ht_selection_ready(&selection) && selection.excerpt[0]) {
         s.hits[s.hit_count++] = (hit_t){{53, 151, 360, 184}, A_PET, 0, true};
@@ -1324,14 +1874,14 @@ static void render_form(ht_scene_t *f)
     if (p->query[0]) text(f, FACE_CX(276), 113, 276, p->query, DIM);
     else if (p->total) center(f, 113, count, DIM);
     text(f, FACE_CX(312), 158, 312, p->previous, DIM);
-    ht_wrap(f, FACE_CX(336), 199, 336, 2, 0, UI_FONT, ACCENT,
+    ui_wrap(f, FACE_CX(336), 199, 336, 2, 0, UI_FONT, ACCENT,
             p->label[0] ? p->label : form.failed ? "Could not open" : "Opening...");
-    if (!p->error[0]) ht_wrap(f, FACE_CX(336), 275, 336, 2, 0, UI_FONT, FG, p->busy ? p->status : p->detail);
+    if (!p->error[0]) ui_wrap(f, FACE_CX(336), 275, 336, 2, 0, UI_FONT, FG, p->busy ? p->status : p->detail);
     if (!form.pending && p->active && p->enabled && !p->busy && !form.failed)
         s.hits[s.hit_count++] = (hit_t){{49, 185, 368, 124}, A_FORM_MAIN, 0, true};
     // The current choice and its detail own the center; footer actions keep
     // a full line at the larger interface size. Errors replace the detail.
-    if (p->error[0]) ht_wrap(f, FACE_CX(336), 275, 336, 2, 0, UI_FONT, ERROR, p->error);
+    if (p->error[0]) ui_wrap(f, FACE_CX(336), 275, 336, 2, 0, UI_FONT, ERROR, p->error);
     control(f, 60, 352, 102, "[back]", A_FORM_BACK, 0, !form.pending || finding);
     control(f, 173, 352, 85, "[say]", A_FORM_SAY, 0,
             !form.pending && !form.failed && p->active && p->can_query && !p->busy);
@@ -1353,12 +1903,12 @@ static void render_draft(ht_scene_t *f)
     center(f, 111, position, DIM);
     int rows = question_rows(p->text), last = rows > DRAFT_ROWS ? rows - DRAFT_ROWS : 0;
     if (s.offset > last) s.offset = last;
-    ht_wrap(f, FACE_CX(348), 153, 348, DRAFT_ROWS, s.offset, UI_FONT, FG, p->text);
+    ui_wrap(f, FACE_CX(348), 153, 348, DRAFT_ROWS, s.offset, UI_FONT, FG, p->text);
     if (rows > DRAFT_ROWS) snprintf(position, sizeof position, "%d-%d / %d  drag to read", s.offset+1, s.offset+DRAFT_ROWS, rows);
     else COPY(position, p->total > 1 ? "drag for other parts" : p->context);
     text(f, FACE_CX(324), 297, 324, position, DIM);
-    if (p->error[0]) ht_wrap(f, FACE_CX(336), 326, 336, 2, 0, &ht_mono_20, ERROR, p->error);
-    else if (!p->can_send) ht_wrap(f, FACE_CX(336), 326, 336, 2, 0, &ht_mono_20, DIM,
+    if (p->error[0]) ui_wrap(f, FACE_CX(336), 326, 336, 2, 0, &ht_mono_20, ERROR, p->error);
+    else if (!p->can_send) ui_wrap(f, FACE_CX(336), 326, 336, 2, 0, &ht_mono_20, DIM,
         "Some characters cannot display. Re-speak that part.");
     else center(f, 333, draft.pending ? (draft.op == HT_DRAFT_SEND ? "Sending..." : "One moment...") :
         "tap to re-speak part", DIM);
@@ -1396,6 +1946,12 @@ static void render_settings(ht_scene_t *f)
                 (active() && (action != A_STOP || active()->busy) && (action != A_LATEST || !visit.pending))));
         int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
         s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, action, 0, enabled};
+        if (focus_skin()) {   // Inter, centred in the row it is tapped in
+            const ht_font_t *font = focus_face_for(UI_FONT);
+            focus_put(f, LIST_HIT_X, y + 14 + (UI_FONT->height - font->height) / 2, LIST_HIT_W, font,
+                      !enabled ? DIM : hit == s.pressed ? ACCENT : FG, hit == s.pressed ? SEL : BG, label, true);
+            continue;
+        }
         ht_text(f, SET_TEXT_X, y + 14, SET_TEXT_W, UI_FONT,
             !enabled ? DIM : hit == s.pressed ? ACCENT : FG, hit == s.pressed ? SEL : BG, label);
     }
@@ -1471,7 +2027,7 @@ bool habitat_scene_take(ht_scene_t *f)
         agent_t *a = active();
         heading(f, "latest result");
         if (a)
-            ht_wrap(f, FACE_CX(348), 125, 348, 5, s.offset, UI_FONT, FG, a->full);
+            ui_wrap(f, FACE_CX(348), 125, 348, 5, s.offset, UI_FONT, FG, a->full);
         control(f, 119, 387, 72, "<", A_UP, 0, s.offset > 0);
         control(f, 205, 366, 153, "[desktop]", A_DESKTOP, 0, s.connected);
         break;
@@ -1502,7 +2058,7 @@ bool habitat_scene_take(ht_scene_t *f)
         break;
     case MESSAGE:
         heading(f, s.title);
-        ht_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
+        ui_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
         break;
     }
     return true;
@@ -1848,21 +2404,26 @@ static void dispatch(action_t a)
         }
         break;
     case A_TABS:
+    case A_TAB_LIST:
         tabs_open();
         break;
     case A_MACHINES:
         view(MACHINES);
         break;
     case A_TAB:
-        if (!s.connected || s.voice_open || s.loading || workspace_index(a.id)<0) break;
-        if (!strcmp(a.id,s.selected_tab)) { view(HOME); break; }
-        if (ht_workspace_request(&workspace,a.id,ms())) {
-            a.revision=workspace.serial;
-            if (!queue(a)) { workspace_failed("Device busy. Choose the tab again."); break; }
-            ht_visit_close(&visit); s.pending_focus[0]=0;
+        if (s.view==TABS && workspace_index(a.id)>=0)
+            ht_tab_carousel_reset(&tab_carousel,s.tab_count,workspace_index(a.id));
+        tab_request(a.id,s.view==TABS);
+        break;
+    case A_TAB_DONE:
+        if (s.view!=TABS) break;
+        ht_tab_carousel_cancel(&tab_carousel);
+        tabs_sync();
+        if (s.view!=TABS) break; // preserve a queue failure shown by tabs_sync
+        if (workspace.phase!=HT_WORKSPACE_IDLE) {
             COPY(s.title,"Switching tab"); COPY(s.message,"Opening your workspace...");
-            view(MESSAGE); s.loading=true;
-        }
+            view(MESSAGE);
+        } else view(HOME);
         break;
     case A_MACHINE:
         if (s.connected && queue(a)) {
@@ -1929,6 +2490,8 @@ static void dispatch(action_t a)
             else if (a.value == 7) COPY(s.voice_target, "Find in output");
             else if (a.value == 5 || a.value == 6) COPY(s.voice_target, draft.page.name);
             else COPY(s.voice_target, target >= 0 ? s.agents[target].name : "harness");
+            COPY(s.voice_engine, target >= 0 && a.value != 2 && a.value != 5 && a.value != 6 && a.value != 7 ?
+                s.agents[target].engine : "");
             s.voice_started = ms();
             view(VOICE);
             ESP_LOGI("habitat", "voice queued generation=%lu", (unsigned long)a.revision);
@@ -2223,11 +2786,12 @@ static void worker(void *unused)
                 config_save_brightness((uint8_t)((want.brightness * 255 + 50) / 100));
             if (fields & UI_SETTING_CHARACTER && !config_save_habitat_character(want.character))
                 ui_cable_toast("Character changed; saving failed.");
-            if (fields & (UI_SETTING_QUIET | UI_SETTING_STRAIGHT_TITLE | UI_SETTING_FOCUS_FACE)) {
+            if (fields & (UI_SETTING_QUIET | UI_SETTING_STRAIGHT_TITLE | UI_SETTING_FOCUS_FACE | UI_SETTING_FOLLOW_COMPANION)) {
                 // Bit 1 was rim scrolling and is RETIRED, not reused: devices in the field still
                 // hold it set, and a new preference on that bit would inherit their answer.
                 uint8_t options = (uint8_t)((want.focus_face ? 1 : 0) |
-                                            (want.quiet ? 4 : 0) | (want.straight_title ? 8 : 0));
+                                            (want.quiet ? 4 : 0) | (want.straight_title ? 8 : 0) |
+                                            (want.follow_companion ? 0 : 16));
                 if (!config_save_habitat_options(options))
                     ui_cable_toast("Preference changed; saving failed.");
             }
@@ -2333,7 +2897,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
         if (surface && home_footer(pressed_action.kind)) {
             if (pressed_action.kind==A_TABS && ht_workspace_move(&workspace,x,y,gesture.axis,now)) change();
         } else if (s.view == TABS) {
-            if (gesture.axis == 2 && ht_tab_carousel_move(&tab_carousel, x, now)) change();
+            if (gesture.axis == 2 && ht_tab_carousel_move(&tab_carousel, x, now)) {
+                tabs_sync(); change();
+            }
+        } else if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS && gesture.axis == 1) {
+            panes_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         } else if ((s.view == AGENTS || s.view == SETTINGS) && gesture.axis == 1) {
             tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         } else if (s.view == DRAFT && gesture.axis == 1) {
@@ -2354,7 +2922,10 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
     }
     if (!down && s.touch_down) {
         ht_touch_result_t result = ht_gesture_end(&gesture, x, y, now);
-        if (!s.touch_cancelled && (s.view == AGENTS || s.view == SETTINGS) && gesture.axis == 1)
+        if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS) {
+            if (!s.touch_cancelled && gesture.axis == 1) panes_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
+            panes_settle();
+        } else if (!s.touch_cancelled && (s.view == AGENTS || s.view == SETTINGS) && gesture.axis == 1)
             tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         bool tab_contact = s.view == TABS && tab_carousel.touching;
         bool tab_tap = tab_contact && ht_tab_carousel_end(&tab_carousel, x, gesture.axis == 2, now);
@@ -2372,6 +2943,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             int index = pressed_action.value;
             if (tab_tap && result == HT_TOUCH_TAP && pressed_action.kind == A_TAB && index >= 0 &&
                 index < s.tab_count && !strcmp(pressed_action.id, s.tabs[index].id)) dispatch(pressed_action);
+            tabs_sync();
             change();
         } else if (result == HT_TOUCH_TAP && s.touch_brake) {
             // DOWN already stopped desktop inertia. This entire tap is only a brake.
@@ -2406,6 +2978,23 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             if (result == HT_TOUCH_TAP || (on_target && now - s.touch_started < 1800))
                 dispatch(pressed_action);
             change();
+        } else if (surface && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_PET &&
+                   !gesture.guarded && dx * dx + dy * dy < 24 * 24 && now - s.touch_started < 650) {
+            /*
+             * ON FOCUS A TOUCH ANYWHERE ON THE FACE TALKS (owner, 2026-10-01), and it is a THUMB's
+             * touch, not an idealised tap. ht_gesture_end() calls a contact a tap only inside 12 px
+             * (1.20 mm on this glass) and 350 ms; a real press drifts past both, which is the fault
+             * the old microphone button had (21 presses in 49). So the face answers what a button
+             * answers: a contact that did not scroll, came up within 24 px of where it went down,
+             * and let go before the 650 ms that opens the tabs.
+             */
+            ht_gesture_guard(&gesture, now);
+            if (s.connected && !s.loading && active()) {
+                ESP_LOGI("habitat", "focus touch: start voice");
+                // Built as the old microphone's was: make_action names the agent on the face, and
+                // main-surface voice without a recipient is dropped.
+                dispatch(make_action((hit_t){.action = A_VOICE}));
+            }
         } else if (result == HT_TOUCH_TAP && pressed_action.kind == A_PET &&
                    (surface || s.view == VOICE || s.view == SELECTION)) {
             ht_gesture_guard(&gesture, now);
@@ -2413,12 +3002,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 ESP_LOGI("habitat", "gesture tap: finish voice");
                 dispatch((action_t){.kind = A_VOICE_STOP});
             } else if (character.id == HT_CHARACTER_FOCUS && s.view != SELECTION) {
-                /*
-                 * On Focus the microphone starts speech and nothing else does. A creature skin has
-                 * no button — the creature IS the affordance, so the middle of the glass has to be
-                 * one. Focus draws its button, and the middle is the recap somebody is reading: a
-                 * tap there opening the mic surprised people, and the mic is right under it.
-                 */
+                // Focus's face answers its touches in the branch above; nothing more here.
             } else if (s.connected && !s.loading && pressed_action.id[0]) {
                 ESP_LOGI("habitat", "gesture tap: start voice");
                 pressed_action.kind = A_VOICE;
@@ -2450,7 +3034,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 // Reading/choosing consumed this contact; motion cannot submit an answer.
             } else if (s.view == SELECTION) {
                 // Its bounded reading cursor already consumed this vertical drag.
-            } else if (surface && character.id == HT_CHARACTER_FOCUS && dy > 0 && notice_unread()) {
+            } else if (surface && character.id == HT_CHARACTER_FOCUS && dy > 0 && notice_unread(active() ? active()->id : NULL)) {
                 // Pull down from the badge. The creature skins keep this drag inert — their footer
                 // badge is a target you tap — but on Focus the badge sits at the top edge and a pull
                 // is the gesture the rest of the world already means by it.
@@ -2534,6 +3118,11 @@ uint32_t habitat_next_wake_ms(void)
         delay = home_caption.next_ms;
     if (status_animated()) {
         uint32_t due = status_wake_ms(now);
+        if (due < delay) delay = due;
+    }
+    if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE)) {
+        int32_t left = (int32_t)(s.pet_next_ms - now);
+        uint32_t due = left < 1 ? 1 : (uint32_t)left;
         if (due < delay) delay = due;
     }
     if ((s.view == HOME || s.view == AGENT) && pressed_action.kind == A_PET && s.touch_down && !s.touch_cancelled &&
@@ -2656,11 +3245,23 @@ void ui_init(void)
     uint8_t saved_character = config_load_habitat_character((uint8_t)ht_character_default());
     if (!ht_character_select(&character, (ht_character_id_t)saved_character))
         ht_character_select(&character, ht_character_default());
+    device_skin = character.id <= HT_CHARACTER_FOCUS ? character.id : ht_character_default();
+    desktop_companion = HT_CHARACTER_COUNT;
+    ht_character_select(&character, device_skin);
     ESP_LOGI("habitat", "character %s; shared moods and controls", ht_character_name(character.id));
     uint8_t options = config_load_habitat_options();
+    follow_companion = !(options & 16);
+#ifdef HABITAT_FOCUS_ONLY
+    device_skin = HT_CHARACTER_FOCUS;
+    follow_companion = false;
+    ht_character_select(&character, device_skin);
+#endif
     s.focus_face = (options & 1) != 0;
     s.quiet = (options & 4) != 0;
     s.straight_title = (options & 8) != 0;
+#ifdef HABITAT_FOCUS_ONLY
+    s.straight_title = true;   // the app no longer offers Edge text: straight across (owner, 2026-10-01)
+#endif
     s.ready = true;
 #ifdef DEVICE_CREATURE_GALLERY
     ht_gallery_init(&gallery, ms());
@@ -2692,7 +3293,13 @@ void ui_settings_read(ui_settings_t *out)
     display_lock();
     out->brightness = (uint8_t)s.brightness;
     out->muted = s.muted;
-    out->character = (uint8_t)character.id;
+    out->character = (uint8_t)device_skin;
+    out->follow_companion = follow_companion;
+    const char *species = follow_companion ? ht_character_species(desktop_companion) : NULL;
+    if (species) {
+        snprintf(out->companion, sizeof out->companion, "%s", species);
+        out->companion_details=desktop_identity;
+    }
     out->quiet = s.quiet;
     out->straight_title = s.straight_title;
     out->focus_face = s.focus_face;
@@ -2717,19 +3324,27 @@ bool ui_settings_apply(const ui_settings_t *want, uint32_t fields, char *error, 
     if (fields & UI_SETTING_CHARACTER) {
         ht_character_t probe;
         memset(&probe, 0, sizeof probe);
-        if (!ht_character_select(&probe, (ht_character_id_t)want->character)) {
+        if (want->character > HT_CHARACTER_FOCUS || !ht_character_select(&probe, (ht_character_id_t)want->character)) {
             if (error) snprintf(error, cap, "This device has no such character.");
             return false;
         }
     }
-    if ((fields & UI_SETTING_VOICELANG) && strlen(want->voicelang) >= CFG_VLANG_MAX) {
+    if ((fields & UI_SETTING_VOICELANG) && !memchr(want->voicelang, '\0', sizeof want->voicelang)) {
         if (error) snprintf(error, cap, "Language code is too long.");
         return false;
     }
     display_lock();
     // The live state moves now, so the next frame is already right; the flash write is the worker's.
-    if (fields & UI_SETTING_BRIGHTNESS) s.brightness = want->brightness;
-    if (fields & UI_SETTING_CHARACTER) ht_character_select(&character, (ht_character_id_t)want->character);
+    if (fields & UI_SETTING_BRIGHTNESS) {
+        s.brightness = want->brightness;
+        display_set_brightness((uint8_t)((want->brightness * 255 + 50) / 100));
+    }
+#ifdef HABITAT_FOCUS_ONLY
+    fields &= ~(uint32_t)(UI_SETTING_CHARACTER | UI_SETTING_FOLLOW_COMPANION | UI_SETTING_STRAIGHT_TITLE);
+#endif
+    if (fields & UI_SETTING_CHARACTER) device_skin = (ht_character_id_t)want->character;
+    if (fields & UI_SETTING_FOLLOW_COMPANION) follow_companion = want->follow_companion;
+    select_companion();
     if (fields & UI_SETTING_FOCUS_FACE) s.focus_face = want->focus_face;
     if (fields & UI_SETTING_QUIET) s.quiet = want->quiet;
     if (fields & UI_SETTING_STRAIGHT_TITLE) s.straight_title = want->straight_title;
@@ -2748,10 +3363,56 @@ void ui_settings_changed(void)
 {
     cable_client_report_settings();
 }
+bool ui_set_companion_identity(const ui_companion_t *identity)
+{
+    ht_character_id_t id=ht_character_companion(identity?identity->id:NULL);
+    if (identity && (id==HT_CHARACTER_COUNT || identity->colour < -1 || identity->colour>5 || identity->mark>4 ||
+        (strcmp(identity->version,"0.1") && strcmp(identity->version,"1.0") && strcmp(identity->version,"2.0")))) return false;
+    display_lock();
+    desktop_companion=id; companion_celebrating=false;
+    desktop_identity=identity?*identity:(ui_companion_t){.colour=-1};
+    select_companion(); change(); display_unlock();
+    ESP_LOGI("companion","desktop=%s uid=%s version=%s colour=%d mark=%u",identity?identity->id:"none",
+        identity?identity->uid:"",identity?identity->version:"",identity?identity->colour:-1,identity?identity->mark:0);
+    return true;
+}
+bool ui_set_companion(const char *species)
+{
+    if (!species) return ui_set_companion_identity(NULL);
+    if (ht_character_companion(species)==HT_CHARACTER_COUNT) return false;
+    ui_companion_t identity={.colour=-1};
+    snprintf(identity.id,sizeof identity.id,"%s",species);
+    snprintf(identity.uid,sizeof identity.uid,"%s",species);
+    snprintf(identity.name,sizeof identity.name,"%s",species);
+    snprintf(identity.version,sizeof identity.version,"2.0");
+    return ui_set_companion_identity(&identity);
+}
+bool ui_companion_celebrate(const ui_companion_t *identity,const char *kind,const char *token)
+{
+    if (!identity || !token || !token[0] || strlen(token)>=sizeof celebration_tokens[0] ||
+        (!kind || (strcmp(kind,"hatch") && strcmp(kind,"grow"))) ||
+        ht_character_companion(identity->id)==HT_CHARACTER_COUNT || identity->colour < -1 || identity->colour > 5 || identity->mark > 4 ||
+        (strcmp(identity->version,"0.1") && strcmp(identity->version,"1.0") && strcmp(identity->version,"2.0"))) return false;
+    display_lock();
+    bool seen=false;
+    for (unsigned i=0;i<8;i++) if (!strcmp(token,celebration_tokens[i])) seen=true;
+    if (!seen) {
+        snprintf(celebration_tokens[celebration_next++%8],sizeof celebration_tokens[0],"%s",token);
+        // A sleeping/reading/quiet dial consumes the event without scheduling a later surprise.
+        if (follow_companion && s.connected && !s.quiet && !s.nap && s.view==HOME && !display_is_asleep() && !s.touch_down && character_mood()!=HT_CHARACTER_ATTENTION) {
+            celebration_identity=*identity; companion_celebrating=true; celebration_began=ms();
+            snprintf(celebration_label,sizeof celebration_label,"%.24s %s",identity->name,!strcmp(kind,"hatch")?"hatched!":"grew!");
+            select_companion(); change();
+            ESP_LOGI("companion","milestone=%s token=%s",kind,token);
+        }
+    }
+    display_unlock(); return true;
+}
 void ui_set_brightness(uint8_t level)
 {
     display_lock();
     s.brightness = (level * 100 + 127) / 255;
+    display_set_brightness(level);
     change();
     display_unlock();
 }
@@ -2761,6 +3422,9 @@ void ui_set_connected(bool value)
 {
     display_lock();
     if (!value) {
+        desktop_companion = HT_CHARACTER_COUNT;
+        desktop_identity=(ui_companion_t){.colour=-1}; companion_celebrating=false;
+        select_companion();
         input_cancel();
         s.voice_retry_until = 0;
         s.pending_machine[0] = 0;
@@ -2858,7 +3522,7 @@ void ui_project_remove(const char *id)
     display_lock();
     int i = find(id);
     if (i >= 0) {
-        if (s.active == i) {
+        if (s.active == i && s.view != TABS) {
             input_cancel();
         }
         memmove(&s.agents[i], &s.agents[i + 1], (size_t)(s.count - i - 1) * sizeof(agent_t));
@@ -2874,7 +3538,7 @@ void ui_project_remove(const char *id)
 void ui_project_clear_all(void)
 {
     display_lock();
-    input_cancel();
+    if (s.view != TABS) input_cancel();
     s.count = 0;
     s.active = -1;
     change();
@@ -3136,7 +3800,7 @@ void ui_focus_project(const char *id)
     s.pending_focus[0] = 0;
     bool opened = s.opening_notice[0] && !strcmp(s.opening_notice, id);
     if (opened) s.opening_notice[0] = 0;
-    if (s.active != i) {
+    if (s.active != i && s.view != TABS) {
         input_cancel();
     }
     s.active = i;
@@ -3179,7 +3843,7 @@ void ui_land_after_reload(void)
     if (s.loading && (workspace.phase==HT_WORKSPACE_IDLE || workspace.phase==HT_WORKSPACE_READY)) {
         ht_workspace_cancel_request(&workspace);
         s.loading = false;
-        view(HOME);
+        if (s.view != TABS) view(HOME);
     }
     change();
     display_unlock();
@@ -3446,13 +4110,13 @@ static void question_load(const cJSON *questions)
         q->can_text=!q->multi && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item,"canText"));
         if (!cJSON_IsString(key) || !q->key[0] || strlen(key->valuestring)>=sizeof q->key ||
             !cJSON_IsString(prompt) || !q->prompt[0] || strlen(prompt->valuestring)>=sizeof q->prompt ||
-            !ht_can_display(q->prompt,UI_FONT,348,256)) s.q.supported=false;
+            !ui_can_display(q->prompt,UI_FONT,348,256)) s.q.supported=false;
         const cJSON *option;
         cJSON_ArrayForEach(option,options) {
             if (q->count==OPTION_MAX) { s.q.supported=false; break; }
             if (!cJSON_IsString(option) || !option->valuestring[0]) { s.q.supported=false; continue; }
             if (strlen(option->valuestring)>=sizeof q->options[0] ||
-                !ht_can_display(option->valuestring,UI_FONT,348,256)) s.q.supported=false;
+                !ui_can_display(option->valuestring,UI_FONT,348,256)) s.q.supported=false;
             COPY(q->options[q->count++],option->valuestring);
         }
         if (!q->count) s.q.supported=false;
@@ -3474,21 +4138,8 @@ void ui_question_show(const char *id, const char *name, const char *machine, con
         s.q.valid=false; s.q.pending=false; s.q.revision++;
         if (question_view(s.view)) { COPY(s.q.error,"The question changed. Open the alert again."); view(QUESTION); }
     }
-    /*
-     * A QUESTION TAKES THE GLASS — to be READ, not answered.
-     *
-     * An agent that asks has stopped: it is waiting on this person and nothing else. Leaving the
-     * face on its "working" line with a count in the bell said the opposite, even to somebody
-     * looking straight at that agent. So the question's card comes up now, from any screen a person
-     * is only reading, on every skin. It is the prompt and nothing else — no [later], [say] or
-     * [next]: the answer is given in the app, which is where the card's tap takes them. Not from a
-     * screen they are in the middle of — recording, drafting, a form, a question already open, a
-     * finger on the glass — where it would take their work away; there the bell counts it, as
-     * before, until the question is ANSWERED rather than until it is seen.
-     */
-    bool reading = s.view == HOME || s.view == AGENTS || s.view == AGENT || s.view == READER ||
-                   s.view == INBOX || s.view == TABS || s.view == MACHINES || s.view == MESSAGE;
-    if (reading && !s.touch_down) notice_show_question(id);
+    // The question is shown on the home face, in the recap's place (render_home): no screen opens
+    // for it. The display wakes so a person glancing over sees it.
     change();
     display_wake();
     display_unlock();
@@ -3585,7 +4236,9 @@ void ui_swarms_replace(const cable_swarm_t *rows, int count, const char *selecte
     char focused[ID_MAX] = "";
     int focused_index = ht_tab_carousel_index(&tab_carousel);
     if (s.view == TABS && focused_index >= 0 && focused_index < s.tab_count) COPY(focused, s.tabs[focused_index].id);
-    bool changed=bounded!=s.tab_count || strcmp(s.selected_tab,selected ? selected : "");
+    bool selected_changed=strcmp(s.selected_tab,selected ? selected : "");
+    bool browsing=workspace.phase!=HT_WORKSPACE_IDLE || tab_carousel.touching || tab_carousel.animating;
+    bool changed=bounded!=s.tab_count;
     for (int i=0;!changed && i<bounded;i++) {
         changed=strcmp(rows[i].id,s.tabs[i].id) || strcmp(rows[i].name,s.tabs[i].name);
     }
@@ -3593,8 +4246,8 @@ void ui_swarms_replace(const cable_swarm_t *rows, int count, const char *selecte
     s.tab_count=bounded;
     if (bounded) memcpy(s.tabs,rows,(size_t)bounded*sizeof *rows);
     COPY(s.selected_tab,selected);
-    if (changed && s.view == TABS) {
-        int index = workspace_index(focused);
+    if (s.view == TABS && (changed || (selected_changed && !browsing))) {
+        int index = browsing ? workspace_index(focused) : workspace_index(s.selected_tab);
         ht_tab_carousel_reset(&tab_carousel, bounded, index >= 0 ? index : workspace_index(s.selected_tab));
     }
     if (workspace.phase!=HT_WORKSPACE_IDLE && workspace_index(workspace.pending)<0) {
@@ -3870,7 +4523,7 @@ static bool draft_page(const cJSON *p, ht_draft_page_t *page)
     page->can_undo = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, "canUndo"));
     page->locked = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, "locked"));
     page->can_send = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, "canSend")) &&
-        ht_can_display(page->text, UI_FONT, 348, 512);
+        ui_can_display(page->text, UI_FONT, 348, 512);
     return true;
 }
 void ui_voice_draft(const cJSON *p)
@@ -3959,7 +4612,7 @@ void ui_voice_question(const cJSON *p)
     voice_close();
     if (!q->can_text || !cJSON_IsString(draft) || !draft->valuestring[0] || strlen(draft->valuestring)>=sizeof q->draft ||
         !cJSON_IsString(text) || !text->valuestring[0] || strlen(text->valuestring)>1200 ||
-        !ht_can_display(text->valuestring,UI_FONT,348,1200)) {
+        !ui_can_display(text->valuestring,UI_FONT,348,1200)) {
         q->draft[0]=q->answer[0]=0; q->selected=0;
         COPY(s.q.speech_error,"Cannot show that answer. Say it again or use the terminal."); view(QUESTION);
     } else {

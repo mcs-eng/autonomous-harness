@@ -1,17 +1,14 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
 import '../state/harness_sessions.dart';
-import '../terminal/terminal_text.dart';
-import '../terminal/terminal_theme.dart';
-import '../terminal/terminal_theme_store.dart';
-import '../widgets/box_chrome.dart';
+import '../widgets/desktop_chrome.dart';
 import '../widgets/terminal_prompt.dart';
-import '../widgets/terminal_text_action.dart';
 import 'team_controller.dart';
 
 class TeamCandidate {
@@ -120,7 +117,7 @@ Future<void> showTeamWorkspace(BuildContext context, AppNotifier app) async {
   );
 }
 
-/// Terminal-native team roster, conversations, and question composer. No terminal is
+/// Team roster, conversations, and question composer. No terminal is
 /// attached or written by mounting, searching, selecting, or closing this surface.
 class TeamWorkspace extends StatefulWidget {
   const TeamWorkspace({
@@ -149,12 +146,15 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
   late final _description = TextEditingController(text: model.newDescription);
   late final _question = TextEditingController(text: model.draft);
   final _questionFocus = FocusNode(debugLabel: 'Team question');
+  final _compactScroll = ScrollController();
+  final _exchangeScroll = ScrollController();
+  final _conversationScroll = ScrollController();
+  final _rosterScroll = ScrollController();
+  ScrollController? _activeScroll;
   bool _creating = false;
   String? _selectedMember;
-  late Size cell;
-  late Color foreground, muted, selection;
-  TextStyle get style => terminalContentStyle(color: foreground);
-  TextStyle get faint => terminalContentStyle(color: muted);
+  TextStyle get style => DesktopChrome.text(size: 13);
+  TextStyle get faint => DesktopChrome.metadata();
   @override
   void initState() {
     super.initState();
@@ -184,54 +184,80 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
     _description.dispose();
     _question.dispose();
     _questionFocus.dispose();
+    _compactScroll.dispose();
+    _exchangeScroll.dispose();
+    _conversationScroll.dispose();
+    _rosterScroll.dispose();
     super.dispose();
   }
+
+  void _page(int direction) {
+    final focusedContext = FocusManager.instance.primaryFocus?.context;
+    final focusedScroll = focusedContext == null
+        ? null
+        : Scrollable.maybeOf(focusedContext, axis: Axis.vertical)?.position;
+    final scroll = _activeScroll?.hasClients == true
+        ? _activeScroll
+        : _compactScroll.hasClients
+        ? _compactScroll
+        : _conversationScroll.hasClients
+        ? _conversationScroll
+        : null;
+    final position = focusedScroll ?? scroll?.position;
+    if (position == null) return;
+    position.jumpTo(
+      (position.pixels + direction * position.viewportDimension * .9).clamp(
+        0,
+        position.maxScrollExtent,
+      ),
+    );
+  }
+
+  Widget _scrollRegion(ScrollController controller, Widget child) => Focus(
+    skipTraversal: true,
+    onFocusChange: (focused) {
+      if (focused) _activeScroll = controller;
+    },
+    child: child,
+  );
 
   Widget _line(
     String label,
     VoidCallback? action, {
     String? trailing,
+    String? detail,
+    bool? checked,
     bool selected = false,
     Key? key,
     String? semantics,
-  }) {
-    return Semantics(
-      selected: selected,
-      label: semantics,
-      child: SizedBox(
-        height: cell.height,
-        child: TextButton(
-          key: key,
-          onPressed: action,
-          style:
-              TextButton.styleFrom(
-                foregroundColor: foreground,
-                disabledForegroundColor: muted,
-                backgroundColor: selected ? selection : Colors.transparent,
-                minimumSize: Size.zero,
-                padding: EdgeInsets.symmetric(horizontal: cell.width),
-                shape: const RoundedRectangleBorder(),
-                textStyle: style,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                splashFactory: NoSplash.splashFactory,
-              ).copyWith(
-                overlayColor: WidgetStatePropertyAll(
-                  selection.withValues(alpha: .45),
-                ),
-              ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              if (trailing != null) Text('  $trailing', style: faint),
-            ],
-          ),
-        ),
+  }) => _TeamRow(
+    key: key,
+    label: label,
+    detail: detail,
+    trailing: trailing,
+    selected: selected,
+    checked: checked,
+    semanticLabel: semantics,
+    onPressed: action,
+  );
+
+  InputDecoration _fieldDecoration(String label) {
+    final border = OutlineInputBorder(
+      borderRadius: BorderRadius.circular(DesktopChrome.controlRadius),
+      borderSide: BorderSide(color: DesktopChrome.rim, width: 1.5),
+    );
+    return InputDecoration(
+      labelText: label,
+      labelStyle: faint,
+      hintStyle: faint,
+      filled: true,
+      fillColor: DesktopChrome.field,
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      border: border,
+      enabledBorder: border,
+      focusedBorder: border.copyWith(
+        borderSide: BorderSide(color: DesktopChrome.focusRing, width: 1.5),
       ),
     );
   }
@@ -253,27 +279,13 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
     maxLines: lines == 1 ? 1 : lines + 3,
     style: style,
     cursorWidth: 2,
-    decoration: InputDecoration(
-      labelText: label,
-      labelStyle: faint,
-      hintStyle: faint,
-      filled: false,
-      isDense: true,
-      contentPadding: EdgeInsets.symmetric(vertical: cell.height / 2),
-      border: InputBorder.none,
-      enabledBorder: InputBorder.none,
-      focusedBorder: InputBorder.none,
-    ),
+    decoration: _fieldDecoration(label),
     onChanged: changed,
   );
   Widget _action(String label, VoidCallback? callback, {Key? key}) =>
-      TerminalTextAction(
-        key: key,
-        label: label,
-        onPressed: callback,
-        padding: EdgeInsets.zero,
-      );
-  Widget _gap([double rows = 1]) => SizedBox(height: cell.height * rows);
+      DesktopPill(key: key, label: label, onPressed: callback);
+  Widget _gap([double groups = 1]) =>
+      SizedBox(height: DesktopChrome.groupGap * groups);
   String _memberName(String? id) {
     final member = model.members.where((m) => m['id'] == id).firstOrNull;
     final runtime = member?['runtime'] as Map?;
@@ -393,13 +405,10 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
       children: [
         for (var i = 0; i < 4; i++)
           Padding(
-            padding: EdgeInsets.only(bottom: cell.height),
+            padding: const EdgeInsets.only(bottom: 16),
             child: ColoredBox(
-              color: muted.withValues(alpha: .12),
-              child: SizedBox(
-                width: cell.width * (24 - i * 3),
-                height: cell.height,
-              ),
+              color: DesktopChrome.muted.withValues(alpha: .12),
+              child: SizedBox(width: 192 - i * 24, height: 16),
             ),
           ),
       ],
@@ -427,6 +436,7 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
             setState(() {});
           },
         ),
+        _gap(),
         _field(
           _description,
           'What are you building together?',
@@ -440,6 +450,7 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
           key: const Key('team-search'),
           changed: (_) => setState(() {}),
         ),
+        _gap(.5),
         Text(
           '${model.newMembers.length} selected · Connect introduces the team to these harnesses.',
           style: faint,
@@ -453,22 +464,20 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
                 Text('No matching harnesses.', style: faint),
               for (final candidate in candidates) ...[
                 _line(
-                  '${model.newMembers.containsKey(candidate.key) ? '[x]' : '[ ]'} ${candidate.name}',
+                  candidate.name,
                   model.pendingCreate || !candidate.available
                       ? null
                       : () => _toggle(candidate),
                   trailing:
                       '${candidate.engine} · ${candidate.available ? candidate.machineName : candidate.status}',
                   key: ValueKey('team-candidate-${candidate.agentId}'),
+                  checked: model.newMembers.containsKey(candidate.key),
                   semantics:
                       '${candidate.name}, ${candidate.engine}, ${candidate.status}',
                 ),
                 if (model.newMembers[candidate.key] case final member?)
                   Padding(
-                    padding: EdgeInsets.only(
-                      left: cell.width * 4,
-                      bottom: cell.height,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(36, 8, 0, 16),
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         final name = TextFormField(
@@ -476,12 +485,7 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
                           initialValue: member['name'] as String,
                           readOnly: model.pendingCreate,
                           style: style,
-                          decoration: InputDecoration(
-                            labelText: 'Team name',
-                            labelStyle: faint,
-                            isDense: true,
-                            border: InputBorder.none,
-                          ),
+                          decoration: _fieldDecoration('Team name'),
                           onChanged: (v) => member['name'] = v,
                         );
                         final role = TextFormField(
@@ -489,20 +493,15 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
                           initialValue: member['role'] as String,
                           readOnly: model.pendingCreate,
                           style: style,
-                          decoration: InputDecoration(
-                            labelText: 'Knows about',
-                            labelStyle: faint,
-                            isDense: true,
-                            border: InputBorder.none,
-                          ),
+                          decoration: _fieldDecoration('Knows about'),
                           onChanged: (v) => member['role'] = v,
                         );
-                        return constraints.maxWidth < cell.width * 50
-                            ? Column(children: [name, role])
+                        return constraints.maxWidth < 440
+                            ? Column(children: [name, _gap(), role])
                             : Row(
                                 children: [
-                                  SizedBox(width: cell.width * 22, child: name),
-                                  SizedBox(width: cell.width * 2),
+                                  SizedBox(width: 176, child: name),
+                                  const SizedBox(width: 16),
                                   Expanded(child: role),
                                 ],
                               );
@@ -515,8 +514,8 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
         ),
         _gap(),
         Wrap(
-          spacing: cell.width * 3,
-          runSpacing: cell.height,
+          spacing: 8,
+          runSpacing: 8,
           children: [
             _action(
               model.pendingCreate ? 'Check connection' : 'Connect teammates',
@@ -542,85 +541,80 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
     final selected = model.members
         .where((m) => m['id'] == _selectedMember)
         .firstOrNull;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text(
-          model.isChannel ? 'Harnesses in this swarm' : 'Teammates',
-          style: faint,
-        ),
-        _gap(),
-        Flexible(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              for (final member in model.members)
-                _line(
-                  model.isChannel
-                      ? _memberName(member['id'] as String?)
-                      : '@${member['name']}',
-                  () =>
-                      setState(() => _selectedMember = member['id'] as String),
-                  selected: _selectedMember == member['id'],
-                  trailing: member['enabled'] == false
-                      ? 'Removed'
-                      : (member['runtime'] as Map?)?['engine'] as String? ??
-                            'Offline',
-                  key: ValueKey('team-member-${member['id']}'),
-                ),
-            ],
-          ),
-        ),
-        if (selected != null) ...[
-          _gap(),
-          Text(selected['role'] as String? ?? '', style: faint),
-          _gap(),
+    return _scrollRegion(
+      _rosterScroll,
+      ListView(
+        controller: _rosterScroll,
+        children: [
           Text(
-            selected['enabled'] == false
-                ? 'Removed from team'
-                : (selected['runtime'] as Map?)?['available'] == true
-                ? 'Available'
-                : 'Offline · questions wait here',
-            style: faint,
+            model.isChannel ? 'Agents in this tab' : 'Teammates',
+            style: DesktopChrome.control(medium: true),
           ),
-          _gap(),
-          _action(
-            'Open harness',
-            () => widget.onOpen(
-              selected['machineId'] as String,
-              selected['agentId'] as String,
+          _gap(.5),
+          for (final member in model.members)
+            _line(
+              model.isChannel
+                  ? _memberName(member['id'] as String?)
+                  : '@${member['name']}',
+              () => setState(() => _selectedMember = member['id'] as String),
+              selected: _selectedMember == member['id'],
+              trailing: member['enabled'] == false
+                  ? 'Removed'
+                  : (member['runtime'] as Map?)?['engine'] as String? ??
+                        'Offline',
+              key: ValueKey('team-member-${member['id']}'),
             ),
-          ),
-          if (!model.isChannel) _gap(.5),
-          if (!model.isChannel)
+          if (selected != null) ...[
+            _gap(),
+            Text(selected['role'] as String? ?? '', style: faint),
+            _gap(),
+            Text(
+              selected['enabled'] == false
+                  ? 'Removed from team'
+                  : (selected['runtime'] as Map?)?['available'] == true
+                  ? 'Available'
+                  : 'Offline · questions wait here',
+              style: faint,
+            ),
+            _gap(),
             _action(
-              'Edit teammate',
-              model.operating ? null : () => _editMember(selected),
+              'Open session',
+              () => widget.onOpen(
+                selected['machineId'] as String,
+                selected['agentId'] as String,
+              ),
+            ),
+            if (!model.isChannel) _gap(.5),
+            if (!model.isChannel)
+              _action(
+                'Edit teammate',
+                model.operating ? null : () => _editMember(selected),
+              ),
+          ],
+          _gap(2),
+          if (!model.isChannel)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: _action(
+                'Ask teammate',
+                model.active
+                    ? () {
+                        setState(() {
+                          model.selectedExchange = null;
+                          if (selected?['enabled'] != false &&
+                              selected?['id'] != model.from &&
+                              selected != null) {
+                            model.to = selected['id'] as String;
+                          }
+                        });
+                        _questionFocus.requestFocus();
+                      }
+                    : null,
+                key: const Key('team-new-question'),
+              ),
             ),
         ],
-        _gap(2),
-        if (!model.isChannel)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: _action(
-              'Ask teammate',
-              model.active
-                  ? () {
-                      setState(() {
-                        model.selectedExchange = null;
-                        if (selected?['enabled'] != false &&
-                            selected?['id'] != model.from &&
-                            selected != null) {
-                          model.to = selected['id'] as String;
-                        }
-                      });
-                      _questionFocus.requestFocus();
-                    }
-                  : null,
-              key: const Key('team-new-question'),
-            ),
-          ),
-      ],
+      ),
     );
   }
 
@@ -693,21 +687,24 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
         cancel: () => Navigator.pop(context),
         child: _TeamSurface(
           width: 620,
-          child: Padding(
-            padding: EdgeInsets.all(cell.width * 2),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
                   adding ? 'Connect teammate' : 'Edit teammate',
-                  style: faint,
+                  style: DesktopChrome.heading(),
                 ),
+                _gap(),
                 _field(name, 'Team name'),
+                _gap(),
                 _field(role, 'Knows about'),
                 _gap(),
                 Wrap(
-                  spacing: cell.width * 3,
+                  spacing: 8,
+                  runSpacing: 8,
                   children: [
                     _action(
                       adding ? 'Connect' : 'Save',
@@ -770,8 +767,8 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
         Text('Ask a teammate', style: style),
         _gap(),
         Wrap(
-          spacing: cell.width * 3,
-          runSpacing: cell.height,
+          spacing: 8,
+          runSpacing: 8,
           children: [
             _action(
               'From @${_memberName(model.from)}',
@@ -820,7 +817,10 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
       ],
     ),
   );
-  Widget _conversation(Map<String, dynamic> exchange) {
+  Widget _conversation(
+    Map<String, dynamic> exchange, {
+    bool scrollable = true,
+  }) {
     final answer = (exchange['answer'] as Map?)?.cast<String, dynamic>();
     final from =
         model.members.where((m) => m['id'] == exchange['from']).firstOrNull ??
@@ -834,215 +834,365 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
     final toName =
         (exchange['toPeer'] as Map?)?['name'] ??
         _memberName(exchange['to'] as String?);
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            model.isChannel
-                ? '$fromName → $toName'
-                : '@${from?['name']} → @${to?['name']}',
-            style: style,
-          ),
-          Text(
-            '${exchange['origin'] == 'owner' ? 'Requested by you' : 'Agent question'} · ${exchange['state']} · ${teamDeliveryLabel((exchange['delivery'] as Map?)?.cast<String, dynamic>())}',
-            style: faint,
-          ),
-          _gap(),
-          SelectableText(exchange['text'] as String? ?? '', style: style),
-          if ((exchange['context'] as String? ?? '').isNotEmpty) ...[
-            _gap(),
-            SelectableText(exchange['context'] as String, style: faint),
-          ],
-          _gap(),
-          if (answer != null) ...[
-            Text(
-              '${answer['late'] == true ? 'Late answer' : 'Answer'} ${answer['origin'] == 'owner' ? 'supplied by you for' : 'from'} @${to?['name']}',
-              style: faint,
-            ),
-            _gap(.5),
-            SelectableText(answer['text'] as String, style: style),
-            for (final reference in answer['evidence'] as List? ?? [])
-              Padding(
-                padding: EdgeInsets.only(top: cell.height / 2),
-                child: SelectableText(reference.toString(), style: faint),
-              ),
-            _gap(),
-            Text(
-              answer['late'] == true
-                  ? 'Retained for reference. No automatic continuation.'
-                  : 'Return to @${from?['name']}: ${teamDeliveryLabel((exchange['continuation'] as Map?)?.cast<String, dynamic>())}',
-              style: faint,
-            ),
-          ] else
-            Text(
-              exchange['state'] == 'pending'
-                  ? 'Waiting for a correlated answer. Delivery alone does not mean the question is answered.'
-                  : 'This question is ${exchange['state']}.',
-              style: faint,
-            ),
-          if ((exchange['delivery'] as Map?)?['reason']
-              case final String reason) ...[
-            _gap(.5),
-            Text(reason, style: faint),
-          ],
-          _gap(),
-          Wrap(
-            spacing: cell.width * 3,
-            runSpacing: cell.height,
-            children: [
-              if (from != null)
-                _action(
-                  'Open @${from['name']}',
-                  () => widget.onOpen(
-                    from['machineId'] as String,
-                    from['agentId'] as String,
-                  ),
-                ),
-              if (to != null)
-                _action(
-                  'Open @${to['name']}',
-                  () => widget.onOpen(
-                    to['machineId'] as String,
-                    to['agentId'] as String,
-                  ),
-                ),
-              if (exchange['state'] == 'pending')
-                _action(
-                  'Cancel question',
-                  model.operating
-                      ? null
-                      : () => unawaited(
-                          model.act('cancel', {
-                            'questionId':
-                                exchange['questionId'] ?? exchange['id'],
-                            if (exchange['teamId'] != null)
-                              'teamId': exchange['teamId'],
-                          }),
-                        ),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _exchanges() {
-    final selected = model.exchanges
-        .where((e) => e['id'] == model.selectedExchange)
-        .firstOrNull;
-    return Column(
+    final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Exchanges', style: faint),
-        _gap(),
-        SizedBox(
-          height:
-              cell.height * math.min(6, math.max(2, model.exchanges.length)),
-          child: model.exchanges.isEmpty
-              ? Text('Questions and answers will appear here.', style: faint)
-              : ListView(
-                  children: [
-                    for (final exchange in model.exchanges)
-                      _line(
-                        '${(exchange['fromPeer'] as Map?)?['name'] ?? _memberName(exchange['from'] as String?)} → ${(exchange['toPeer'] as Map?)?['name'] ?? _memberName(exchange['to'] as String?)}  ${exchange['text']}',
-                        () => setState(
-                          () =>
-                              model.selectedExchange = exchange['id'] as String,
-                        ),
-                        selected: model.selectedExchange == exchange['id'],
-                        trailing: exchange['state'] as String,
-                        key: ValueKey('team-exchange-${exchange['id']}'),
-                      ),
-                  ],
-                ),
+        Text(
+          model.isChannel
+              ? '$fromName → $toName'
+              : '@${from?['name']} → @${to?['name']}',
+          style: style,
+        ),
+        Text(
+          '${exchange['origin'] == 'owner' ? 'Requested by you' : 'Agent question'} · ${exchange['state']} · ${teamDeliveryLabel((exchange['delivery'] as Map?)?.cast<String, dynamic>())}',
+          style: faint,
         ),
         _gap(),
-        Expanded(
-          child: selected == null
-              ? model.isChannel
-                    ? SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Agents consult relevant peers in this swarm and continue their work.',
-                              style: style,
-                            ),
-                            _gap(),
-                            Text(
-                              'Add a harness to this swarm to include its agent.',
-                              style: faint,
-                            ),
-                            for (final instruction in teamRows(
-                              model.team?['consultations'],
-                            ).reversed.take(5)) ...[
-                              _gap(),
-                              Text(
-                                'Consult requested for ${_memberName(instruction['memberId'] as String?)} · ${teamDeliveryLabel((instruction['receipt'] as Map?)?.cast<String, dynamic>())}',
-                                style: faint,
-                              ),
-                            ],
-                          ],
-                        ),
-                      )
-                    : _composer()
-              : _conversation(selected),
+        SelectableText(exchange['text'] as String? ?? '', style: style),
+        if ((exchange['context'] as String? ?? '').isNotEmpty) ...[
+          _gap(),
+          SelectableText(exchange['context'] as String, style: faint),
+        ],
+        _gap(),
+        if (answer != null) ...[
+          Text(
+            '${answer['late'] == true ? 'Late answer' : 'Answer'} ${answer['origin'] == 'owner' ? 'supplied by you for' : 'from'} @${to?['name']}',
+            style: faint,
+          ),
+          _gap(.5),
+          SelectableText(answer['text'] as String, style: style),
+          for (final reference in answer['evidence'] as List? ?? [])
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: SelectableText(reference.toString(), style: faint),
+            ),
+          _gap(),
+          Text(
+            answer['late'] == true
+                ? 'Retained for reference. No automatic continuation.'
+                : 'Return to @${from?['name']}: ${teamDeliveryLabel((exchange['continuation'] as Map?)?.cast<String, dynamic>())}',
+            style: faint,
+          ),
+        ] else
+          Text(
+            exchange['state'] == 'pending'
+                ? 'Waiting for a correlated answer. Delivery alone does not mean the question is answered.'
+                : 'This question is ${exchange['state']}.',
+            style: faint,
+          ),
+        if ((exchange['delivery'] as Map?)?['reason']
+            case final String reason) ...[
+          _gap(.5),
+          Text(reason, style: faint),
+        ],
+        _gap(),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (from != null)
+              _action(
+                'Open @${from['name']}',
+                () => widget.onOpen(
+                  from['machineId'] as String,
+                  from['agentId'] as String,
+                ),
+              ),
+            if (to != null)
+              _action(
+                'Open @${to['name']}',
+                () => widget.onOpen(
+                  to['machineId'] as String,
+                  to['agentId'] as String,
+                ),
+              ),
+            if (exchange['state'] == 'pending')
+              _action(
+                'Cancel question',
+                model.operating
+                    ? null
+                    : () => unawaited(
+                        model.act('cancel', {
+                          'questionId':
+                              exchange['questionId'] ?? exchange['id'],
+                          if (exchange['teamId'] != null)
+                            'teamId': exchange['teamId'],
+                        }),
+                      ),
+              ),
+          ],
         ),
       ],
     );
+    return scrollable
+        ? _scrollRegion(
+            _conversationScroll,
+            SingleChildScrollView(
+              controller: _conversationScroll,
+              child: content,
+            ),
+          )
+        : content;
   }
+
+  Widget _selectedConversation({bool scrollable = true}) {
+    final selected = model.exchanges
+        .where((e) => e['id'] == model.selectedExchange)
+        .firstOrNull;
+    if (selected != null) {
+      return _conversation(selected, scrollable: scrollable);
+    }
+    if (!model.isChannel) return _composer();
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Agents consult relevant peers in this tab and continue their work.',
+          style: style,
+        ),
+        _gap(),
+        Text('Add another agent pane to include it in this tab.', style: faint),
+        for (final instruction in teamRows(
+          model.team?['consultations'],
+        ).reversed.take(5)) ...[
+          _gap(),
+          Text(
+            'Consult requested for ${_memberName(instruction['memberId'] as String?)} · ${teamDeliveryLabel((instruction['receipt'] as Map?)?.cast<String, dynamic>())}',
+            style: faint,
+          ),
+        ],
+      ],
+    );
+    return scrollable
+        ? _scrollRegion(
+            _conversationScroll,
+            SingleChildScrollView(
+              controller: _conversationScroll,
+              child: content,
+            ),
+          )
+        : content;
+  }
+
+  Widget _exchangeList() => _scrollRegion(
+    _exchangeScroll,
+    ListView(
+      key: const ValueKey('team-exchanges'),
+      controller: _exchangeScroll,
+      shrinkWrap: true,
+      children: [
+        for (final exchange in model.exchanges)
+          _line(
+            '${(exchange['fromPeer'] as Map?)?['name'] ?? _memberName(exchange['from'] as String?)} → ${(exchange['toPeer'] as Map?)?['name'] ?? _memberName(exchange['to'] as String?)}',
+            () => setState(
+              () => model.selectedExchange = exchange['id'] as String,
+            ),
+            detail: exchange['text'] as String? ?? '',
+            selected: model.selectedExchange == exchange['id'],
+            trailing: exchange['state'] as String,
+            key: ValueKey('team-exchange-${exchange['id']}'),
+          ),
+      ],
+    ),
+  );
+
+  Widget _exchanges() => LayoutBuilder(
+    builder: (context, constraints) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Exchanges', style: DesktopChrome.control(medium: true)),
+        _gap(.5),
+        if (model.exchanges.isEmpty)
+          Text('Questions and answers will appear here.', style: faint)
+        else
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: math.min(224, constraints.maxHeight * .38),
+            ),
+            child: _exchangeList(),
+          ),
+        _gap(),
+        Expanded(child: _selectedConversation()),
+      ],
+    ),
+  );
+
+  Widget _summary() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (model.selectedId != null && !_creating) ...[
+        Text(
+          '${model.isChannel ? 'Tab conversation · ' : ''}${model.members.where((m) => m['enabled'] != false).length} agents · ${model.isChannel ? 'This tab only · ' : ''}${model.team?['state'] ?? 'Connecting'}',
+          style: faint,
+        ),
+        _gap(.5),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (!model.isChannel)
+              _action(
+                'All teams',
+                model.operating ? null : () => unawaited(model.select(null)),
+              ),
+            if (model.team?['state'] != 'archived')
+              _action(
+                model.active ? 'Pause collaboration' : 'Resume collaboration',
+                model.operating || model.team == null
+                    ? null
+                    : () => unawaited(
+                        model.act(model.active ? 'pause' : 'resume'),
+                      ),
+              ),
+            if (!model.isChannel && model.team?['state'] != 'archived')
+              _action(
+                model.pendingAdd ? 'Check teammate' : 'Add teammate',
+                model.operating ? null : _addMember,
+              ),
+            if (!model.isChannel)
+              _action(
+                'New question',
+                model.active
+                    ? () => setState(() {
+                        model.selectedExchange = null;
+                        _questionFocus.requestFocus();
+                      })
+                    : null,
+                key: const Key('team-compose'),
+              ),
+            if (!model.isChannel && model.team?['state'] == 'paused')
+              _action(
+                'Archive paused team',
+                model.operating ? null : () => unawaited(model.act('archive')),
+              ),
+          ],
+        ),
+        _gap(),
+      ],
+      if (model.error case final message?) ...[
+        Semantics(
+          liveRegion: true,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 160),
+            child: SingleChildScrollView(
+              child: SelectableText(
+                message,
+                style: DesktopChrome.text(
+                  size: 13,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+              ),
+            ),
+          ),
+        ),
+        _gap(),
+      ],
+    ],
+  );
 
   Widget _detail() {
     if (model.team == null) {
-      return model.loading
-          ? _loadingRows()
-          : Align(
-              alignment: Alignment.topLeft,
-              child: _action(
-                model.isChannel ? 'Retry reading swarm' : 'Retry reading team',
+      return SingleChildScrollView(
+        controller: _compactScroll,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _summary(),
+            if (model.loading)
+              _loadingRows()
+            else
+              _action(
+                model.isChannel ? 'Retry reading tab' : 'Retry reading team',
                 () => unawaited(model.refresh()),
               ),
-            );
+          ],
+        ),
+      );
     }
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < cell.width * 90) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                height: cell.height * 2,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  children: [
-                    for (final m in model.members)
-                      Padding(
-                        padding: EdgeInsets.only(right: cell.width * 2),
-                        child: _action(
-                          '${m['name']}',
-                          () => model.isChannel
-                              ? widget.onOpen(
-                                  m['machineId'] as String,
-                                  m['agentId'] as String,
-                                )
-                              : _editMember(m),
-                        ),
+        final scale = grid.appTextScaleOf(context);
+        if (constraints.maxWidth < 760 * scale ||
+            constraints.maxHeight < 420 * scale) {
+          return _scrollRegion(
+            _compactScroll,
+            SingleChildScrollView(
+              key: const ValueKey('team-compact-content'),
+              controller: _compactScroll,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _summary(),
+                  Text(
+                    model.isChannel ? 'Agents in this tab' : 'Teammates',
+                    style: DesktopChrome.control(medium: true),
+                  ),
+                  _gap(.5),
+                  SizedBox(
+                    height: math.max(
+                      36,
+                      MediaQuery.textScalerOf(context).scale(19) + 16,
+                    ),
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      children: [
+                        for (final member in model.members)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: _action(
+                              model.isChannel
+                                  ? _memberName(member['id'] as String?)
+                                  : '${member['name']}',
+                              () => model.isChannel
+                                  ? widget.onOpen(
+                                      member['machineId'] as String,
+                                      member['agentId'] as String,
+                                    )
+                                  : _editMember(member),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  _gap(),
+                  Text('Exchanges', style: DesktopChrome.control(medium: true)),
+                  _gap(.5),
+                  if (model.exchanges.isEmpty)
+                    Text(
+                      'Questions and answers will appear here.',
+                      style: faint,
+                    )
+                  else
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: math.min(224, constraints.maxHeight * .45),
                       ),
-                  ],
-                ),
+                      child: _exchangeList(),
+                    ),
+                  _gap(),
+                  _selectedConversation(scrollable: false),
+                ],
               ),
-              Expanded(child: _exchanges()),
-            ],
+            ),
           );
         }
-        return Row(
+        return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizedBox(width: cell.width * 28, child: _roster()),
-            SizedBox(width: cell.width * 3),
-            Expanded(child: _exchanges()),
+            _summary(),
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SizedBox(width: 240, child: _roster()),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: VerticalDivider(width: 1, color: DesktopChrome.rim),
+                  ),
+                  Expanded(child: _exchanges()),
+                ],
+              ),
+            ),
           ],
         );
       },
@@ -1051,154 +1201,83 @@ class _TeamWorkspaceState extends State<TeamWorkspace> {
 
   @override
   Widget build(BuildContext context) {
-    TerminalFontScope.watch(context);
     grid.AppTheme.watch(context);
-    return ListenableBuilder(
-      listenable: Listenable.merge([terminalFontStore, terminalThemeStore]),
-      builder: (context, _) {
-        final theme = terminalThemeFor(
-          grid.AppTheme.palette.value,
-          terminalThemeStore.value,
-        );
-        cell = terminalCellSizeOf(context);
-        foreground = theme.foreground;
-        // Read off the scheme's own ground, not the app palette's: Tango stays
-        // dark under a light palette. Near-black at .6 on a light ground is
-        // 3.9:1, so a light scheme takes .7 (≥5.4:1); a dark one keeps .6.
-        muted = foreground.withValues(
-          alpha: theme.background.computeLuminance() > .5 ? .7 : .6,
-        );
-        selection = theme.selection;
-        final title = _creating
-            ? 'Connect a team'
-            : model.team?['name'] as String? ??
-                  (model.isChannel ? 'Swarm conversation' : 'Team');
-        return TerminalPromptKeys(
-          cancel: widget.onClose,
-          refresh: () => unawaited(model.refresh()),
-          submit: model.isChannel ? null : () => unawaited(model.ask()),
-          child: _TeamSurface(
-            width: 1140,
-            child: SizedBox(
-              height: math.min(
-                cell.height * 35,
-                MediaQuery.sizeOf(context).height * .82,
-              ),
-              child: Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: cell.width * 2,
-                  vertical: cell.height,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+    final short =
+        MediaQuery.sizeOf(context).height < 520 * grid.appTextScaleOf(context);
+    final title = _creating
+        ? 'Connect a team'
+        : model.team?['name'] as String? ??
+              (model.isChannel ? 'Tab conversation' : 'Team');
+    final hint =
+        '${terminalPromptHint(context, 'picker.complete', 'Tab')} move · ${terminalPromptHint(context, 'picker.cancel', 'Esc')} close · conversations stay with the ${model.isChannel ? 'tab' : 'team'}';
+    return TerminalPromptKeys(
+      cancel: widget.onClose,
+      refresh: () => unawaited(model.refresh()),
+      submit: model.isChannel ? null : () => unawaited(model.ask()),
+      pageDown: () => _page(1),
+      pageUp: () => _page(-1),
+      child: _TeamSurface(
+        width: 1140,
+        child: SizedBox(
+          height: 680,
+          child: Padding(
+            padding: EdgeInsets.all(short ? 16 : 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            title,
-                            style: style,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        _action('Close', widget.onClose),
-                      ],
-                    ),
-                    _gap(),
-                    if (model.selectedId != null && !_creating) ...[
-                      Wrap(
-                        spacing: cell.width * 3,
-                        runSpacing: cell.height / 2,
-                        children: [
-                          if (!model.isChannel)
-                            _action(
-                              'All teams',
-                              model.operating
-                                  ? null
-                                  : () => unawaited(model.select(null)),
-                            ),
-                          Text(
-                            '${model.isChannel ? 'Swarm conversation · ' : ''}${model.members.where((m) => m['enabled'] != false).length} harnesses · ${model.isChannel ? 'This swarm only · ' : ''}${model.team?['state'] ?? 'Connecting'}',
-                            style: faint,
-                          ),
-                          if (model.team?['state'] != 'archived')
-                            _action(
-                              model.active
-                                  ? 'Pause collaboration'
-                                  : 'Resume collaboration',
-                              model.operating || model.team == null
-                                  ? null
-                                  : () => unawaited(
-                                      model.act(
-                                        model.active ? 'pause' : 'resume',
-                                      ),
-                                    ),
-                            ),
-                          if (!model.isChannel &&
-                              model.team?['state'] != 'archived')
-                            _action(
-                              model.pendingAdd
-                                  ? 'Check teammate'
-                                  : 'Add teammate',
-                              model.operating ? null : _addMember,
-                            ),
-                          if (!model.isChannel)
-                            _action(
-                              'New question',
-                              model.active
-                                  ? () => setState(() {
-                                      model.selectedExchange = null;
-                                      _questionFocus.requestFocus();
-                                    })
-                                  : null,
-                              key: const Key('team-compose'),
-                            ),
-                          if (!model.isChannel &&
-                              model.team?['state'] == 'paused')
-                            _action(
-                              'Archive paused team',
-                              model.operating
-                                  ? null
-                                  : () => unawaited(model.act('archive')),
-                            ),
-                        ],
-                      ),
-                      _gap(),
-                    ],
-                    if (model.error case final message?) ...[
-                      Semantics(
-                        liveRegion: true,
+                    Expanded(
+                      child: Tooltip(
+                        message: title,
                         child: Text(
-                          message,
-                          style: style,
-                          maxLines: 3,
+                          title,
+                          style: DesktopChrome.heading(),
+                          maxLines: short ? 1 : 2,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      _gap(),
-                    ],
-                    Expanded(
-                      child: _creating
-                          ? _create()
-                          : model.selectedId == null && !model.isChannel
-                          ? _home()
-                          : _detail(),
                     ),
-                    _gap(),
-                    Text(
-                      '${terminalPromptHint(context, 'picker.complete', 'Tab')} move · ${terminalPromptHint(context, 'picker.cancel', 'Esc')} close · conversations stay with the ${model.isChannel ? 'swarm' : 'team'}',
+                    const SizedBox(width: 8),
+                    IconButton(
+                      key: const ValueKey('team-close'),
+                      tooltip: 'Close conversation',
+                      onPressed: widget.onClose,
+                      icon: const Icon(AppIcons.close, size: 18),
+                    ),
+                  ],
+                ),
+                _gap(short ? .5 : 1),
+                Expanded(
+                  child:
+                      _creating ||
+                          (model.selectedId == null && !model.isChannel)
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _summary(),
+                            Expanded(child: _creating ? _create() : _home()),
+                          ],
+                        )
+                      : _detail(),
+                ),
+                if (!short) ...[
+                  _gap(),
+                  Tooltip(
+                    message: hint,
+                    child: Text(
+                      hint,
                       style: faint,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                ],
+              ],
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }
@@ -1208,26 +1287,142 @@ class _TeamSurface extends StatelessWidget {
   final Widget child;
   final double width;
   @override
-  Widget build(BuildContext context) => Dialog(
-    elevation: 0,
-    insetPadding: const EdgeInsets.all(20),
-    backgroundColor: Colors.transparent,
-    child: SizedBox(
-      width: width,
-      child: Material(
-        color: terminalThemeFor(
-          grid.AppTheme.palette.value,
-          terminalThemeStore.value,
-        ).background,
-        shape: RoundedRectangleBorder(
-          side: terminalPaneBorder(focused: true),
-          borderRadius: BorderRadius.circular(kTerminalCornerRadius),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: child,
+  Widget build(BuildContext context) => DesktopChrome(
+    child: Dialog(
+      elevation: 0,
+      insetPadding: const EdgeInsets.all(16),
+      backgroundColor: Colors.transparent,
+      child: SizedBox(
+        width: width,
+        child: DesktopDialogSurface(child: child),
       ),
     ),
   );
+}
+
+class _TeamRow extends StatelessWidget {
+  const _TeamRow({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.detail,
+    this.trailing,
+    this.selected = false,
+    this.checked,
+    this.semanticLabel,
+  });
+  final String label;
+  final String? detail, trailing, semanticLabel;
+  final VoidCallback? onPressed;
+  final bool selected;
+  final bool? checked;
+
+  @override
+  Widget build(BuildContext context) {
+    final highContrast = MediaQuery.highContrastOf(context);
+    return Semantics(
+      selected: selected,
+      checked: checked,
+      label: semanticLabel,
+      child: TextButton(
+        onPressed: onPressed,
+        style:
+            TextButton.styleFrom(
+              foregroundColor: DesktopChrome.foreground,
+              disabledForegroundColor: DesktopChrome.muted,
+              backgroundColor: selected
+                  ? DesktopChrome.selection
+                  : Colors.transparent,
+              minimumSize: const Size(0, 32),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              textStyle: DesktopChrome.control(),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(
+                  DesktopChrome.controlRadius,
+                ),
+              ),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              splashFactory: NoSplash.splashFactory,
+            ).copyWith(
+              side: WidgetStateProperty.resolveWith(
+                (states) => BorderSide(
+                  width: 1.5,
+                  color: states.contains(WidgetState.focused)
+                      ? (highContrast
+                            ? DesktopChrome.accent
+                            : DesktopChrome.focusRing)
+                      : Colors.transparent,
+                ),
+              ),
+              overlayColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.disabled)
+                    ? Colors.transparent
+                    : states.contains(WidgetState.pressed)
+                    ? DesktopChrome.foreground.withValues(alpha: .12)
+                    : states.contains(WidgetState.hovered)
+                    ? DesktopChrome.foreground.withValues(alpha: .06)
+                    : Colors.transparent,
+              ),
+            ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (checked != null) ...[
+              ExcludeSemantics(
+                child: ExcludeFocus(
+                  child: IgnorePointer(
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: Checkbox(
+                        value: checked,
+                        onChanged: onPressed == null ? null : (_) {},
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Tooltip(
+                    message: label,
+                    child: Text(
+                      label,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: DesktopChrome.control(medium: true),
+                    ),
+                  ),
+                  if (detail != null && detail!.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      detail!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: DesktopChrome.text(
+                        size: 13,
+                        color: DesktopChrome.muted,
+                      ),
+                    ),
+                  ],
+                  if (trailing != null && trailing!.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(trailing!, style: DesktopChrome.metadata()),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _TeamChoice extends StatefulWidget {
@@ -1241,95 +1436,81 @@ class _TeamChoice extends StatefulWidget {
 class _TeamChoiceState extends State<_TeamChoice> {
   int _index = 0;
   final _scroll = ScrollController();
+  final _rows = <String, GlobalKey>{};
   @override
   void dispose() {
     _scroll.dispose();
     super.dispose();
   }
 
+  void _move(int delta) {
+    setState(
+      () => _index = (_index + delta).clamp(
+        0,
+        math.max(0, widget.choices.length - 1),
+      ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || widget.choices.isEmpty) return;
+      final row = _rows[widget.choices[_index].id]?.currentContext;
+      if (row != null) Scrollable.ensureVisible(row);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    final cell = terminalCellSizeOf(context), style = terminalContentStyle();
-    final theme = terminalThemeFor(
-      grid.AppTheme.palette.value,
-      terminalThemeStore.value,
-    );
-    void move(int delta) {
-      setState(
-        () => _index = (_index + delta).clamp(
-          0,
-          math.max(0, widget.choices.length - 1),
-        ),
-      );
-      if (_scroll.hasClients) {
-        final top = _index * cell.height;
-        final bottom = top + cell.height;
-        final offset = top < _scroll.offset
-            ? top
-            : bottom > _scroll.offset + _scroll.position.viewportDimension
-            ? bottom - _scroll.position.viewportDimension
-            : _scroll.offset;
-        _scroll.jumpTo(offset.clamp(0, _scroll.position.maxScrollExtent));
-      }
-    }
-
+    grid.AppTheme.watch(context);
     return TerminalPromptKeys(
       cancel: () => Navigator.pop(context),
-      previous: () => move(-1),
-      next: () => move(1),
+      previous: () => _move(-1),
+      next: () => _move(1),
       accept: () {
         if (widget.choices.isNotEmpty) {
           Navigator.pop(context, widget.choices[_index].id);
         }
       },
       child: _TeamSurface(
-        width: 660,
+        width: 480,
         child: Padding(
-          padding: EdgeInsets.all(cell.width * 2),
+          padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                widget.title,
-                style: style.copyWith(color: theme.foreground),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(widget.title, style: DesktopChrome.heading()),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: 'Close chooser',
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(AppIcons.close, size: 18),
+                  ),
+                ],
               ),
-              SizedBox(height: cell.height),
+              const SizedBox(height: 16),
               Flexible(
-                child: ListView(
+                child: SingleChildScrollView(
                   controller: _scroll,
-                  shrinkWrap: true,
-                  children: [
-                    for (var i = 0; i < widget.choices.length; i++)
-                      SizedBox(
-                        height: cell.height,
-                        child: TextButton(
-                          style: TextButton.styleFrom(
-                            textStyle: style,
-                            foregroundColor: theme.foreground,
-                            backgroundColor: i == _index
-                                ? theme.selection
-                                : Colors.transparent,
-                            minimumSize: Size.zero,
-                            padding: EdgeInsets.symmetric(
-                              horizontal: cell.width,
-                            ),
-                            shape: const RoundedRectangleBorder(),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (var i = 0; i < widget.choices.length; i++)
+                        _TeamRow(
+                          key: _rows.putIfAbsent(
+                            widget.choices[i].id,
+                            GlobalKey.new,
                           ),
+                          label: widget.choices[i].label,
+                          detail: widget.choices[i].detail,
+                          selected: i == _index,
                           onPressed: () =>
                               Navigator.pop(context, widget.choices[i].id),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              '${widget.choices[i].label}  ${widget.choices[i].detail}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ],

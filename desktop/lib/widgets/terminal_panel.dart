@@ -6,9 +6,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
@@ -18,9 +18,11 @@ import '../core/project_folder.dart';
 import '../core/models.dart';
 import '../core/runtime_platform.dart';
 import '../state/app_state.dart';
+import '../state/harness_activity.dart';
 import '../state/model_start_watch.dart';
 
 import 'agent_drag.dart';
+import 'box_chrome.dart';
 import 'rename_agent_dialog.dart';
 import 'terminal_composer.dart';
 import '../shortcuts/app_keymap.dart';
@@ -43,9 +45,11 @@ import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/workspace_bar_style.dart';
 import '../theme/app_theme.dart';
 import 'engine_identity.dart';
+import 'harness_agent_control.dart';
 import 'harness_activity_mark.dart';
 import 'grid_model_picker.dart';
 import 'pane_header_actions.dart';
+import 'pane_share_badge.dart';
 import 'pane_model_status.dart';
 
 /// The pane header's own horizontal inset.
@@ -67,10 +71,8 @@ typedef TerminalNotice = ({
   String? actionLabel,
   VoidCallback? onAction,
 
-  /// Whether this one also earns the band across the top of the pane, over the
-  /// output. The chip is the resting place for a notice; the band is for the
-  /// few that are CONFUSING as well as blocking — a pane still printing while
-  /// its keyboard is locked — where the sentence has to be read, not hovered.
+  /// Whether this one also earns a band above the terminal output.
+  /// Startup and failure guidance needs to be read, not hovered.
   /// An offline machine is neither confusing nor rare, and a band on every one
   /// of those would cost rows in every tile.
   bool banner,
@@ -105,6 +107,9 @@ bool get isTouchBrowser =>
     (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS);
 
+/// Safari (or any browser) on an iPhone or iPad.
+bool get isIOSBrowser => kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+
 class TerminalPanel extends StatefulWidget {
   final AppNotifier notifier;
   final TerminalSession session;
@@ -112,6 +117,12 @@ class TerminalPanel extends StatefulWidget {
   /// Takes this tile off the grid. Null when the terminal is the whole window,
   /// where there is nothing to close it back to.
   final VoidCallback? onClose;
+
+  /// Opens the workspace's shared model picker for this exact pane.
+  final VoidCallback? onOpenModels;
+
+  /// Creates a new harness beside this exact pane.
+  final VoidCallback? onSplitDown, onSplitRight;
 
   final VoidCallback? onDelete;
 
@@ -185,6 +196,9 @@ class TerminalPanel extends StatefulWidget {
     this.notice,
     this.onToggleComposer,
     this.onClose,
+    this.onOpenModels,
+    this.onSplitDown,
+    this.onSplitRight,
     this.onDelete,
     this.onToggleZoom,
     this.zoomed = false,
@@ -310,6 +324,7 @@ class _TerminalPanelState extends State<TerminalPanel>
     WidgetsBinding.instance.addObserver(this);
     widget.session.attachViewport(this);
     widget.session.addListener(_onSessionChanged);
+    widget.session.remoteCursorVisibility.addListener(_syncCursorBlink);
     terminalFontStore.addListener(_onFontChanged);
     // Colours repaint the view in place — no relayout, no resize frame — but
     // they still need a rebuild to reach it, and this widget reads the store
@@ -401,9 +416,11 @@ class _TerminalPanelState extends State<TerminalPanel>
       _previewProgress = null;
       oldWidget.session.setCursorBlinkPhase(true);
       oldWidget.session.removeListener(_onSessionChanged);
+      oldWidget.session.remoteCursorVisibility.removeListener(_syncCursorBlink);
       oldWidget.session.detachViewport(this);
       widget.session.attachViewport(this);
       widget.session.addListener(_onSessionChanged);
+      widget.session.remoteCursorVisibility.addListener(_syncCursorBlink);
       _composerFocusPending = false;
       _cancelDialInertia();
       _controller.clearSelection();
@@ -490,6 +507,7 @@ class _TerminalPanelState extends State<TerminalPanel>
     _observeLinkModifiers(false);
     widget.session.setCursorBlinkPhase(true);
     widget.session.removeListener(_onSessionChanged);
+    widget.session.remoteCursorVisibility.removeListener(_syncCursorBlink);
     widget.session.detachViewport(this);
     terminalFontStore.removeListener(_onFontChanged);
     terminalThemeStore.removeListener(_onFontChanged);
@@ -798,11 +816,10 @@ class _TerminalPanelState extends State<TerminalPanel>
   /// usually a beat long — the app reattaches them itself
   /// (`_paneNeedsAttach`) — and a band that flashes up for those frames is
   /// noise, where a taken-over pane stays taken over until somebody acts.
-  /// Never a pane-level [TerminalPanel.notice] (offline, unlinked — nothing
-  /// here would help) and never a shared read-only view.
+  /// Unavailable/read-only panes cannot take control. A writable startup
+  /// notice must still allow it: setup prompts need a controlling client.
   bool get _inputBlocked =>
       !widget.readOnly &&
-      widget.notice == null &&
       // A watcher is the same situation seen from the other side: this window
       // has the output but another client has the terminal, and the band's
       // button is how a person here asks for it.
@@ -938,6 +955,7 @@ class _TerminalPanelState extends State<TerminalPanel>
         !widget.readOnly &&
         _focusNode.hasFocus &&
         widget.session.acceptsInput &&
+        widget.session.remoteCursorVisibility.value &&
         (_tickerMode?.value.enabled ?? false) &&
         (lifecycle == null || lifecycle == AppLifecycleState.resumed);
     if (!enabled) {
@@ -959,8 +977,9 @@ class _TerminalPanelState extends State<TerminalPanel>
   void _setCursorBlinkVisible(bool visible) {
     if (visible == _cursorBlinkVisible) return;
     _cursorBlinkVisible = visible;
-    widget.session.setCursorBlinkPhase(visible);
-    _repaintTerminalCursor();
+    if (widget.session.setCursorBlinkPhase(visible)) {
+      _repaintTerminalCursor();
+    }
   }
 
   void _repaintTerminalCursor() {
@@ -2152,95 +2171,109 @@ class _TerminalPanelState extends State<TerminalPanel>
     final machineState = widget.notifier.stateOf(session.machineId);
     final remote = machineState != null && !machineState.isLocalMachine;
     final showComposer = _showsComposer;
+    // Over a Background: each part paints its own fill at this opacity (the
+    // header, the screen) or solid (the composer), over nothing — a fill
+    // underneath them all would stack with theirs.
+    final paneOpacity = PaneOpacity.of(context);
+    final chromeFill = PaneOpacity.fill(context, grid.AppPalette.windowBg);
     return KeymapRegion(
       contextKind: KeymapContext.terminal,
       composing: () =>
           _focusNode.hasFocus &&
           _terminalViewKey.currentState?.isComposing == true,
       child: ColoredBox(
-        color: grid.AppPalette.windowBg,
+        color: paneOpacity < 1 ? Colors.transparent : grid.AppPalette.windowBg,
         child: Column(
           children: [
             if (widget.showHeader)
-              Stack(
-                children: [
-                  Visibility(
-                    visible: _find == null,
-                    maintainSize: true,
-                    maintainAnimation: true,
-                    maintainState: true,
-                    child: _buildHeader(context),
-                  ),
-                  // Attach the focused pane's input before Find is requested.
-                  // Hidden/unfocused panes need no dormant editor or index.
-                  if (_find != null || (widget.visible && widget.focused))
-                    Positioned.fill(
-                      child: Offstage(
-                        offstage: _find == null,
-                        child: LayoutBuilder(
-                          builder: (context, constraints) => Row(
-                            children: [
-                              if (constraints.maxWidth > 520)
-                                Expanded(
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: _stripPadding,
-                                    ),
-                                    child: Text(
-                                      session.agentName,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      // The header's own ink, which this
-                                      // line stands in for while Find is open.
-                                      style: grid.AppType.monoLabel(
-                                        color: terminalThemeFor(
-                                          grid.AppTheme.palette.value,
-                                          terminalThemeStore.value,
-                                        ).foreground.withValues(alpha: .70),
-                                        fontWeight: FontWeight.w400,
+              ColoredBox(
+                color: chromeFill,
+                child: Stack(
+                  children: [
+                    Visibility(
+                      visible: _find == null,
+                      maintainSize: true,
+                      maintainAnimation: true,
+                      maintainState: true,
+                      child: _buildHeader(context),
+                    ),
+                    // Attach the focused pane's input before Find is requested.
+                    // Hidden/unfocused panes need no dormant editor or index.
+                    if (_find != null || (widget.visible && widget.focused))
+                      Positioned.fill(
+                        child: Offstage(
+                          offstage: _find == null,
+                          child: LayoutBuilder(
+                            builder: (context, constraints) => Row(
+                              children: [
+                                if (constraints.maxWidth > 520)
+                                  Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: _stripPadding,
+                                      ),
+                                      child: Text(
+                                        session.agentName,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        // The header's own ink, which this
+                                        // line stands in for while Find is open.
+                                        style: grid.AppType.monoLabel(
+                                          color: terminalThemeFor(
+                                            grid.AppTheme.palette.value,
+                                            terminalThemeStore.value,
+                                          ).foreground.withValues(alpha: .70),
+                                          fontWeight: FontWeight.w400,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                )
-                              else
-                                const Spacer(),
-                              SizedBox(
-                                width: math.min(constraints.maxWidth, 380),
+                                  )
+                                else
+                                  const Spacer(),
+                                SizedBox(
+                                  width: math.min(constraints.maxWidth, 380),
 
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 6,
-                                    vertical: 4,
-                                  ),
-                                  child: TerminalFindBar(
-                                    key: _findBarKey,
-                                    search: _find,
-                                    initialQuery: _lastFindQuery,
-                                    initialCaseSensitive:
-                                        _lastFindCaseSensitive,
-                                    readOnly:
-                                        widget.readOnly ||
-                                        !session.acceptsInput,
-                                    onQuery: _queryFind,
-                                    onStep: _stepFind,
-                                    onClose: _closeFind,
-                                    onFocus: () =>
-                                        widget.onRendererFocus?.call(),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 4,
+                                    ),
+                                    child: TerminalFindBar(
+                                      key: _findBarKey,
+                                      search: _find,
+                                      initialQuery: _lastFindQuery,
+                                      initialCaseSensitive:
+                                          _lastFindCaseSensitive,
+                                      readOnly:
+                                          widget.readOnly ||
+                                          !session.acceptsInput,
+                                      onQuery: _queryFind,
+                                      onStep: _stepFind,
+                                      onClose: _closeFind,
+                                      onFocus: () =>
+                                          widget.onRendererFocus?.call(),
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
 
             // Goes with the row above it: the phone draws its own rule under
             // [PhoneHeader], and keeping this one would stack two.
             if (widget.showHeader) Divider(height: 1, color: AppColors.border),
             ?_modelNote(),
+            // Reserve space for launch guidance so it cannot cover the shell
+            // prompt on the first line. Stream-ownership notices below remain
+            // overlays over frozen output until control is restored.
+            if (widget.notice case final notice?
+                when notice.banner && !_inputBlocked && !_retakingControl)
+              _ControlBanner.notice(notice),
             Expanded(
               // Any press into the pane's body — the terminal, the band, its
               // scrollbar; not the header, which is chrome — is the person
@@ -2294,6 +2327,7 @@ class _TerminalPanelState extends State<TerminalPanel>
                                 terminalThemeStore.value,
                               ),
                               padding: const EdgeInsets.all(10),
+                              backgroundOpacity: paneOpacity,
                               textStyle: terminalFontStore.value,
                               // The chosen point size already sizes each terminal cell.
                               // Applying the OS text scale again would change rows/cols
@@ -2311,6 +2345,13 @@ class _TerminalPanelState extends State<TerminalPanel>
                                   : SystemMouseCursors.text,
                               onSecondaryTapDown: (_, _) => _copyOrPaste(),
                               deleteDetection: isTouchBrowser,
+                              // A <textarea>, not an <input>: iOS Safari hangs
+                              // its AutoFill bar (passwords, cards, places)
+                              // over the keyboard for every <input>. Return
+                              // still submits: see CustomTextEdit's action echo.
+                              keyboardType: isIOSBrowser
+                                  ? TextInputType.multiline
+                                  : TextInputType.text,
 
                               onAltBufferScroll: session.scrollViaTmuxCopyMode
                                   ? (up) => session.sendScrollCommand(up, 1)
@@ -2324,13 +2365,6 @@ class _TerminalPanelState extends State<TerminalPanel>
                     // frozen output itself, where the eyes already are, and
                     // stays through `opening` so the pane does not jump when
                     // it is answered.
-                    //
-                    // It also carries a pane-level notice that has something to
-                    // DO about itself (a failed start offering Check again or
-                    // Restart). One strip, never two: a noticed pane is already
-                    // excluded from `_inputBlocked` — nothing the takeover band
-                    // offers would help a pane whose machine or launch is the
-                    // problem — so these two conditions cannot both hold.
                     if (_passageId != null && !_inputBlocked)
                       Positioned(
                         top: 0,
@@ -2359,14 +2393,6 @@ class _TerminalPanelState extends State<TerminalPanel>
                               ? () => unawaited(_takeControl())
                               : null,
                         ),
-                      )
-                    else if (widget.notice case final notice?
-                        when notice.banner && notice.onAction != null)
-                      Positioned(
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        child: _ControlBanner.notice(notice),
                       ),
                     if (session.uploadProgress != null ||
                         _previewProgress != null)
@@ -2407,16 +2433,23 @@ class _TerminalPanelState extends State<TerminalPanel>
             if (!widget.compactHeader &&
                 remote &&
                 widget.onToggleComposer != null)
-              ComposerGrip(
-                expanded: widget.composerVisible,
-                onPressed: widget.onToggleComposer!,
+              ColoredBox(
+                color: chromeFill,
+                child: ComposerGrip(
+                  expanded: widget.composerVisible,
+                  onPressed: widget.onToggleComposer!,
+                ),
               ),
+            // Solid whatever the pane opacity: this is where you type.
             if (showComposer)
-              TerminalComposer(
-                tabId: widget.paneLocation?.$1,
-                session: session,
-                focusNode: _composerFocus,
-                inputEnabled: !widget.readOnly,
+              ColoredBox(
+                color: grid.AppPalette.windowBg,
+                child: TerminalComposer(
+                  tabId: widget.paneLocation?.$1,
+                  session: session,
+                  focusNode: _composerFocus,
+                  inputEnabled: !widget.readOnly,
+                ),
               ),
           ],
         ),
@@ -2492,6 +2525,9 @@ class _TerminalPanelState extends State<TerminalPanel>
       project: agent == null ? null : machine?.projectOf(agent),
       compact: widget.compactHeader,
       close: widget.onClose != null,
+      openModels: widget.onOpenModels != null,
+      splitDown: widget.onSplitDown != null,
+      splitRight: widget.onSplitRight != null,
       delete: widget.onDelete != null,
       composer: widget.composerVisible,
       toggleComposer: widget.onToggleComposer != null,
@@ -2514,6 +2550,15 @@ class _TerminalPanelState extends State<TerminalPanel>
             ? null
             : () => widget.onToggleZoom?.call(),
         onClose: widget.onClose == null ? null : () => widget.onClose?.call(),
+        onOpenModels: widget.onOpenModels == null
+            ? null
+            : () => widget.onOpenModels?.call(),
+        onSplitDown: widget.onSplitDown == null
+            ? null
+            : () => widget.onSplitDown?.call(),
+        onSplitRight: widget.onSplitRight == null
+            ? null
+            : () => widget.onSplitRight?.call(),
         onDelete: widget.onDelete == null
             ? null
             : () => widget.onDelete?.call(),
@@ -2590,6 +2635,8 @@ class _TerminalHeader extends StatelessWidget {
   final TerminalNotice? notice;
   final bool readOnly;
   final VoidCallback? onClose;
+  final VoidCallback? onOpenModels;
+  final VoidCallback? onSplitDown, onSplitRight;
 
   /// Ends the agent (with a confirmation), as the rail's row menu does. Null
   /// where the pane cannot name a live agent to end.
@@ -2626,6 +2673,9 @@ class _TerminalHeader extends StatelessWidget {
     this.notice,
     this.readOnly = false,
     this.onClose,
+    this.onOpenModels,
+    this.onSplitDown,
+    this.onSplitRight,
     this.onDelete,
     required this.onReconnect,
     this.compact = false,
@@ -2671,25 +2721,25 @@ class _TerminalHeader extends StatelessWidget {
           TerminalSessionStatus.controlling => null,
           TerminalSessionStatus.opening => terminalNotice(
             label: 'Connecting',
-            icon: Icons.sync,
+            icon: AppIcons.refreshCw,
             detail:
                 'Connecting to this terminal. Retained output is read only.',
           ),
           TerminalSessionStatus.resyncing => terminalNotice(
             label: 'Restoring',
-            icon: Icons.sync,
+            icon: AppIcons.refreshCw,
             detail: 'Restoring this terminal. Retained output is read only.',
           ),
           TerminalSessionStatus.takenOver => terminalNotice(
             label: 'Take control',
-            icon: Icons.lock_outline,
+            icon: AppIcons.lock,
             detail:
                 'Read only: ${taker ?? 'another app'} controls this terminal. Take control moves input ownership to this app.',
           ),
           TerminalSessionStatus.error ||
           TerminalSessionStatus.closed => terminalNotice(
             label: 'Reconnect',
-            icon: Icons.refresh,
+            icon: AppIcons.refreshCw,
             detail:
                 session.errorMessage ??
                 session.errorCode ??
@@ -2724,13 +2774,15 @@ class _TerminalHeader extends StatelessWidget {
     ].join('\n');
     // Reserve space for the pane-local model selector.
     // Engines without a picker keep their existing header width.
+    // Fork: compact panes do not carry the picker; the fork's Windows layout
+    // keeps the header narrow enough for the tab strip beside it.
     final showModelPicker = !compact && modelPickerSupports(session.engineId);
-    // The picker: a model id up to 220px and its padding.
-    final pickerWidth = showModelPicker ? 250.0 : 0.0;
-    final closeWidth = onClose == null
-        ? 0.0
-        : workspaceBarCellSizeOf(context).width * 3;
-    final actionsWidth = pickerWidth + closeWidth;
+    // Both text selectors keep their natural width until the title has yielded.
+    final pickerWidth =
+        (showModelPicker ? 232.0 : 0.0) + (agent != null ? 140.0 : 0.0);
+    // A domain harness has a different identity from its coding agent. The
+    // latter is already named by the selector on the right.
+    final showIdentityMark = agent == null || agent.dsh != null;
     // Fork: a folder Harness named itself (`agent-3`, `codex-…`) says nothing
     // in the header; the tooltip still has the full working folder.
     final folder = project?.label;
@@ -2743,11 +2795,38 @@ class _TerminalHeader extends StatelessWidget {
     final header = SizedBox(
       height: compact ? 38 : 46,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: _stripPadding),
+        padding: const EdgeInsets.only(
+          left: _stripPadding,
+          right: grid.AppDesktop.paneCloseInset,
+        ),
         child: LayoutBuilder(
           builder: (context, constraints) {
             final scale = grid.appTextScaleOf(context);
             final narrow = constraints.maxWidth < 560 * math.max(1, scale);
+            final controlsWidth = onClose != null
+                ? PaneHeaderButton.width
+                : 0.0;
+            final actionsWidth = pickerWidth + controlsWidth;
+            // At the smallest widths, connection state takes the leading
+            // mark's place so the pane name survives beside the fixed tools.
+            final leadingStatus =
+                compact && constraints.maxWidth < 280 && status != null;
+            Widget statusButton() => Tooltip(
+              message: '${status!.label}: ${status.detail}',
+              child: IconButton(
+                tooltip: status.actionLabel ?? status.label,
+                onPressed: statusAction,
+                icon: Icon(status.icon, size: 14),
+                style: IconButton.styleFrom(
+                  foregroundColor: color,
+                  disabledForegroundColor: color,
+                  fixedSize: const Size(28, 28),
+                  minimumSize: const Size(28, 28),
+                  padding: EdgeInsets.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            );
             // Workspace panes show PR state once in the main status bar.
             // Standalone terminals retain their own PR badge.
             final showPr =
@@ -2777,14 +2856,17 @@ class _TerminalHeader extends StatelessWidget {
                     )
                   : 16.0;
               return math.min(
-                17 + 10 + width + 8 + statusRoom + 8,
+                (showIdentityMark ? 27 : 0) + width + 8 + statusRoom + 8,
                 constraints.maxWidth * .45,
               );
             }
 
             final desiredRightWidth = narrow
                 ? math.max(
-                    (showModelPicker ? 96.0 : 0.0) + badgeWidth,
+                    controlsWidth +
+                        (showModelPicker ? 96.0 : 0.0) +
+                        (agent != null ? 90.0 : 0.0) +
+                        badgeWidth,
                     constraints.maxWidth * .36,
                   )
                 : math.max(
@@ -2793,28 +2875,54 @@ class _TerminalHeader extends StatelessWidget {
                     // shortened to "…" beside a short name with half the header empty.
                     constraints.maxWidth - titleRoom(),
                   );
-            // The name/status retain space while model and project text yield.
+            // Budget the title's fixed neighbours too. An activity mark and
+            // connection status must not consume the name's entire flex width
+            // when the model/agent controls share a narrow split pane.
+            final hasActivity =
+                harnessActivity(notifier, session.machineId, session.agentId) !=
+                null;
+            final activityWidth = hasActivity
+                ? workspaceBarCellSizeOf(context).width * 2
+                : 0.0;
+            final leadingWidth = leadingStatus
+                ? 34.0
+                : showIdentityMark
+                ? 27.0
+                : 0.0;
+            final statusWidth = status != null && !leadingStatus
+                ? 36.0
+                : starting != null
+                ? 8 +
+                      paneStartingChipWidth(
+                        starting,
+                        MediaQuery.textScalerOf(context),
+                        narrow: narrow,
+                      )
+                : 0.0;
+            final minimumLeftWidth = compact
+                ? 56 + leadingWidth + activityWidth + statusWidth + 8
+                : 99.0;
             final rightWidth = math.min(
-              compact ? closeWidth : desiredRightWidth,
-              math.max(0.0, constraints.maxWidth - 99),
+              compact ? actionsWidth : desiredRightWidth,
+              math.max(0.0, constraints.maxWidth - minimumLeftWidth),
             );
             return Row(
               children: [
-                if (agent != null)
+                if (leadingStatus)
+                  statusButton()
+                else if (agent != null && showIdentityMark)
                   EngineMark.forAgent(agent, size: 17)
-                else
+                else if (showIdentityMark)
                   EngineMark(engine: session.engineId, size: 17),
-                // Icon and name, the same as every other pane (owner,
-                // 2026-09-15): a harness agent is its harness here, and the
-                // engine it runs on is the dialog's and the tooltip's to say.
-                const SizedBox(width: 10),
+                if (leadingStatus || showIdentityMark)
+                  SizedBox(width: leadingStatus ? 6 : 10),
                 Expanded(
                   child: Row(
                     children: [
                       Flexible(
                         child: Tooltip(
                           message: identityDetail,
-                          waitDuration: const Duration(milliseconds: 700),
+                          waitDuration: const Duration(milliseconds: 500),
                           child: GestureDetector(
                             behavior: HitTestBehavior.opaque,
                             onDoubleTap: () => unawaited(
@@ -2841,26 +2949,13 @@ class _TerminalHeader extends StatelessWidget {
                         machineId: session.machineId,
                         agentId: session.agentId,
                       ),
-                      if (status != null || starting != null || !compact)
+                      if ((status != null && !leadingStatus) ||
+                          starting != null ||
+                          !compact)
                         const SizedBox(width: 8),
-                      if (status != null && narrow)
-                        Tooltip(
-                          message: '${status.label}: ${status.detail}',
-                          child: IconButton(
-                            tooltip: status.actionLabel ?? status.label,
-                            onPressed: statusAction,
-                            icon: Icon(status.icon, size: 14),
-                            style: IconButton.styleFrom(
-                              foregroundColor: color,
-                              disabledForegroundColor: color,
-                              fixedSize: const Size(28, 28),
-                              minimumSize: const Size(28, 28),
-                              padding: EdgeInsets.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            ),
-                          ),
-                        )
-                      else if (status != null)
+                      if (status != null && narrow && !leadingStatus)
+                        statusButton()
+                      else if (status != null && !leadingStatus)
                         ConstrainedBox(
                           constraints: BoxConstraints(
                             maxWidth: math.max(
@@ -2915,9 +3010,9 @@ class _TerminalHeader extends StatelessWidget {
                             ),
                           ),
                         )
-                      else if (starting != null && narrow)
+                      else if (status == null && starting != null && narrow)
                         PaneStartingChip(phase: starting, narrow: true)
-                      else if (starting != null)
+                      else if (status == null && starting != null)
                         // Never wider than the room this row is sure to have: the name's
                         // share (at most 45%) or what the actions and the PR badge leave —
                         // less [_headerFurniture]. Its words shorten rather than push the
@@ -2940,12 +3035,32 @@ class _TerminalHeader extends StatelessWidget {
                       else if (!compact)
                         Padding(
                           padding: const EdgeInsets.all(4),
-                          child: Icon(Icons.circle, size: 8, color: color),
+                          child: Tooltip(
+                            message: 'Terminal connected',
+                            child: Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: color,
+                              ),
+                            ),
+                          ),
                         ),
                     ],
                   ),
                 ),
                 const SizedBox(width: 8),
+                // Keep sharing status outside the model/action width budget.
+                // It follows the title and precedes the model and pane controls.
+                if (agent != null && PaneShareStatus.visibleOf(context))
+                  PaneShareBadge(
+                    notifier: notifier,
+                    machineId: session.machineId,
+                    agentId: agent.id,
+                    name: agent.displayName,
+                    compact: narrow,
+                  ),
                 // Which of the three paths carries this pane's bytes. Absent for a local machine's own
                 // terminal, which has no such distinction and so gets no badge.
                 //
@@ -2959,34 +3074,39 @@ class _TerminalHeader extends StatelessWidget {
                     child: _LinkModeMark(mode: session.linkMode!),
                   ),
                 ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: rightWidth),
+                  constraints: BoxConstraints(
+                    maxWidth: math.max(0, rightWidth - controlsWidth),
+                  ),
                   child: PaneHeaderActions(
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (showPr)
-                          Flexible(
-                            child: ConstrainedBox(
-                              constraints: BoxConstraints(maxWidth: badgeWidth),
-                              child: PullRequestBadge(
-                                compact: narrow,
-                                identity: (
-                                  session.machineId,
-                                  agent.id,
-                                  project?.cwd,
-                                  project?.shownBranch,
-                                ),
-                                read: () => notifier.readAgentPullRequest(
-                                  session.machineId,
-                                  agent.id,
-                                ),
+                    agentPicker: agent == null
+                        ? null
+                        : HarnessAgentControl(
+                            app: notifier,
+                            machineId: session.machineId,
+                            agent: agent,
+                            enabled:
+                                machine?.machine.isShared == false &&
+                                machine?.nodeOnline != false,
+                          ),
+                    trailing: showPr
+                        ? ConstrainedBox(
+                            constraints: BoxConstraints(maxWidth: badgeWidth),
+                            child: PullRequestBadge(
+                              compact: narrow,
+                              foreground: notifier.foreground,
+                              identity: (
+                                session.machineId,
+                                agent.id,
+                                project?.cwd,
+                                project?.shownBranch,
+                              ),
+                              read: () => notifier.readAgentPullRequest(
+                                session.machineId,
+                                agent.id,
                               ),
                             ),
-                          ),
-                        if (onClose != null)
-                          PaneCloseButton(onPressed: onClose!),
-                      ],
-                    ),
+                          )
+                        : null,
                     modelPicker: showModelPicker
                         ? GridModelPicker(
                             key: ValueKey((
@@ -2995,6 +3115,7 @@ class _TerminalHeader extends StatelessWidget {
                               session.agentId,
                             )),
                             paneHeader: true,
+                            onOpen: onOpenModels,
                             enabled: !readOnly && !session.readOnly,
                             compact: narrow,
                             notifier: notifier,
@@ -3060,13 +3181,14 @@ class _TerminalHeader extends StatelessWidget {
                           ),
                   ),
                 ),
+                if (onClose != null) PaneCloseButton(onPressed: onClose!),
               ],
             );
           },
         ),
       ),
     );
-    final strip = PaneHeaderHoverRegion(child: header);
+    final strip = header;
     final handle = paneDrag;
     if (handle == null) return strip;
 
@@ -3083,7 +3205,14 @@ class _TerminalHeader extends StatelessWidget {
       // The header itself does NOT change — the whole tile fades instead, in
       // _PaneCell, so what dims is the thing that is moving rather than one
       // strip of it.
-      child: strip,
+      //
+      // OPAQUE TO THE POINTER across its whole width. The strip is a SizedBox
+      // of a Row, so only its words and icons hit-test; a press on the empty
+      // space between them — most of the strip, and where a hand reaches to
+      // carry a pane — never reached this Draggable, and dragging a pane by its
+      // title did nothing (owner, 2026-10-01). The buttons on it still take
+      // their own clicks first.
+      child: ColoredBox(color: Colors.transparent, child: strip),
     );
   }
 }
@@ -3158,17 +3287,17 @@ class _LinkModeMark extends StatelessWidget {
   Widget build(BuildContext context) {
     final (icon, color, label) = switch (mode) {
       'p2p' => (
-        LucideIcons.link2,
+        AppIcons.link2,
         AppColors.success,
         'P2P · Direct peer connection',
       ),
       'turn' => (
-        LucideIcons.waypoints,
+        AppIcons.waypoints,
         AppColors.warning,
         'TURN · Via Cloudflare relay',
       ),
       _ => (
-        LucideIcons.server,
+        AppIcons.server,
         AppColors.mutedStrong,
         'WS · Via Harness WebSocket relay',
       ),
@@ -3249,7 +3378,7 @@ class _ControlBanner extends StatelessWidget {
     grid.AppTheme.watch(context);
     // A notice that failed is red; everything else on this strip is the amber
     // of "paused, and you can do something about it".
-    final ink = notice != null && notice!.icon == Icons.error_outline
+    final ink = notice != null && notice!.icon == AppIcons.circleAlert
         ? AppColors.danger
         : AppColors.warning;
     final detail = this.detail;
@@ -3299,7 +3428,7 @@ class _ControlBanner extends StatelessWidget {
                 final lead = notice != null
                     ? Icon(notice!.icon, size: 16, color: ink)
                     : !busy
-                    ? Icon(Icons.lock_outline, size: 16, color: ink)
+                    ? Icon(AppIcons.lock, size: 16, color: ink)
                     : SizedBox(
                         width: 16,
                         height: 16,
@@ -3316,7 +3445,7 @@ class _ControlBanner extends StatelessWidget {
                       title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: grid.AppType.label(
+                      style: grid.AppType.mono(
                         color: AppColors.text,
                         fontWeight: FontWeight.w600,
                       ),
@@ -3405,10 +3534,17 @@ class _ControlBannerButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final onAccent = Theme.of(context).colorScheme.onPrimary;
+    final scheme = Theme.of(context).colorScheme;
+    final onAccent = scheme.onSurface;
     return FilledButton(
       onPressed: onPressed,
       style: FilledButton.styleFrom(
+        backgroundColor: Color.alphaBlend(
+          scheme.onSurface.withValues(alpha: .10),
+          scheme.surface,
+        ),
+        foregroundColor: scheme.onSurface,
+        side: BorderSide(color: scheme.onSurface.withValues(alpha: .14)),
         minimumSize: const Size(0, 28),
         padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -3417,7 +3553,12 @@ class _ControlBannerButton extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Flexible(child: Text(label, style: grid.AppType.label())),
+          Flexible(
+            child: Text(
+              label,
+              style: grid.AppType.mono(fontWeight: FontWeight.w500),
+            ),
+          ),
           if (showReturnKey) ...[
             const SizedBox(width: 8),
             Container(
@@ -3428,7 +3569,7 @@ class _ControlBannerButton extends StatelessWidget {
               ),
               child: Semantics(
                 label: 'Return',
-                child: Icon(Icons.keyboard_return, size: 12, color: onAccent),
+                child: Icon(AppIcons.cornerDownLeft, size: 12, color: onAccent),
               ),
             ),
           ],
@@ -3472,7 +3613,10 @@ class _TransferProgressBadge extends StatelessWidget {
                 child: Text(
                   '$label$percentLabel',
                   overflow: TextOverflow.ellipsis,
-                  style: grid.AppType.label(color: AppColors.textSoft),
+                  style: grid.AppType.mono(
+                    color: AppColors.textSoft,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -3480,7 +3624,10 @@ class _TransferProgressBadge extends StatelessWidget {
                 onTap: onCancel,
                 child: Text(
                   'CANCEL',
-                  style: grid.AppType.label(color: AppColors.textSoft),
+                  style: grid.AppType.mono(
+                    color: AppColors.textSoft,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
             ],

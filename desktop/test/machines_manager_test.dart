@@ -15,7 +15,7 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/harness_placement.dart';
 import 'package:harness/state/new_harness.dart';
 import 'package:harness/widgets/new_harness_form.dart';
-import 'package:harness/widgets/harness_session_manager.dart';
+import 'package:harness/state/harness_monitor_controller.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:xterm/xterm.dart';
 
@@ -24,6 +24,7 @@ import 'keymap_host_test.dart' show key;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
 import 'support/model_manager.dart';
+import 'support/harness_monitor.dart';
 
 class _MachineApi extends ApiClient {
   _MachineApi() : super(config: AppConfig.dev, session: AuthSession());
@@ -41,8 +42,8 @@ class _MachineApi extends ApiClient {
   }
 }
 
-class _ToolbarApp extends ModelManagerTestApp {
-  _ToolbarApp() : super(ModelManagerConnection());
+class _ToolbarApp extends MonitorTestApp {
+  _ToolbarApp() : super(MonitorConnection());
 
   @override
   Future<RemotePasswordStatus> remotePasswordStatus() async =>
@@ -73,7 +74,9 @@ void main() {
         }
         expect(resourceField, findsOneWidget);
         expect(resourceSearch(tester).selected, isNull);
-        await tester.tap(find.byKey(const ValueKey('swarm-search-scope:@')));
+        await tester.tap(
+          find.byKey(const ValueKey('search-category-Machines')),
+        );
         await tester.pumpAndSettle();
         expect(resourceScope('@'), findsOneWidget);
         expect(find.byKey(const ValueKey('machines-panel')), findsNothing);
@@ -93,21 +96,20 @@ void main() {
 
         await tester.enterText(resourceField, '');
         await tester.pump();
-        await tester.tap(find.byKey(const ValueKey('swarm-search-scope::')));
+        await tester.tap(find.byKey(const ValueKey('search-category-Models')));
         await tester.pumpAndSettle();
         expect(resourceScope(':'), findsOneWidget);
         expect(find.byType(ModelsPanel), findsNothing);
         expect(app.actions, isEmpty);
 
         await openWorkspaceManagement(tester, 'harnesses');
-        await tester.pumpAndSettle();
-        expect(find.byType(HarnessSessionManager), findsOneWidget);
+        // The command helper pumps the navigation transition. The monitor's
+        // fake terminal stays loading, so its animation never settles.
+        expect(app.activeSwarm.name, harnessMonitorName);
         await openWorkspaceManagement(tester, 'machines');
-        await tester.pumpAndSettle();
-        expect(find.byType(HarnessSessionManager), findsNothing);
+        expect(app.activeSwarm.name, harnessMonitorName);
         expect(resourceScope('@'), findsOneWidget);
         await openWorkspaceManagement(tester, 'models');
-        await tester.pumpAndSettle();
         expect(find.byKey(const ValueKey('machines-panel')), findsNothing);
         expect(find.byType(ModelsPanel), findsOneWidget);
         await openWorkspaceTool(tester, 'store');
@@ -338,6 +340,7 @@ void main() {
     await key(tester, LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(resourceScope('@'), findsNothing);
+    expect(resourceField, findsNothing);
     await openWorkspaceTool(tester, 'machines');
     await tester.pumpAndSettle();
     expect(resourceScope('@'), findsOneWidget);
@@ -388,6 +391,10 @@ void main() {
       await key(tester, LogicalKeyboardKey.tab);
       await tester.pumpAndSettle();
       expect(resourceSearch(tester).selected!.machineId, 'm');
+      // Tab advances through native controls; Escape returns to search.
+      expect(resourceSearch(tester).managing, isTrue);
+      await key(tester, LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
       expect(resourceSearch(tester).managing, isFalse);
       expect(search.focusNode!.hasFocus, isTrue);
       await tester.pumpWidget(const SizedBox());

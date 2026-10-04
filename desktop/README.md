@@ -114,6 +114,7 @@ For a local production build, run `bash scripts/build-web-release.sh X.Y.Z`.
   and their waiting, cancellation, and recovery states.
 - Workspace shortcuts use **Option/Alt** in the browser: Alt-P finds harnesses,
   Alt-N starts a harness, Alt-M opens machines, and Alt-T opens a swarm.
+  Alt-Shift-A opens the companion conversation without taking New Tab's key.
   Machine connection commands and link requests use that same `@` picker,
   with connection and setup forms inside its preview pane.
   Text editing and terminal
@@ -176,7 +177,7 @@ Useful validation commands:
 
 ```bash
 dart analyze
-flutter build macos --debug
+bash scripts/build-macos-debug.sh
 flutter build macos --release
 flutter build linux --release     # must run on an Ubuntu host — no cross-compiling
 flutter build windows --release   # must run on a Windows 11 x64 host
@@ -220,23 +221,45 @@ DLLs, `data/`, and `harness-cli/` directories together when extracting it.
 
 For investigating a known failing baseline, `ALLOW_TEST_FAILURES=1` permits packaging after test failures and returns a nonzero result. Such a bundle is a prototype, not a passed test run. Analysis and native import-inspection failures remain visible. The script does not sign, upload, or publish the bundle.
 
+The macOS debug script uses the same renderer as the host's release build: Skia on
+Intel, Impeller on Apple Silicon. It also pins that choice for opening `Harness.app`
+directly. On Intel, add `--no-enable-impeller` to `flutter run` and native integration
+test commands; the default renderer can make bitmap artwork disappear.
+
 ### Current limits
 
 The migration's checks and remaining work are recorded in [WINDOWS_PORT.md](WINDOWS_PORT.md). A release build alone does not establish a completed WSL setup, signed-in agent session, terminal reconnect, or compatibility on macOS and Linux. Windows self-update is not implemented. Most application shortcuts still use the Meta/Windows key, which conflicts with some Windows system shortcuts; Ctrl+Tab and Ctrl+Shift+Tab remain available for switching panes.
-
 The terminal core is vendored at `third_party/xterm`. Do not replace it with an
 upstream package upgrade without preserving the local rendering and IME fixes.
 
 ## Harness manager
 
-The terminal icon to the left of Harness Store opens a compact list across your
+On macOS, the Harness portrait symbol follows the system menu bar's appearance and
+carries a small circular unread badge at its bottom-right corner,
+only when notifications are unread (`99+` above 99; the tooltip keeps the exact count). Open it for
+one Notifications section, with questions first and the newest results below.
+Each row pairs the harness name with its question or completion recap, the
+shared tab/pane status mark, and arrival time. Tab and machine details remain
+in tooltips. The first five appear here; View all opens the full inbox. Read sessions
+disappear, and an empty inbox says “No unread notifications.” Working starts
+expanded, showing active sessions with elapsed time when the app observed their start;
+idle sessions and sessions already listed above do not fill this section.
+Working never contributes to the unread badge. New Harness and Open Harness
+use the normal creation and existing-session pickers. Show Harness brings the
+window forward; Quit exits the app. Selecting a conversation reuses its existing
+pane before revealing the window. The close icon beside Notifications marks
+all read, acknowledging the opening
+snapshot without answering pending questions or clearing newer arrivals.
+Linux and the browser keep the in-window notification bell. GitHub merge
+notifications are not part of this menu yet.
+
+The search icon to the left of Harness Store opens a compact list across your
 machines. Each harness shows its agent and name, followed by its machine, project,
 branch, and last activity (`5m`, `1h`, `2d`). Search matches names, machines,
 projects, branches, and pending questions. Filter All, Needs input, Running, or
 Paused; sort by recently active, name, machine, or project.
 
-Needs input replaces the separate bell. A red count badge at the terminal icon’s
-top-right corner appears only when harnesses need input. An amber help action
+The Needs input filter remains available independently of read notifications. An amber help action
 opens the waiting harness; its question appears on a third line in the Needs input
 view. The same view opens with **⌘⇧I**. Questions update live and stale actions
 cannot redirect you after a question is answered or replaced elsewhere.

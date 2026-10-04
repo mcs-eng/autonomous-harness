@@ -111,6 +111,50 @@ void main() {
     ]);
   });
 
+  test('recent status ink stays readable on desktop surfaces', () {
+    for (final surface in [Colors.white, const Color(0xFF181818)]) {
+      for (final style in StatusLineStyle.values) {
+        final parts = statusLineParts(
+          provider: '',
+          machine: 'M2',
+          project: 'app',
+          branch: 'main',
+          style: style,
+        );
+        for (final color in [true, false]) {
+          final original = statusLinePaintSegments(
+            parts,
+            darkTerminalTheme,
+            color: color,
+          );
+          final adapted = statusLinePaintSegments(
+            parts,
+            darkTerminalTheme,
+            color: color,
+            surfaceBackground: surface,
+          );
+          for (var i = 0; i < adapted.length; i++) {
+            final segment = adapted[i];
+            if (segment.background != null) {
+              expect(segment.toJson(), original[i].toJson());
+              continue;
+            }
+            final a = segment.foreground.computeLuminance();
+            final b = surface.computeLuminance();
+            final ratio = a > b ? (a + .05) / (b + .05) : (b + .05) / (a + .05);
+            expect(
+              ratio,
+              greaterThanOrEqualTo(4.5),
+              reason: '${style.name}, $color',
+            );
+            expect(segment.text, original[i].text);
+            expect(segment.branchSymbol, original[i].branchSymbol);
+          }
+        }
+      }
+    }
+  });
+
   test(
     'branch symbols follow real branches without changing searchable text',
     () {

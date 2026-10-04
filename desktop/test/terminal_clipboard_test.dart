@@ -287,7 +287,7 @@ void main() {
         expect(frames, isEmpty);
         expect(
           kTerminalOwnedKeys.firstWhere((item) => item.label == 'Paste').chord,
-          apple ? ['⌘', 'V'] : ['⌃', '⇧', 'V'],
+          apple ? ['⌘', 'V'] : ['Ctrl', 'Shift', 'V'],
         );
         await tester.pumpWidget(const SizedBox());
         session.dispose();

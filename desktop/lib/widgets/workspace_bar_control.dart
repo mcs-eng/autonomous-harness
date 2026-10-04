@@ -92,19 +92,19 @@ class _WorkspaceBarControlState extends State<WorkspaceBarControl> {
         : Tooltip(
             message: hint,
             excludeFromSemantics: true,
-            waitDuration: const Duration(milliseconds: 700),
+            waitDuration: const Duration(milliseconds: 500),
             child: control,
           );
   }
 }
 
-/// The numeric prefix is navigation, not a different name worth repeating.
+/// The visible name needs a tooltip only when clipped or shortened.
 String? workspaceTabTooltip(
   String label,
   String name, {
   required bool clipped,
 }) {
-  final visibleName = label.replaceFirst(RegExp(r'^\d+:'), '').trim();
+  final visibleName = label.trim();
   final hint = [
     if (clipped) label,
     if (name.trim().isNotEmpty && name.trim() != visibleName && name != label)
