@@ -235,11 +235,17 @@ function engineCapabilityProbe(args: string): boolean {
 function hasCursorPackageEntrypoint(args: string): boolean {
   // Cursor's launcher uses `exec -a "$0" node .../index.js`, so argv[0] may stay `agent` instead of
   // `node`. Restrict this scan to the executable prefix: prompt text can appear later and is not proof.
+  // The layout must span the WHOLE token: a real entrypoint is exactly `…/cursor-agent/versions/<ver>/index.js`
+  // as one argv element, while a prompt sentence mentioning the path is many words inside one token.
+  // A suffix-only match let a quoted prompt ENDING in the path score 3 (round-2 review, P1); the
+  // `[^/\s]` classes additionally refuse any whitespace inside the layout, so one prompt argument
+  // can never carry it. Spaces in a real install path are not matched here — such a row falls back
+  // to file-key ownership and transcript corroboration instead.
   const next = argvPrefix(args)
   for (let seen = 0; seen < 8; seen++) {
     const token = next()
     if (token === undefined) break
-    if (/cursor-agent[\/\\]versions[\/\\][^/\\]+[\/\\]index\.js$/i.test(token)) return true
+    if (/^(?:[^/\s]*\/)*cursor-agent\/versions\/[^/\s]+\/index\.js$/i.test(token)) return true
   }
   return false
 }
