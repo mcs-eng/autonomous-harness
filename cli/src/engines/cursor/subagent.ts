@@ -1,5 +1,6 @@
 import { readFile, readdir, realpath, stat } from 'node:fs/promises'
-import { basename, dirname, join, relative } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { within } from '../../lib/pathContainment.js'
 import type { LiveEvent, SessionEvent } from '../../lib/normalize.js'
 import {
   CursorNormalizer,
@@ -56,11 +57,6 @@ function string(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-function isWithin(root: string, file: string): boolean {
-  const rel = relative(root, file)
-  return rel === '' || (!rel.startsWith('..') && !rel.startsWith('/') && !rel.startsWith('\\'))
-}
-
 async function databaseConstructor(): Promise<DatabaseConstructor | null> {
   try {
     const moduleName = 'node:sqlite'
@@ -78,7 +74,7 @@ async function readChildMeta(chatsRoot: string, dbPath: string): Promise<ChildMe
     [actualRoot, actual] = await Promise.all([realpath(chatsRoot), realpath(dbPath)])
     const info = await stat(actual)
     const uid = typeof process.getuid === 'function' ? process.getuid() : null
-    if (!info.isFile() || !isWithin(actualRoot, actual) || (uid !== null && info.uid !== uid)) return null
+    if (!info.isFile() || !within(actualRoot, actual) || (uid !== null && info.uid !== uid)) return null
   } catch {
     return null
   }

@@ -36,7 +36,8 @@ import {
   writeFileSync,
 } from 'fs'
 import { randomUUID } from 'crypto'
-import { join, basename, dirname, relative, isAbsolute } from 'path'
+import { join, basename, dirname, isAbsolute } from 'path'
+import { within } from './pathContainment.js'
 import { hostname, uptime } from 'os'
 import { cursorDataDir } from '../engines/cursor/home.js'
 import { env } from '../config/env.js'
@@ -725,11 +726,6 @@ function selectedRuntimeKey(runtimes: readonly TerminalRuntimeRef[], requested: 
     : runtimes[0] ? terminalRouteKey(runtimes[0]) : ''
 }
 
-function isWithin(root: string, file: string): boolean {
-  const rel = relative(root, file)
-  return rel === '' || (!rel.startsWith('..') && !rel.startsWith(`/`) && !rel.startsWith(`\\`))
-}
-
 /**
  * Where each engine's conversation file lives, or **null for an engine that keeps no file at all**.
  *
@@ -777,7 +773,7 @@ export function validTranscriptPath(engine: AgentEngine, filePath: string, codex
     const actual = missing ? join(realpathSync(dirname(filePath)), basename(filePath)) : realpathSync(filePath)
     const root = realpathSync(rootFor(codexHome))
     const st = statSync(missing ? dirname(actual) : actual)
-    if (!(missing ? st.isDirectory() : st.isFile()) || !isWithin(root, actual)) return false
+    if (!(missing ? st.isDirectory() : st.isFile()) || !within(root, actual)) return false
     if (engine === 'cursor') {
       const id = basename(actual).replace(/\.jsonl$/, '')
       if (!id || basename(dirname(actual)) !== id || basename(dirname(dirname(actual))) !== 'agent-transcripts') return false
