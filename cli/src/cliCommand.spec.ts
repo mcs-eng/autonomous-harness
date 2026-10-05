@@ -227,7 +227,10 @@ describe('start --repair beside a running daemon', () => {
   }, 20_000)
 })
 
-describe('start beside a daemon that serves another account', () => {
+// Every case serves the live daemon's status on this user's private Unix socket, and
+// localSocketPath() is null on win32 (no such socket there; the product falls back to the TCP status
+// check). The account-mismatch check this covers is the Unix-socket path, so it is not exercised here.
+describe.skipIf(process.platform === 'win32')('start beside a daemon that serves another account', () => {
   // A forced login stops the daemon and waits for the browser, and a start that landed in that window
   // used to bring a daemon up on the OLD session (closed under the spawn lock now — loginForceRace.spec.ts).
   // "Already running" is what kept it there: `auth status` named the new machine, the socket served the
