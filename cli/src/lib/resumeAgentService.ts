@@ -194,7 +194,8 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
         if (!built.ok) return { ok: false, error: built.error, detail: built.detail }
         if (!current()) return resumeChanged
         if (resumeSessionId) {
-          try { prepareSessionResume(saved) } catch {
+          try { prepareSessionResume(saved) } catch (error) {
+            console.warn(`[resume] ${sid(saved.agentId)} could not prepare ${saved.engine} history: ${error instanceof Error ? error.message : String(error)}`)
             return { ok: false, error: 'RESUME_PREPARATION_FAILED', detail: 'Could not prepare the saved conversation. Its history has been retained.' }
           }
         }
