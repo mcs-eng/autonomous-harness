@@ -1,5 +1,5 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../core/dsh_catalog.dart';
 import '../shared/theme/app_theme.dart' as grid;
@@ -74,7 +74,7 @@ class StoreViewers extends StatelessWidget {
           Row(
             children: [
               Icon(
-                LucideIcons.panelsTopLeft300,
+                AppIcons.panelsTopLeft,
                 size: 20,
                 color: grid.AppPalette.textSecondary,
               ),

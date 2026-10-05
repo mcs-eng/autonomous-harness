@@ -77,14 +77,14 @@ for workloads, slow tails, connection failures and raw data.
 ## How it works
 
 In the workspace, a **harness** is one running session of an agent such as Codex
-or Claude Code, with its own conversation and working context. A **swarm** groups
-harnesses. Use **New Harness** to start one and **New Swarm** to group work.
-Enable **Settings → Experimental → Swarm collaboration** to let their agents
-consult peers in the same swarm; it is off by default.
+or Claude Code, with its own conversation and working context. A **tab** groups
+harnesses. Use **New Harness** to start one and **New Tab** to group work.
+Enable **Settings → Experimental → Tab collaboration** to let their agents
+consult peers in the same tab; it is off by default.
 
 The Store offers **harnesses** with instructions, tools, and optional viewers for
 specific crafts. Install a harness, then start it in your workspace. See the
-[terminology guide](docs/terminology.md) for the complete naming rules.
+[Naming System](docs/naming-system.md) for the complete naming rules.
 
 One daemon per machine runs your agents in tmux. It dials out, so no machine opens a port.
 
@@ -235,11 +235,11 @@ The agent does the reasoning. The harness supplies the tools and the view. It's 
 `harness.json`, so adding a craft never touches the app.
 
 <!-- store-catalog:start -->
-### 49 harnesses in the Store
+### 50 harnesses in the Store
 
 | Category | Agents and harnesses |
 |---|---|
-| **Coding** | [Claude Code, Codex, Cursor, OpenCode, Pi, Hermes, Command Code, Devin, Muse Code, Amp, Antigravity, GitHub Copilot, Grok Build, Kilo Code](docs/engines.md), [Harness Monitor](store/agents/harness-monitor/), [Machine Monitor](store/agents/machine-monitor/) |
+| **Coding** | [Claude Code, Codex, Cursor, OpenCode, Pi, Hermes, Command Code, Devin, Muse Code, Amp, Antigravity, GitHub Copilot, Grok Build, Kilo Code](docs/engines.md), [Harness Monitor](store/agents/harness-monitor/), [Machine Monitor](store/agents/machine-monitor/), [Trail of Bits Skills](store/agents/trailofbits-skills/) |
 | Design | [Autonomous Workshop](store/agents/autonomous-workshop/), [Blender](store/agents/blender/), [Bonsai MCP](store/agents/bonsai-mcp/), [Creative Direction](store/agents/creative-direction/), [Excalidraw](store/agents/excalidraw/), [FreeCAD](store/agents/freecad/), [Generative Art](store/agents/generative-art/), [OpenSCAD](store/agents/openscad/), [text-to-cad](store/agents/text-to-cad/) |
 | Engineering | [Autonomous Circuit](store/agents/autonomous-circuit/), [CircuitJS](store/agents/circuitjs/), [Home Assistant](store/agents/home-assistant/), [KiCad](store/agents/kicad/), [Orca Slicer](store/agents/orca-slicer/), [Yosys](store/agents/yosys/) |
 | Media | [Comfy MCP](store/agents/comfy-mcp/), [Manim](store/agents/manim/), [OpenMontage](store/agents/openmontage/), [Remotion](store/agents/remotion/) |

@@ -171,7 +171,7 @@ void main() {
       expect(find.text('build-box is linked.'), findsOneWidget);
       expect(
         find.text(
-          'Already linked. Open its harnesses from New Swarm or New Pane.',
+          'Already linked. Open its harnesses from New Tab or New Pane.',
         ),
         findsOneWidget,
       );

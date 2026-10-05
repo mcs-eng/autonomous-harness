@@ -92,7 +92,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.descendant(of: selected, matching: find.text('Add to this swarm')),
+      find.descendant(of: selected, matching: find.text('Add to this tab')),
       findsOneWidget,
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);

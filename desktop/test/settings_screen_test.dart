@@ -7,6 +7,7 @@
 // `HarnessFileStore` (the user's actual `~/.harness/desktop-app/state.json`).
 // This only reads the store's untouched default.
 import 'dart:async';
+import 'dart:ui' show SemanticsAction, Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -21,6 +22,8 @@ import 'package:harness/settings/settings_section.dart';
 import 'package:harness/settings/experimental_features.dart';
 import 'package:harness/settings/sections/shortcuts_section.dart';
 import 'package:harness/shared/theme/app_theme.dart';
+import 'package:harness/shared/theme/app_icons.dart';
+import 'package:harness/shared/layouts/widgets/sidebar_item.dart';
 import 'package:harness/shortcuts/keyboard_practice.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/harness_customize_pane.dart';
@@ -122,6 +125,134 @@ void main() {
     expect(find.byType(SettingsScreen), findsNothing);
     expect(find.byType(HarnessCustomizePane), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('settings navigation announces and changes its selected section', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    try {
+      await openSettings(tester);
+      Finder row(String label) => find.descendant(
+        of: find.byType(SettingsNav),
+        matching: find.widgetWithText(InkWell, label),
+      );
+      final usage = tester.getSemantics(row('Usage'));
+      final account = tester.getSemantics(row('Account'));
+      expect(usage.getSemanticsData().flagsCollection.isButton, isTrue);
+      expect(
+        usage.getSemanticsData().flagsCollection.isSelected,
+        Tristate.isTrue,
+      );
+      expect(
+        account.getSemanticsData().flagsCollection.isSelected,
+        Tristate.isFalse,
+      );
+      expect(account.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+
+      // Assistive activation must take the same route as pointer/keyboard use.
+      tester
+          .renderObject(row('Account'))
+          .owner!
+          .semanticsOwner!
+          .performAction(account.id, SemanticsAction.tap);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<SettingsNav>(find.byType(SettingsNav)).section,
+        SettingsSection.account,
+      );
+      expect(
+        tester
+            .getSemantics(row('Account'))
+            .getSemanticsData()
+            .flagsCollection
+            .isSelected,
+        Tristate.isTrue,
+      );
+      expect(
+        tester
+            .getSemantics(row('Usage'))
+            .getSemanticsData()
+            .flagsCollection
+            .isSelected,
+        Tristate.isFalse,
+      );
+    } finally {
+      semantics.dispose();
+    }
+  });
+
+  testWidgets('shared sidebar semantics keep secondary actions independent', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    try {
+      var opened = 0;
+      var closed = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildAppTheme(brightness: Brightness.light),
+          home: Scaffold(
+            body: SizedBox(
+              width: 260,
+              child: Column(
+                children: [
+                  SidebarItem(
+                    label: 'Workspace',
+                    selected: true,
+                    onTap: () => opened++,
+                    trailingAlwaysVisible: true,
+                    trailing: IconButton(
+                      tooltip: 'Close workspace',
+                      onPressed: () => closed++,
+                      icon: const Icon(AppIcons.close),
+                    ),
+                  ),
+                  SidebarItem(
+                    label: 'Unavailable workspace',
+                    enabled: false,
+                    onTap: () => fail('Disabled rows must not activate'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final primary = tester.getSemantics(find.text('Workspace'));
+      final secondary = tester.getSemantics(find.byTooltip('Close workspace'));
+      final disabled = tester.getSemantics(find.text('Unavailable workspace'));
+      expect(primary.getSemanticsData().flagsCollection.isButton, isTrue);
+      expect(
+        primary.getSemanticsData().flagsCollection.isSelected,
+        Tristate.isTrue,
+      );
+      expect(secondary.id, isNot(primary.id));
+      expect(secondary.getSemanticsData().flagsCollection.isButton, isTrue);
+      expect(
+        disabled.getSemanticsData().flagsCollection.isEnabled,
+        Tristate.isFalse,
+      );
+      expect(
+        disabled.getSemanticsData().hasAction(SemanticsAction.tap),
+        isFalse,
+      );
+      final owner = tester
+          .renderObject(find.text('Workspace'))
+          .owner!
+          .semanticsOwner!;
+      owner.performAction(secondary.id, SemanticsAction.tap);
+      await tester.pump();
+      expect(closed, 1);
+      expect(opened, 0);
+      owner.performAction(primary.id, SemanticsAction.tap);
+      await tester.pump();
+      expect(opened, 1);
+      expect(closed, 1);
+    } finally {
+      semantics.dispose();
+    }
   });
 
   testWidgets('About prints the running version', (tester) async {

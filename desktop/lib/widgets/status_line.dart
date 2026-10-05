@@ -21,6 +21,8 @@ class StatusLine extends StatelessWidget {
     this.workspaceBar = false,
     this.emphasized = false,
     this.middleEllipsis = false,
+    this.surfaceBackground,
+    this.monochromeColor,
   });
   final StatusLineParts parts;
   final bool color;
@@ -33,6 +35,14 @@ class StatusLine extends StatelessWidget {
   final bool emphasized;
   final bool middleEllipsis;
 
+  /// Set only when the status is displayed outside its terminal surface.
+  final Color? surfaceBackground;
+
+  /// Secondary context keeps the chosen wording, fields, and status face, but
+  /// uses one ink without colored segment backgrounds. The focused workspace
+  /// footer does not set this and retains its full customized appearance.
+  final Color? monochromeColor;
+
   @override
   Widget build(BuildContext context) {
     TerminalFontScope.watch(context);
@@ -44,18 +54,33 @@ class StatusLine extends StatelessWidget {
           grid.AppTheme.palette.value,
           terminalThemeStore.value,
         );
+        final foreground =
+            monochromeColor ??
+            (surfaceBackground == null
+                ? theme.foreground
+                : statusLineInkOnSurface(theme.foreground, surfaceBackground!));
         final style = workspaceBar
-            ? workspaceBarTextStyle(
-                color: theme.foreground,
-                emphasized: emphasized,
-              )
-            : terminalContentStyle(color: theme.foreground);
-        final segments = statusLinePaintSegments(
+            ? workspaceBarTextStyle(color: foreground, emphasized: emphasized)
+            : terminalContentStyle(color: foreground);
+        final resolvedSegments = statusLinePaintSegments(
           parts,
           theme,
           color: color,
           segmentOffset: segmentOffset,
+          surfaceBackground: surfaceBackground,
         );
+        final segments = monochromeColor == null
+            ? resolvedSegments
+            : [
+                for (final (index, segment) in resolvedSegments.indexed)
+                  StatusLinePaintSegment(
+                    '${parts.style.segmented && index > 0 ? '  ' : ''}'
+                    '${segment.text}',
+                    monochromeColor!,
+                    null,
+                    branchSymbol: segment.branchSymbol,
+                  ),
+              ];
         final cell = workspaceBar
             ? workspaceBarCellSizeOf(context)
             : terminalCellSizeOf(context);
@@ -63,7 +88,7 @@ class StatusLine extends StatelessWidget {
         double measure(String text) => workspaceBar
             ? workspaceBarTextSizeOf(context, text).width
             : _measure(text, style, scaler);
-        if (!parts.style.segmented) {
+        if (!parts.style.segmented || monochromeColor != null) {
           Widget line(List<StatusLinePaintSegment> visible) => Text.rich(
             TextSpan(
               children: [

@@ -1,122 +1,98 @@
 #include "focus.h"
+#include "pets.h"
+#include "focus_faces.h"
 #include "theme.h"
 #include <stdio.h>
 #include <string.h>
 
 /*
- * THE FOCUS FACE — the dial's pre-habitat screens, in cells.
+ * THE FOCUS FACE — the agent screen, laid out like the octopus's (owner, 2026-10-01).
  *
- * Reference: mockup/device-screens/png/agent-working.png and agent-recap.png, which are exact 466
- * renders of the firmware that shipped before this one. Those are proportional Geist at eight sizes;
- * this is ht_mono_28 at 17 px a cell, which holds about 27 characters a line where the old face held
- * roughly 35. So the arrangement is kept and the measurements are redone, never copied.
+ * The session's name curves along the top edge in the octopus's own arc, in Inter Medium 26 laid out
+ * glyph by glyph along it (ht_arc_title_face, ht_arc_inter_prop; the lower-arc status and the Listening
+ * sweep wear the same face on the lower curve, ht_arc_inter_lower);
+ * the engine's mark stands where the octopus does, 56 px (focus_marks.c) — for an engine with a pet
+ * (Claude, Codex: pets.c) it is the animated pet instead, centred in the same box. Under it the recap
+ * is set in the "Kindle dark" layout (owner, 2026-10-02, K3: mockup/kindle_options.py), now in Inter, SF Compact's
+ * open look-alike (owner, 2026-10-03): no card,
+ * soft white Inter 30 (inter_30, focus_faces.c) on the black ground, each line centred
+ * on x 233 in a 364 px column at x 51, 43 px apart, up to four lines — as many as the octopus reads — and a longer recap
+ * ends in "…". The block is centred vertically in a fixed area (y 176..376), so the mark never moves
+ * with its length. A question takes the recap's place and look. With no recap, the working line or a
+ * resting line ("Let's build it", …) is centred on the glass. The mark stands halfway between the
+ * name and what is under it — the recap area's top, or the line. There is no tab pill and no microphone: a tap anywhere
+ * on the face talks to the agent, a hold opens the tabs, a tap on the name opens the panes
+ * (ui_habitat.c).
  *
- * ── the rule that decides every width on this file ──────────────────────────────────────────────
- *
- * A run's usable width is set by its LOWEST edge, not its top: the chord at distance d from the
- * centre is 2*sqrt(233^2 - d^2), and a 38 px row starting at y has its box ending at y+38. Getting
- * this backwards is what cut the brackets off the first square face's footer. Every width in ROWS
- * below is the chord at that row's bottom, minus a margin.
+ * Every word is Inter (focus_faces.c, owner 2026-10-02: one font), laid out by ht_lv_label — LVGL's own wrap,
+ * centring and LONG_DOT.
  *
  * ── the rule that decides the SHAPE of this file ────────────────────────────────────────────────
  *
- * ht_damage() diffs run index against run index and falls back to repainting the whole 466x466 the
- * moment the count or the order changes (terminal.c). So this face emits the SAME RUNS IN THE SAME
- * ORDER on every frame, with empty text where a row has nothing to say — the same stabiliser
- * ht_wrap() already applies by padding to a fixed line count. Do not make a row conditional.
+ * ht_damage() diffs run index against run index and repaints the whole 466x466 the moment the count
+ * or the order changes (terminal.c). So the home face emits the SAME ELEVEN RUNS IN THE SAME ORDER on
+ * every frame — name, mark, card (an invisible placeholder since the "Kindle dark" recap, kept so the count and
+ * order never move), recap ×4, status, resting line ×2, lower-arc status — each empty
+ * where it has nothing to say. Do not make one conditional. The lower arc is a working scene's
+ * status line (arc_status below); every other state, and every other engine, leaves it empty. A scene's
+ * overlay (Codex's sandbox bubble) takes the first recap line's slot, which a working scene (no recap)
+ * leaves empty, and is emitted after the scene's own run so it draws over it.
  */
-
-enum { FOCUS_ROWS = 7 };   // pill, name, status, and four of recap
+// The text column of the working and resting lines: 384 px at x 41. The recap has its own: 364 px at
+// x 51 (233 - 182), each line centred in it (LVGL's centring, as every label here), up to four lines 43 px apart, centred vertically in the area
+// y 176..376 (RECAP_AREA_*), the first baseline 30 px under the block's top. Every
+// line's ink stays inside r 230. TITLE_BOTTOM is the foot of the arc's cells at the top of the curve,
+// where the mark is measured from.
+enum { MARK_SIZE = 56, TITLE_BOTTOM = HT_ARC_Y + HT_ARC_CELL_HEIGHT, COL_X = 41, COL_W = 384,
+       RECAP_X = 51, RECAP_W = 364, RECAP_LINES = 4, RECAP_PITCH = 43, RECAP_BASELINE = 30,
+       RECAP_AREA_Y = 176, RECAP_AREA_H = 200, EMPTY_W = 276,
+       SCENE_LINE_Y = 334 };   // the working scene ends at y 325
+#define FOCUS_RECAP   0xd6d6d2u   // the "Kindle dark" layout's soft white
+#define FOCUS_FG      0xeaeaf0u
+#define FOCUS_EMPTY   0x585863u
+#define FOCUS_VOICE   0x00ff2fu
 
 /*
- * WHERE THE BODY STARTS, and it is measured off the raster rather than derived from the cells.
- *
- * Equal CELL gaps are not equal gaps to look at. The pill is a filled block so its bottom edge is
- * exactly its cell's, 60 + 28 = 88; the name's ink opens 11 px inside its cell and its descenders
- * run almost to the bottom of it. So cell gaps of 30 and 30 render as ink gaps of 41 and 44, and the
- * lower one looks the looser of the two.
- *
- * 183 is 118 + 38 + 27, and it puts both at 41. The asymmetry is not arbitrary: a pane name carries
- * a descender about half the time (p, y, g) while the first line of a summary carries an ascender
- * nearly always (h, d, t, k, l), so the gap below the name is the one that needs the three pixels
- * back. Verified by banding the rendered face — see focus_face() in test/test_character.c.
+ * WHAT AN AGENT WITH NOTHING YET SAYS, in place of "No activity yet" (owner, 2026-10-01): an
+ * invitation rather than a report, picked at random each time the resting face appears — on arrival,
+ * after a turn, on another agent, back from voice — and never the same line twice running (owner,
+ * 2026-10-02). It holds while that face stays up, so a redraw never swaps it. Each fits two lines of
+ * inter_36 at EMPTY_W. The lines that teach the dial come up more often (owner, 2026-10-03): a line
+ * listed k times is k times as likely — "Tap to talk" 10, "Hold to switch tabs" 5, "Tap the name to
+ * switch panes" 5, every other line once.
  */
-enum { FOCUS_BODY_Y = 118 + 38 + 27 };
-
-/*
- * y, and the width the chord allows there, against a 230 px working radius rather than the 233 px
- * face — the inset every other screen keeps off the bezel.
- *
- * THE NARROW EDGE IS THE ONE FARTHER FROM THE MIDDLE, which for a row above y=233 is its TOP, not
- * its bottom. An earlier note here said "the lowest edge" and meant it generally; that is only true
- * below the centre. The pill and the name sit entirely above it, and while the name had room to
- * spare nothing showed — then the engine badge made it spend its whole width and its top corners
- * went past the bezel.
- *
- *   pill   mono_20, y  60..88  -> far edge  60, d=173 -> chord 303
- *   name   mono_28, y 118..156 -> far edge 118, d=115 -> chord 398
- *   body   mono_28, rows from 183 -> far edges 183/221/297/335 -> chords 449/457/441/412
- *
- * THE STATUS ROW AND THE FIRST RECAP ROW SHARE A y, AND CANNOT BOTH BE FULL. render_home() builds
- * the recap from `!a->busy` and the activity from `a->busy`; its other two status strings ("Try
- * again", "Text expired") each require the recap to be absent as well. So one of the two is always
- * empty, and the face enforces that below rather than trusting it. An empty run draws nothing, and
- * the alternative — sliding the group to fill whichever half is missing — is what used to leave a
- * 96 px hole under the name whenever a turn had said something short.
- *
- * THE FOUR RECAP ROWS HOLD WHAT THE OCTOPUS'S DO: the same {408,408,391,340} and the same
- * HT_CHARACTER_RECAP_CHARS budget ht_character_layout() gives its roomy reading. They sit 22 px
- * higher than its HT_CHARACTER_READING_TEXT_Y, because that row has to clear a portrait and this one
- * has a line of text over it; the widths are re-measured for the y they actually use.
- */
-static const struct { int y, width; const ht_font_t *font; } ROWS[FOCUS_ROWS] = {
-    {  50, 240, &ht_mono_20 },   // the pill: 38 tall from 50, 20 cells of name — see pill()
-    { 118, 384, &ht_mono_28 },
-    { FOCUS_BODY_Y,       442, &ht_mono_28 },
-    { FOCUS_BODY_Y,       408, &ht_mono_28 },
-    { FOCUS_BODY_Y +  38, 408, &ht_mono_28 },
-    { FOCUS_BODY_Y +  76, 391, &ht_mono_28 },
-    { FOCUS_BODY_Y + 114, 340, &ht_mono_28 },
+#define TAP_TO_TALK "Tap to talk"
+#define HOLD_FOR_TABS "Hold to switch tabs"
+#define TAP_THE_NAME "Tap the name to switch panes"
+static const char *const RESTING[] = {
+    "Let's build it", "Do anything", "What's next?", "Ready when you are",
+    "Say the word", "Make it happen", "Start something",
+    TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK,
+    TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK,
+    HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS,
+    TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME,
 };
-
-/*
- * One row, centred on what it actually contains.
- *
- * `rest` is advanced, so consecutive calls walk one string across several rows. A row with nothing
- * left still emits its run — see the shape rule above.
- */
-static void row(ht_scene_t *s, int index, uint16_t ink, uint16_t fill, const char **rest)
+static struct {
+    bool showing;           // the last home face drawn was a resting one
+    char who[64];           // ... for this recipient
+    const char *line;
+    uint32_t seed;
+} resting;
+static const char *resting_line(const ht_character_face_t *f)
 {
-    const ht_font_t *font = ROWS[index].font;
-    // A filled row spends two of its cells on the padding that makes the block clear the text, so it
-    // has two fewer to write in. Forgetting this is how a full-width pill overran its own chord.
-    int cells = ROWS[index].width / font->width - (fill != s->background ? 2 : 0);
-    char line[HT_TEXT_BYTES] = "";
-    if (rest && *rest && **rest) {
-        const char *begin = *rest, *end = ht_take_display_line(rest, cells, font);
-        size_t n = (size_t)(end - begin);
-        if (n >= sizeof line) n = sizeof line - 1;
-        memcpy(line, begin, n);
-        line[n] = 0;
+    const char *who = f->recipient ? f->recipient : "";
+    if (!resting.showing || !resting.line || strncmp(resting.who, who, sizeof resting.who - 1)) {
+        const unsigned n = sizeof RESTING / sizeof RESTING[0];
+        // An LCG stirred with the clock: no entropy source is needed to look random on a dial.
+        resting.seed = resting.seed * 1664525u + 1013904223u + f->clock_ms;
+        unsigned pick = (resting.seed >> 16) % n;
+        // Never the same words twice running: past every copy of the last line (copies are adjacent).
+        while (resting.line && !strcmp(RESTING[pick], resting.line)) pick = (pick + 1) % n;
+        resting.line = RESTING[pick];
+        snprintf(resting.who, sizeof resting.who, "%s", who);
     }
-    int glyphs = 0;
-    for (const char *p = line; *p; glyphs++) ht_utf8_next(&p);
-    // A filled row is padded by one cell each side so the block clears the text it sits behind.
-    bool filled = fill != s->background && glyphs;
-    char padded[sizeof line + 2];
-    snprintf(padded, sizeof padded, filled ? " %s " : "%s", line);
-    int width = (glyphs + (filled ? 2 : 0)) * font->width;
-    /*
-     * ALWAYS ONE RUN, even with nothing to say.
-     *
-     * ht_text() refuses a run of width <= 0 and returns false, which leaves the next writer pointing
-     * at the PREVIOUS run. An empty status row used to blank the engine mark, and three empty recap
-     * rows used to blank the status — both from that. A one-cell run draws nothing and holds the
-     * index, which is also what keeps ht_damage() on its cheap per-cell path.
-     */
-    if (width <= 0) width = font->width;
-    ht_text(s, (HT_WIDTH - width) / 2, ROWS[index].y, width, font,
-            ink, filled ? fill : s->background, padded);
+    resting.showing = true;
+    return resting.line;
 }
 
 /*
@@ -152,6 +128,175 @@ static const uint32_t ENGINE_INK[] = {
 };
 _Static_assert(sizeof ENGINE_INK / sizeof ENGINE_INK[0] == sizeof ENGINES / sizeof ENGINES[0],
                "one ink per engine");
+
+int ht_focus_engine_index(const char *engine)
+{
+    if (!engine || !*engine) return -1;
+    for (unsigned i = 0; i < sizeof ENGINES / sizeof ENGINES[0]; i++)
+        if (!strcmp(engine, ENGINES[i])) return (int)i;
+    return -1;
+}
+_Static_assert(sizeof ht_icon_engine20 / sizeof ht_icon_engine20[0] == sizeof ENGINES / sizeof ENGINES[0],
+               "one icon per engine");
+
+/*
+ * A PET'S STATE, from the face alone: an open question; else the working line (the
+ * `status[0]` path in ht_focus_face: no recap, an activity); else a finished turn; else resting.
+ * A clock of 0, or a sleeping/offline mood, holds idle step 0. ht_focus_pet_next_ms() and the face
+ * share this, so the redraw time in ui_habitat.c always agrees with what is drawn.
+ */
+static ht_pet_state_t pet_state(const ht_character_face_t *f, const char *recap)
+{
+    bool has_recap = recap && *recap;
+    if (f->asking) return HT_PET_ASKING;
+    if (!has_recap && f->activity && *f->activity) return HT_PET_WORKING;
+    return f->mood == HT_CHARACTER_DONE ? HT_PET_DONE : HT_PET_IDLE;
+}
+static bool pet_holds(const ht_character_face_t *f)
+{
+    return !f->clock_ms || f->mood == HT_CHARACTER_ASLEEP || f->mood == HT_CHARACTER_OFFLINE;
+}
+
+// The pet of the face's engine, or NULL: the face draws the engine's mark.
+static const ht_pet_t *pet_for(const ht_character_face_t *f)
+{
+    if (!f->engine) return NULL;
+    for (unsigned i = 0; i < ht_pet_count; i++)
+        if (!strcmp(f->engine, ht_pets[i].engine)) return &ht_pets[i];
+    return NULL;
+}
+
+/*
+ * THE WORKING SCENE: a pet with one (Claude's cooking Clawd) plays it, large, in place of the small
+ * pet and the centred working line, while it is working on a plain working line — not asking, not a
+ * recap, not the listening meter, not held. NULL otherwise.
+ */
+static const ht_pet_scene_t *working_scene(const ht_character_face_t *f, const char *recap)
+{
+    const ht_pet_t *pet = pet_for(f);
+    if (!pet || !pet->working_scene || pet_holds(f) || f->mood == HT_CHARACTER_LISTENING) return NULL;
+    return pet_state(f, recap) == HT_PET_WORKING ? pet->working_scene : NULL;
+}
+bool ht_focus_scene_shown(const ht_character_face_t *f, const char *recap)
+{
+    return working_scene(f, recap) != NULL;
+}
+static unsigned scene_step(const ht_pet_scene_t *sc, uint32_t clock_ms)
+{
+    return (clock_ms / sc->step_ms) % sc->steps;
+}
+// The scene's frame at this clock; `level` picks the listening scene's loop (the working one has one).
+static const ht_cell_frame_t *scene_frame(const ht_pet_scene_t *sc, unsigned level, uint32_t clock_ms)
+{
+    if (level >= HT_PET_SCENE_LEVELS) level = HT_PET_SCENE_LEVELS - 1;
+    return &sc->frames[sc->loop[level * sc->steps + scene_step(sc, clock_ms)]];
+}
+// Where the scene's top-left sits on the glass: centred, `bias` px lower (the slot's own nudge), moved by its dx, dy.
+static void scene_origin(const ht_pet_scene_t *sc, int bias, int *x, int *y)
+{
+    *x = (HT_WIDTH - sc->w) / 2 + sc->dx;
+    *y = HT_HEIGHT / 2 - sc->h / 2 + bias + sc->dy;
+}
+// The scene's overlay as ONE run, in a slot that is empty whenever the scene shows: its frame at this level
+// and clock, `at` px from the scene's origin; an empty text run when the scene has none.
+static void scene_overlay(ht_scene_t *s, const ht_pet_scene_t *sc, int bias, unsigned level, uint32_t clock_ms,
+                          const ht_font_t *font)
+{
+    if (!sc || !sc->overlay) { ht_text(s, 0, 0, 1, font, s->background, s->background, ""); return; }
+    if (level >= HT_PET_SCENE_LEVELS) level = HT_PET_SCENE_LEVELS - 1;
+    unsigned i = level * sc->steps + scene_step(sc, clock_ms);
+    int x, y;
+    scene_origin(sc, bias, &x, &y);
+    ht_cell_sprite(s, x + sc->overlay->at[i][0], y + sc->overlay->at[i][1], &sc->overlay->frames[sc->overlay->loop[i]]);
+}
+/*
+ * THE LISTENING WORD on the lower arc of the voice face (owner, 2026-10-02: rhythm B, mockup/listening_arc.py):
+ * the word at 30 % brightness, a band two letters wide sweeping left to right in 900 ms, then 400 ms at rest —
+ * 1300 ms, drawn in 20 steps of 65 ms. Letter i is 0.3 + 0.7 * max(0, 1 - |i - head| / 2) bright, the head
+ * -2 + (n + 4) * t / 900 letters along while sweeping. Integers: the head in 1/900 letters.
+ */
+#define LISTENING_WORD "Listening"
+enum { SWEEP_MS = 900, SWEEP_PERIOD_MS = 1300, SWEEP_STEP_MS = 65, SWEEP_LETTERS = 9 };
+_Static_assert(sizeof LISTENING_WORD - 1 == (unsigned)SWEEP_LETTERS && (int)SWEEP_LETTERS <= (int)HT_ARC_GAINS, "one gain per letter");
+static void sweep_gains(uint32_t clock_ms, uint8_t gain[HT_ARC_GAINS])
+{
+    uint32_t t = clock_ms % SWEEP_PERIOD_MS / SWEEP_STEP_MS * SWEEP_STEP_MS;
+    int head = t < SWEEP_MS ? -2 * SWEEP_MS + (SWEEP_LETTERS + 4) * (int)t : -100 * SWEEP_MS;
+    for (int i = 0; i < HT_ARC_GAINS; i++) {
+        int d = i * SWEEP_MS - head, near;
+        if (d < 0) d = -d;
+        near = 2 * SWEEP_MS - d;                      // 1 - |i - head| / 2, in 1/(2 * 900)
+        if (near < 0) near = 0;
+        gain[i] = i < SWEEP_LETTERS ? (uint8_t)((255 * (3 * 2 * SWEEP_MS + 7 * near) + 5 * SWEEP_MS) / (10 * 2 * SWEEP_MS)) : 255;
+    }
+}
+// When the sweep's drawn gains next change, from this clock; 0 = never.
+static uint32_t sweep_next_ms(uint32_t clock_ms)
+{
+    uint8_t now[HT_ARC_GAINS], then[HT_ARC_GAINS];
+    sweep_gains(clock_ms, now);
+    for (unsigned i = 1; i <= SWEEP_PERIOD_MS / SWEEP_STEP_MS; i++) {
+        uint32_t at = (clock_ms / SWEEP_STEP_MS + i) * SWEEP_STEP_MS;
+        sweep_gains(at, then);
+        if (memcmp(now, then, sizeof now)) return at;
+    }
+    return 0;
+}
+// The listening scene, when this is the voice screen recording on an engine that has one.
+static const ht_pet_scene_t *listening_scene(const ht_character_face_t *f)
+{
+    const ht_pet_t *pet = pet_for(f);
+    return pet && f->voice && f->mood == HT_CHARACTER_LISTENING ? pet->listening_scene : NULL;
+}
+// The sending scene, when this is the voice screen sending (not recording) on an engine that has one.
+static const ht_pet_scene_t *sending_scene(const ht_character_face_t *f)
+{
+    const ht_pet_t *pet = pet_for(f);
+    return pet && f->voice && f->mood != HT_CHARACTER_LISTENING && !pet_holds(f) ? pet->sending_scene : NULL;
+}
+// Whether steps a and b of the loop starting at `at` draw the same: the scene's frame and its overlay's.
+static bool step_same(const ht_pet_scene_t *sc, unsigned at, unsigned a, unsigned b)
+{
+    if (sc->loop[at + a] != sc->loop[at + b]) return false;
+    const ht_pet_overlay_t *o = sc->overlay;
+    return !o || (o->loop[at + a] == o->loop[at + b] && o->at[at + a][0] == o->at[at + b][0] &&
+                  o->at[at + a][1] == o->at[at + b][1]);
+}
+// When the scene's drawn frame (or its overlay) next changes, in the loop of this level; 0 = never.
+static uint32_t scene_next_ms(const ht_pet_scene_t *sc, unsigned level, uint32_t clock_ms)
+{
+    uint32_t now = clock_ms / sc->step_ms;
+    unsigned at = level * sc->steps;
+    for (unsigned i = 1; i <= sc->steps; i++)
+        if (!step_same(sc, at, (now + i) % sc->steps, now % sc->steps)) return (now + i) * sc->step_ms;
+    return 0;
+}
+
+uint32_t ht_focus_pet_next_ms(const ht_character_face_t *f, const char *recap)
+{
+    const ht_pet_t *pet = pet_for(f);
+    if (!pet || pet_holds(f)) return 0;
+    if (f->voice) {
+        const ht_pet_scene_t *ls = listening_scene(f);
+        unsigned level = f->pose.level >= HT_PET_SCENE_LEVELS ? HT_PET_SCENE_LEVELS - 1 : f->pose.level;
+        if (ls) {   // the scene's next frame or the word's next sweep step, whichever comes first
+            uint32_t frame = scene_next_ms(ls, level, f->clock_ms), sweep = sweep_next_ms(f->clock_ms);
+            return frame && frame < sweep ? frame : sweep;
+        }
+        const ht_pet_scene_t *ss = sending_scene(f);
+        return ss ? scene_next_ms(ss, 0, f->clock_ms) : 0;
+    }
+    const ht_pet_scene_t *sc = working_scene(f, recap);
+    if (sc) return scene_next_ms(sc, 0, f->clock_ms);
+    ht_pet_state_t state = pet_state(f, recap);
+    uint32_t each = pet->step_ms[state], now = f->clock_ms / each;
+    const ht_pet_step_t *cur = &pet->loops[state][now % HT_PET_STEPS];
+    for (unsigned i = 1; i <= HT_PET_STEPS; i++) {
+        const ht_pet_step_t *p = &pet->loops[state][(now + i) % HT_PET_STEPS];
+        if (p->frame != cur->frame || p->dy != cur->dy) return (now + i) * each;
+    }
+    return 0;
+}
 
 bool ht_focus_engine_mark(const char *engine, char out[4], uint32_t *ink)
 {
@@ -225,12 +370,22 @@ static void wave_glyph(unsigned level, char out[4])
     out[3] = 0;
 }
 
+static void no_text(ht_scene_t *s, const ht_font_t *font);
+
 static void voice_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame)
 {
     bool listening = f->mood == HT_CHARACTER_LISTENING;
+    // A pet with a listening scene (Claude's headphones Clawd) draws it, nodding with the mic level,
+    // in place of the seven bars; its step follows the face's clock (140 ms), 0 when there is none.
+    const ht_pet_scene_t *scene = listening ? listening_scene(f) : NULL;
+    // Sending with one (Claude's rocket Clawd) takes the same slot, centred, and the sparkles go empty.
+    const ht_pet_scene_t *launch = listening ? NULL : sending_scene(f);
 
     /*
-     * TEN RUNS, ALWAYS, IN THIS ORDER — seven bars then three sparkles — whichever half is showing.
+     * ELEVEN RUNS, ALWAYS, IN THIS ORDER — seven bars, the scene's slot, three sparkles — whichever
+     * half is showing; the bars are empty under a scene and the slot is empty without one. A scene's
+     * extras sit in slots it leaves empty: the first bar's is the "Listening" arc (a listening scene), the
+     * first sparkle's the scene's overlay (Codex's bubble or plane), after the scene's own run.
      *
      * ht_damage() diffs run index against run index and repaints all 466x466 the moment the count or
      * the order moves, so the half that is idle is emitted empty rather than skipped. Recording and
@@ -240,11 +395,26 @@ static void voice_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t fram
     int mid_y = (HT_HEIGHT - ht_wave.height) / 2;
     uint16_t voice = ht_rgb(HT_THEME_VOICE);
     for (int k = 0; k < WAVE_BARS; k++) {
+        if (k == 0 && scene) {
+            uint8_t gain[HT_ARC_GAINS];
+            sweep_gains(f->clock_ms, gain);
+            ht_arc_status_sweep(s, ht_rgb(FOCUS_VOICE), LISTENING_WORD, &ht_arc_inter_lower, gain);
+            continue;
+        }
         char bar[4] = {0};
-        if (listening) wave_glyph(WAVE[frame % WAVE_FRAMES][k], bar);
+        if (listening && !scene) wave_glyph(WAVE[frame % WAVE_FRAMES][k], bar);
         int x = HT_WIDTH / 2 + (k - WAVE_BARS / 2) * WAVE_PITCH_X10 / 10 - ht_wave.width / 2;
         ht_text(s, x, mid_y, ht_wave.width, &ht_wave, voice, s->background, bar);
     }
+
+    int sx, sy;
+    if (scene) {
+        scene_origin(scene, -6, &sx, &sy);
+        ht_cell_sprite(s, sx, sy, scene_frame(scene, f->pose.level, f->clock_ms));
+    } else if (launch) {
+        scene_origin(launch, 0, &sx, &sy);
+        ht_cell_sprite(s, sx, sy, scene_frame(launch, 0, f->clock_ms));
+    } else no_text(s, &ht_wave);
 
     /*
      * And the sending sweep: three filled sparkles on a 66 px pitch, the lit one travelling across
@@ -254,15 +424,16 @@ static void voice_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t fram
      */
     int spark_y = (HT_HEIGHT - ht_spark.height) / 2;
     int lit = (frame % WAVE_FRAMES) / 5;      // three steps, 200 ms each, per the old busy sweep
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 3; i++) {
+        if (i == 0 && (scene ? scene : launch) && (scene ? scene : launch)->overlay) {
+            scene_overlay(s, scene ? scene : launch, scene ? -6 : 0, scene ? f->pose.level : 0, f->clock_ms, &ht_spark);
+            continue;
+        }
         ht_text(s, HT_WIDTH / 2 + (i - 1) * 66 - ht_spark.width / 2, spark_y,
                 ht_spark.width, &ht_spark,
-                listening ? s->background : i == lit ? voice : f->foreground, s->background,
-                listening ? "" : HT_SPARK);
-
-    // And the rows the home face owns, emitted empty for the same reason.
-    for (int i = 0; i < FOCUS_ROWS; i++)
-        ht_text(s, 0, ROWS[i].y, ROWS[i].font->width, ROWS[i].font, f->dim, s->background, "");
+                listening || launch ? s->background : i == lit ? voice : f->foreground, s->background,
+                listening || launch ? "" : HT_SPARK);
+    }
 }
 
 /*
@@ -283,149 +454,220 @@ static const char *meter(unsigned level)
     return bars[level > 4 ? 4 : level];
 }
 
-/*
- * THE TAB PILL, as the design draws it: a rounded box with a thin lighter rim.
- *
- * Habitat fills rectangles and nothing else, so the outline is a run of ht_pill glyphs — two cells of
- * left cap, one body cell per letter, two of right cap — whose coverage levels 1 and 2 are the fill
- * and the rim (see HT_THEME_PILL). The name is a second run laid over the body cells with exactly
- * level 1 as its background, from ht_blend(), so the two meet without a seam. The caps are the
- * padding: the name starts where the left cap's curve ends.
- *
- * TWO RUNS, ALWAYS — with no tab both are one empty cell — so the face's run count never moves.
- * The name's cell sits 4 px into the pill, which centres its cap height (rows 8..22 of ht_mono_20)
- * on the pill's middle rather than centring the cell and leaving the letters high.
- */
-static void pill(ht_scene_t *s, const ht_character_face_t *f, const char *tab)
+// Placeholders that keep the run count constant: an invisible box and an empty text run.
+static void no_box(ht_scene_t *s) { ht_box(s, 0, 0, 1, 1, 0, s->background, s->background); }
+static void no_text(ht_scene_t *s, const ht_font_t *font)
 {
-    const ht_font_t *font = ROWS[0].font;
-    int cells = ROWS[0].width / font->width;
-    char line[HT_TEXT_BYTES] = "";
-    if (*tab) {
-        const char *rest = tab, *end = ht_take_display_line(&rest, cells, font);
-        size_t n = (size_t)(end - tab);
-        if (n >= sizeof line) n = sizeof line - 1;
-        memcpy(line, tab, n);
-        line[n] = 0;
+    ht_text(s, 0, 0, 1, font, s->background, s->background, "");
+}
+/*
+ * A laid-out label's lines as runs, `runs` of them always: line n at (x + its centring, y + n *
+ * pitch). The line's bytes are the label's own, trailing space and all,
+ * because LVGL centred on them.
+ */
+static void label_runs(ht_scene_t *s, const ht_lv_label_t *l, int runs, int x, int y, int pitch,
+                       const ht_font_t *font, uint16_t ink, uint16_t bg)
+{
+    for (int n = 0; n < runs; n++) {
+        if (n >= l->lines || !l->line[n].len) { no_text(s, font); continue; }
+        const ht_lv_line_t *ln = &l->line[n];
+        char text[HT_TEXT_BYTES];
+        size_t len = ln->len < sizeof text ? ln->len : sizeof text - 1;
+        memcpy(text, l->text + ln->at, len);
+        while (len && (text[len - 1] == '\n' || text[len - 1] == '\r')) len--;
+        text[len] = 0;
+        ht_text(s, x + ln->x, y + n * pitch, ln->w > 0 ? ln->w : 1, font, ink, bg, text);
     }
-    int glyphs = 0;
-    for (const char *p = line; *p; glyphs++) ht_utf8_next(&p);
-    if (!glyphs) {
-        ht_text(s, 0, ROWS[0].y, ht_pill.width, &ht_pill, s->background, s->background, "");
-        ht_text(s, 0, ROWS[0].y, font->width, font, f->foreground, s->background, "");
-        return;
+}
+
+// "34s", then "1m 05s" — the old firmware's fmt_elapsed.
+static void elapsed_text(char *out, size_t cap, unsigned sec)
+{
+    if (sec < 60) snprintf(out, cap, "%us", sec);
+    else snprintf(out, cap, "%um %02us", sec / 60, sec % 60);
+}
+
+/*
+ * THE WORKING LINE. The verb is the engine's own when the cable carried one; "Working" — the
+ * placeholder render_home() uses when it did not — becomes the old firmware's rotating gerund,
+ * one every six seconds, so a long turn does not read as stuck on a word.
+ */
+static const char *const GERUNDS[] = {
+    "Working", "Brewing", "Cooking", "Churning", "Frosting", "Simmering", "Tinkering",
+    "Conjuring", "Composing", "Percolating", "Wrangling", "Hatching", "Concocting", "Puttering",
+};
+static const char *status_verb(const ht_character_face_t *f)
+{
+    const char *verb = f->activity;
+    if (!strcmp(verb, "Working"))
+        verb = GERUNDS[(f->elapsed / 6) % (sizeof GERUNDS / sizeof GERUNDS[0])];
+    return verb;
+}
+static void status_text(char *out, size_t cap, const ht_character_face_t *f)
+{
+    const char *verb = status_verb(f);
+    if (!f->elapsed) { snprintf(out, cap, "%s\xe2\x80\xa6", verb); return; }
+    char when[16];
+    elapsed_text(when, sizeof when, f->elapsed);
+    snprintf(out, cap, "%s\xe2\x80\xa6 %s", verb, when);
+}
+/*
+ * The working line where the room is short — the scene's lower arc (`arc` set: Inter Medium 26, measured
+ * in px of arc length against `limit`) or its straight line (`font` set: `limit` px). The seconds always
+ * survive: the verb is cut a letter at a time and its "…" doubles as the cut.
+ */
+static void status_fitted(char *out, size_t cap, const ht_character_face_t *f, const ht_font_t *font,
+                          const ht_arc_face_t *arc, int limit)
+{
+    const char *verb = status_verb(f);
+    char when[16] = "";
+    if (f->elapsed) elapsed_text(when, sizeof when, f->elapsed);
+    size_t n = strlen(verb);
+    for (;;) {
+        snprintf(out, cap, "%.*s\xe2\x80\xa6%s%s", (int)n, verb, when[0] ? " " : "", when);
+        if ((arc ? ht_arc_measure(arc, out) : ht_measure(font, out)) <= limit || n <= 1) return;
+        do n--; while (n > 1 && ((uint8_t)verb[n] & 0xc0) == 0x80);
+        while (n > 1 && verb[n - 1] == ' ') n--;
     }
-    char outline[HT_TEXT_BYTES];
-    int used = snprintf(outline, sizeof outline, "%s", HT_PILL_LEFT);
-    for (int i = 0; i < glyphs && used + 4 < (int)sizeof outline - 7; i++)
-        used += snprintf(outline + used, sizeof outline - (size_t)used, "%s", HT_PILL_BODY);
-    snprintf(outline + used, sizeof outline - (size_t)used, "%s", HT_PILL_RIGHT);
-    int width = (glyphs + 4) * ht_pill.width, x = (HT_WIDTH - width) / 2;
-    uint16_t ink = ht_rgb(HT_THEME_PILL);
-    ht_text(s, x, ROWS[0].y, width, &ht_pill, ink, s->background, outline);
-    ht_text(s, x + 2 * ht_pill.width, ROWS[0].y + 4, glyphs * font->width, font, f->foreground,
-            ht_blend(ink, s->background, 1), line);
+}
+
+/*
+ * The recap as the face reads it: cut to the octopus's ninety codepoints, then a glyph at a time until
+ * it fits four lines with its "…" — measured, since ninety short words can still need five.
+ */
+static void recap_cut(char *out, size_t cap, const char *recap, const ht_font_t *font, int width)
+{
+    size_t n = 0, glyphs = 0;
+    while (recap[n] && glyphs < HT_CHARACTER_RECAP_CHARS) {
+        size_t k = n + 1;
+        while (recap[k] && ((uint8_t)recap[k] & 0xc0) == 0x80) k++;
+        if (k + 4 > cap) break;
+        n = k;
+        glyphs++;
+    }
+    bool clipped = recap[n] != 0;
+    memcpy(out, recap, n);
+    out[n] = 0;
+    ht_lv_label_t l;
+    for (;;) {
+        char probe[HT_TEXT_BYTES + 4];
+        snprintf(probe, sizeof probe, "%s%s", out, clipped ? "\xe2\x80\xa6" : "");
+        if (ht_lv_label(&l, font, probe, width, RECAP_LINES, false) <= RECAP_LINES || !out[0]) break;
+        size_t k = strlen(out);
+        do k--; while (k > 0 && ((uint8_t)out[k] & 0xc0) == 0x80);
+        while (k > 0 && out[k - 1] == ' ') k--;
+        out[k] = 0;
+        clipped = true;
+    }
+    if (clipped) strcat(out, "\xe2\x80\xa6");
 }
 
 void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, uint16_t ink,
                    const char *recap)
 {
     (void)ink;
-    if (f->voice) { voice_face(s, f, frame); return; }
-    // The pane this agent belongs to. It stands where the old face drew the repository name, which
-    // does not exist anywhere in the cable vocabulary — see ht_character_face_t.
-    pill(s, f, f->tab && *f->tab ? f->tab : "");
+    if (f->voice) { resting.showing = false; voice_face(s, f, frame); return; }
+    bool has_recap = recap && *recap;
+    bool working = !has_recap && f->activity && *f->activity;
+    bool retry = !has_recap && !working && f->status && *f->status;
 
-    /*
-     * The name, and the engine's badge beside it.
-     *
-     * The badge is its own run because a run carries one colour, and the badge's is not the name's:
-     * this is what lets each engine keep its own ink (ENGINE_INK). ht_run_t.colors would colour
-     * cells individually, but that array has to outlive both scene buffers and a face rebuilt every
-     * frame has nowhere to keep one — and a one-cell badge would get one colour out of it anyway.
-     * The cell is wider than a letter's, so the pair is measured and centred together rather than
-     * the badge being squeezed into the name's first character.
-     */
-    char mark[4];
-    uint32_t mark_ink = 0;
-    bool badged = ht_focus_engine_mark(f->engine, mark, &mark_ink);
-    const char *who = f->recipient ? f->recipient : "";
-    int cells = 0;
-    for (const char *p = who; *p; cells++) ht_utf8_next(&p);
-    // The badge spends part of the row's chord, so the name gets what is left of it — not the whole
-    // width it would have had alone. Getting this wrong puts the pair's ends outside the bezel.
-    int room = ROWS[1].width - (badged ? ht_engine.width + 8 : 0);
-    if (cells * ht_mono_28.width > room) cells = room / ht_mono_28.width;
-    int name_w = cells * ht_mono_28.width;
-    int total = name_w + (badged ? ht_engine.width + 8 : 0);
-    if (total > ROWS[1].width) total = ROWS[1].width;
-    int x = (HT_WIDTH - total) / 2;
-    // Always emitted, badge or not, so the run count and order never move — see the note at the top.
-    ht_text(s, badged ? x : 0, ROWS[1].y, badged ? ht_engine.width : 1, &ht_engine,
-            mark_ink ? ht_rgb(mark_ink) : f->foreground, s->background, badged ? mark : "");
-    ht_text(s, x + (badged ? ht_engine.width + 8 : 0), ROWS[1].y, name_w ? name_w : 1, &ht_mono_28,
-            f->foreground, s->background, who);
+    // The live line: listening meter, the working verb and its seconds, or a status of its own.
+    const ht_font_t *sf = &ht_lv_inter_30.base, *ef = &ht_lv_inter_36.base,
+                    *rf = &ht_lv_inter_30.base;
+    char status[HT_TEXT_BYTES] = "";
+    if (!has_recap && f->mood == HT_CHARACTER_LISTENING) snprintf(status, sizeof status, "%s", meter(f->pose.level));
+    else if (working) status_text(status, sizeof status, f);
+    else if (retry) snprintf(status, sizeof status, "%s", f->status);
+    bool empty = !has_recap && !status[0];
+    if (!empty) resting.showing = false;
 
-    /*
-     * The live line.
-     *
-     * While listening this is the meter; while working it is the activity the daemon scraped off the
-     * engine's spinner plus the seconds this dial has been counting. Neither is a tool call and the
-     * seconds are the dial's own — see ht_character_face_t.elapsed.
-     */
-    char status[HT_TEXT_BYTES];
-    uint16_t status_ink = f->ink;
-    if (f->mood == HT_CHARACTER_LISTENING) {
-        snprintf(status, sizeof status, "%s", meter(f->pose.level));
-        status_ink = ht_rgb(HT_THEME_DONE);
-    } else if (f->activity && *f->activity) {
-        if (f->elapsed) snprintf(status, sizeof status, "%s... %us", f->activity, f->elapsed);
-        else snprintf(status, sizeof status, "%s", f->activity);
-        status_ink = ht_rgb(HT_THEME_DONE);
-    } else if (f->status && *f->status) {
-        snprintf(status, sizeof status, "%s", f->status);
+    // The body, laid out first.
+    ht_lv_label_t body;
+    int recap_h = 0;
+    if (has_recap) {
+        char cut[HT_TEXT_BYTES];
+        recap_cut(cut, sizeof cut, recap, rf, RECAP_W);
+        int n = ht_lv_label(&body, rf, cut, RECAP_W, RECAP_LINES, false);
+        if (n > RECAP_LINES) n = RECAP_LINES;
+        recap_h = n * RECAP_PITCH;
+    } else if (status[0]) {
+        ht_lv_label(&body, sf, status, COL_W, 1, true);
     } else {
-        status[0] = 0;
+        ht_lv_label(&body, ef, resting_line(f), EMPTY_W, 2, false);
     }
-    // Whatever the turn left behind, in the octopus's own four rows and under its own character
-    // budget, so the same summary reads the same on either skin.
-    char prose[HT_CHARACTER_RECAP_CHARS * 4 + 8];
-    ht_display_text(prose, sizeof prose, recap && *recap ? recap : "", &ht_mono_28);
-    int budget = 0;
-    for (const char *p = prose; *p; budget++) ht_utf8_next(&p);
+    // A recap's block is centred in its fixed area, its first baseline RECAP_BASELINE under the block's
+    // top; a line without a recap is centred on the glass. The mark halfway between the name and the
+    // area's top or the line: the gap above it equals the gap below, whatever the recap's length.
+    int body_y = has_recap ? RECAP_AREA_Y + (RECAP_AREA_H - recap_h) / 2 + RECAP_BASELINE - ht_pfont(rf)->ascent
+                           : HT_HEIGHT / 2 - sf->height / 2;
+    int below = has_recap ? RECAP_AREA_Y : body_y;
+    int mark_top = TITLE_BOTTOM + (below - TITLE_BOTTOM - MARK_SIZE) / 2;
 
-    /*
-     * The two cannot share the glass — see the ROWS comment. Stated here as code rather than left as
-     * an assumption about render_home(), so a future caller that breaks it loses the status line
-     * instead of printing it through the summary.
-     */
-    if (prose[0]) status[0] = 0;
-    const char *live = status;
-    row(s, 2, status_ink, s->background, &live);
+    // The name on the top curve, the octopus's arc; a tap there opens the pane list.
+    ht_arc_title_face(s, ht_rgb(FOCUS_FG), f->recipient && *f->recipient ? f->recipient : "\xe2\x80\xa6",
+                      &ht_arc_inter_prop);
 
-    const char *body = prose;
-    for (int i = 3; i < FOCUS_ROWS; i++) row(s, i, f->foreground, s->background, &body);
+    // The engine's mark, where the octopus stands. An unknown engine leaves the place empty.
+    int engine = ht_focus_engine_index(f->engine);
+    int mark_x = (HT_WIDTH - MARK_SIZE) / 2;
+    const ht_pet_t *pet = pet_for(f);
+    const ht_pet_scene_t *scene = working_scene(f, recap);
+    if (scene) {
+        // The working scene in the mark's slot: centred on the glass, a touch low for its hat.
+        int sx, sy;
+        scene_origin(scene, 4, &sx, &sy);
+        ht_cell_sprite(s, sx, sy, scene_frame(scene, 0, f->clock_ms));
+    } else if (pet) {
+        // The engine's pet, centred in the mark's box, lifted by its step's hop.
+        bool hold = pet_holds(f);
+        ht_pet_state_t state = hold ? HT_PET_IDLE : pet_state(f, recap);
+        unsigned step = hold ? 0 : (f->clock_ms / pet->step_ms[state]) % HT_PET_STEPS;
+        const ht_pet_step_t *p = &pet->loops[state][step];
+        int px = (HT_WIDTH - pet->w) / 2, py = mark_top + (MARK_SIZE - pet->h) / 2 + p->dy;
+        if (pet->cells) ht_cell_sprite(s, px, py, &pet->cells[p->frame]);
+        else ht_icon(s, px, py, &pet->frames[p->frame]);
+    } else if (engine >= 0) ht_icon(s, mark_x, mark_top, &ht_icon_engine56[engine]);
+    else no_text(s, rf);
 
-    // More than the rows or the budget hold. The octopus marks this too (recap_lines); without it a
-    // summary that was cut simply reads as a sentence that stops.
-    if (*body || budget > HT_CHARACTER_RECAP_CHARS) {
-        for (int i = s->count - 1; i >= 3; i--) {
-            char *line = s->runs[i].text;
-            size_t n = strlen(line);
-            if (!n || (n == 1 && line[0] == ' ')) continue;
-            while (n && line[n - 1] == ' ') n--;
-            size_t cells = (size_t)(s->runs[i].w / s->runs[i].font->width);
-            if (n + 3 > cells) n = cells > 3 ? cells - 3 : 0;
-            // Finish at the last whole word the row supplies, the way lines() does — a cut through
-            // the middle of one reads as a typo rather than as more text waiting.
-            size_t word = n;
-            while (word && line[word - 1] != ' ') word--;
-            if (word > 1) n = word;
-            while (n && line[n - 1] == ' ') n--;
-            strcpy(line + n, "...");
-            break;
-        }
+    // No card: its run stays, invisible, so the run count and order never change.
+    no_box(s);
+
+    if (has_recap) label_runs(s, &body, RECAP_LINES, RECAP_X, body_y, RECAP_PITCH, rf, ht_rgb(FOCUS_RECAP),
+                              s->background);
+    else for (int n = 0; n < RECAP_LINES; n++) {
+        // The scene's overlay (Codex's sandboxes) takes the first line's slot, empty without a recap.
+        if (n == 0 && scene && scene->overlay) scene_overlay(s, scene, 4, 0, f->clock_ms, rf);
+        else no_text(s, rf);
     }
+
+    // The scene's status: on the lower curve (the bell pill is raised clear of it), or — when a footer
+    // control has the bottom edge — a straight line under the scene, in this same slot.
+    bool taken = f->footer_action;
+    if (scene && taken) {
+        const ht_font_t *lf = &ht_lv_inter_30.base;
+        char line[HT_TEXT_BYTES];
+        status_fitted(line, sizeof line, f, lf, NULL, COL_W);
+        ht_lv_label_t l;
+        ht_lv_label(&l, lf, line, COL_W, 1, false);
+        label_runs(s, &l, 1, COL_X, SCENE_LINE_Y, 0, lf, ht_rgb(FOCUS_VOICE), s->background);
+    } else if (status[0] && !scene)
+        label_runs(s, &body, 1, COL_X, body_y, 0, sf,
+                   ht_rgb(retry ? FOCUS_FG : FOCUS_VOICE), s->background);
+    else no_text(s, sf);
+
+    // Nothing yet: said in the resting grey.
+    if (empty) label_runs(s, &body, 2, (HT_WIDTH - EMPTY_W) / 2, body_y, ef->height, ef,
+                          ht_rgb(FOCUS_EMPTY), s->background);
+    else { no_text(s, ef); no_text(s, ef); }
+
+    // The scene's status on the lower curve (or in the slot above when a footer has the bottom); an empty slot otherwise (the count never moves).
+    int before = s->count;
+    if (scene && !taken) {
+        char arc[HT_TEXT_BYTES];
+        status_fitted(arc, sizeof arc, f, NULL, &ht_arc_inter_lower, HT_ARC_SPAN);
+        ht_arc_status_face(s, ht_rgb(FOCUS_VOICE), arc, &ht_arc_inter_lower);
+    }
+    if (s->count == before) no_text(s, sf);
 }
 
 void ht_focus_portrait(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, uint16_t ink,
@@ -444,7 +686,8 @@ bool ht_focus_motion_tick(ht_character_motion_t *m, uint32_t now, ht_character_m
     /*
      * Fifteen frames, and only the voice screen spends them.
      *
-     * Nothing on the home face moves — a skin whose subject is the work should not fidget. These are
+     * Nothing on the home face moves but the pet, which runs on clock_ms, not on these
+     * frames — a skin whose subject is the work should not fidget. These are
      * the recording meter and the sending sweep, both of which the old firmware animated, and the
      * duration is picked so each lands on the cadence it had there.
      *

@@ -64,6 +64,7 @@ pub struct Agent {
     pub known_at: Instant,
     pub active_at: u64,
     pub working: bool,
+    pub activity: crate::activity::Activity,
     pub last_beat: Option<Instant>,
     pub question: Option<Question>,
     pub unread: bool,
@@ -112,6 +113,32 @@ pub struct Agent {
     /// When its transcript last changed, as the daemon last read it (tokenUsage.updatedAt, ms):
     /// what it last did, while no window was watching too.
     pub usage_at: u64,
+    // ── models: the model its engine is pointed at (the frame's `grid`) ──
+    /// A grid's or a saved API's model (`grid.model`; empty on its own login), that endpoint
+    /// (`grid.baseUrl`, which tells one API from another), whether the computers serving it rest
+    /// (`grid.state`: asleep, waking), and why it will not answer now (`grid.note`: its reason —
+    /// offline, not_served — the model, and the computer).
+    pub grid_model: String,
+    pub grid_base_url: String,
+    pub grid_state: String,
+    pub grid_note: Option<(String, String, String)>,
+    /// The tmux pane it runs in on its machine (`tmuxPane`), kept once the daemon no longer says it: a
+    /// harness whose engine exited is retired with its conversation, and the shell left in that pane
+    /// goes on under a new id (`releaseEngine`) — this is how a pane still on the old one finds it.
+    pub tmux_pane: String,
+}
+
+/// `grid.note`, read as the desktop reads it: a reason it does not know, or one missing the names
+/// its sentence needs, is no note.
+fn grid_note(note: &Value) -> Option<(String, String, String)> {
+    let model = s(note, "model");
+    let machine = s(note, "machine");
+    match s(note, "reason").as_str() {
+        _ if model.is_empty() => None,
+        "not_served" => Some(("not_served".into(), model, machine)),
+        "offline" if !machine.is_empty() => Some(("offline".into(), model, machine)),
+        _ => None,
+    }
 }
 
 /// A pull request for an agent's branch: its number, state (Open, Draft, Merged, Closed), link.
@@ -191,6 +218,7 @@ pub enum State {
     Working,
     Done,
     Ready,
+    Unknown,
     Starting,
     Failed,
     Paused,
@@ -212,6 +240,7 @@ impl Agent {
         if self.working { return State::Working }
         if self.errored { return State::Failed }
         if self.unread { return State::Done }
+        if self.activity.unknown { return State::Unknown }
         State::Ready
     }
 
@@ -260,6 +289,13 @@ pub fn parse_iso(text: &str) -> Option<u64> {
 }
 
 pub fn agent_from(machine_id: &str, row: &Value, previous: Option<&Agent>) -> Agent {
+    if let Some(agent) = previous {
+        if agent.session_id != s(row, "sessionId") && agent.activity.older(&row["activity"]) { return agent.clone() }
+    }
+    let activity = previous.map(|p| p.activity.clone()).unwrap_or_default();
+    // (The pane outlives the engine's session: kept across one, and after the row no longer says it.)
+    let last_pane = previous.map(|p| p.tmux_pane.clone()).unwrap_or_default();
+    let previous = previous.filter(|agent| agent.session_id == s(row, "sessionId"));
     let project = row.get("project").cloned().unwrap_or(Value::Null);
     let launch = row.get("launch").cloned().unwrap_or(Value::Null);
     let title = s(row, "title");
@@ -267,7 +303,7 @@ pub fn agent_from(machine_id: &str, row: &Value, previous: Option<&Agent>) -> Ag
     if name.is_empty() { name = if !title.is_empty() { title } else { s(&project, "name") } }
     if name.is_empty() { name = s(row, "engine") }
     let dsh = { let n = s(row, "dshName"); if n.is_empty() { s(row, "dsh") } else { n } };
-    Agent {
+    let mut agent = Agent {
         machine_id: machine_id.to_string(),
         id: s(row, "id"),
         session_id: s(row, "sessionId"),
@@ -283,6 +319,7 @@ pub fn agent_from(machine_id: &str, row: &Value, previous: Option<&Agent>) -> Ag
         known_at: previous.map(|p| p.known_at).unwrap_or_else(Instant::now),
         // Not `updatedAt`: the daemon restamps every row on each reconcile.
         active_at: previous.map(|p| p.active_at).unwrap_or(0),
+        activity,
         working: previous.map(|p| p.working).unwrap_or(false),
         last_beat: previous.and_then(|p| p.last_beat),
         question: previous.and_then(|p| p.question.clone()),
@@ -315,7 +352,16 @@ pub fn agent_from(machine_id: &str, row: &Value, previous: Option<&Agent>) -> Ag
         usage_at: row.get("tokenUsage").map(|u| time(u, "updatedAt")).filter(|t| *t > 0).or(previous.map(|p| p.usage_at)).unwrap_or(0),
         todos: previous.map(|p| p.todos.clone()).unwrap_or_default(),
         subagents: previous.map(|p| p.subagents.clone()).unwrap_or_default(),
-    }
+        // ── models ── (the daemon pushes the row again when its note clears)
+        grid_model: s(&row["grid"], "model"),
+        grid_base_url: s(&row["grid"], "baseUrl"),
+        grid_state: s(&row["grid"], "state"),
+        grid_note: grid_note(&row["grid"]["note"]),
+        tmux_pane: { let pane = s(row, "tmuxPane"); if pane.is_empty() { last_pane } else { pane } },
+    };
+    if let Some(working) = agent.activity.accept(&row["activity"], Instant::now()) { agent.working = working; }
+    if matches!(agent.status.as_str(), "stopped" | "offline") { agent.working = false; agent.activity.unknown = false; }
+    agent
 }
 
 /// TodoWrite's list: each item's words (its present-tense form while it is in progress) and state.
@@ -430,10 +476,40 @@ pub struct Fleet {
     pub agents: HashMap<(String, String), Agent>,
 }
 
+/// Match the desktop and phone: the app's saved name, or its stable machine-id label.
+pub fn machine_display_name(id: &str, name: Option<&str>) -> String {
+    name.map(str::trim).filter(|name| !name.is_empty()).map(str::to_string)
+        .unwrap_or_else(|| format!("machine-{}", id.chars().take(8).collect::<String>()))
+}
+
 impl Fleet {
     pub fn machine(&self, id: &str) -> Option<&Machine> { self.machines.iter().find(|m| m.id == id) }
     pub fn machine_mut(&mut self, id: &str) -> Option<&mut Machine> { self.machines.iter_mut().find(|m| m.id == id) }
-    pub fn machine_name(&self, id: &str) -> String { self.machine(id).map(|m| m.name.clone()).unwrap_or_default() }
+    /// The account's record for this computer; the local PTY transport is not another machine.
+    pub fn registered_local_machine(&self) -> Option<&Machine> {
+        self.machine(&self.local_id).filter(|m| !crate::local::is_local(&m.id))
+            .or_else(|| self.machines.iter().find(|m| m.local && !crate::local::is_local(&m.id)))
+    }
+    pub fn local_machine_name(&self) -> String {
+        self.registered_local_machine().map(|m| machine_display_name(&m.id, Some(&m.name)))
+            .unwrap_or_else(|| "This computer".into())
+    }
+    pub fn machine_name(&self, id: &str) -> String {
+        if crate::local::is_local(id) { return self.local_machine_name() }
+        machine_display_name(id, self.machine(id).map(|m| m.name.as_str()))
+    }
+    /// New work from a local shell goes through Harness when its daemon is connected.
+    /// Existing PTYs keep their transport identity so their sessions survive reconnects.
+    pub fn launch_machine_id<'a>(&'a self, id: &'a str) -> &'a str {
+        if crate::local::is_local(id) {
+            if let Some(machine) = self.registered_local_machine().filter(|m| m.usable()) { return &machine.id }
+        }
+        id
+    }
+    pub fn visible_machines(&self) -> impl Iterator<Item = &Machine> {
+        let connected_local = self.registered_local_machine().is_some_and(Machine::usable);
+        self.machines.iter().filter(move |m| !connected_local || !crate::local::is_local(&m.id))
+    }
     pub fn agent(&self, machine: &str, id: &str) -> Option<&Agent> { self.agents.get(&(machine.to_string(), id.to_string())) }
 
     pub fn state_of(&self, agent: &Agent) -> State { agent.state(self.machine(&agent.machine_id)) }
@@ -473,7 +549,10 @@ impl Fleet {
     pub fn event_agent(&mut self, machine_id: &str, payload: &Value) -> Option<&mut Agent> {
         let id = s(payload, "agentId");
         if !id.is_empty() && self.agents.contains_key(&(machine_id.to_string(), id.clone())) {
-            return self.agents.get_mut(&(machine_id.to_string(), id));
+            let agent = self.agents.get_mut(&(machine_id.to_string(), id))?;
+            let session = payload.get("sessionId").or_else(|| payload.get("dbSessionId")).and_then(Value::as_str);
+            if agent.status == "stopped" || session.is_some_and(|s| !agent.session_id.is_empty() && s != agent.session_id) { return None }
+            return Some(agent);
         }
         let session = { let x = s(payload, "sessionId"); if x.is_empty() { s(payload, "dbSessionId") } else { x } };
         if session.is_empty() { return None }
@@ -485,7 +564,7 @@ impl Fleet {
     /// starting, idle, paused, offline — within the first three and working, the one that has
     /// waited (or run) longest first; the rest most recent first.
     pub fn ranked(&self) -> Vec<&Agent> {
-        let bucket = |st: State| match st { State::NeedsInput => 0, State::Failed => 1, State::Done => 2, State::Working => 3, State::Starting => 4, State::Ready => 5, State::Paused => 6, State::Offline => 7 };
+        let bucket = |st: State| match st { State::NeedsInput => 0, State::Failed => 1, State::Done => 2, State::Working => 3, State::Starting => 4, State::Unknown => 5, State::Ready => 6, State::Paused => 7, State::Offline => 8 };
         // Each one's key once (the clock read once for all: a comparison that read it again could
         // order two alike harnesses both ways, which a sort must never see).
         let now = now_ms();
@@ -511,15 +590,20 @@ impl Fleet {
 // ── the roster between runs ────────────────────────────────────────────────────
 
 fn cache_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".harness").join("tui").join("fleet.json")
+    crate::app::state_dir().join("fleet.json")
 }
 
 impl Fleet {
-    /// Last run's machines and harnesses — searchable the instant the TUI opens, replaced by the
-    /// live rosters as each machine answers.
-    pub fn load_cache(&mut self) {
+    /// Restore only after this user's daemon identifies the current account's machine. Old caches
+    /// had no owner and may have come from another OS user's TCP listener; never adopt those.
+    pub fn load_cache(&mut self, owner: &str) {
         let Ok(text) = std::fs::read_to_string(cache_path()) else { return };
         let Ok(value) = serde_json::from_str::<Value>(&text) else { return };
+        self.restore_cache(&value, owner);
+    }
+
+    fn restore_cache(&mut self, value: &Value, owner: &str) {
+        if owner.is_empty() || value.get("owner").and_then(Value::as_str) != Some(owner) { return }
         for m in value.get("machines").and_then(Value::as_array).into_iter().flatten() {
             let id = s(m, "id");
             if id.is_empty() || self.machine(&id).is_some() { continue }
@@ -537,7 +621,7 @@ impl Fleet {
     }
 
     pub fn save_cache(&self) {
-        if self.agents.is_empty() { return }
+        if self.agents.is_empty() || self.local_id.is_empty() || crate::local::is_local(&self.local_id) { return }
         let machines: Vec<Value> = self.machines.iter().map(|m| serde_json::json!({ "id": m.id, "name": m.name, "local": m.local, "status": m.status })).collect();
         let agents: Vec<Value> = self.agents.values().map(|a| serde_json::json!({
             "machine": a.machine_id, "activeAt": a.active_at,
@@ -548,7 +632,7 @@ impl Fleet {
         let path = cache_path();
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
         let temp = path.with_extension("json.tmp");
-        if std::fs::write(&temp, serde_json::json!({ "machines": machines, "agents": agents }).to_string()).is_ok() { let _ = std::fs::rename(temp, path); }
+        if std::fs::write(&temp, serde_json::json!({ "owner": self.local_id, "machines": machines, "agents": agents }).to_string()).is_ok() { let _ = std::fs::rename(temp, path); }
     }
 }
 
@@ -567,6 +651,53 @@ pub fn ago(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_needs_the_current_accounts_owner_and_drops_legacy_unscoped_data() {
+        let mut cached = serde_json::json!({
+            "owner": "account-a", "machines": [{"id": "remote-a", "name": "private-machine"}],
+            "agents": [{"machine": "remote-a", "row": {"id": "private-agent", "name": "private work"}}]
+        });
+        let mut fleet = Fleet::default();
+        fleet.restore_cache(&cached, "account-b");
+        assert!(fleet.machines.is_empty() && fleet.agents.is_empty());
+        cached.as_object_mut().unwrap().remove("owner");
+        fleet.restore_cache(&cached, "account-a");
+        fleet.restore_cache(&cached, "");
+        assert!(fleet.machines.is_empty() && fleet.agents.is_empty());
+        cached["owner"] = serde_json::json!("account-a");
+        fleet.restore_cache(&cached, "account-a");
+        assert_eq!(fleet.machines.len(), 1);
+        assert_eq!(fleet.agents.len(), 1);
+    }
+
+    #[test]
+    fn local_shells_share_the_app_name_without_changing_their_transport() {
+        let shell = crate::local::MACHINE;
+        let mut fleet = Fleet { local_id: "registered-local".into(), ..Default::default() };
+        for (id, name, local) in [(shell, "m0", true), ("registered-local", "office", true), ("remote", "GPU rig", false)] {
+            fleet.machines.push(Machine { id: id.into(), name: name.into(), local, status: "running".into(), reach: Reach::Ready });
+        }
+        assert_eq!(fleet.machine_name(shell), "office");
+        assert_eq!(fleet.machine_name("registered-local"), "office");
+        assert_eq!(fleet.machine_name("remote"), "GPU rig");
+        assert_eq!(fleet.launch_machine_id(shell), "registered-local");
+        assert_eq!(fleet.visible_machines().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["registered-local", "remote"]);
+        assert_eq!(fleet.machine(shell).unwrap().id, shell);
+        // A rename is visible even to existing shell panes. Offline boot keeps the cached app name.
+        fleet.machine_mut("registered-local").unwrap().name = "Work Mac".into();
+        assert_eq!(fleet.machine_name(shell), "Work Mac");
+        fleet.local_id = shell.into();
+        fleet.machine_mut("registered-local").unwrap().reach = Reach::Offline;
+        assert_eq!(fleet.local_machine_name(), "Work Mac");
+        assert_eq!(fleet.machine_name(shell), "Work Mac");
+        assert_eq!(fleet.launch_machine_id(shell), shell);
+        // An unnamed account machine follows the desktop/phone convention, not its hostname.
+        fleet.machine_mut("registered-local").unwrap().name.clear();
+        assert_eq!(fleet.machine_name(shell), "machine-register");
+        assert_eq!(Fleet::default().machine_name(shell), "This computer");
+    }
+
     #[test]
     fn parses_iso() {
         assert_eq!(parse_iso("1970-01-01T00:00:01.500Z"), Some(1500));
@@ -618,5 +749,26 @@ mod answer_tests {
         assert_eq!(answer_text(&q(false), "9").as_deref(), Some("9"));
         assert_eq!(answer_text(&q(false), " per user, please ").as_deref(), Some("per user, please"));
         assert_eq!(answer_text(&q(false), "  "), None);
+    }
+}
+
+#[cfg(test)]
+mod activity_evidence_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn late_snapshot_cannot_restore_an_old_conversation() {
+        let old = json!({"id":"agent","sessionId":"old","activity":{"state":"working","epoch":"daemon","revision":1,"validForMs":30000}});
+        let new = json!({"id":"agent","sessionId":"new","activity":{"state":"idle","epoch":"daemon","revision":2,"validForMs":0}});
+        let first = agent_from("m", &old, None);
+        let replacement = agent_from("m", &new, Some(&first));
+        let late = agent_from("m", &old, Some(&replacement));
+        assert_eq!(late.session_id, "new"); assert!(!late.working);
+    }
+    #[test]
+    fn unavailable_activity_is_neither_working_nor_done() {
+        let row = json!({"id":"agent","sessionId":"s","activity":{"state":"unknown","epoch":"daemon","revision":1,"validForMs":0}});
+        let agent = agent_from("m", &row, None);
+        assert_eq!(agent.state(None), State::Unknown); assert!(!agent.unread);
     }
 }

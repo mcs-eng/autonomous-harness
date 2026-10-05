@@ -26,7 +26,7 @@ class SwarmSettingsController extends ChangeNotifier {
     }
     if (result['enabled'] is! bool || result['revision'] is! num) {
       throw const TeamRequestError(
-        'Update Harness to configure swarm collaboration.',
+        'Update Harness to configure tab collaboration.',
       );
     }
     return result;

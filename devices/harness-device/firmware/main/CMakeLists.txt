@@ -55,6 +55,8 @@ set(BOARD_SRCS
     "ui/habitat/gestures.c"
     "ui/habitat/tim.c"
     "ui/habitat/character.c"
+    "ui/habitat/illustrated.c"
+    "ui/habitat/illustrated_cache.c"
     "ui/habitat/character_motion.c"
     "ui/habitat/character_layout.c"
     "ui/habitat/tux.c"
@@ -64,6 +66,11 @@ set(BOARD_SRCS
     "ui/habitat/octopus_font.c"
     "ui/habitat/command_face.c"
     "ui/habitat/fonts.c"
+    "ui/habitat/lvgl_fonts.c"
+    "ui/habitat/lvgl_icons.c"
+    "ui/habitat/focus_marks.c"
+    "ui/habitat/focus_faces.c"
+    "ui/habitat/pets.c"
 )
 
 set(BOARD_REQUIRES
@@ -87,6 +94,15 @@ set(BOARD_REQUIRES
     json
 )
 
+# The illustrated companions' artwork is 4.6 MB of the image, and a Focus-only build never draws it,
+# so it ships only with -DDEVICE_ALL_SKINS=1 (owner, 2026-09-30). Without it the code stays and the
+# pack is empty — see illustrated_cache.c.
+if(DEVICE_ALL_SKINS)
+    set(COMPANION_ART "../assets/companions/companion_art.pack")
+else()
+    set(COMPANION_ART "")
+endif()
+
 idf_component_register(
     SRCS ${BOARD_SRCS}
     INCLUDE_DIRS
@@ -94,6 +110,7 @@ idf_component_register(
         "ui"
         "board"
     REQUIRES ${BOARD_REQUIRES}
+    EMBED_FILES ${COMPANION_ART}
 )
 
 # snprintf() is bounded (it truncates, never overflows), but -O2 enables a noisy
@@ -104,11 +121,18 @@ if(DEVICE_HABITAT_ORANGE)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_HABITAT_ORANGE=1)
 endif()
 
+# Focus and nothing else until the companion skins are finished (owner, 2026-09-30); the host tests
+# build without it and keep covering every skin. -DDEVICE_ALL_SKINS=1 lifts it for a build.
+if(NOT DEVICE_ALL_SKINS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE HABITAT_FOCUS_ONLY=1 HABITAT_NO_COMPANION_ART=1)
+endif()
+
+# Focus unless told otherwise — see ht_character_default().
 if(DEVICE_DEFAULT_CHARACTER STREQUAL "tux")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_DEFAULT_CHARACTER_TUX=1)
-elseif(DEVICE_DEFAULT_CHARACTER STREQUAL "focus")
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_DEFAULT_CHARACTER_FOCUS=1)
-elseif(DEFINED DEVICE_DEFAULT_CHARACTER AND NOT DEVICE_DEFAULT_CHARACTER STREQUAL "tim")
+elseif(DEVICE_DEFAULT_CHARACTER STREQUAL "tim")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_DEFAULT_CHARACTER_TIM=1)
+elseif(DEFINED DEVICE_DEFAULT_CHARACTER AND NOT DEVICE_DEFAULT_CHARACTER STREQUAL "focus")
     message(FATAL_ERROR "DEVICE_DEFAULT_CHARACTER must be tim, tux or focus")
 endif()
 

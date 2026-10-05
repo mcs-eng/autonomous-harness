@@ -8,16 +8,16 @@ import '../widgets/engine_identity.dart' show isTerminalEngine;
 const commandBarCommands = {
   'navigation.needs_input':
       'Find live questions and harnesses waiting for your input.',
-  'navigation.history': 'Return to previously opened harnesses and swarms.',
+  'navigation.history': 'Return to previously opened harnesses and tabs.',
   'app.settings':
       'Change preferences, appearance, account or connection settings.',
   'machines.manage': 'Open Machine Monitor, the harness that links, names and retires your computers.',
   'machines.list': 'See connected computers and their link state.',
   'machine.link': 'Open the setup dialog to connect another computer.',
-  'swarm.new': 'Choose an existing harness or create one in a new swarm.',
-  'swarm.reopen': 'Reopen the most recently closed swarm or pane.',
+  'swarm.new': 'Choose an existing harness or create one in a new tab.',
+  'swarm.reopen': 'Reopen the most recently closed tab or pane.',
   'agent.add':
-      'Choose an existing harness or create one in a new pane in this swarm.',
+      'Choose an existing harness or create one in a new pane in this tab.',
   'project.add': 'Choose a project folder to add to the workspace.',
   'pane.layout': 'Open the workspace layout chooser.',
   'pane.zoom': 'Toggle the focused pane between full size and the grid.',
@@ -57,6 +57,8 @@ const _commandPhrases = {
     'open a fresh tab',
   ],
   'swarm.reopen': [
+    'reopen last tab',
+    'reopen the last tab',
     'reopen last swarm',
     'reopen the last swarm',
     'reopen last harness',
@@ -317,7 +319,7 @@ List<CommandBarAction> buildCommandBarCatalog(
               destinationSwarmId: app.activeSwarmId,
             )
             ? null
-            : 'That swarm is no longer available.',
+            : 'That tab is no longer available.',
       ),
     );
   }

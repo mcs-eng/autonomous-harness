@@ -13,6 +13,8 @@ const int e2eVersion = 1;
 /// to the CLI's own list, because a type missing here fails nowhere: the frame simply leaves in the
 /// clear, and for terminal_* the relay then drops it as TERMINAL_FRAME_REJECTED.
 const Set<String> encryptedDownTypes = {
+  'harness_devices_list',
+  'harness_device_settings',
   'team',
   'team_delivery',
   'harness_share_list',
@@ -27,6 +29,7 @@ const Set<String> encryptedDownTypes = {
   'grid_fleet_run',
   'grid_fleet_cancel',
   'machine_resources',
+  'agent_close',
   'phone_pair',
   'viewer_surface',
   'api_connections',
@@ -48,7 +51,13 @@ const Set<String> encryptedDownTypes = {
   'agent_create_status',
   'agent_delete',
   'agent_restart',
+  // Reopens stopped work and forks a harness: the CLI has required both sealed since they were
+  // added, so unsealed the machine answers E2EE_REQUIRED (the web build sends them itself).
+  'agent_resume',
+  'agent_fork',
   'agent_recent',
+  // Writes the conversation record a switched agent reads (cli/src/lib/agentHandoff.ts).
+  'agent_handoff_prepare',
   'agent_update',
   'agent_files',
   'agent_read_file',

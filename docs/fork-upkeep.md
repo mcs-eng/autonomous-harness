@@ -84,6 +84,26 @@ own reviewed change.
   real-account compatibility or persistent-state downgrade safety. Preserve the complete
   known-good bundle; binary rollback and state rollback require separate evidence.
 
+## Evidence snapshot: 2026-10-04
+
+The inspected fork main was `ac2a8a865a6b0f86753e4fd7b4997555d5cf5655`; upstream main
+was `6bcdafb16db6a9790fc9b3b79a0ac55f807878fd`. Their common base is unchanged:
+`7debeb1750fbb1625158876819ba14b29e0a0211`. There were **127 fork-only / 426
+upstream-only commits** and **51 conflicted paths** in the object-only merge simulation
+(exit 1). No fork PR was open at inspection.
+
+The 2026-10-04 pass integrated the batch on branch `sync/upstream-2026-10-04` (worktree
+`.worktrees/sync-2026-10-04`, HEAD `6a4819cdb`): merge commit `c1d3a004c` plus three
+repair commits (`dccd2a0bb`, `c53b1783b`, `6a4819cdb`). Validation on Windows 11:
+CLI typecheck clean; cli suite 7369 pass / 1326 fail vs baseline 6112 / 1158 (delta is
+upstream-new specs red on Windows, an inherited class); `flutter analyze` 0 errors /
+0 warnings; desktop suite 534 files in six chunks — all regressions fixed or classified
+against baseline and the upstream parent, with 5 inherited reds recorded
+(`buffered_log_test` NUL path; 4 `linux_app_image_test` quoting-on-Windows). Behavior
+adoptions logged in `sync-receipt-2026-10-04.md` (unattended in-app installs,
+discoveryReady non-gating, picker empty-open layout, harness→agent share copy,
+colorScheme.error check row). This pass did not package, install, publish or PR.
+
 ## Evidence snapshot: 2026-10-02
 
 The inspected fork main was `2c347db6079603ced7085282cba02c65d0b1ed34`; upstream main

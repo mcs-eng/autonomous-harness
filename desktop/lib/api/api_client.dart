@@ -5,7 +5,10 @@ import 'package:dio/dio.dart';
 import '../auth/auth_session.dart';
 import '../core/config.dart';
 import '../core/models.dart';
+import '../core/test_run.dart';
 import '../logging/http_log.dart';
+import '../viewer/device_log.dart';
+import '../viewer/device_log_sync.dart' show DeviceLogAppendAnswer, DeviceLogFetched;
 import '../ws/local_daemon_transport.dart';
 import 'access_token_source.dart';
 import 'bearer_auth_interceptor.dart';
@@ -55,6 +58,37 @@ class ApiClient {
         ),
       ),
     );
+    if (kUnderTest) {
+      // Plain Dart tests do not install Flutter's HTTP override. A partial API
+      // fake can otherwise inherit desk()/deskOps() and seed fixture tabs into
+      // the signed-in user's real account through the local daemon.
+      dio.interceptors.insert(
+        0,
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            final uri = options.uri;
+            final fixture =
+                (uri.scheme == 'http' || uri.scheme == 'https') &&
+                const {'127.0.0.1', 'localhost', '::1'}.contains(uri.host) &&
+                uri.hasPort &&
+                uri.port != Uri.parse(AppConfig.dev.localCliBaseUrl).port;
+            if (fixture) {
+              handler.next(options);
+            } else {
+              handler.reject(
+                DioException(
+                  requestOptions: options,
+                  error: StateError(
+                    'Tests must use a fake API or an isolated local server; '
+                    'access to live services is disabled.',
+                  ),
+                ),
+              );
+            }
+          },
+        ),
+      );
+    }
     final transport = localTransport;
     if (auth == null && transport != null) {
       dio.httpClientAdapter = LocalDaemonHttpAdapter(
@@ -255,36 +289,138 @@ class ApiClient {
     }
   }
 
-  /// What this computer trusts to read and drive its terminals — every phone
-  /// paired by QR or password, and every computer linked to it — as the
-  /// daemon keeps them (`GET /api/pairs`, the list `harness pairings` prints).
-  /// Null when the daemon cannot say; the dialog then shows no list.
-  Future<List<PairedDevice>?> pairedDevices() async {
+  // -- the account's device key log (viewer builds: straight to the backend, signed) --
+
+  /// `GET /api/device-keys?since=` — the log from [since]; null when there is none to read (an older
+  /// backend, signed out, or unreachable). See `viewer/device_log_sync.dart`.
+  Future<DeviceLogFetched?> deviceKeys(int since) async {
     try {
-      final res = await _dio.get('/api/pairs');
-      final data = res.data;
-      final pairs = data is Map ? data['pairs'] : null;
-      if (res.statusCode != 200 || pairs is! List) return null;
-      return [for (final raw in pairs) ?PairedDevice.fromJson(raw)];
+      final res = await _dio.get('/api/device-keys', queryParameters: {'since': since});
+      if (res.statusCode != 200) return null;
+      final data = unwrapApiResponse(res);
+      if (data is! Map) return null;
+      final acct = data['acct'], head = DevLogHead.fromJson(data['head']), entries = data['entries'];
+      if (acct is! String || head == null || entries is! List) return null;
+      return (acct: acct, head: head, entries: entries.cast<Object?>());
     } catch (_) {
       return null;
     }
   }
 
-  /// Take [fingerprint]'s trust away: it can no longer read or drive this
-  /// computer, and any session it has open is dropped (`POST /api/revoke`,
-  /// what `harness unpair` sends). True when the daemon did it.
-  Future<bool> removePairedDevice(String fingerprint) async {
+  /// `POST /api/device-keys` — append one entry this app signed. Null when the backend could not be
+  /// reached; a refusal comes back as its code (`STALE_HEAD` with the current head).
+  Future<DeviceLogAppendAnswer?> appendDeviceKey(DevLogEntry entry) async {
+    try {
+      final res = await _dio.post('/api/device-keys', data: {'entry': entry.toJson()});
+      final body = res.data;
+      if (body is! Map) return null;
+      final data = body['data'];
+      final head = data is Map ? DevLogHead.fromJson(data['head']) : null;
+      if (res.statusCode == 200) return (head: head, error: null);
+      final error = body['error'];
+      final code = error is Map && error['code'] is String ? error['code'] as String : 'HTTP_${res.statusCode}';
+      return (head: head, error: code);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// `GET /api/device-keys/seen` — when each key last opened a session, `{pub: ms}`; empty when it
+  /// cannot be read. A hint for offering to remove apps not used in a long while.
+  Future<Map<String, int>> deviceKeysSeen() async {
+    try {
+      final res = await _dio.get('/api/device-keys/seen');
+      if (res.statusCode != 200) return const {};
+      final data = unwrapApiResponse(res);
+      final seen = data is Map ? data['seen'] : null;
+      return {
+        if (seen is Map)
+          for (final e in seen.entries)
+            if (e.key is String && e.value is int) e.key as String: e.value as int,
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  // -- the same list on a desktop build, as this computer's daemon verified it --
+
+  /// `GET /api/devices` — the account's devices as the daemon's copy of the log has them; null when
+  /// the daemon cannot say (an older CLI, signed out).
+  Future<Map<String, dynamic>?> daemonDevices() async {
+    try {
+      final res = await _dio.get('/api/devices');
+      final data = res.data;
+      return res.statusCode == 200 && data is Map<String, dynamic> ? data : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// `POST /api/devices/remove` — out of the account, signed by this computer. Null when done,
+  /// else the reason.
+  Future<String?> daemonRemoveDevice(String pub) async {
     try {
       final res = await _dio.post(
-        '/api/revoke',
-        data: {'id': fingerprint},
+        '/api/devices/remove',
+        data: {'pub': pub},
+        options: Options(headers: {'x-adapter-local': '1'}),
+      );
+      if (res.statusCode == 200) return null;
+      final data = res.data;
+      return data is Map && data['error'] is String ? data['error'] as String : 'HTTP_${res.statusCode}';
+    } catch (_) {
+      return 'UNAVAILABLE';
+    }
+  }
+
+  /// `GET /api/devices/history` — every add and remove, as the daemon verified it. Null when the
+  /// daemon predates the route (404); throws when it cannot answer.
+  Future<Map<String, dynamic>?> daemonDeviceHistory() async {
+    final res = await _dio.get(
+      '/api/devices/history',
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    if (res.statusCode == 404) return null;
+    final data = res.data;
+    if (res.statusCode == 200 && data is Map<String, dynamic>) return data;
+    throw StateError('HTTP_${res.statusCode}');
+  }
+
+  /// `POST /api/devices/dismiss` — new devices marked as seen: [pub] one, neither argument every
+  /// one, [pubs] exactly those (what the person was shown), [baseline] the "Already on your account"
+  /// list. False when the daemon predates the route (an old one answers a `pubs` body with an error).
+  Future<bool> daemonDismissDevices({String? pub, List<String>? pubs, bool baseline = false}) async {
+    try {
+      final res = await _dio.post(
+        '/api/devices/dismiss',
+        data: {'pub': ?pub, 'pubs': ?pubs, if (baseline) 'baseline': true},
+        options: Options(headers: {'x-adapter-local': '1'}),
+      );
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// `POST /api/devices/rebaseline` — what trusting the backend's list again changes; [confirm]
+  /// does it, for the list whose [head] (`{seq, hash}`) the preview showed. Null when the daemon could
+  /// not read a valid list; `{'error': 'LOG_CHANGED'}` when the list is not the one that was previewed;
+  /// `{'error': 'OTHER_ACCOUNT'}` when it is another account's than the one this computer is signed in to.
+  Future<Map<String, dynamic>?> daemonRebaselineDevices({required bool confirm, Map<String, Object?>? head}) async {
+    try {
+      final res = await _dio.post(
+        '/api/devices/rebaseline',
+        data: {'confirm': confirm, 'head': ?head},
         options: Options(headers: {'x-adapter-local': '1'}),
       );
       final data = res.data;
-      return res.statusCode == 200 && !(data is Map && data['error'] != null);
+      if (res.statusCode == 409) {
+        return {'error': data is Map && data['error'] == 'OTHER_ACCOUNT' ? 'OTHER_ACCOUNT' : 'LOG_CHANGED'};
+      }
+      return res.statusCode == 200 && data is Map<String, dynamic> ? data : null;
     } catch (_) {
-      return false;
+      return null;
     }
   }
 
@@ -498,46 +634,3 @@ String describeApiError(Object error) {
   return '$error';
 }
 
-/// One entry of [ApiClient.pairedDevices].
-class PairedDevice {
-  const PairedDevice({
-    required this.fingerprint,
-    required this.label,
-    required this.pairedAt,
-    required this.online,
-  });
-
-  final String fingerprint;
-
-  /// What the device called itself ("Dee's iPhone"). An older phone, or a
-  /// computer linked with `harness link connect`, is `harness link` — which
-  /// says nothing, so [name] says "Linked device" for it instead.
-  final String label;
-  final DateTime pairedAt;
-  final bool online;
-
-  String get name {
-    final trimmed = label.trim();
-    return trimmed.isEmpty || trimmed == 'harness link' || trimmed == 'browser'
-        ? 'Linked device'
-        : trimmed;
-  }
-
-  /// A `web` pairing: a phone or another computer. The dial (`device`) has
-  /// its own place, in Settings.
-  static PairedDevice? fromJson(Object? raw) {
-    if (raw is! Map) return null;
-    final fingerprint = raw['fingerprint'], label = raw['label'];
-    final pairedAt = raw['pairedAt'], role = raw['role'];
-    if (fingerprint is! String || fingerprint.isEmpty) return null;
-    if (role != null && role != 'web') return null;
-    return PairedDevice(
-      fingerprint: fingerprint,
-      label: label is String ? label : '',
-      pairedAt: pairedAt is num
-          ? DateTime.fromMillisecondsSinceEpoch(pairedAt.toInt())
-          : DateTime.fromMillisecondsSinceEpoch(0),
-      online: raw['online'] == true,
-    );
-  }
-}

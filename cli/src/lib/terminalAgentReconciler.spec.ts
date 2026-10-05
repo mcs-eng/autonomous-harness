@@ -32,6 +32,42 @@ function probe(targets: TerminalAgentProbe['targets'], agents: DiscoveredTermina
 }
 
 describe('composite terminal reconciliation', () => {
+  it('defers early startup hooks until restored panes have their original owners', async () => {
+    const current = { ...session([tmux]), sessionId: 'saved-conversation', processIdentity: null }
+    const onRemoved = vi.fn()
+    const onDiscovered = vi.fn()
+    const onObserved = vi.fn()
+    const probed = vi.fn(async (_hints: ReadonlyMap<string, unknown>) =>
+      probe([{ instanceId: 'tmux:default', result: { state: 'available' as const, roots: [] } }]))
+    const reconciler = new TerminalAgentReconciler({
+      deferUntilStart: true,
+      current: () => [current], backends: [], backendOrder: ['tmux'],
+      onDiscovered, onObserved, onDormant: vi.fn(), onRemoved, probe: probed,
+    })
+    const restored: TerminalRuntimeRef = { backend: 'tmux', paneId: '%24' }
+    // Hooks from an earlier restored pane used to run two full negative inventories here and
+    // remove this row before its new pane was allocated. Never block a hook waiting for boot.
+    await reconciler.triggerHint(restored, 'claude')
+    await reconciler.trigger()
+    expect(probed).not.toHaveBeenCalled()
+    expect(onRemoved).not.toHaveBeenCalled()
+
+    current.runtimes = [restored]
+    current.primaryRuntimeKey = terminalRouteKey(restored)
+    current.launch = { state: 'starting' }
+    const live = observed([restored])
+    probed.mockImplementation(async () => probe([
+      { instanceId: 'tmux:default', result: { state: 'available', roots: [{ runtime: restored, rootPid: 1, cwd: '/work' }] } },
+    ], [live]))
+    try {
+      await reconciler.start(60_000)
+      expect(probed).toHaveBeenCalledWith(new Map([[terminalRouteKey(restored), 'claude']]))
+      expect(onObserved).toHaveBeenCalledWith(live, current)
+      expect(onDiscovered).not.toHaveBeenCalled()
+      expect(onRemoved).not.toHaveBeenCalled()
+    } finally { reconciler.stop() }
+  })
+
   it('advertises a retained pane even when no engine process is observed', async () => {
     const current = { ...session([tmux]), active: false }
     const onTerminalAvailability = vi.fn()

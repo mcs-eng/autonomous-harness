@@ -1,52 +1,62 @@
 # New Harness entry rules
 
-Presentation follows the [terminal dialog design system](terminal-dialogs.md).
-Use that guide for current visuals; this document owns entry and launch behavior.
+Presentation follows the [desktop design system](desktop-design-system.md).
+This document owns entry, drafts, and launch behavior; the
+[desktop experiment](friendly-desktop-experiment.md) records the reviewed
+composer and picker interactions. Earlier terminal-cell form styling is retired.
 
-Startup and Cmd-T show the same quiet welcome page. Cmd-T creates a blank tab;
-Escape leaves that tab open. The command dock opens only after an explicit
-Cmd-N, Cmd-O, or Cmd-P action. Start Harness submits the reviewed draft;
-opening or cancelling the dock never starts a harness.
+Startup and New Tab embed the same `NewHarnessForm` and controller used by
+Cmd-N, at the same 680-point maximum width. The page has Recent harnesses below
+the composer, without a modal frame or Close button. Opening the page or dialog
+never starts a harness; Enter or New Harness starts it, with or without a prompt.
 
-The compact, centered launch form starts with `New Harness` selected.
-Agent, Project, and collapsed Options are the main rows. Options expands Model,
-Approvals, applicable Profile, Branch, and Worktree in consecutive rows. Enter launches
-using the displayed settings. The launch action follows the fields with one blank row
-and no extra shortcut hint. Enter on the selected action launches; there is no
-Shift-Enter shortcut. Carried tasks remain in the draft.
+Agent, Computer, and Repo selectors sit above the message. The local computer is
+**This Mac** on macOS and **This Computer** on Linux; remote computers retain their
+names. Model, Approvals, applicable Account, Worktree, and Branch remain visible
+below the message. Worktree and Branch stay on one line, without explanatory text
+underneath. **From main** identifies the base of a new worktree branch; a tooltip
+explains the operation. Existing branches and worktrees retain their branch name.
 
-Up/Down moves between fields and automatically reveals that field's chooser to
-the right, without moving the form. Right, typing, or Enter moves keyboard focus
-into the chooser. Enter accepts a value and returns focus to New Harness; a
-second Enter launches. Escape discards the search and returns to the form.
-Tab and Shift-Tab switch between the form and its chooser without applying a
-choice; Up/Down navigates the active pane, matching Cmd-P and Cmd-I.
-There is no summary pane. Agent combines coding agents and specialized
-harnesses in one list. Choosing Blender opens a compatible coding-agent list
-in the chooser. Project
-searches all machine/folder pairs, local first, with unavailable destinations
-dimmed. Choosing a pair sets both the machine and project. New Folder, Open
-Folder, and Clone Repository first ask for a machine, with local preselected,
-then show their name, path/browser, or URL prompt. Escape retraces these steps.
-Project displays `machine:full-path`; there is no separate Machine row.
+The model control retains the provider/subscription picker and shared models.
+Per-agent model selection stays in the agent's own UI. Model, Approvals, Account,
+Worktree, and Branch remain on one row; narrow windows scroll horizontally
+instead of wrapping settings onto another line. Named accounts are currently
+Codex-only; an unnamed account reads **Default account**. Fresh forms and recovered
+launches focus the prompt. Terminal, which takes no task, focuses New Harness. In the message,
+Enter submits and Shift-Enter inserts a newline, respecting composition and the
+active keymap. Tab/Shift-Tab traverse the visible controls. Arrow keys navigate
+an open chooser. Accepting or cancelling returns focus to its originating control.
 
-Use the terminal's selected font and measured cells. All controls are plain
-text, with one-row highlights. Worktree uses `[x]` / `[ ]`. Narrow windows show
-the active list on the same column with its own height. Validation messages have
-their own whole rows. The chooser starts with search, without
-a back/title row; Left or Escape returns to the form. Opening, searching, and cancelling
-never send input to an existing harness or start one.
+Outside clicks close an open picker but never dismiss the main popup. Escape
+closes the innermost child picker first; with no picker open, it closes the popup.
+The X directly closes the popup. Closing discards an ordinary unfinished task
+and its attachments; unresolved launch receipts retain their close guards and recovery values.
+The popup's 95% dark backdrop covers the native footer. Reopening starts fresh. Choosers use system typography, normal controls, a search field,
+natural row heights, and bounded scrolling.
+
+![Cmd-N composition with a separate computer selector and one settings row](images/new-harness-cmd-n.png)
+
+Agent combines direct coding agents and specialized harnesses in one searchable
+list. A specialized harness then offers compatible coding agents. Repo searches
+recent folders on the computer selected in the header; the search row does not
+repeat the computer picker. Open Folder, New Folder,
+and GitHub operate on that selected machine. Open invokes the native local
+folder dialog or remote browser; New and Clone offer Change machine inside
+their prompts. Escape retraces child steps. The computer remains visible in its own header selector, with the full folder
+path available in the Repo tooltip.
+
+Opening, searching, and cancelling never send input to an existing harness.
 
 | Entry | Initial values | Destination after a successful start |
 | --- | --- | --- |
-| Cmd-T, then Cmd-N | Last successful agent, local machine, last project on that machine | The blank tab opened by Cmd-T |
-| Cmd-Shift-P → New Harness | Last successful agent, local machine, last project on that machine | Current tab |
-| Cmd-N or the New Harness command | Last successful agent, local machine, last project on that machine; retain explicit task and destination | Current tab unless its source requests a new tab |
-| Explicit pane split | Focused pane's defaults | Requested split in that tab |
+| Cmd-T, then Cmd-N | Last successful setup and last focused real project with its machine | The blank tab opened by Cmd-T |
+| Cmd-Shift-P → New Harness | Last successful setup and last focused real project with its machine | Current tab |
+| Cmd-N or the New Harness command | Last successful setup and last focused real project with its machine; retain explicit task and destination | Current tab unless its source requests a new tab |
+| Pane-edge split, Split Right/Down command, menu, or shortcut | Opens creation directly with the clicked/focused pane's agent, machine, and project | Requested split in that tab after submission |
 | Store New Harness, or a product's Open action in the pane or native Models menu | Explicit product and machine; suggested project named for that product | New tab |
 | Store Resume Harness | Existing harness and its machine; choose from a menu when several match | Focus its existing tab or reopen a view of the same harness |
 | Store Try this prompt | Same as Open, with the example as the editable task | New tab |
-| First empty workspace | No automatic action; show the welcome page | User chooses with Cmd-N, Cmd-O, or Cmd-S |
+| First empty workspace / New Tab | Same successful setup and working project; a suggested local folder on first launch | That tab when the user submits New Harness |
 
 The Store and orchestration tabs cannot host a terminal pane. Generic creation
 from either uses a new tab. Command-bar requests keep the workspace context and
@@ -67,13 +77,28 @@ arrows navigate within the active pane and Enter activates the focused item.
 
 ## Harness and agent choices
 
-Agent lists recent specialized harnesses, direct coding agents, installed
-harnesses, and the rest of the machine's catalog, followed by Browse Harness
-Store. All are searchable. Codex, Claude Code, and Terminal are direct choices;
-there is no separate Coding category. A specialized harness asks which compatible
-coding agent should run it, preselecting its remembered choice. The form's value
+Agent keeps every coding agent first, in the curated order documented in the
+desktop experiment. Specialized harnesses follow with recent choices, the tuned
+set, and the remaining catalog. Terminal comes last. All are searchable and
+the saved default selection does not move specialized harnesses above coding
+agents. There is no separate Coding category. A specialized harness asks which compatible
+coding agent should run it, using the last successful agent when compatible. The form's value
 then reads `Blender · Codex`. Choosing a direct agent removes the package choice
 and sends no `dsh`; it does not remove project instructions or skills.
+
+Fresh harnesses use OpenCode with Muse Spark 1.3, xhigh effort and Auto-approve when compatible. Explicit and
+remembered agent choices are retained; reopening a session keeps its saved agent
+and model. A package's declared agent is a compatibility fallback, not a global default.
+
+The running pane header shows the agent name as plain text beside the model,
+with the same type, padding and hover/focus treatment and no pill or chevron.
+Clicking it opens the shared Cmd-P picker in `&` Agents mode. All agents are
+listed; unsupported choices explain why they cannot be selected. Selecting a
+supported agent saves and stops the current session, starts a fresh conversation
+in the same folder, and replaces its references in every pane without changing
+tab positions or layout. The previous saved conversation stays in history. No
+confirmation dialog is shown. Failed saves do not start a replacement; uncertain
+creation replies retain one receipt for retry.
 
 Explicit entry choices and pending receipts win over remembered defaults. A
 remembered agent, package, project, or profile that is unavailable requires an
@@ -84,13 +109,27 @@ Machine changes re-evaluate compatibility and never silently substitute at
 launch. The installed package's compatibility takes precedence over a newer
 catalog listing.
 
-The existing local state store retains separate engine and harness recents and
-the last successful engine per harness. Legacy preference keys and the app data
-directory stay in place. Fresh forms use successful launches, not canceled edits.
+The existing local state store remembers one global **last successful launch**:
+agent and specialized harness, model route, approvals, and account/profile.
+A profile path is only reusable on its original machine. Worktree is a global
+choice from the last successful Git launch; plain folders leave that choice alone.
+Choosing options, cancelling, or a failed start never changes these defaults.
+A confirmed start saves them even when creation has already replaced the form.
+Legacy preference keys and the app data directory stay in place; migration uses
+actual launch history instead of previously persisted dropdown edits.
+
+The working project is the last focused real work pane in this window, including
+its machine. Monitor, Grid, Store, and Settings do not replace it. Without a working
+pane, use the last successfully launched user project. Without either, suggest a
+new local folder so Enter can launch immediately. Normalize linked worktrees back
+to their repository. Utility launches never update this project history or the
+successful setup. Task text, attachments, branch names, and worktree folder names
+are never global preferences. There is no extra Draft, Save as default, or
+reasoning-effort control.
 
 ## Model selection
 
-Model lives under Options and uses the chosen agent’s supported routes. Show the
+Model is a compact control below the message and uses the chosen agent’s supported routes. Show the
 selected model name, or its provider (OpenAI / Anthropic) when the launch model
 is not reported. Its picker reuses the Models menu's subscription usage
 source and the selected machine's model catalog. It shows the relevant
@@ -106,39 +145,43 @@ updates the choices; Manage Models opens the existing Models panel for lifecycle
 management and preserves the launch draft. Choosing Terminal clears model routing;
 its Model row is omitted.
 
-An explicit model survives draft dismissal/restoration and uncertain creation
-receipts. A new session starts with the selected engine's default subscription;
-model routing is not persisted as a global preference. Start refreshes availability
+An explicit model survives an uncertain creation receipt. A successful launch
+remembers its model route globally with its agent. A first OpenCode session starts
+with Muse Spark 1.3; other engines use their default subscription. Start refreshes availability
 and sends only `gridModel` and `gridName`; the selected machine resolves the endpoint
 and credentials. Older daemons without `supportsModelLaunch` explain that an update
 is needed while continuing to allow ordinary subscription launches.
 
 ## Git projects
 
-Git projects enable Branch and Worktree. Worktree defaults to **Yes**;
-Enter, Space, Left/Right, Page Up/Down, or a click toggles `[x]` and `[ ]`.
+Git projects enable Branch and Worktree. Worktree defaults to **Yes** until a
+successful Git launch remembers another global choice.
+The checkbox supports pointer and keyboard activation through the form's active
+keymap. Its label and branch icon remain together as the form narrows.
 An empty repository explains that a commit is required for a worktree and asks
 for a choice. Folders without Git keep both rows disabled. Discovery runs on the selected machine
 without fetching, switching branches, or creating a worktree. A failed
 discovery offers Retry and blocks starting until the result is known.
 
 A worktree is a temporary folder, never a project: a harness is known by the
-folder it was started in and its repository's branch. Pane headers read
-`folder › branch`, with the machine first only for another computer: the folder
-the harness started in (a subfolder as itself, a checkout's root — a
-worktree's too — as its repository), which does not follow the agent's shell,
-and the branch with the same icon everywhere. A checkout on no branch — a
-commit an agent checked out to read or test — shows no branch; the tooltip says
-`No branch: on commit 65281563`. Worktree folders are never shown; the header's
-tooltip has the full path. Cut short, the folder shortens in the
-middle before the branch does. A folder inside a linked
+folder it was started in and its repository's branch. The focused workspace
+footer shows machine, project, branch and PR together using the user's selected
+status style. Pane headers keep harness identity, the model control and close
+action; they do not repeat project or branch context. The project label is the
+folder the harness started in (a subfolder as itself, a checkout's root — a
+worktree's too — as its repository), and does not follow the agent's shell.
+Detached checkouts do not invent a branch name; full path and checkout details
+remain available through the context controls. Worktree implementation folders
+are not everyday project labels. See [workspace-status-bar.md](workspace-status-bar.md)
+for context actions and compact layout. A folder inside a linked
 worktree (the focused pane's, or one typed or browsed) shows as the same folder
 in the repository's main checkout, so Cmd-N from a worktree pane starts beside
 it rather than inside it. Worktrees Start made are never offered as recent
 projects.
 
-**Branch** starts on `main` (local, or `origin/main`) with Worktree on, and on the
-folder's own branch after the user turns Worktree off. Missing `main` requires
+**Branch** starts on `main` for a fresh desktop form. With Worktree on, local
+`main` or `origin/main` can supply the base. With Worktree off, it must be a local
+branch; a remote-only `main` requires an explicit local branch choice. Missing `main` requires
 an explicit branch choice; a failed worktree creation never silently turns
 Worktree off. Branch does not follow the pane New Harness was opened from:
 New Harness is new work, and another agent's branch is one pick away. The start
@@ -178,8 +221,8 @@ A picked or created branch keeps its name. The worktree is checked out in
 `~/harnesses/worktrees/<repository>/<branch>`, and ignored files listed in the
 repository's `.worktreeinclude` (gitignore syntax, e.g. `.env`) are copied in.
 
-With **No**, **Branch** is the branch the folder itself is on; only local
-branches are selectable. A branch with a worktree of its own opens there.
+With **No**, **Branch** selects the local checkout branch, initially `main` for
+fresh desktop work. Only local branches are selectable. A branch with a worktree of its own opens there.
 Typing a name no branch has offers **Create branch**:
 a new branch from the folder's branch, keeping its uncommitted changes.
 Switching or creating needs no harness working in the folder, and switching
@@ -194,37 +237,36 @@ worktree it finds in `~/harnesses/worktrees` only when no live or stopped
 harness uses it, nothing is uncommitted, and it has been idle for a week; the
 branch stays unless Harness made it and its commits are all elsewhere.
 
-Drafts preserve these choices. A lost start reply reuses
+An open form preserves these choices. A lost start reply reuses
 its receipt, and retrying a confirmed launch failure reuses its prepared
 worktree: the retry selects that worktree's branch with Worktree off.
 
-## Draft ownership
+## Fresh forms and launch recovery
 
-- Workspace drafts belong to their original machine, focused source harness,
-  and project context. A different focused harness does not inherit their edits.
-- Fresh Cmd-N and Cmd-Shift-P creation use the same successful-launch defaults.
-  The current tab controls placement; a saved draft cannot redirect it to an old destination.
-- Store drafts belong to the explicitly requested product and machine. Opening
-  Blender cannot restore Workshop's agent, task, or generated project name.
-- Escape discards ordinary Cmd-N edits. Explicit Store entries can resume their
-  compatible draft, including the selected agent. Store Open still wins if the
-  harness or machine was changed inside that saved draft.
-- A newly typed search task or Store example starts from that entry's defaults.
-  Repeating the same request while its draft is already open keeps its edits.
-- A request awaiting confirmation is an exception: restore its exact values and
+- Every newly opened Cmd-N starts with an empty prompt and the successful setup.
+  Closing discards ordinary edits. Repeating Cmd-N while the same form is still
+  open simply focuses it.
+- Browsing search does not become a new task. An explicit create action or Store
+  example supplies its requested prompt. Explicit product, machine, split and
+  destination choices take precedence over inferred defaults.
+- The current tab controls placement. Store entries start fresh on their requested
+  machine, with a suggested project named for that product.
+- A request awaiting confirmation is the exception: restore its exact values and
   receipt. A new task must not silently turn an uncertain start into a duplicate.
-  An in-flight or uncertain draft cannot be replaced while it is open.
-- Closing the dock does not discard unresolved receipts. Advanced options and
-  return-to-dock preserve the same draft ownership and placement.
+  In-flight and uncertain requests cannot be replaced while open.
+- Pending receipts belong to their original source context. Closing keeps them
+  recoverable. Opening a nested picker or returning from advanced options keeps
+  the currently open form and its destination.
 
 ## Project names
 
 Suggested projects display the existing `<agent>-YYYY-MM-DD-HH-MM` naming
 convention. Untouched suggestions follow agent changes; a user's edited name
 does not. The suggestion is frozen while reviewed. Project → New Folder
-asks for a machine, then opens the name prompt; accepting a name returns to the Project field.
+opens the name prompt on the selected machine, with Change machine available;
+accepting a name returns to the Repo control.
 
-Each machine retains its own project choice. A folder on one machine is never
+Project paths retain their owning machine. A folder on one machine is never
 silently reused on another. Generated folders use exclusive reservation and
 advance to seconds/a suffix only on a confirmed collision. Explicit names are
 never silently renamed, and existing files are never overwritten.

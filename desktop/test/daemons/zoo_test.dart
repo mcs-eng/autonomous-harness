@@ -1268,6 +1268,47 @@ void main() {
     );
 
     test(
+      'fresh hatches celebrate once without pairing or replaying a read',
+      () async {
+        final remote = FakeZooTransport()
+          ..zoo = Zoo(
+            daemons: [ZooDaemon(id: 'tim', hatched: '', egg: 'first')],
+            pair: legacyZooUid('tim'),
+          )
+          ..revision = 1;
+        final zoo = controller();
+        addTearDown(zoo.dispose);
+        final events = <ZooEvent>[];
+        zoo.events.listen(events.add);
+        zoo.bind('account:u1', remote: remote);
+        await pumpEventQueue();
+        remote
+          ..zoo = remote.zoo.copyWith(
+            daemons: [
+              ...remote.zoo.daemons,
+              ZooDaemon(
+                id: 'gnu',
+                uid: 'fresh_gnu',
+                hatched: DateTime(2026, 9, 28, 9, 42).toIso8601String(),
+                egg: 'turn',
+              ),
+            ],
+          )
+          ..revision = 2;
+        zoo.pushed(2);
+        await pumpEventQueue();
+        expect(
+          events.whereType<ZooDaemonHatched>().single.daemon.uid,
+          'fresh_gnu',
+        );
+        expect(zoo.paired!.id, 'tim');
+        zoo.pushed(2);
+        await pumpEventQueue();
+        expect(events.whereType<ZooDaemonHatched>(), hasLength(1));
+      },
+    );
+
+    test(
       'a guest counts its own turns; an account never sends zoo.turn',
       () async {
         final guest = controller();

@@ -80,6 +80,7 @@ class _ReadyDiscovery extends LocalCliDiscovery {
   @override
   Timer startSupervising({
     Duration checkInterval = const Duration(seconds: 5),
+    Future<void> Function(int daemonPid)? checkOwner,
     Duration graceStep = const Duration(milliseconds: 500),
     Duration graceWindow = const Duration(seconds: 5),
     Duration initialBackoff = const Duration(seconds: 2),
@@ -238,6 +239,8 @@ void main() {
       final door = find.byKey(const Key('use-without-account-button'));
       expect(door, findsOneWidget);
       expect(find.text('Use this computer without an account'), findsOneWidget);
+      await tester.ensureVisible(door);
+      await tester.pump();
       await tester.tap(door);
       // Not pumpAndSettle: the fleet diagram on this screen animates for as
       // long as it is shown, so the frame never settles. Pump until the boot

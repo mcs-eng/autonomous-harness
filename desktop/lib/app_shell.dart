@@ -12,6 +12,7 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'core/crash_log.dart';
 import 'core/desktop_window.dart';
+import 'core/linux_app_image.dart';
 import 'screens/login_screen.dart';
 import 'state/app_state.dart';
 import 'stats/stats_lifecycle.dart';
@@ -33,6 +34,7 @@ import 'logging/install.dart';
 import 'shortcuts/app_keymap.dart';
 import 'shortcuts/keyboard_practice.dart';
 import 'widgets/shortcuts_sheet.dart';
+import 'widgets/new_device_notice.dart';
 import 'widgets/update_notice.dart';
 import 'widgets/window_chrome.dart';
 import 'sharing/shared_agent_location.dart';
@@ -45,6 +47,10 @@ import 'viewer/viewer_page.dart';
 /// entry points disagree about; everything below is shared.
 typedef AuthenticatedScreenBuilder = Widget Function(AppNotifier app);
 
+/// What a host draws around every screen of the app, sign-in included. The
+/// desktop draws nothing; a browser build stands its store bar over the app.
+typedef AppFrameBuilder = Widget Function(Widget app);
+
 /// Everything both entry points do before their first frame: file logs, the
 /// crash log, the keyboard config, the saved appearance, and the native window
 /// where there is one.
@@ -56,6 +62,9 @@ typedef AuthenticatedScreenBuilder = Widget Function(AppNotifier app);
 /// trees are otherwise byte-identical outside `lib/phone/` and `lib/p2p/`.
 Future<void> startHarness({
   required AuthenticatedScreenBuilder authenticatedScreen,
+
+  /// See [AppFrameBuilder]; none leaves the app unframed.
+  AppFrameBuilder? frame,
 
   /// A viewer build's second wire to each machine (see
   /// [TerminalTransportPlugin]); the desktop passes none.
@@ -87,15 +96,25 @@ Future<void> startHarness({
       child: HarnessApp(
         keymap: keymap,
         authenticatedScreen: authenticatedScreen,
+        frame: frame,
       ),
     ),
   );
+  // After the first frame is on its way: a launcher entry is not worth
+  // holding the window up for.
+  unawaited(registerAppImageLauncher());
 }
 
 class HarnessApp extends StatelessWidget {
-  const HarnessApp({super.key, this.keymap, required this.authenticatedScreen});
+  const HarnessApp({
+    super.key,
+    this.keymap,
+    required this.authenticatedScreen,
+    this.frame,
+  });
   final AppKeymap? keymap;
   final AuthenticatedScreenBuilder authenticatedScreen;
+  final AppFrameBuilder? frame;
 
   @override
   Widget build(BuildContext context) {
@@ -123,21 +142,24 @@ class HarnessApp extends StatelessWidget {
       ),
       // The design system's own `buildAppTheme` — see the note where a second,
       // hand-written `ThemeData` used to shadow it, in `lib/theme/app_theme.dart`.
-      // One theme, no `darkTheme`/`themeMode` to resolve between: the chosen
-      // palette says whether it is light or dark.
+      // The chosen palette owns the appearance; platform text scaling remains
+      // available to app controls.
       theme: grid.buildAppTheme(brightness: prefs.palette.brightness),
-      // The chosen point size is already applied to every style and terminal
-      // cell. A second UI scale would make the chrome disagree with the grid.
-      builder: (context, child) => MediaQuery.withNoTextScaling(
-        child: _GridTokenScope(
-          child: keymap == null
-              ? child ?? const SizedBox.shrink()
-              : KeymapProvider(
-                  keymap: keymap!,
-                  child: child ?? const SizedBox.shrink(),
-                ),
-        ),
+      highContrastTheme: grid.buildAppTheme(
+        brightness: prefs.palette.brightness,
+        highContrast: true,
       ),
+      // Desktop forms respect the platform's text size. Fixed-grid terminal
+      // surfaces own their no-scaling boundary alongside terminal zoom.
+      builder: (context, child) {
+        final app = child ?? const SizedBox.shrink();
+        final framed = frame?.call(app) ?? app;
+        return _GridTokenScope(
+          child: keymap == null
+              ? framed
+              : KeymapProvider(keymap: keymap!, child: framed),
+        );
+      },
       home: StatsLifecycle(
         child: RootShell(authenticatedScreen: authenticatedScreen),
       ),
@@ -197,19 +219,33 @@ class _RootShellState extends ConsumerState<RootShell>
 
   @override
   void dispose() {
+    flushAppLog();
     WidgetsBinding.instance.removeObserver(this);
     _appMenuChannel.setMethodCallHandler(null);
     super.dispose();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) flushAppLog();
+  }
+
+  @override
   Future<AppExitResponse> didRequestAppExit() async {
+    final app = ref.read(appStateProvider);
+    // A sign-in still waiting on the browser or a phone ends with the app: its
+    // CLI would otherwise wait on, holding the lock the next sign-in needs.
+    if (app.canCancelLogin) app.cancelLogin();
     // Save the final arrangement, with a bound so an unavailable disk cannot
     // trap the user in the app. Input and tab switching never wait for disk.
-    await ref
-        .read(appStateProvider)
-        .flushPaneLayout()
-        .timeout(const Duration(seconds: 1), onTimeout: () {});
+    try {
+      await app.flushPaneLayout().timeout(
+        const Duration(seconds: 1),
+        onTimeout: () {},
+      );
+    } finally {
+      flushAppLog();
+    }
     return AppExitResponse.exit;
   }
 
@@ -342,6 +378,8 @@ class _RootShellState extends ConsumerState<RootShell>
         // overlay it landed on the rail's head — covering the wordmark and the
         // three buttons beside it, which is the one strip of this window that
         // must stay reachable.
+        // Device bands, most urgent first: a removal (red before neutral), a key that joined and left,
+        // a new device, a held computer id. The mobile app stacks them in the same order.
         return Column(
           children: [
             // The app's commands as a menu strip (Linux only; macOS carries
@@ -352,6 +390,18 @@ class _RootShellState extends ConsumerState<RootShell>
                 app.status != AppStatus.checkingEnvironment &&
                 app.status != AppStatus.preparingEnvironment)
               UpdateNotice(notifier: app),
+            if (app.visibleDeviceRemovals.isNotEmpty &&
+                app.status == AppStatus.authenticated)
+              DeviceRemovalNoticeBand(notifier: app),
+            if (app.departedDevices.isNotEmpty &&
+                app.status == AppStatus.authenticated)
+              DeviceDepartedNoticeBand(notifier: app),
+            if (app.newDevices.isNotEmpty &&
+                app.status == AppStatus.authenticated)
+              NewDeviceNotice(notifier: app),
+            if (app.deviceConflict != null &&
+                app.status == AppStatus.authenticated)
+              DeviceConflictNoticeBand(notifier: app),
             Expanded(child: framed),
           ],
         );

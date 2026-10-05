@@ -284,6 +284,7 @@ class TerminalViewState extends State<TerminalView> {
           textStyle: widget.textStyle,
           textScaler: widget.textScaler ?? MediaQuery.textScalerOf(context),
           theme: widget.theme,
+          fillsBackground: widget.backgroundOpacity >= 1,
           focusNode: _focusNode,
           cursorType: widget.cursorType,
           alwaysShowCursor: widget.alwaysShowCursor,
@@ -593,6 +594,25 @@ class TerminalViewState extends State<TerminalView> {
       _scrollToBottom();
       return KeyEventResult.handled;
     }
+    // macOS's "Add period with double-space" (Keyboard › Text Input, on by
+    // default) acts on the input method's side: the second press does not
+    // insert a space, it asks the client to REPLACE the first one with ". ".
+    // A prompt is not prose, and neither the input configuration nor the app's
+    // own defaults turn it off (both measured). So the space bar never reaches
+    // the input method here: it is typed straight into the buffer and the pty.
+    // Unless something is being composed — a Telex word, a CJK candidate, a
+    // dead key — where the space belongs to the IME, which commits with it.
+    final editor = _customTextEditKey.currentState;
+    if (defaultTargetPlatform == TargetPlatform.macOS &&
+        event.character == ' ' &&
+        !reservesTerminalKey &&
+        !HardwareKeyboard.instance.isAltPressed &&
+        !isComposing &&
+        editor != null) {
+      editor.insertTyped(' ');
+      return KeyEventResult.handled;
+    }
+
     if (isTextInput && !reservesTerminalKey) {
       // Do not let another Flutter shortcut consume this before macOS gets a
       // chance to update the native text-input client.
@@ -703,6 +723,7 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.textStyle,
     required this.textScaler,
     required this.theme,
+    this.fillsBackground = true,
     required this.focusNode,
     required this.cursorType,
     required this.alwaysShowCursor,
@@ -733,6 +754,9 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final TerminalTheme theme;
 
+  /// See [RenderTerminal.fillsBackground].
+  final bool fillsBackground;
+
   final FocusNode focusNode;
 
   final TerminalCursorType cursorType;
@@ -760,6 +784,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       textStyle: textStyle,
       textScaler: textScaler,
       theme: theme,
+      fillsBackground: fillsBackground,
       focusNode: focusNode,
       cursorType: cursorType,
       alwaysShowCursor: alwaysShowCursor,
@@ -784,6 +809,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..textStyle = textStyle
       ..textScaler = textScaler
       ..theme = theme
+      ..fillsBackground = fillsBackground
       ..focusNode = focusNode
       ..cursorType = cursorType
       ..alwaysShowCursor = alwaysShowCursor

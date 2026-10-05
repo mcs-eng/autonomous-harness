@@ -5,10 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/link.dart';
 
 import '../core/models.dart';
+import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
 import '../state/terminal_pane.dart';
-import '../terminal/terminal_text.dart';
-import '../widgets/terminal_text_action.dart';
+import '../widgets/desktop_chrome.dart';
 import '../widgets/web_download_button.dart';
 import 'shared_agent_location.dart';
 import 'shared_harness_panel.dart';
@@ -142,23 +142,34 @@ class _SharedAgentPageState extends State<SharedAgentPage> {
 
   @override
   Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
     final data = _data;
     return Scaffold(
+      backgroundColor: grid.AppPalette.windowBg,
       body: SafeArea(
         child: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Row(
-                children: [
-                  Link(
-                    uri: Uri.parse('/'),
-                    builder: (context, follow) =>
-                        TerminalTextAction(label: 'Harness', onPressed: follow),
-                  ),
-                  const Spacer(),
-                  const WebDownloadButton(),
-                ],
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: SizedBox(
+                width: double.infinity,
+                child: Wrap(
+                  spacing: 16,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Link(
+                      uri: Uri.parse('/'),
+                      builder: (context, follow) => DesktopPill(
+                        label: 'Harness',
+                        quiet: true,
+                        onPressed: follow,
+                      ),
+                    ),
+                    const WebDownloadButton(),
+                  ],
+                ),
               ),
             ),
             Expanded(
@@ -192,44 +203,75 @@ class _SharedAgentPageState extends State<SharedAgentPage> {
                           : () => unawaited(widget.app.login()),
                     )
                   : Center(
-                      child: Padding(
+                      child: SingleChildScrollView(
                         padding: const EdgeInsets.all(24),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              _loading
-                                  ? 'Opening shared harness…'
-                                  : _error ?? 'Shared harness',
-                              style: terminalContentStyle(),
-                              textAlign: TextAlign.center,
-                            ),
-                            if (widget.app.lastError != null)
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 440),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
                               Text(
-                                widget.app.lastError!,
+                                _loading
+                                    ? 'Opening shared harness…'
+                                    : 'Shared harness',
+                                style: DesktopChrome.heading(),
                                 textAlign: TextAlign.center,
                               ),
-                            const SizedBox(height: 20),
-                            if (_signInRequired)
-                              TerminalTextAction(
-                                label: widget.app.signingIn
-                                    ? 'Signing in…'
-                                    : 'Sign in',
-                                onPressed: widget.app.signingIn
-                                    ? null
-                                    : () => unawaited(widget.app.login()),
+                              if (!_loading) ...[
+                                const SizedBox(height: 12),
+                                Semantics(
+                                  liveRegion: true,
+                                  child: Text(
+                                    _error ?? 'Shared harness',
+                                    style: DesktopChrome.text(
+                                      size: 13,
+                                      color: DesktopChrome.muted,
+                                    ),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ),
+                              ],
+                              if (widget.app.lastError != null) ...[
+                                const SizedBox(height: 12),
+                                Text(
+                                  widget.app.lastError!,
+                                  style: DesktopChrome.text(
+                                    size: 13,
+                                    color: Theme.of(context).colorScheme.error,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ],
+                              const SizedBox(height: 20),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                alignment: WrapAlignment.center,
+                                children: [
+                                  if (_signInRequired)
+                                    DesktopPill(
+                                      label: widget.app.signingIn
+                                          ? 'Signing in…'
+                                          : 'Sign in',
+                                      onPressed: widget.app.signingIn
+                                          ? null
+                                          : () => unawaited(widget.app.login()),
+                                    ),
+                                  if (!_loading && !_signInRequired)
+                                    DesktopPill(
+                                      label: 'Retry',
+                                      onPressed: _load,
+                                    ),
+                                  if (!_loading && _signedIn && _data == null)
+                                    DesktopPill(
+                                      label: 'Switch account',
+                                      onPressed: () =>
+                                          unawaited(widget.app.logout()),
+                                    ),
+                                ],
                               ),
-                            if (!_loading && !_signInRequired)
-                              TerminalTextAction(
-                                label: 'Retry',
-                                onPressed: _load,
-                              ),
-                            if (!_loading && _signedIn && _data == null)
-                              TerminalTextAction(
-                                label: 'Switch account',
-                                onPressed: () => unawaited(widget.app.logout()),
-                              ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ),

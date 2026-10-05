@@ -96,6 +96,8 @@ pub struct Pane {
     /// select-pane -d: keys for this pane are dropped until select-pane -e.
     pub input_off: bool,
     pub opening: bool,
+    /// A user requested app-wide control while this pane's passive open was in flight.
+    pub takeover_pending: bool,
     pub read_only: bool,
     pub last_alive: Instant,
     pub dirty: bool,
@@ -431,6 +433,14 @@ impl Pane {
 }
 
 impl Pane {
+    /// A fast replacement process may already have exited before its restart RPC
+    /// callback runs. Only retire the exit that belonged to the old process; a new
+    /// exit must survive stream reopening so pane-died is not emitted twice.
+    pub fn complete_restart(&mut self, previous_exit: Option<&str>, command: Option<String>) {
+        if self.dead.as_ref().map(|exit| exit.id.as_str()) == previous_exit { self.dead = None; }
+        if command.is_some() { self.start_command = command; }
+    }
+
     pub fn new(id: u64, machine_id: &str, agent_id: &str, cols: u16, rows: u16) -> Pane {
         let listener = Listener::default();
         let (cols, rows) = (cols.max(1), rows.max(1));
@@ -456,6 +466,7 @@ impl Pane {
             osc_title: String::new(),
             input_off: false,
             opening: false,
+            takeover_pending: false,
             read_only: false,
             last_alive: Instant::now(),
             dirty: true,

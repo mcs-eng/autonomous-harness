@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { findTuiBinary, opensClient, platformKey, tuiCommand } from './index.js'
+import { localDaemonStatus } from '../lib/daemonEndpoint.js'
+vi.mock('../lib/daemonEndpoint.js', () => ({ localDaemonStatus: vi.fn() }))
 
 // No test may start a real binary, daemon or login flow, or make a network request.
-vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }))
+vi.mock('node:child_process', async (original) => ({ ...await original<typeof import('node:child_process')>(), spawnSync: vi.fn() }))
 const ok = { status: 0, signal: null, pid: 0, stdout: '', stderr: '', output: [] }
 
 describe('harness tui launcher', () => {
@@ -17,11 +19,13 @@ describe('harness tui launcher', () => {
     binary = join(home, 'hn')
     writeFileSync(binary, '#!/bin/sh\n', { mode: 0o755 })
     vi.stubEnv('HOME', home)
+    vi.stubEnv('ADAPTER_DATA_DIR', join(home, '.harness', 'cli', 'data'))
     vi.stubEnv('HARNESS_TUI_BIN', binary)
     vi.stubEnv('PORT', '19418')
     vi.stubEnv('HN_SOCKET_NAME', 'hnr19fix-launcher')
     for (const key of ['TMUX', 'TMUX_PANE', 'HN_SOCKET']) vi.stubEnv(key, undefined)
     vi.mocked(spawnSync).mockReset().mockReturnValue(ok)
+    vi.mocked(localDaemonStatus).mockReset().mockResolvedValue(null)
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
     vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -65,24 +69,39 @@ describe('harness tui launcher', () => {
     expect(findTuiBinary()).not.toBe(join(home, 'missing'))
   })
 
-  it('launches local shells even if login is cancelled', async () => {
-    vi.mocked(spawnSync).mockReturnValueOnce({ ...ok, status: 1 })
+  it('starts the local daemon and client without requiring an account or opening login', async () => {
+    vi.mocked(localDaemonStatus).mockResolvedValueOnce(null).mockResolvedValue({ machineId: 'guest-computer', signedIn: false })
     const args = ['-L', 'hnr19fix-launcher', '--port', '19418']
-    await expect(tuiCommand(args, { port: 19418, signedIn: () => false })).resolves.toBe(0)
+    await expect(tuiCommand(args, { port: 19418 })).resolves.toBe(0)
     expect(spawnSync).toHaveBeenCalledTimes(2)
-    expect(vi.mocked(spawnSync).mock.calls[0][1]).toContain('login')
+    expect(vi.mocked(spawnSync).mock.calls[0][1]).toContain('start')
+    expect(vi.mocked(spawnSync).mock.calls.flatMap((call) => call[1])).not.toContain('login')
     expect(spawnSync).toHaveBeenLastCalledWith(binary, args, expect.objectContaining({
-      env: expect.objectContaining({ HOME: home, PORT: '19418' }),
+      env: expect.objectContaining({ HOME: home, PORT: '19418', ADAPTER_DATA_DIR: join(home, '.harness', 'cli', 'data') }),
     }))
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('reuses this user\'s signed-out daemon', async () => {
+    vi.mocked(localDaemonStatus).mockResolvedValue({ machineId: 'guest-computer', signedIn: false })
+    await expect(tuiCommand([], { port: 19418, identity: () => 'guest-computer' })).resolves.toBe(0)
+    expect(spawnSync).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(spawnSync).mock.calls[0][0]).toBe(binary)
+  })
+
+  it('asks start to reconcile a daemon still serving a previous sign-in', async () => {
+    vi.mocked(localDaemonStatus).mockResolvedValueOnce({ machineId: 'old-account' }).mockResolvedValue({ machineId: 'new-account' })
+    await expect(tuiCommand([], { port: 19418, identity: () => 'new-account' })).resolves.toBe(0)
+    expect(vi.mocked(spawnSync).mock.calls[0][1]).toContain('start')
+    expect(spawnSync).toHaveBeenCalledTimes(2)
   })
 
   it('uses the explicit port for daemon status, daemon start and the native client', async () => {
     vi.mocked(spawnSync).mockReturnValueOnce({ ...ok, status: 1 })
     const args = ['-L', 'hnr19fix-launcher', '--port', '19419']
-    await expect(tuiCommand(args, { port: 19418, signedIn: () => true })).resolves.toBe(0)
-    expect(fetch).toHaveBeenCalledTimes(1)
-    expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:19419/api/status', expect.anything())
+    await expect(tuiCommand(args, { port: 19418 })).resolves.toBe(0)
+    expect(localDaemonStatus).toHaveBeenCalledWith(join(home, '.harness', 'cli', 'data'), 19419)
+    expect(fetch).not.toHaveBeenCalled()
     const calls = vi.mocked(spawnSync).mock.calls
     expect(calls[0][1]).toContain('start')
     expect(calls[0][2]?.env?.PORT).toBe('19419')
@@ -93,7 +112,7 @@ describe('harness tui launcher', () => {
 
   it('opens a local client after the daemon startup deadline', async () => {
     vi.useFakeTimers()
-    const launched = tuiCommand(['-L', 'hnr19fix-launcher', '--port', '19418'], { port: 19418, signedIn: () => true })
+    const launched = tuiCommand(['-L', 'hnr19fix-launcher', '--port', '19418'], { port: 19418 })
     await vi.runAllTimersAsync()
     await expect(launched).resolves.toBe(0)
     expect(vi.mocked(spawnSync).mock.calls[0][1]).toContain('start')
@@ -101,15 +120,16 @@ describe('harness tui launcher', () => {
   })
 
   it('leaves commands and invalid arguments to the native binary without bootstrapping', async () => {
-    const signedIn = vi.fn(() => false)
+    const identity = vi.fn(() => 'current-user')
     for (const args of [
       ['--port', 'broken'], ['--port', '65536'], ['--port'], ['--unknown'],
       ['-c', 'true'], ['--headless'], ['--local-server'], ['-C'],
       ['list-panes'], ['--', 'ls'], ['-L'],
     ]) {
-      await tuiCommand(['-L', 'hnr19fix-launcher', '--port', '19418', ...args], { port: 19418, signedIn })
+      await tuiCommand(['-L', 'hnr19fix-launcher', '--port', '19418', ...args], { port: 19418, identity })
     }
-    expect(signedIn).not.toHaveBeenCalled()
+    expect(identity).not.toHaveBeenCalled()
+    expect(localDaemonStatus).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
     expect(vi.mocked(spawnSync).mock.calls.every(([command]) => command === binary)).toBe(true)
   })

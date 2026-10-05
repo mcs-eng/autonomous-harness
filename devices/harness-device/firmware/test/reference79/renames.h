@@ -1,4 +1,4 @@
-// Diagnostic namespace for the unmodified dense-cache renderer.
+// Diagnostic namespace for the dense-cache reference algorithm.
 #define ht_arc_cache_builds ht79_arc_cache_builds
 #define ht_arc_fast_sampling ht79_arc_fast_sampling
 #define ht_arc_status ht79_arc_status

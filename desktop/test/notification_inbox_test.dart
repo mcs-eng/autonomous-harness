@@ -9,7 +9,9 @@ import 'package:harness/core/models.dart';
 import 'package:harness/notify/alert_sounds.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/notification_inbox.dart';
+import 'package:harness/terminal/terminal_text.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
+import 'package:harness/widgets/desktop_chrome.dart';
 import 'package:harness/widgets/notification_inbox.dart';
 import 'package:harness/widgets/workspace_notifications_button.dart';
 
@@ -17,13 +19,33 @@ import 'support/real_fonts.dart';
 import 'swarm_attention_test.dart' show waitingQuestion;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
-import 'workspace_activity_test.dart' show captureWorkspace;
+import 'workspace_activity_test.dart' as activity;
 
 void main() {
   final capture = Platform.environment['HARNESS_NOTIFICATION_CAPTURE_DIR'];
   final bell = find.byKey(const ValueKey('workspace-notifications-button'));
   final inbox = find.byKey(const ValueKey('notification-inbox'));
   Finder row(String agent) => find.byKey(ValueKey('notification:m/$agent'));
+
+  Future<void> captureWorkspace(WidgetTester tester, String path) async {
+    final oldShadows = debugDisableShadows;
+    final view = tester.binding.renderViews.first;
+    void repaint(RenderObject object) {
+      object.markNeedsPaint();
+      object.visitChildren(repaint);
+    }
+
+    try {
+      debugDisableShadows = false;
+      repaint(view);
+      await tester.pumpAndSettle();
+      await activity.captureWorkspace(tester, path);
+    } finally {
+      debugDisableShadows = oldShadows;
+      repaint(view);
+      await tester.pump();
+    }
+  }
 
   setUpAll(() async {
     await (FontLoader('packages/lucide_icons_flutter/Lucide')..addFont(
@@ -383,7 +405,13 @@ void main() {
     await mount(tester, app);
     await tester.tap(bell);
     await tester.pumpAndSettle();
-    expect(find.text('Notifications  9'), findsOneWidget);
+    expect(find.text('Notifications'), findsOneWidget);
+    expect(
+      find.descendant(of: inbox, matching: find.text('9')),
+      findsOneWidget,
+    );
+    expect(find.byTooltip('Close notifications'), findsOneWidget);
+    expect(tester.getSize(inbox).width, 440);
     expect(find.byTooltip('Needs input'), findsWidgets);
     expect(find.byTooltip('Failed'), findsWidgets);
     expect(find.text('Test host  openharness  release-notes'), findsOneWidget);
@@ -417,4 +445,141 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     app.dispose();
   });
+
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'desktop inbox fits enlarged text and live states in ${brightness.name}',
+      (tester) async {
+        final app = createApp(connected: true);
+        addTearDown(app.dispose);
+        final oldBrightness = grid.AppTheme.brightness.value;
+        final oldFont = terminalFontStore.value;
+        addTearDown(() {
+          grid.AppTheme.brightness.value = oldBrightness;
+          terminalFontStore.value = oldFont;
+        });
+        grid.AppTheme.brightness.value = brightness;
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(480, 420);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.resetPhysicalSize);
+        final machine = app.stateOf('m')!;
+        machine.agents = const [
+          Agent(
+            id: 'a0',
+            name: 'Review the long onboarding flow for the product website',
+            terminalAvailable: true,
+            project: AgentProject(
+              name: 'product-website',
+              cwd: '/work/product-website',
+              branch: 'onboarding-review',
+            ),
+          ),
+          Agent(
+            id: 'a1',
+            name: 'Choose a homepage direction',
+            terminalAvailable: true,
+            project: AgentProject(
+              name: 'website',
+              cwd: '/work/website',
+              branch: 'new-home',
+            ),
+          ),
+        ];
+        app.agentUnread.mark('m', 'a0', AlertKind.done);
+        machine.blockedAgents['a1'] = waitingQuestion('a1');
+        app.agentUnread.mark('m', 'a1', AlertKind.needsYou);
+        await tester.pumpWidget(
+          MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: grid.buildAppTheme(brightness: brightness),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: const TextScaler.linear(1.6)),
+              child: child!,
+            ),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => unawaited(
+                    showNotificationInbox(
+                      context,
+                      app: app,
+                      topInset: 40,
+                      onOpen: (_) async => false,
+                    ),
+                  ),
+                  child: const Text('Open inbox'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('Open inbox'));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(tester.getRect(inbox).right, 464);
+        expect(tester.getRect(inbox).top, 56);
+        expect(tester.getSize(inbox).width, 440);
+        expect(find.byType(DesktopDialogSurface), findsOneWidget);
+        expect(app.agentUnread.count, 2);
+        final title = tester.widget<Text>(
+          find.text('Choose a homepage direction'),
+        );
+        expect(title.style!.fontFamily, grid.AppType.sansFamily);
+        final header = tester.widget<Text>(find.text('Notifications'));
+        expect(header.style!.fontFamily, grid.AppType.sansFamily);
+        final before = tester.getSize(inbox);
+        final rowBefore = tester.getSize(row('a0'));
+        terminalFontStore.value = oldFont.copyWith(fontSize: 30);
+        await tester.pumpAndSettle();
+        expect(tester.getSize(inbox), before);
+        expect(tester.getSize(row('a0')), rowBefore);
+
+        if (capture != null) {
+          await tester.runAsync(
+            () => Directory(capture).create(recursive: true),
+          );
+          await captureWorkspace(
+            tester,
+            '$capture/desktop-notifications-${brightness.name}-enlarged.png',
+          );
+        }
+        await tester.tap(row('a0'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Could not open this harness. Try again.'),
+          findsOneWidget,
+        );
+        expect(app.agentUnread.count, 2);
+        expect(tester.takeException(), isNull);
+        if (capture != null) {
+          await captureWorkspace(
+            tester,
+            '$capture/desktop-notifications-${brightness.name}-error.png',
+          );
+        }
+        machine.blockedAgents.clear();
+        app.agentUnread.clearAll();
+        await tester.pumpAndSettle();
+        expect(find.text('No notifications'), findsOneWidget);
+        expect(
+          find.text('Could not open this harness. Try again.'),
+          findsNothing,
+        );
+        expect(find.byTooltip('Close notifications'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        if (capture != null) {
+          await captureWorkspace(
+            tester,
+            '$capture/desktop-notifications-${brightness.name}-empty.png',
+          );
+        }
+        await tester.tap(find.byTooltip('Close notifications'));
+        await tester.pumpAndSettle();
+        expect(inbox, findsNothing);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
 }

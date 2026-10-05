@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../state/pane_arrangement.dart';
 import '../core/desktop_window.dart';
@@ -14,6 +14,7 @@ import '../core/codex_profiles.dart';
 import '../core/dsh_catalog.dart';
 import '../core/harness_catalog.dart';
 import '../core/first_task.dart';
+import '../core/launch_setup.dart';
 import '../core/permission_modes.dart';
 import '../core/project_folder.dart';
 import '../core/repository_clone.dart';
@@ -757,6 +758,30 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       prompt: _firstPrompt,
       attempt: _creation,
     );
+    if (error == null && _creation?.agentId != null) {
+      unawaited(
+        widget.notifier.agentPreference.remember(
+          choice,
+          harnessId: harness,
+          setup: LaunchSetup(
+            engine: engine,
+            harnessId: harness,
+            permissionMode: permissionMode ?? kDefaultPermissionMode,
+            model: terminal ? null : widget.initialDraft?.model,
+            profile: engine == 'codex' && widget.initialDraft?.model == null
+                ? profile
+                : null,
+            profileMachineId: _machineId,
+          ),
+          worktree:
+              _sameGitProject && widget.initialDraft?.worktreePreference != null
+              ? widget.initialDraft!.worktreePreference
+              : project?.gitSource != null
+              ? project!.createsWorktree
+              : null,
+        ),
+      );
+    }
     if (!mounted) return;
     if (error != null) {
       setState(() {
@@ -776,10 +801,6 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
       });
       return;
     }
-    // What New Harness lists first next time, before anything is typed.
-    unawaited(
-      widget.notifier.agentPreference.remember(choice, harnessId: _harnessId),
-    );
     Navigator.of(context).pop(NewAgentDialogResult.created);
   }
 
@@ -1055,7 +1076,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                             : () =>
                                   Navigator.of(context)
                                       .pop(NewAgentDialogResult.findExisting),
-                        icon: const Icon(LucideIcons.search, size: 16),
+                        icon: const Icon(AppIcons.search, size: 16),
                         label: const Text('Find a harness'),
                       ),
                     FilledButton(
@@ -1269,7 +1290,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                 id: NewHarnessController.codingId,
                 label: 'Coding',
                 detail: 'Work in any code project',
-                mark: (size) => Icon(LucideIcons.code, size: size),
+                mark: (size) => Icon(AppIcons.code, size: size),
               ),
               for (final harness in _harnessOptions)
                 AgentChoice(
@@ -1341,7 +1362,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                   detail: 'Browser workspace on this PC',
                   creator: 'DeepSeek',
                   description: 'Launch the official browser UI in WSL. Separate from Harness terminal panes and task routing.',
-                  mark: (size) => Icon(Icons.open_in_browser, size: size),
+                  mark: (size) => Icon(AppIcons.squareArrowOutUpRight, size: size),
                 ),
                 AgentChoice(
                   id: 'zcode-desktop',
@@ -1350,7 +1371,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                   detail: 'Desktop app on this PC',
                   creator: 'Z.ai',
                   description: 'Open the installed official desktop app. Choose your project and sign in there.',
-                  mark: (size) => Icon(Icons.desktop_windows, size: size),
+                  mark: (size) => Icon(AppIcons.monitor, size: size),
                 ),
               ],
               for (final identity in allEngines)
@@ -1661,7 +1682,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                   padding: const EdgeInsets.only(right: 8),
                   child: AppIconButton(
                     key: const Key('new-agent-task-clear'),
-                    icon: LucideIcons.x300,
+                    icon: AppIcons.close,
                     tooltip: 'Clear the task',
                     onPressed: _choicesLocked ? null : _task.clear,
                   ),
@@ -1727,10 +1748,10 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
             detail: mode.detail,
             leading: () => Icon(
               mode.risky
-                  ? LucideIcons.shieldOff
+                  ? AppIcons.shieldOff
                   : mode.id == kDefaultPermissionMode
-                  ? LucideIcons.shieldCheck
-                  : LucideIcons.shield,
+                  ? AppIcons.shieldCheck
+                  : AppIcons.shield,
               size: 16,
               color: mode.risky
                   ? grid.AppPalette.dangerFill
@@ -1786,7 +1807,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
     value: _machineId,
     moreKey: const Key('new-agent-machine-more'),
     moreLabel: 'More machines',
-    moreLeading: const Icon(LucideIcons.monitor, size: 22),
+    moreLeading: const Icon(AppIcons.monitor, size: 22),
     optionKey: (id) => ValueKey('new-agent-machine-$id'),
     showDetails: true,
     compact: true,
@@ -1805,9 +1826,9 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
             leading: () => Icon(
               _machineOnline(machine)
                   ? (machine.isLocalMachine
-                        ? LucideIcons.laptop
-                        : LucideIcons.monitor)
-                  : LucideIcons.monitorOff,
+                        ? AppIcons.laptop
+                        : AppIcons.monitor)
+                  : AppIcons.monitorOff,
               size: 22,
               color: _machineOnline(machine)
                   ? grid.AppPalette.textPrimary

@@ -1,9 +1,9 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/models.dart';
@@ -52,7 +52,7 @@ class _Connection extends WsConn {
 
 void main() {
   // Initialize the generated icon library before entering the deep widget-build stack in DDC.
-  setUpAll(() => expect(LucideIcons.sparkles.codePoint, greaterThan(0)));
+  setUpAll(() => expect(AppIcons.sparkles.codePoint, greaterThan(0)));
   late AppNotifier app;
   late Map<String, _Connection> connections;
   setUp(() {

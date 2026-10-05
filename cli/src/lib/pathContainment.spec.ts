@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { env } from '../config/env.js'
 import { tempRoots, within, withinRoots } from './pathContainment.js'
@@ -23,6 +23,31 @@ it('counts a root itself and what is under it, and nothing else', () => {
   expect(within('/a/b', '/a/bc')).toBe(false)
   expect(within('/a/b', '/a')).toBe(false)
   expect(within('/a/b', '/other')).toBe(false)
+})
+
+it('refuses a parent escape, another drive, and a UNC share under Windows path rules', () => {
+  // win32 relative() climbs out as `..\x`, never `../x`, and answers with an absolute path when the
+  // target is on another drive or share. Pinned with path.win32 so POSIX hosts check it too.
+  expect(within('C:\\a\\b', 'C:\\a\\b', win32)).toBe(true)
+  expect(within('C:\\a\\b', 'C:\\a\\b\\c\\d', win32)).toBe(true)
+  expect(within('C:\\a\\b', 'c:\\A\\B\\c', win32)).toBe(true)
+  expect(within('C:\\a\\b', 'C:\\a\\b\\..name', win32)).toBe(true)
+  expect(within('C:\\a\\b', 'C:\\a\\other.txt', win32)).toBe(false)
+  expect(within('C:\\a\\b', 'C:\\a\\bc', win32)).toBe(false)
+  expect(within('C:\\a\\b', 'C:\\a', win32)).toBe(false)
+  expect(within('C:\\a\\b', 'D:\\a\\b\\c', win32)).toBe(false)
+  expect(within('C:\\a\\b', '\\\\server\\share\\a\\b', win32)).toBe(false)
+  expect(within('\\\\server\\share\\a', '\\\\server\\share\\a\\x', win32)).toBe(true)
+  expect(within('\\\\server\\share\\a', '\\\\server\\other\\a\\x', win32)).toBe(false)
+})
+
+it('applies the same rule under POSIX path rules', () => {
+  expect(within('/a/b', '/a/b/c', posix)).toBe(true)
+  expect(within('/a/b', '/a/b/..name', posix)).toBe(true)
+  expect(within('/a/b', '/a/other.txt', posix)).toBe(false)
+  expect(within('/a/b', '/a/bc', posix)).toBe(false)
+  // A backslash is an ordinary filename character on POSIX, not a separator.
+  expect(within('/a/b', '/a/b/..\\x', posix)).toBe(true)
 })
 
 it('measures the target against roots resolved through their symlinks', async () => {

@@ -1,8 +1,11 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
-import '../shared/theme/workspace_bar_style.dart';
+import '../devices/device_artwork.dart';
 import '../store/store_mark.dart';
+import 'desktop_chrome.dart';
 import 'workspace_bar_control.dart';
 
 /// The Store's rounded, marked button, restored from the original tab bar.
@@ -12,14 +15,31 @@ class WorkspaceStoreButton extends StatelessWidget {
     required this.width,
     required this.tooltip,
     this.onPressed,
+    this.devices = false,
   });
 
   final double width;
   final String tooltip;
   final VoidCallback? onPressed;
+  final bool devices;
 
-  static double widthOf(BuildContext context) =>
-      workspaceBarTextSizeOf(context, 'Harness Store').width + 52;
+  static Size _labelSize(BuildContext context, {bool devices = false}) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: devices ? 'Devices' : 'Harness Store',
+        style: DesktopChrome.control(),
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final size = painter.size;
+    painter.dispose();
+    return size;
+  }
+
+  static double widthOf(BuildContext context, {bool devices = false}) =>
+      _labelSize(context, devices: devices).width + 52;
 
   @override
   Widget build(BuildContext context) {
@@ -27,12 +47,15 @@ class WorkspaceStoreButton extends StatelessWidget {
     final enabled = onPressed != null;
     final accent = grid.AppPalette.swarmAccent;
     return WorkspaceBarControl(
-      label: 'Harness Store',
+      label: devices ? 'Devices' : 'Harness Store',
       tooltip: tooltip,
       onPressed: onPressed,
       builder: (context, emphasized) => Container(
         width: width,
-        height: workspaceBarControlHeight(context),
+        height: math.max(
+          grid.AppControl.heightSmall,
+          _labelSize(context, devices: devices).height + 12,
+        ),
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: ShapeDecoration(
           color: Color.alphaBlend(
@@ -54,14 +77,17 @@ class WorkspaceStoreButton extends StatelessWidget {
         ),
         child: Row(
           children: [
-            StoreMark(enabled: enabled),
+            if (devices)
+              DeviceMark(enabled: enabled)
+            else
+              StoreMark(enabled: enabled),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Harness Store',
+                devices ? 'Devices' : 'Harness Store',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: workspaceBarTextStyle(
+                style: DesktopChrome.control(
                   color: accent.withValues(alpha: enabled ? 1 : .45),
                 ),
               ),

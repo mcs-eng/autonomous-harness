@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/models/model_search_catalog.dart';
 import 'package:harness/models/api_connections_controller.dart';
+import 'package:harness/state/swarm_navigation.dart';
 import 'package:harness/state/swarm_search.dart';
 import 'package:harness/usage/models_menu_controller.dart';
 import 'package:harness/widgets/resting_model_words.dart';
@@ -137,6 +138,61 @@ void main() {
     );
     expect(app.actions, isEmpty);
   });
+  test(
+    'footer counts installed variants once across owned linked machines',
+    () async {
+      expect(catalog.installedCount, isNull);
+      app.localInventory = {
+        'models': [
+          {
+            'id': 'same-model',
+            'name': 'Same model',
+            'quant': 'Q4',
+            'state': 'downloaded',
+          },
+          {'id': 'catalog-only', 'name': 'Download me'},
+        ],
+      };
+      app.machineStates['other']!.connectionStatus = ConnectionStatus.connected;
+      app.machineInventories['other'] = {
+        'models': [
+          {
+            'id': 'same-model',
+            'name': 'Same model',
+            'quant': 'Q4',
+            'state': 'running',
+          },
+          {
+            'id': 'same-model',
+            'name': 'Same model',
+            'quant': 'Q8',
+            'state': 'downloaded',
+          },
+        ],
+      };
+      catalog.watchInstalled();
+      await catalog.refresh();
+      expect(catalog.installedCount, 2);
+      expect(catalog.installedDetail, contains('2 machines'));
+      expect(app.gridSetups, isEmpty);
+      expect(app.installs, 0);
+      expect(app.connection.creations, isEmpty);
+
+      // An offline host retains its last installed inventory; an unlinked host
+      // leaves this account's scope altogether.
+      app.machineStates['other']!.connectionStatus =
+          ConnectionStatus.disconnected;
+      app.notifyListeners();
+      expect(catalog.installedCount, 2);
+      expect(catalog.installedDetail, contains('Inventory unavailable'));
+      app.machineStates['other']!.needsLink = true;
+      app.notifyListeners();
+      expect(catalog.installedCount, 1);
+      app.localInventory = {'models': <Object>[]};
+      await catalog.refresh();
+      expect(catalog.installedCount, 0);
+    },
+  );
 
   test('sections separate your models from downloads, and fold the catalog past five', () async {
     final usage = _WithSubscriptions();
@@ -247,6 +303,103 @@ void main() {
         ],
       );
       expect(app.actions, isEmpty);
+    } finally {
+      search.dispose();
+      grouped.dispose();
+      usage.dispose();
+    }
+  });
+
+  test('the desktop list names its action rows for what they do, and keeps who shares a model on its line', () async {
+    final usage = _WithSubscriptions();
+    final grouped = ModelSearchCatalog(
+      app.modelManager,
+      usage,
+      pollHosts: false,
+    );
+    final search = SwarmSearchController(
+      app,
+      const [],
+      models: grouped,
+      offersCreate: true,
+      adding: true,
+    )..setQuery(':');
+    try {
+      app.localInventory = {
+        'models': [
+          for (final letter in ['A', 'B', 'C', 'D', 'E', 'F', 'G'])
+            {'id': 'catalog-$letter', 'name': '${letter * 3} catalog'},
+        ],
+      };
+      app.inventory = const GridModels(
+        gridName: 'home',
+        models: [],
+        grids: [
+          GridSection(
+            name: 'Team',
+            own: false,
+            models: [GridModel(id: 'Shared Qwen', node: 'team.lan')],
+          ),
+        ],
+      );
+      app.modelManager.apis.connections = [
+        const ApiConnection({
+          'id': 'custom',
+          'name': 'Custom API',
+          'baseUrl': 'https://relay.example.test/v1',
+        }),
+      ];
+      await app.modelManager.refresh();
+      SwarmDestination row(bool Function(SwarmDestination) test) =>
+          search.rows.singleWhere(test);
+      final subscription = row((r) => r.title == 'OpenAI');
+      final api = row((r) => r.title == 'Custom API');
+      final shared = row((r) => r.title == 'Shared Qwen · team.lan');
+      final more = row(search.isModelDownloadsRow);
+
+      // One line a row: every other row keeps its own title, who shares a model included.
+      expect(search.modelRowTitle(subscription), 'OpenAI');
+      expect(search.modelRowTitle(api), 'Custom API');
+      expect(search.modelRowTitle(shared), 'Shared Qwen · team.lan');
+      // The fold is named for what Enter does, with how many it holds.
+      expect(search.modelRowTitle(more), 'More models (2)');
+      search.move(search.rows.indexOf(more) - search.cursor);
+      search.submit();
+      expect(search.modelRowTitle(more), 'Show fewer');
+    } finally {
+      search.dispose();
+      grouped.dispose();
+      usage.dispose();
+    }
+  });
+
+  test('a subscription the harness can use still shows how much of it is left, not Use', () async {
+    final usage = _MachineSubscriptions();
+    final grouped = ModelSearchCatalog(
+      app.modelManager,
+      usage,
+      pollHosts: false,
+    );
+    final search = SwarmSearchController(
+      app,
+      const [],
+      models: grouped,
+      offersCreate: true,
+      adding: true,
+    )..setQuery(':');
+    try {
+      await app.modelManager.refresh();
+      // A Codex harness on this computer: its own OpenAI account is one it can switch to.
+      search.setModelSelection(
+        'codex',
+        const GridModels(gridName: 'home', models: []),
+        machineId: 'm',
+      );
+      final own = search.rows.singleWhere(
+        (row) => row.title == 'OpenAI · local-account',
+      );
+      expect(search.canSelectModel(own), isTrue);
+      expect(search.modelRowStatus(own), '50% remaining');
     } finally {
       search.dispose();
       grouped.dispose();

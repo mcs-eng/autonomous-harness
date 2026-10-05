@@ -13,7 +13,7 @@
 import { realpathSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, relative } from 'node:path'
+import { isAbsolute, relative, sep, type PlatformPath } from 'node:path'
 import { env } from '../config/env.js'
 
 /**
@@ -21,10 +21,17 @@ import { env } from '../config/env.js'
  * paths — handing this a path straight from a client checks the name of a symlink, not its target.
  *
  * `relative()` rather than `startsWith`, because `/a/bc` starts with `/a/b` and is not inside it.
+ * `paths` lets tests pin `path.win32` or `path.posix` semantics on any host.
  */
-export function within(root: string, path: string): boolean {
-  const rel = relative(root, path)
-  return rel === '' || (rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel))
+export function within(
+  root: string,
+  path: string,
+  paths: Pick<PlatformPath, 'relative' | 'sep' | 'isAbsolute'> = { relative, sep, isAbsolute },
+): boolean {
+  const rel = paths.relative(root, path)
+  // Climbing out is `..` alone or followed by THIS platform's separator: win32 returns `..\x`, never
+  // `../x`. An absolute result is another drive or UNC share on win32, which relative() cannot bridge.
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${paths.sep}`) && !paths.isAbsolute(rel))
 }
 
 /**

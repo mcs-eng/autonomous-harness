@@ -34,6 +34,55 @@ describe('prompt swarm origin', () => {
     expect(scopes.current(agent)).toBe(b)
   })
 
+  it('keeps the origin of prompts broken with the app’s ⇧⏎ and ⌥⏎ line keys', () => {
+    const scopes = new SwarmPromptScopes()
+    scopes.raw(agent, bytes('a\x1b[13;2ub\r'), 'swarm-a')
+    scopes.started(agent, 'a\nb', 'hook', 'claude')
+    expect(scopes.current(agent)).toBe(a)
+    // A paste, two ⇧⏎, then text, each key arriving as its own write.
+    for (const chunk of ['\x1b[200~pasted code\x1b[201~', '\x1b[13;2u', '\x1b', '[13;2u', 'explain it', '\r']) scopes.raw(agent, bytes(chunk), 'swarm-b')
+    scopes.started(agent, 'pasted code\n\nexplain it', 'hook', 'claude')
+    expect(scopes.current(agent)).toBe(b)
+    scopes.raw(agent, bytes('c\x1b\rd\r'), 'swarm-a')
+    scopes.started(agent, 'c\nd', 'hook', 'codex')
+    expect(scopes.current(agent)).toBe(a)
+    // Under LNM the app sends Return as \r\n, so ⌥⏎ arrives as \x1b\r\n: still one line break.
+    scopes.raw(agent, bytes('e\x1b\r\nf\r\n'), 'swarm-b')
+    scopes.started(agent, 'e\nf', 'hook', 'codex')
+    expect(scopes.current(agent)).toBe(b)
+  })
+
+  it('ignores SGR mouse reports from clicking into or scrolling the pane', () => {
+    const scopes = new SwarmPromptScopes()
+    // Recorded shape: click to focus (split press/release), a wheel burst, then ⌥⏎ lines.
+    for (const chunk of ['\x1b[<0;12;34M', '\x1b[<0;12;34m', '\x1b[<65;40;20M'.repeat(19), '\x1b', '[<64;4', '0;20M', '\x1b\r', '\x1b\r', 'ok', '\r']) scopes.raw(agent, bytes(chunk), 'swarm-a')
+    scopes.started(agent, '\n\nok', 'hook', 'claude')
+    expect(scopes.current(agent)).toBe(a)
+    scopes.raw(agent, bytes('x\x1b[<0;12M\r'), 'swarm-b') // A malformed report is not a mouse event.
+    scopes.started(agent, 'x', 'hook', 'claude')
+    expect(scopes.current(agent)).toBeNull()
+  })
+
+  it('still fails closed on ⌥⌫ and on other CSI keys that share the ⇧⏎ prefix', () => {
+    const scopes = new SwarmPromptScopes()
+    scopes.raw(agent, bytes('one two\x1b\x7f\r'), 'swarm-a')
+    scopes.started(agent, 'one ', 'hook', 'claude')
+    expect(scopes.current(agent)).toBeNull()
+    scopes.raw(agent, bytes('word\x1b[1;5D\r'), 'swarm-a')
+    scopes.started(agent, 'word', 'hook', 'claude')
+    expect(scopes.current(agent)).toBeNull()
+    // Pasted escapes reach the engine literally; they are not line keys.
+    scopes.raw(agent, bytes('\x1b[200~x\x1b[13;2uy\x1b\rz\x1b[201~\r'), 'swarm-a')
+    scopes.started(agent, 'x\ny\nz', 'hook', 'claude')
+    expect(scopes.current(agent)).toBeNull()
+    // A lone Esc followed later by Return is not ⌥⏎: the draft must not become 'hello\n…'.
+    scopes.raw(agent, bytes('hello\x1b'), 'swarm-a')
+    scopes.raw(agent, bytes('\r'), 'swarm-a')
+    scopes.raw(agent, bytes('next\r'), 'swarm-a')
+    scopes.started(agent, 'hello\nnext', 'hook', 'claude')
+    expect(scopes.current(agent)).toBeNull()
+  })
+
   it('matches native accepted text instead of treating permission keys as prompts', () => {
     const scopes = new SwarmPromptScopes()
     scopes.raw(agent, bytes('1\r'), 'swarm-b')

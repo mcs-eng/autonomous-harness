@@ -63,18 +63,19 @@ it uses temporary identities and loopback sockets, never live machine state.
 
 ## Install & run (`harness`)
 
-Install the CLI, then sign in once with the same SSO account used by Harness:
+Install the CLI and run `hn` to work locally. Sign in when you want to connect other machines:
 
 ```bash
 curl -fsSL https://harness.autonomous.ai/cli/install.sh | bash
 ```
 
 (The installer is a first-party hosted script. It brings its own Node, downloads the published
-bundle and writes the `~/.local/bin/harness` command, and `hn`: Harness in a terminal, which signs in
-and starts the daemon the first time you run it.)
+bundle and writes the `~/.local/bin/harness` command, and `hn`: Harness in a terminal, which starts
+your local daemon the first time you run it. Local use requires no login.)
 
 ```bash
-harness login         # opens browser SSO and saves this computer's session
+harness login         # asks how to sign in (Google, Apple, or a QR your phone scans) and saves this computer's session
+harness login --google # or --apple: straight to that account in the browser, without asking
 harness login --force # stop the daemon and sign in as a different SSO account
 harness start         # starts the adapter; signed out, it serves this computer only
 harness start -f      # foreground mode for a supervisor; logs to stdout
@@ -85,7 +86,7 @@ harness tui        # all of Harness in this terminal — tabs, panes, every mach
 harness logout     # clear this computer's SSO session; a running adapter restarts signed out
 ```
 
-`login` uses the browser's native loopback SSO flow. Its access token, refresh token, expiry and
+`login` uses the browser's native loopback SSO flow, as the auth-service client of whoever asked — `harness-cli` from a terminal, `harness-desktop` when the desktop app runs it — and the session remembers that client, because a refresh has to name it again. Its access token, refresh token, expiry and
 backend-resolved machine id are stored atomically with owner-only permissions in
 `~/.harness/auth/session.json`; the immutable computer id lives separately at
 `~/.harness/computer-id`. Later `harness start` invocations reuse and refresh that session as needed.
@@ -241,11 +242,30 @@ npm ci
 npm run test:tmux-real
 ```
 
+The tmux suite creates and cleans up its own private server, including when run from inside a
+Harness pane. No outer `tmux kill-server` cleanup is needed. Setting `TMUX_TMPDIR` alone does not
+isolate tmux: an inherited `TMUX` still selects the parent server. Any separate fixture must clear
+`TMUX`/`TMUX_PANE` and name its private socket explicitly with `tmux -S` for cleanup.
+
 The suite uses isolated, test-owned lifecycle fixtures. Its engine matrix explicitly skips commands that are not installed; authentication or
 first-run onboarding that prevents a proprietary CLI from running is unavailable evidence and must be
 reported as such, not described as exercised.
 
-## Config (`.env`, see `.env.example`)
+## Config (environment variables; see `.env.example`)
+
+Dev and release builds use the same production backend, account and machine state by default.
+Harness does **not** load a project's `.env` when started from that folder. To run against a
+different backend deliberately, export the settings or select a file explicitly:
+
+```bash
+HARNESS_ENV_FILE=/absolute/path/to/harness.env harness start
+```
+
+Exported variables take precedence. An explicit `DOTENV_CONFIG_PATH` remains supported.
+If you previously relied on automatic `.env` loading, set one of these paths before starting
+Harness. `harness status` reports the running daemon's backend, account environment and state
+directories; those can differ from the shell that invokes the command. Older daemons may not
+report all fields.
 
 | var | default | meaning |
 |-----|---------|---------|
@@ -267,9 +287,7 @@ reported as such, not described as exercised.
 | `ADAPTER_CLI_DIR` | `~/.harness/cli` | install dir holding the `cli.js`/`notify.mjs` the updater swaps |
 | `LOG_FRAMES` | `false` | one log line per backend frame — type, audience and opaque ids, never a payload body. Every content-bearing frame is encrypted before it reaches the socket, so this is the only way to see what the daemon actually sent |
 | `HARNESS_HOOK_DEADLINE_MS` | `4500` | wall-clock budget a hook gives itself before abandoning optional work. Raise it on a slow or heavily loaded machine, where the budget is spent on load rather than on the hook and the offline registry fallback silently does nothing. Clamped, never below the default |
-| `SUMMARY_MODE` | `local` | who writes the recap HEADLINE. `local`: no model — the answer's first sentence is excerpted, instantly; the dial shows what the terminal shows. `model`: a one-shot of the session's own engine, fed the previous recap, the user's ask and the answer — reads better across turns, at ~9s of latency per turn. The `text` under the headline is the answer's own excerpt in both modes |
-| `ORI_SUMMARY_MODEL` | `deepseek/deepseek-v4-flash` | recap model for agents routed through an OpenRouter gateway (`ori claude`), which have no vendor credential to spend |
-| `ORI_VOICE_ROUTE_MODEL` | `deepseek/deepseek-v4-flash` | same, for the voice router's classification |
+| `ORI_VOICE_ROUTE_MODEL` | `deepseek/deepseek-v4-flash` | the voice router's classification model for agents routed through an OpenRouter gateway (`ori claude`), which have no vendor credential to spend |
 | `ORI_CREDENTIALS_PATH` | `~/.ori/credentials.json` | where `ori login` stores its key; read only when neither the daemon env nor the agent's own process supplies one |
 
 ## Device (hardware commander)
@@ -282,22 +300,12 @@ turns arrive as an injected `message` → `sendToTmux`. A device that joins **mi
 a client-count signal (`__clients`) — the adapter re-emits the open turn's live state on join (no
 periodic heartbeat).
 
-The per-turn **summary/recap** matches the hosted runtime: on turn end, *only while a device is
-connected*, the adapter runs a disposable one-shot from the session's own CLI engine
-(`SUMMARY_MODEL`, `CODEX_SUMMARY_MODEL`, or `CURSOR_SUMMARY_MODEL`) → a one-line `recap ≤15 words`,
-shows a `Summarizing…` indicator while it runs, persists `recap\n\ntext` per session
-(`${ADAPTER_DATA_DIR}/summaries.json`), and returns it on `project_recent` at device boot. A newer
-turn aborts a stale recap. The `text` under the headline is NOT model-written: it is the answer
-itself, flattened to one line and clipped to 250 characters (`deriveTurnBody`) — the dial shows only
-the headline, the device protocol defines `text` as an excerpt, and a paraphrase nobody reads cost
-output tokens on every turn.
-
-The one-shot is `recap = llm(instruct, previous recap, the user's ask, the answer)`. The previous
-recap is the session's last stored summary, quoted as *continuity only* — it lets a turn whose
-answer is "done, same change in the other file" recap as what was done instead of a fragment — and
-the prompt forbids repeating it or reporting it as this turn's news. `SUMMARY_MODE=local` drops the
-model: the answer's first prose sentence becomes the headline in the same tick (no `Summarizing…`),
-which is the right trade when the dial sits next to a window already showing the full text.
+The per-turn **recap** is cut from the answer the moment a turn ends, with no model in the loop: the
+answer's first prose sentence is the headline, and the `text` under it is the answer itself,
+flattened to one line and clipped to 250 characters (`deriveTurnBody`). It is persisted as
+`recap\n\ntext` per session (`${ADAPTER_DATA_DIR}/summaries.json`) and returned on
+`project_recent` at device boot. The window, the phone and the dial each show it beside the full
+answer, so the model rewrite the daemon once offered (about 9 s of every turn) is gone.
 
 ## Pair an Autonomous device directly
 

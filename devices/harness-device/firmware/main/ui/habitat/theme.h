@@ -17,11 +17,6 @@
 #endif
 #define HT_THEME_SELECTION 0x392c4au
 #define HT_THEME_ERROR     0xe7a6adu
-// The Focus tab pill's INK — not its fill. The pill is a run of ht_pill glyphs, which carry their fill
-// and rim as coverage levels 1 and 2 of this ink over the black canvas: level 1 ≈ #19181f, the
-// design's #141519 fill, and level 2 ≈ #31313a, its #333842 rim. Level 3, this colour itself, is
-// never drawn. See gen_habitat_fonts.py (ht_pill) and focus.c (pill).
-#define HT_THEME_PILL      0x484a5au
 // Desktop activityColor() / darkTerminalTheme ANSI status colors.
 //
 // The inbox status mark was the only coloured thing on the glass until the Focus skin, which reads a

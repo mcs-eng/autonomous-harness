@@ -16,19 +16,30 @@ class SettingRow extends StatelessWidget {
     required this.title,
     this.detail,
     required this.control,
+    this.controlSemanticLabel,
     this.footer,
     this.alignTop = false,
+    this.badge,
   });
 
   final String title;
   final String? detail;
   final Widget control;
 
+  /// Purpose of a single otherwise unlabeled control, such as a switch.
+  ///
+  /// Opt in only when [control] has one action. Rows containing several fields
+  /// or buttons keep their separate labels and actions instead of merging them.
+  final String? controlSemanticLabel;
+
   /// Guidance or feedback that belongs inside this setting's block.
   final Widget? footer;
 
   /// Align taller controls with the title; compact controls stay centered.
   final bool alignTop;
+
+  /// A small tag after the title, such as `New`. Null draws the title alone.
+  final String? badge;
 
   /// Fixed, so every control on this screen lines up on one right edge.
   static const double controlWidth = 188;
@@ -44,13 +55,30 @@ class SettingRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(title, style: Theme.of(context).textTheme.titleSmall),
+        if (badge case final badge?)
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
+              const SizedBox(width: 6),
+              _Badge(badge),
+            ],
+          )
+        else
+          Text(title, style: Theme.of(context).textTheme.titleSmall),
         if (detail case final detail?) ...[
           const SizedBox(height: 2),
           Text(detail, style: Theme.of(context).textTheme.bodySmall),
         ],
       ],
     );
+    final labeledControl = controlSemanticLabel == null
+        ? control
+        : Semantics(label: controlSemanticLabel, child: control);
 
     return Container(
       // A raised block: fill plus a soft lift, no rim. The same recipe the rest
@@ -76,7 +104,11 @@ class SettingRow extends StatelessWidget {
                     MediaQuery.textScalerOf(context).scale(_stackBelow)
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [text, const SizedBox(height: 10), control],
+                    children: [
+                      text,
+                      const SizedBox(height: 10),
+                      labeledControl,
+                    ],
                   )
                 : Row(
                     crossAxisAlignment: alignTop
@@ -85,7 +117,7 @@ class SettingRow extends StatelessWidget {
                     children: [
                       Expanded(child: text),
                       const SizedBox(width: 20),
-                      control,
+                      labeledControl,
                     ],
                   ),
           ),
@@ -94,4 +126,22 @@ class SettingRow extends StatelessWidget {
       ),
     );
   }
+}
+
+class _Badge extends StatelessWidget {
+  const _Badge(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: AppPalette.warn.withValues(alpha: 0.12),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      child: Text(text, style: AppType.caption(color: AppPalette.warn)),
+    ),
+  );
 }

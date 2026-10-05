@@ -117,6 +117,15 @@ export interface HookServerHandlers {
   onGroupList?: () => PairOutcome
   onGroupSync?: () => PairOutcome
   onGroupRemove?: (selector: string) => PairOutcome
+  /** `harness devices list|remove|rebaseline` and the window's Devices list — the account's device key
+   *  log as this machine verified it (lib/e2ee/deviceLogSyncer.ts). */
+  onDevicesList?: () => Promise<PairOutcome>
+  onDevicesRemove?: (pub: string) => Promise<PairOutcome>
+  onDevicesRebaseline?: (confirm: boolean, head?: { seq: number; hash: string }) => Promise<PairOutcome>
+  /** `harness devices history` and the window's History — every add and remove, as this machine verified it. */
+  onDevicesHistory?: () => Promise<PairOutcome>
+  /** `harness devices dismiss` and the window's "It's mine" / "Got it" — mark new devices as seen. */
+  onDevicesDismiss?: (body: { pub?: string; pubs?: string[]; baseline?: boolean }) => PairOutcome
   /** Local dashboard status snapshot (GET /api/status). */
   onStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>
   /** Recent adapter log tail (GET /api/logs). */
@@ -144,11 +153,6 @@ export interface HookServerHandlers {
   /** The account's Experimental switches, proxied with the daemon's own identity. */
   onExperimentalRead?: () => Promise<PairOutcome>
   onExperimentalWrite?: (body: unknown) => Promise<PairOutcome>
-  /** GET /api/zoo — the account's daemons and eggs (daemons/README.md); proxied like the desk. */
-  onZooRead?: () => Promise<PairOutcome>
-  /** POST /api/zoo/ops — habits, hatches, pair and nickname, applied on the backend (its routes/zoo.ts),
-   *  which alone draws; a local write, so CSRF-guarded like the desk's ops. */
-  onZooOps?: (body: unknown) => Promise<PairOutcome>
   /** /api/store/* — proxy the Harness Store's ratings and reviews to backend the same way: reads
    *  ungated like the machine list, writes (PUT/DELETE) CSRF-guarded like a rename. See storeProxy.ts. */
   onStore?: StoreHandler
@@ -384,6 +388,8 @@ async function awaitHermesKind(body: RegisterInput, handlers: HookServerHandlers
 export interface HookServerOptions {
   /** Also serve on this Unix socket (see lib/localSocket.ts). Null or absent: TCP only. */
   socketPath?: string | null
+  /** A private socket identifies this user's daemon even when another OS user holds the TCP port. */
+  allowPortFallback?: boolean
 }
 
 export function startHookServer(
@@ -700,6 +706,65 @@ export function startHookServer(
         const out = handlers.onGroupRemove(body.selector.trim()); json(out.status, out.body); return
       }
 
+      // `harness devices list` / the window's Devices list → the account's devices, as this machine's
+      // verified copy of the device key log has them. Read-only (public keys and labels).
+      if (req.method === 'GET' && url === '/api/devices') {
+        if (!handlers.onDevicesList) { json(503, { error: 'UNAVAILABLE' }); return }
+        const out = await handlers.onDevicesList(); json(out.status, out.body); return
+      }
+      // `harness devices remove <fp>` / Remove in the window → out of the log, signed by this machine.
+      if (req.method === 'POST' && url === '/api/devices/remove') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onDevicesRemove) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: { pub?: unknown }
+        try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
+        if (typeof body.pub !== 'string' || !body.pub) { json(400, { error: 'MISSING_PUB' }); return }
+        const out = await handlers.onDevicesRemove(body.pub); json(out.status, out.body); return
+      }
+      // `harness devices rebaseline` → what trusting the backend's log again would change; `confirm`
+      // does it (the only way out of a frozen log).
+      if (req.method === 'POST' && url === '/api/devices/rebaseline') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onDevicesRebaseline) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: { confirm?: unknown; head?: unknown }
+        try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
+        if (!body || typeof body !== 'object') { json(400, { error: 'bad json' }); return }
+        // The head the person was shown in the preview: a confirm only goes ahead on that same list.
+        let head: { seq: number; hash: string } | undefined
+        if (body.head !== undefined) {
+          const h = body.head as { seq?: unknown; hash?: unknown } | null
+          if (!h || typeof h !== 'object' || typeof h.seq !== 'number' || !Number.isSafeInteger(h.seq) || h.seq < 0
+            || typeof h.hash !== 'string' || h.hash.length > 128) { json(400, { error: 'BAD_HEAD' }); return }
+          head = { seq: h.seq, hash: h.hash }
+        }
+        const out = await handlers.onDevicesRebaseline(body.confirm === true, head); json(out.status, out.body); return
+      }
+
+      // `harness devices history` → the log's adds and removes, newest first. Local only: it is the
+      // account's whole device story, and the fetch behind it is a backend call as this machine.
+      if (req.method === 'GET' && url === '/api/devices/history') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onDevicesHistory) { json(503, { error: 'UNAVAILABLE' }); return }
+        const out = await handlers.onDevicesHistory(); json(out.status, out.body); return
+      }
+      // `harness devices dismiss [<fp>]` / "It's mine" / "Got it" → new devices marked as seen here.
+      if (req.method === 'POST' && url === '/api/devices/dismiss') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onDevicesDismiss) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: { pub?: unknown; pubs?: unknown; baseline?: unknown }
+        try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
+        if (!body || typeof body !== 'object') { json(400, { error: 'bad json' }); return }
+        if (body.pub !== undefined && (typeof body.pub !== 'string' || !body.pub)) { json(400, { error: 'MISSING_PUB' }); return }
+        // The keys a window displayed, so a key accepted since the window read the list is not cleared unseen.
+        if (body.pubs !== undefined && (!Array.isArray(body.pubs) || body.pubs.length > 256
+          || body.pubs.some((k) => typeof k !== 'string' || !k || k.length > 256))) { json(400, { error: 'BAD_PUBS' }); return }
+        const out = handlers.onDevicesDismiss({
+          ...(typeof body.pub === 'string' ? { pub: body.pub } : {}),
+          ...(Array.isArray(body.pubs) ? { pubs: body.pubs as string[] } : {}),
+          ...(body.baseline === true ? { baseline: true } : {}),
+        }); json(out.status, out.body); return
+      }
+
       // `harness remote-password status` → whether one is set, and its fingerprint. Read-only, same
       // gating tier as /api/pairs.
       if (req.method === 'GET' && url === '/api/remote-password/status') {
@@ -741,20 +806,6 @@ export function startHookServer(
         let body: unknown
         try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
         await proxied(() => handlers.onExperimentalWrite!(body)); return
-      }
-      if (req.method === 'GET' && url === '/api/zoo') {
-        if (!handlers.onZooRead) { json(503, { error: 'UNAVAILABLE' }); return }
-        await proxied(handlers.onZooRead); return
-      }
-      if (req.method === 'POST' && url === '/api/zoo/ops') {
-        // Any local process that sets the header can send an op here, `zoo.autonomy` and `zoo.consent`
-        // included: the account's dial is only a REQUEST to each daemon, which acts above `suggest` only
-        // after the person confirms it at a window (pair/gate.ts, daemons/BRAIN.md "Security").
-        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
-        if (!handlers.onZooOps) { json(503, { error: 'UNAVAILABLE' }); return }
-        let body: unknown
-        try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
-        await proxied(() => handlers.onZooOps!(body)); return
       }
       if (req.method === 'GET' && url === '/api/auth/me') {
         const me = handlers.onAuthMe
@@ -826,41 +877,62 @@ export function startHookServer(
       }
 
       json(404, { error: 'not found' })
-    })()
+    })().catch((error: unknown) => {
+      // Whatever a handler throws, the request is answered: an engine's hook that waits on this server
+      // holds up that engine's turn until its own timeout, and the desktop waits out thirty seconds.
+      console.error(`[hooks] ${req.method} ${(req.url ?? '').split('?')[0].slice(0, 80)} failed:`, error instanceof Error ? error.message : error)
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'INTERNAL' }))
+      } else if (!res.writableEnded) res.end()
+    })
   }
   const server = http.createServer(handle)
 
   return new Promise((resolve, reject) => {
-    server.once('error', (err: NodeJS.ErrnoException) => {
-      // FIXED port — no OS-assigned fallback. A free-port fallback made the daemon land on an
-      // unpredictable port, so a leftover/zombie couldn't be found by `lsof :<port>`. On a clash we
-      // fail loudly with the exact port instead (the CLI turns this into a clear "already running?").
+    let fellBack = false
+    const failed = (err: NodeJS.ErrnoException): void => {
+      if (err.code === 'EADDRINUSE' && !fellBack && options.allowPortFallback && options.socketPath) {
+        fellBack = true
+        console.log(`[hooks] control port ${port} unavailable; assigning a separate port for this user`)
+        server.once('error', failed)
+        server.listen(0, '127.0.0.1')
+        return
+      }
       if (err.code === 'EADDRINUSE') {
         console.error(`[hooks] 127.0.0.1:${port} is already in use — another adapter is probably running.`)
-        console.error(`        Stop it:  harness stop      or find it:  lsof -ti :${port} | xargs kill`)
+        console.error('        Use a different PORT; no other user\'s daemon was stopped.')
       } else {
         console.error('[hooks] listen failed:', err)
       }
       reject(err)
-    })
-    server.listen(port, '127.0.0.1', () => {
+    }
+    server.once('error', failed)
+    server.once('listening', () => {
       const actual = (server.address() as AddressInfo).port
       hosts = loopbackHosts(actual)
       console.log(`[hooks] listening on 127.0.0.1:${actual} (SessionStart/SessionEnd callbacks)`)
       const socketPath = options.socketPath
       if (!socketPath) { resolve({ server, port: actual, localSocket: null }); return }
-      // After the port, never before: holding it is what makes a socket file already there stale.
-      // A socket that cannot be opened costs the app its fast path, not the daemon its start.
+      // The private socket is mandatory when opting into multi-user startup. A duplicate daemon
+      // must not survive on a random port while another one owns this user's socket.
       listenLocalSocket(handle, socketPath).then(
         (localSocket) => {
           console.log(`[hooks] listening on ${socketPath}`)
           resolve({ server, port: actual, localSocket })
         },
         (error: unknown) => {
+          if (options.allowPortFallback) {
+            server.closeAllConnections()
+            server.close()
+            reject(error)
+            return
+          }
           console.warn(`[hooks] local socket unavailable (${socketPath}): ${error instanceof Error ? error.message : error}`)
           resolve({ server, port: actual, localSocket: null })
         },
       )
     })
+    server.listen(port, '127.0.0.1')
   })
 }

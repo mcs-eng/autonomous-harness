@@ -1,5 +1,5 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../terminal/terminal_text.dart';
@@ -160,14 +160,14 @@ class _SessionCard extends StatelessWidget {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 const Icon(
-                                  LucideIcons.play300,
-                                  size: 15,
+                                  AppIcons.play,
+                                  size: 16,
                                   color: Colors.white,
                                 ),
                                 const SizedBox(width: 8),
                                 Text(
                                   'Watch run',
-                                  style: grid.AppType.monoLabel(
+                                  style: grid.AppType.label(
                                     color: Colors.white,
                                   ),
                                 ),
@@ -220,7 +220,7 @@ class _SessionCard extends StatelessWidget {
                         child: Text(
                           entry.category ?? storeCategoryFor(entry),
                           textAlign: TextAlign.end,
-                          style: grid.AppType.monoMeta(
+                          style: grid.AppType.caption(
                             color: grid.AppPalette.textFaint,
                           ),
                         ),
@@ -262,7 +262,7 @@ class _SessionCard extends StatelessWidget {
                       foregroundColor: grid.AppPalette.accentOnSurface,
                     ),
                     iconAlignment: IconAlignment.end,
-                    icon: const Icon(LucideIcons.arrowRight300, size: 15),
+                    icon: const Icon(AppIcons.arrowRight, size: 16),
                     label: const Text('Explore harness'),
                   ),
                 ],

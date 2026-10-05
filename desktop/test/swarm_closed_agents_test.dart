@@ -17,7 +17,7 @@ import 'swarm_state_test.dart' show createApp, MemoryStore;
 
 void main() {
   test(
-    'History interleaves closed agents and swarms with captured identities',
+    'History interleaves closed agents and tabs with captured identities',
     () async {
       final app = createApp();
       addTearDown(app.dispose);
@@ -87,7 +87,7 @@ void main() {
   );
 
   test(
-    'a closed parent gets a swarm when its agent alone is reopened',
+    'a closed parent gets a tab when its agent alone is reopened',
     () async {
       final app = createApp();
       addTearDown(app.dispose);
@@ -114,7 +114,7 @@ void main() {
     },
   );
 
-  test('swarm recovery keeps newer choices and shared live sessions', () async {
+  test('tab recovery keeps newer choices and shared live sessions', () async {
     final store = MemoryStore();
     final app = createApp(store: store);
     addTearDown(app.dispose);
@@ -177,7 +177,7 @@ void main() {
   });
 
   test(
-    'swarm recovery fits among many tabs without duplicating agents',
+    'tab recovery fits among many tabs without duplicating agents',
     () async {
       final app = createApp();
       addTearDown(app.dispose);
@@ -206,7 +206,7 @@ void main() {
   );
 
   test(
-    'a full partial swarm keeps its recovery until every view fits',
+    'a full partial tab keeps its recovery until every view fits',
     () async {
       final app = createApp();
       addTearDown(app.dispose);
@@ -382,7 +382,7 @@ void main() {
     app.dispose();
   });
 
-  testWidgets('keyboard swarm recovery returns input to its existing view', (
+  testWidgets('keyboard tab recovery returns input to its existing view', (
     tester,
   ) async {
     final app = createApp();

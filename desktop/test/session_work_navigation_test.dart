@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/shared/theme/appearance_prefs_store.dart';
+import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/shared/theme/prompt_style.dart';
 import 'package:harness/shared/theme/status_line_style.dart';
 import 'package:harness/state/workspace_status.dart';
@@ -78,6 +79,15 @@ void main() {
         }
         await tester.pumpAndSettle();
         expect(find.byType(SessionWorkDialog), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is ColoredBox &&
+                widget.color == grid.AppDesktop.darkVeil,
+          ),
+          findsOneWidget,
+        );
+        if (native) expect(updates.last['footerCovered'], isTrue);
         expect(find.textContaining('/silent-beacon'), findsNothing);
         expect(pane.session, same(session));
         expect(input, isEmpty);

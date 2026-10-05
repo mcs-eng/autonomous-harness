@@ -35,7 +35,7 @@ ENV.update(HOME=str(BASE), HN_TMPDIR=str(BASE), HN_SOCKET_NAME=PREFIX, PORT=str(
            TERM='xterm-256color', SHELL='/bin/sh', HARNESS_TUI_DESK='off',
            HARNESS_TUI_NOTIFY='off', HN_DESKTOP='off', MOCK_RECONNECT='1')
 CONF = BASE / 'tmux.conf'
-CONF.write_text('set -g automatic-rename off\nset -g pane-border-status off\n')
+CONF.write_text('set -g @hn-new-window shell\nset -g automatic-rename off\nset -g pane-border-status off\n')
 
 
 def hn(*args, ok=True):
@@ -152,6 +152,40 @@ try:
         wait(lambda: {shell, claude, codex} <= live(LOCAL), 'socket close should recover')
         echo(codex, 'RECOVERED_SOCKET')
         print('PASS: dropped socket recovery', flush=True)
+
+        # One deliberate claim reclaims every tab, including the hidden remote pane.
+        def watched(agent):
+            return hn('display-message', '-p', '-t', pane_for(agent), '#{pane_watched}') == '1'
+
+        def displace_all():
+            start = len(api()['opens'])
+            for agent in panes:
+                fault('watch', agent=agent)
+                fault('close', agent=agent, takenBy='another app')
+            wait(lambda: all(watched(a) for a in panes), 'every pane is watching')
+            assert all(o['takeover'] is False for o in api()['opens'][start:]), 'ownership notifications reclaimed control'
+
+        displace_all()
+        focus = hn('display-message', '-p', '#{window_id}:#{pane_id}')
+        layouts = hn('list-windows', '-F', '#{window_id}:#{window_layout}')
+        before = api()
+        hn('take-control')
+        wait(lambda: len(api()['opens']) == len(before['opens']) + len(panes) and all(not watched(a) for a in panes), 'one command reclaims all local and remote tabs')
+        claims = api()['opens'][len(before['opens']):]
+        assert len(claims) == len(panes) and all(o['takeover'] is True for o in claims), claims
+        assert {o['agent'] for o in claims} == set(panes)
+        assert hn('display-message', '-p', '#{window_id}:#{pane_id}') == focus
+        assert hn('list-windows', '-F', '#{window_id}:#{window_layout}') == layouts
+        assert api()['inputs'] == before['inputs'], 'take-control typed into a terminal'
+        hn('take')
+        assert len(api()['opens']) == len(before['opens']) + len(panes), 'repeat claim reopened controlled panes'
+        displace_all()
+        before = api()
+        hn('send-keys', '-t', pane_for(claude), '-l', 'CLAIMED_ALL_TABS')
+        wait(lambda: all(not watched(a) for a in panes), 'typing in a watcher reclaims every tab')
+        wait(lambda: 'CLAIMED_ALL_TABS' in hn('capture-pane', '-p', '-t', pane_for(claude)), 'claim preserves typed input')
+        assert {i['agent'] for i in api()['inputs'][len(before['inputs']):]} == {claude}, 'typed input leaked to another pane'
+        print('PASS: app-wide control, hidden local/remote tabs, stable focus, idempotence and isolated input', flush=True)
 
         # Genuine terminal/process closure remains a card; it must not restart the program.
         before_count = len(api()['opens'])

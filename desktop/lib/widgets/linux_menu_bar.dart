@@ -1,10 +1,10 @@
-import 'dart:io' show Platform;
-
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../core/runtime_platform.dart';
+import '../shared/theme/app_pane_icon.dart';
 import '../core/test_run.dart';
 import '../screens/swarm_menu_bus.dart';
 import '../shared/theme/app_theme.dart' as grid;
@@ -39,6 +39,54 @@ typedef AppMenuActionHandler = Future<void> Function(String action);
 /// tests at large keep the bar off by default: it is window chrome — on macOS
 /// it costs the layout nothing at all — and pane-geometry assertions should
 /// not depend on whether the Linux build is drawing it.
+/// Who draws the Linux window's title bar — decided by the runner
+/// (`my_application.cc`) and handed over as `HARNESS_LINUX_TITLE_BAR`.
+enum LinuxTitleBar {
+  /// GNOME: no GTK caption; this bar is the title bar, window buttons and all.
+  flutter,
+
+  /// A tiling compositor: no title bar anywhere, nor buttons to draw.
+  none,
+
+  /// A window manager's own caption sits above this bar.
+  native;
+
+  static LinuxTitleBar get current =>
+      switch (RuntimePlatform.environment['HARNESS_LINUX_TITLE_BAR']) {
+        'flutter' => flutter,
+        'none' => none,
+        _ => native,
+      };
+}
+
+/// The workspace's own controls for the right end of the Linux title bar —
+/// search, notifications, Store — which the workspace draws in its tab strip
+/// everywhere else. The workspace installs a builder while it is on screen and
+/// [refresh]es after each of its builds, so the bar redraws with it.
+class LinuxTitleBarActions extends ChangeNotifier {
+  Object? _owner;
+  WidgetBuilder? _builder;
+
+  WidgetBuilder? get builder => _builder;
+
+  void attach(Object owner, WidgetBuilder builder) {
+    _owner = owner;
+    _builder = builder;
+    notifyListeners();
+  }
+
+  void detach(Object owner) {
+    if (!identical(_owner, owner)) return;
+    _owner = null;
+    _builder = null;
+    notifyListeners();
+  }
+
+  void refresh() => notifyListeners();
+}
+
+final linuxTitleBarActions = LinuxTitleBarActions();
+
 class LinuxMenuBar extends StatefulWidget {
   const LinuxMenuBar({
     super.key,
@@ -90,39 +138,91 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
   /// and a margin for the screen edge; past that a menu really does scroll.
   MenuStyle get _panelStyle {
     final height = MediaQuery.sizeOf(context).height;
-    return grid.AppMenu.style(maxHeight: height - 30 - 24);
+    return grid.AppMenu.style(maxHeight: height - 36 - 24);
   }
 
   @override
   Widget build(BuildContext context) {
-    final visible = widget.visible ?? (Platform.isLinux && !kUnderTest);
+    // RuntimePlatform: false in a browser, where `dart:io` Platform throws.
+    final visible = widget.visible ?? (RuntimePlatform.isLinux && !kUnderTest);
     if (!visible) return const SizedBox.shrink();
     grid.AppTheme.watch(context);
-    return Container(
-      height: 30,
-      decoration: BoxDecoration(
-        color: grid.AppPalette.panelBg,
-        border: Border(bottom: BorderSide(color: grid.AppGlass.hair)),
-      ),
-      // The full set of menus outgrows a narrow window; a menubar that
-      // scrolls beats one that clips its last menus into nothing.
-      child: ScrollConfiguration(
-        behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 6),
-          child: Row(
-            children: [
-              _menu('Harness', _buildHarnessMenu()),
-              _menu('File', _buildFileMenu()),
-              _menu('Edit', _buildEditMenu()),
-              _menu('View', _buildViewMenu(), onOpen: _readFullScreen),
-              _menu('History', _buildHistoryMenu()),
-              _menu('Window', _buildWindowMenu()),
-              _menu('Help', _buildHelpMenu()),
-            ],
-          ),
+    // The full set of menus outgrows a narrow window; a menubar that scrolls
+    // beats one that clips its last menus into nothing.
+    final menus = ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Row(
+          children: [
+            _menu('Harness', _buildHarnessMenu()),
+            _menu('File', _buildFileMenu()),
+            _menu('Edit', _buildEditMenu()),
+            _menu('View', _buildViewMenu(), onOpen: _readFullScreen),
+            _menu('History', _buildHistoryMenu()),
+            _menu('Window', _buildWindowMenu()),
+            _menu('Help', _buildHelpMenu()),
+          ],
         ),
+      ),
+    );
+    final decoration = BoxDecoration(
+      color: grid.AppPalette.panelBg,
+      border: Border(bottom: BorderSide(color: grid.AppGlass.hair)),
+    );
+    // Under a window manager's caption, or a tiling compositor's none, the
+    // bar is a strip of menus across the window, left-aligned where a menu bar
+    // sits; the shell's Column would otherwise centre one only as wide as its
+    // menus.
+    if (LinuxTitleBar.current != LinuxTitleBar.flutter) {
+      return Container(
+        width: double.infinity,
+        height: 30,
+        alignment: Alignment.centerLeft,
+        decoration: decoration,
+        child: menus,
+      );
+    }
+    // Where nothing else draws a caption (GNOME), the bar IS the title bar,
+    // one row: the menus; the space after them, which drags the window as a
+    // caption would; the workspace's search, notifications and Store; and the
+    // window's own buttons.
+    return Container(
+      width: double.infinity,
+      height: 36,
+      decoration: decoration,
+      child: Row(
+        children: [
+          // The menus sit over the drag area rather than beside it, so the
+          // area takes whatever they leave and the controls after it reach the
+          // right edge; a loose Flexible would keep its unused share instead.
+          // Nothing is drawn inside the area itself, so its double-click to
+          // maximize holds up no control (the 300ms wait at WindowDragArea).
+          Expanded(
+            child: Stack(
+              children: [
+                const Positioned.fill(
+                  child: DragToMoveArea(child: SizedBox.expand()),
+                ),
+                Align(alignment: Alignment.centerLeft, child: menus),
+              ],
+            ),
+          ),
+          // The workspace's controls are built for the tab strip, inside its
+          // Material; up here they are above it, and the Store's label would
+          // fall back to Flutter's yellow-underlined "no text style" warning.
+          Material(
+            type: MaterialType.transparency,
+            child: ListenableBuilder(
+              listenable: linuxTitleBarActions,
+              builder: (context, _) =>
+                  linuxTitleBarActions.builder?.call(context) ??
+                  const SizedBox.shrink(),
+            ),
+          ),
+          const _WindowButtons(),
+        ],
       ),
     );
   }
@@ -137,39 +237,39 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
     return [
       _appRow(
         key: 'menu-bar-about',
-        icon: LucideIcons.info300,
+        icon: AppIcons.info,
         label: 'About Harness',
         action: 'showAbout',
       ),
       const AppMenuDivider(),
       _swarmRow(
         key: 'menu-bar-customize',
-        icon: LucideIcons.palette300,
+        icon: AppIcons.palette,
         label: 'Customize Harness',
         action: 'customize',
       ),
       _swarmRow(
         key: 'menu-bar-settings',
-        icon: LucideIcons.settings300,
+        icon: AppIcons.settings,
         label: 'Settings…',
         action: 'settings',
       ),
       const AppMenuDivider(),
       _appRow(
         key: 'menu-bar-shortcuts',
-        icon: LucideIcons.keyboard300,
+        icon: AppIcons.keyboard,
         label: 'Keyboard Shortcuts…',
         action: 'showShortcuts',
       ),
       _appRow(
         key: 'menu-bar-check-for-updates',
-        icon: LucideIcons.refreshCw300,
+        icon: AppIcons.refreshCw,
         label: 'Check for Updates…',
         action: 'checkForUpdates',
       ),
       _appRow(
         key: 'menu-bar-flash-firmware',
-        icon: LucideIcons.zap300,
+        icon: AppIcons.zap,
         label: 'Flash Firmware…',
         action: 'flashFirmware',
       ),
@@ -193,32 +293,38 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
     return [
       _swarmRow(
         key: 'menu-bar-new-harness',
-        icon: LucideIcons.plus300,
+        icon: AppIcons.plus,
         label: 'New Harness',
         action: 'newAgent',
       ),
       _swarmRow(
         key: 'menu-bar-open-harness',
-        icon: LucideIcons.folderOpen300,
+        icon: AppIcons.folderOpen,
         label: 'Open Harness',
+        action: 'sessions',
+      ),
+      _swarmRow(
+        key: 'menu-bar-open-project',
+        icon: AppIcons.folderOpen,
+        label: 'Open Project',
         action: 'addAgent',
       ),
       _swarmRow(
         key: 'menu-bar-clone-agent',
-        icon: LucideIcons.copyPlus300,
+        icon: AppIcons.copyPlus,
         label: 'Clone Harness',
         action: 'cloneAgent',
       ),
       _swarmRow(
         key: 'menu-bar-restart-agent',
-        icon: LucideIcons.rotateCw300,
+        icon: AppIcons.rotateCw,
         label: 'Restart Harness',
         action: 'restartAgent',
         enabled: _paneAction('restartAgent'),
       ),
       _swarmRow(
         key: 'menu-bar-share-agent',
-        icon: LucideIcons.share300,
+        icon: AppIcons.share,
         label: 'Share Harness',
         action: 'shareAgent',
         enabled: _paneAction('shareAgent'),
@@ -226,54 +332,54 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
       const AppMenuDivider(),
       _swarmRow(
         key: 'menu-bar-new-tab',
-        icon: LucideIcons.squarePlus300,
+        icon: AppIcons.squarePlus,
         label: 'New Tab',
         action: 'new',
       ),
       _swarmRow(
         key: 'menu-bar-rename-tab',
-        icon: LucideIcons.pencil300,
+        icon: AppIcons.pencil,
         label: 'Rename Tab',
         action: 'renameActive',
       ),
       _swarmRow(
         key: 'menu-bar-close-tab',
-        icon: LucideIcons.x300,
+        icon: AppIcons.close,
         label: 'Close Tab',
         action: 'closeActive',
       ),
       const AppMenuDivider(),
       _swarmRow(
         key: 'menu-bar-split-right',
-        icon: LucideIcons.panelRight300,
+        leading: const AppPaneIcon(AppPaneSymbol.splitRight, size: 16),
         label: 'Split Right',
         action: 'splitRight',
         enabled: state.enabled && state.canFind,
       ),
       _swarmRow(
         key: 'menu-bar-split-down',
-        icon: LucideIcons.panelBottom300,
+        leading: const AppPaneIcon(AppPaneSymbol.splitDown, size: 16),
         label: 'Split Down',
         action: 'splitDown',
         enabled: state.enabled && state.canFind,
       ),
       _swarmRow(
         key: 'menu-bar-zoom-pane',
-        icon: LucideIcons.focus300,
+        leading: const AppPaneIcon(AppPaneSymbol.zoom, size: 16),
         label: 'Zoom Pane',
         action: 'zoomPane',
         enabled: state.enabled && state.canFind,
       ),
       _swarmRow(
         key: 'menu-bar-move-pane',
-        icon: LucideIcons.arrowRightLeft300,
+        icon: AppIcons.arrowRightLeft,
         label: 'Move Pane to Tab',
         action: 'movePaneToTab',
         enabled: state.enabled && state.canFind,
       ),
       _swarmRow(
         key: 'menu-bar-close-pane',
-        icon: LucideIcons.x300,
+        icon: AppIcons.close,
         label: 'Close Pane',
         action: 'closePane',
         enabled: state.enabled && state.canClosePane,
@@ -308,7 +414,7 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
       const AppMenuDivider(),
       _swarmRow(
         key: 'menu-bar-commands',
-        icon: LucideIcons.command300,
+        icon: AppIcons.command,
         label: 'Search Commands…',
         action: 'commands',
       ),
@@ -321,26 +427,26 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
     return [
       _appRow(
         key: 'menu-bar-layout',
-        icon: LucideIcons.layoutGrid300,
+        icon: AppIcons.layoutGrid,
         label: 'Layout…',
         action: 'showLayout',
       ),
       const AppMenuDivider(),
       _appRow(
         key: 'menu-bar-reset-font-size',
-        icon: LucideIcons.type300,
+        icon: AppIcons.type,
         label: 'Default Font Size',
         action: 'resetTerminalFontSize',
       ),
       _appRow(
         key: 'menu-bar-bigger-font',
-        icon: LucideIcons.aArrowUp300,
+        icon: AppIcons.aArrowUp,
         label: 'Bigger',
         action: 'increaseTerminalFontSize',
       ),
       _appRow(
         key: 'menu-bar-smaller-font',
-        icon: LucideIcons.aArrowDown300,
+        icon: AppIcons.aArrowDown,
         label: 'Smaller',
         action: 'decreaseTerminalFontSize',
       ),
@@ -358,32 +464,26 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
       ),
       const AppMenuDivider(),
       _swarmRow(
-        key: 'menu-bar-sessions',
-        icon: LucideIcons.terminal300,
-        label: 'Harnesses',
-        action: 'sessions',
-      ),
-      _swarmRow(
         key: 'menu-bar-notifications',
-        icon: LucideIcons.bell300,
+        icon: AppIcons.bell,
         label: 'Harnesses Needing Input…',
         action: 'notifications',
       ),
       _swarmRow(
         key: 'menu-bar-machines',
-        icon: LucideIcons.server300,
+        icon: AppIcons.server,
         label: 'Machines',
         action: 'machineList',
       ),
       _swarmRow(
         key: 'menu-bar-models',
-        icon: LucideIcons.cpu300,
+        icon: AppIcons.cpu,
         label: 'Models',
         action: 'models',
       ),
       _swarmRow(
         key: 'menu-bar-machine-monitor',
-        icon: LucideIcons.activity300,
+        icon: AppIcons.activity,
         label: 'Machine Monitor',
         action: 'manageMachines',
       ),
@@ -506,7 +606,7 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
       // over the swarm channel as `keymapCommand`.
       _swarmRow(
         key: 'menu-bar-quick-start',
-        icon: LucideIcons.rocket300,
+        icon: AppIcons.rocket,
         label: 'Quick Start',
         action: 'keymapCommand',
         args: const {'command': 'keyboard.quick_start'},
@@ -514,14 +614,14 @@ class _LinuxMenuBarState extends State<LinuxMenuBar> {
       ),
       _appRow(
         key: 'menu-bar-keyboard-practice',
-        icon: LucideIcons.keyboard300,
+        icon: AppIcons.keyboard,
         label: 'Keyboard Practice',
         action: 'keyboardPractice',
       ),
       const AppMenuDivider(),
       _appRow(
         key: 'menu-bar-export-logs',
-        icon: LucideIcons.fileDown300,
+        icon: AppIcons.fileDown,
         label: 'Export Logs…',
         action: 'exportLogs',
       ),
@@ -766,4 +866,105 @@ class _MenuLabelRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Minimize, maximize and close, for a window no manager draws a caption on
+/// ([LinuxTitleBar.flutter]). GNOME's own order and shapes: the close button
+/// last, a square that becomes two when the window already fills the screen.
+class _WindowButtons extends StatefulWidget {
+  const _WindowButtons();
+
+  @override
+  State<_WindowButtons> createState() => _WindowButtonsState();
+}
+
+class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
+  bool _maximized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    windowManager.addListener(this);
+    windowManager.isMaximized().then((value) {
+      if (mounted) setState(() => _maximized = value);
+    });
+  }
+
+  @override
+  void dispose() {
+    windowManager.removeListener(this);
+    super.dispose();
+  }
+
+  @override
+  void onWindowMaximize() => setState(() => _maximized = true);
+
+  @override
+  void onWindowUnmaximize() => setState(() => _maximized = false);
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(left: 6, right: 8),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _WindowButton(
+          key: const ValueKey('linux-window-minimize'),
+          tooltip: 'Minimize',
+          icon: AppIcons.minus,
+          onPressed: windowManager.minimize,
+        ),
+        _WindowButton(
+          key: const ValueKey('linux-window-maximize'),
+          tooltip: _maximized ? 'Restore' : 'Maximize',
+          icon: _maximized ? AppIcons.copy : AppIcons.square,
+          onPressed: () => _maximized
+              ? windowManager.unmaximize()
+              : windowManager.maximize(),
+        ),
+        _WindowButton(
+          key: const ValueKey('linux-window-close'),
+          tooltip: 'Close',
+          icon: AppIcons.close,
+          // Through window_manager, as Quit does, so the exit lifecycle runs.
+          onPressed: windowManager.close,
+        ),
+      ],
+    ),
+  );
+}
+
+class _WindowButton extends StatelessWidget {
+  const _WindowButton({
+    super.key,
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(left: 6),
+    child: Tooltip(
+      message: tooltip,
+      child: Material(
+        color: grid.AppSurface.recess,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          hoverColor: grid.AppSurface.recessHover,
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: Icon(icon, size: 14, color: grid.AppPalette.textPrimary),
+          ),
+        ),
+      ),
+    ),
+  );
 }

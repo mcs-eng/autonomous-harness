@@ -1,5 +1,5 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/workspace_bar_style.dart';
 import 'workspace_bar_control.dart';
@@ -41,8 +41,8 @@ class WorkspaceNotificationsButton extends StatelessWidget {
             style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w600),
           ),
           child: Icon(
-            LucideIcons.bell,
-            size: 17,
+            AppIcons.bell,
+            size: 16,
             color: foreground.withValues(
               alpha: onPressed == null
                   ? .28

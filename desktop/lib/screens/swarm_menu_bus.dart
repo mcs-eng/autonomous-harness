@@ -1,8 +1,7 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../core/runtime_platform.dart';
 import '../core/test_run.dart';
 
 /// The seam both native menu surfaces talk through.
@@ -20,7 +19,9 @@ class SwarmMenuBus {
   /// run on macOS machines too, and there the channel has nobody on the other
   /// end, so the bar would draw no state and its rows would reach no handler.
   /// A test that wants the channel asks for [SwarmMenuBus.forChannel].
-  SwarmMenuBus() : _channelBacked = Platform.isMacOS && !kUnderTest;
+  /// [RuntimePlatform], not `dart:io`: the browser build constructs this too,
+  /// and `Platform` throws there before the first frame.
+  SwarmMenuBus() : _channelBacked = RuntimePlatform.isMacOS && !kUnderTest;
 
   /// The channel, even on a Linux test host — a screen forced onto the
   /// native-tabs path must keep talking to something a test can mock.

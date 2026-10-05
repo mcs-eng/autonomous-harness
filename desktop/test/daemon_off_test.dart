@@ -5,7 +5,6 @@
 // no habits, no keys taken, no commands, no easter row, no notices.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/gestures.dart';
@@ -13,7 +12,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
+import 'package:harness/daemons/daemon_face.dart';
 import 'package:harness/daemons/zoo.dart';
+import 'package:harness/widgets/daemon_illustration.dart';
+import 'package:harness/widgets/daemon_slot.dart';
 import 'package:harness/daemons/zoo_controller.dart';
 import 'package:harness/screens/swarm_screen.dart';
 import 'package:harness/settings/sections/account_section.dart';
@@ -54,7 +56,7 @@ void main() {
   late ExperimentalFeaturesStore experiments;
   late List<(String, Map<String, dynamic>)> frames;
 
-  setUp(() {
+  setUp(() async {
     app = createApp();
     app.currentUser = const CurrentUserProfile(
       id: 'u1',
@@ -75,6 +77,8 @@ void main() {
     preview = ValueNotifier(false);
     preferences = MemoryStore();
     experiments = MemoryExperimentalFeaturesStore(storage: preferences);
+    // Finish the real-zone read before testWidgets enters its fake clock.
+    await experiments.refresh();
   });
   tearDown(() {
     app.dispose();
@@ -213,16 +217,227 @@ void main() {
     },
   );
 
+  testWidgets('illustrated Tim lives in the footer and hover preserves focus', (
+    tester,
+  ) async {
+    await mount(tester, on: true);
+    expect(
+      find.ancestor(
+        of: slot,
+        matching: find.byKey(const ValueKey('workspace-status-bar')),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.ancestor(
+        of: slot,
+        matching: find.byKey(const ValueKey('workspace-tab-bar')),
+      ),
+      findsNothing,
+    );
+    final footer = find.byKey(const ValueKey('workspace-status-bar'));
+    expect(
+      tester.getRect(slot).left,
+      greaterThanOrEqualTo(tester.getRect(footer).left),
+    );
+    expect(tester.getSize(slot).width, 44);
+    final focus = FocusManager.instance.primaryFocus;
+    final before = zoo.zoo.toJson();
+    final remoteBefore = remote.zoo.toJson();
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: const Offset(2, 400));
+    await mouse.moveTo(tester.getCenter(slot));
+    await tester.pump(const Duration(milliseconds: 250));
+    final preview = find.byKey(const ValueKey('daemon-hover-preview'));
+    expect(preview, findsOneWidget);
+    expect(FocusManager.instance.primaryFocus, same(focus));
+    expect(
+      tester
+          .widget<DaemonIllustration>(
+            find.descendant(
+              of: preview,
+              matching: find.byType(DaemonIllustration),
+            ),
+          )
+          .size,
+      350,
+    );
+    expect(
+      zoo.zoo.toJson(),
+      before,
+      reason: 'looking never hatches or changes progress',
+    );
+    await mouse.moveTo(const Offset(2, 400));
+    await tester.pump();
+    expect(preview, findsNothing);
+    await mouse.moveTo(tester.getCenter(slot));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(preview, findsOneWidget);
+    await experiments.set(feature, false);
+    await tester.pump();
+    expect(preview, findsNothing);
+    expect(slot, findsNothing);
+    expect(remote.zoo.toJson(), remoteBefore);
+    await mouse.removePointer();
+    await unmount(tester);
+  });
+
+  for (final native in [false, true]) {
+    for (final shown in [false, true]) {
+      testWidgets(
+        'Cmd-P dismisses the ${shown ? 'visible' : 'pending'} ${native ? 'native' : 'Flutter'} daemon hover preview',
+        (tester) async {
+          const channel = MethodChannel('harness/swarm_tabs');
+          if (native) {
+            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+              channel,
+              (_) async => null,
+            );
+            addTearDown(
+              () => tester.binding.defaultBinaryMessenger
+                  .setMockMethodCallHandler(channel, null),
+            );
+          }
+          await mount(tester, on: true, native: native);
+          final mouse = native
+              ? null
+              : await tester.createGesture(kind: PointerDeviceKind.mouse);
+          if (mouse != null) {
+            await mouse.addPointer(location: const Offset(2, 400));
+            await mouse.moveTo(tester.getCenter(slot));
+          } else {
+            unawaited(
+              tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+                channel.name,
+                channel.codec.encodeMethodCall(
+                  const MethodCall('daemonHover', {'hovered': true}),
+                ),
+                (_) {},
+              ),
+            );
+            await tester.pump();
+          }
+          await tester.pump(Duration(milliseconds: shown ? 250 : 100));
+          final hover = find.byKey(const ValueKey('daemon-hover-preview'));
+          expect(hover, shown ? findsOneWidget : findsNothing);
+
+          // Keep the pointer over Tim: keyboard navigation must dismiss the
+          // preview and cancel its delay without relying on a mouse-exit event.
+          await key(tester, LogicalKeyboardKey.keyP, cmd: true);
+          expect(
+            find.byKey(const ValueKey('swarm-search-input')),
+            findsOneWidget,
+          );
+          expect(hover, findsNothing);
+          if (mouse != null) {
+            await tester.pump(const Duration(milliseconds: 400));
+            expect(
+              hover,
+              findsNothing,
+              reason: 'search suppresses hover previews',
+            );
+            // Removing a Flutter overlay synthesizes a new onEnter under a
+            // stationary pointer. Test cancellation without that fresh hover.
+            await mouse.moveTo(const Offset(2, 400));
+          }
+          await key(tester, LogicalKeyboardKey.escape);
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(
+            hover,
+            findsNothing,
+            reason: 'a cancelled hover must not reopen',
+          );
+          await mouse?.removePointer();
+          await unmount(tester);
+        },
+      );
+    }
+  }
+
+  testWidgets(
+    'disabling a hovered slot closes its preview and ignores later looks',
+    (tester) async {
+      final storage = MemoryStore()
+        ..values[ZooController.localZooKey] = jsonEncode({
+          'zoo': _tim.toJson(),
+          'seeded': true,
+        });
+      final buttonZoo = ZooController(storage: storage);
+      final face = DaemonFace(buttonZoo, now: () => tester.binding.clock.now());
+      final enabled = ValueNotifier(true);
+      addTearDown(() {
+        face.dispose();
+        buttonZoo.dispose();
+        enabled.dispose();
+      });
+      buttonZoo.bind('guest');
+      await tester.pump();
+      face.sync(const DaemonWatch(doneCount: 1));
+      var seen = 0;
+      var pressed = 0;
+      face.onSeen = () => seen++;
+      final hover = <bool>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Center(
+            child: ValueListenableBuilder<bool>(
+              valueListenable: enabled,
+              builder: (context, active, _) => DaemonSlotButton(
+                face: face,
+                enabled: active,
+                onPressed: () => pressed++,
+                onHover: hover.add,
+              ),
+            ),
+          ),
+        ),
+      );
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(2, 400));
+      await mouse.moveTo(tester.getCenter(slot));
+      await tester.pump();
+      expect(hover, [true]);
+      expect(seen, 1);
+      expect(face.doneCount, 0);
+
+      enabled.value = false;
+      await tester.pump();
+      expect(hover, [
+        true,
+        false,
+      ], reason: 'disable closes hover without a pointer exit');
+      face.sync(const DaemonWatch(doneCount: 2));
+      await mouse.moveTo(const Offset(2, 400));
+      await mouse.moveTo(tester.getCenter(slot));
+      await tester.tap(slot);
+      await tester.pump();
+      expect(hover, [true, false]);
+      expect(
+        seen,
+        1,
+        reason: 'a disabled slot must not mark finished work as seen',
+      );
+      expect(face.doneCount, 2);
+      expect(pressed, 0);
+      await mouse.removePointer();
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
   testWidgets(
     'the account egg earns and saves its first hatch from workspace activity',
     (tester) async {
       await mount(tester, on: true, enabled: false, seed: Zoo.empty);
       await setCreature(tester, true);
-      String glyph() => tester
-          .widget<Text>(find.byKey(const ValueKey('daemon-slot-glyph')))
-          .data!
-          .trim();
-      expect(glyph(), r'\_(  )_/');
+      String glyph() {
+        final art = find.byKey(const ValueKey('daemon-slot-art'));
+        return art.evaluate().isNotEmpty
+            ? tester.widget<DaemonIllustration>(art).art.stem
+            : 'legacy-species';
+      }
+
+      expect(glyph(), 'egg_first_p0');
       expect(zoo.zoo.daemons, isEmpty);
 
       app.adoptSessionForTest(terminal('a0', []));
@@ -231,22 +446,22 @@ void main() {
         'agentId': 'a0',
       });
       await tester.pump();
-      expect(glyph(), r'\_(/\)_/');
+      expect(glyph(), 'egg_first_p2');
       app.adoptSessionForTest(terminal('a1', []));
       app.notifyListeners();
       await tester.pump();
-      expect(glyph(), r"\_(*')_/");
+      expect(glyph(), 'egg_first_p3');
       app.stateOf('m')!.resumedHarnesses = 1;
       app.notifyListeners();
       await tester.pump();
       expect(zoo.readyEgg!.kind, 'first');
-      expect(glyph(), r'\_(oo)_/');
+      expect(glyph(), 'egg_first_p4');
       expect(zoo.paired, isNull, reason: 'the user must open the egg');
 
       await tester.tap(slot);
       await tester.pump();
       expect(find.byKey(const ValueKey('daemon-hatch')), findsOneWidget);
-      expect(glyph(), r'\_(oo)_/', reason: 'no creature before the reveal');
+      expect(glyph(), 'egg_first_p4', reason: 'no creature before the reveal');
       final card = find.byKey(const ValueKey('daemon-hatch-card'));
       for (var i = 0; i < 180 && card.evaluate().isEmpty; i++) {
         await tester.pump(const Duration(milliseconds: 100));
@@ -254,7 +469,7 @@ void main() {
       expect(card, findsOneWidget);
       expect(zoo.zoo.daemons, hasLength(1));
       expect(zoo.paired!.version, '0.1');
-      expect(glyph(), isNot(r'\_(oo)_/'));
+      expect(glyph(), isNot('egg_first_p4'));
       await tester.enterText(
         find.byKey(const ValueKey('daemon-hatch-name')),
         'Pip',
@@ -335,6 +550,130 @@ void main() {
     expect(remote.fetches, fetches);
     await unmount(tester);
   });
+
+  testWidgets('a saved companion tab stays inert while the experiment is off', (
+    tester,
+  ) async {
+    // The same utility tab can return from the saved account workspace.
+    app.openCompanions();
+    await mount(tester, on: true, enabled: false);
+    expect(app.activeSwarm.isCompanions, isTrue);
+    expect(find.byKey(const ValueKey('companion-home')), findsNothing);
+    expect(
+      find.text('Companions is available in Settings → Experimental.'),
+      findsOneWidget,
+    );
+    expect(remote.fetches, 0);
+    expect(frames, isEmpty);
+
+    await setCreature(tester, true);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('companion-home')), findsOneWidget);
+    expect(remote.fetches, greaterThan(0));
+    expect(frames.where((frame) => frame.$1 == 'daemon_talk'), isEmpty);
+
+    await setCreature(tester, false);
+    final fetches = remote.fetches;
+    expect(find.byKey(const ValueKey('companion-home')), findsNothing);
+    zoo.pushed(999);
+    app.notifyListeners();
+    await tester.pump(const Duration(seconds: 1));
+    expect(remote.fetches, fetches);
+    expect(frames.where((frame) => frame.$1 == 'daemon_talk'), isEmpty);
+    await unmount(tester);
+  });
+
+  testWidgets(
+    'Companions opens its own DSH terminal and switches identities without an extra tab',
+    (tester) async {
+      app.stateOf('m')!.nodeOnline = true;
+      final seed = Zoo(
+        daemons: [
+          ZooDaemon(uid: 'tim-one', id: 'tim', hatched: '', egg: 'first'),
+          ZooDaemon(uid: 'gnu-one', id: 'gnu', hatched: '', egg: 'turn'),
+        ],
+        pair: 'tim-one',
+        firstEgg: true,
+      );
+      await mount(tester, on: true, seed: seed);
+      await app.handleEventForTest('m', {
+        'type': 'daemon_state',
+        'payload': {'pair': 'tim'},
+      });
+      await tester.pump();
+      expect(frames.where((f) => f.$1 == 'daemon_open'), isEmpty);
+      app.openCompanions();
+      await tester.pump();
+      await tester.pump();
+      final requests = frames.where((f) => f.$1 == 'daemon_open').toList();
+      expect(requests, hasLength(1));
+      expect(requests.single.$2['companionUid'], 'tim-one');
+      expect(requests.single.$2.containsKey('text'), isFalse);
+      app
+          .stateOf('m')!
+          .agents
+          .add(
+            const Agent(
+              id: 'pair-tim',
+              name: 'Tim',
+              engine: 'claude',
+              dsh: 'autonomous/pair',
+              terminalAvailable: true,
+              project: AgentProject(
+                name: 'Pair',
+                cwd: '/pair/workspace/tim-one',
+              ),
+            ),
+          );
+      await app.handleEventForTest('m', {
+        'type': 'daemon_open_result',
+        'payload': {
+          'requestId': requests.single.$2['requestId'],
+          'ok': true,
+          'agentId': 'pair-tim',
+        },
+      });
+      await tester.pump();
+      await tester.pump();
+      expect(app.swarms, hasLength(1));
+      expect(app.activeSwarm.name, 'Companions');
+      expect(app.panes, hasLength(2));
+      expect(app.panes.first.isCompanion, isTrue);
+      expect(app.panes.last.agentId, 'pair-tim');
+      expect(app.panes.first.ownerAgentId, 'pair-tim');
+      expect(frames.where((f) => f.$1 == 'daemon_talk'), isEmpty);
+
+      zoo.pair('gnu-one');
+      await tester.pump();
+      await tester.pump();
+      final terminalPane = app.panes.last;
+      expect(terminalPane.agentId, 'pair-tim');
+      expect(app.panes.first.ownerAgentId, 'pair-tim');
+      final next = frames.where((f) => f.$1 == 'daemon_open').last;
+      expect(next.$2['companionUid'], 'gnu-one');
+      await app.handleEventForTest('m', {
+        'type': 'daemon_open_result',
+        'payload': {
+          'requestId': next.$2['requestId'],
+          'ok': true,
+          'agentId': 'pair-tim',
+        },
+      });
+      await tester.pump();
+      await tester.pump();
+      expect(app.panes.last, same(terminalPane));
+      expect(app.swarms, hasLength(1));
+      expect(frames.where((f) => f.$1 == 'daemon_talk'), isEmpty);
+      await setCreature(tester, false);
+      await tester.pump();
+      expect(app.activeSwarm.panes, isEmpty);
+      final opens = frames.where((f) => f.$1 == 'daemon_open').length;
+      app.notifyListeners();
+      await tester.pump();
+      expect(frames.where((f) => f.$1 == 'daemon_open'), hasLength(opens));
+      await unmount(tester);
+    },
+  );
 
   testWidgets('disabling the experiment also closes an egg reveal', (
     tester,
@@ -463,22 +802,22 @@ void main() {
     },
   );
 
-  testWidgets('a 404 is off: no slot and the bar from before daemons, at '
+  testWidgets('a 404 is off: no slot and the disabled-feature bar, at '
       'every width', (tester) async {
     seedStatusBarWorkspace(app);
-    // This historical layout includes Share; keep its independent experiment
-    // enabled while checking that daemons reserve no space.
+    // Compare the same workspace with the creature feature disabled. The
+    // independent Share control may change appearance without granting an
+    // absent daemon any space in either bar.
     await experiments.set(ExperimentalFeature.shareButton, true);
-    await mount(tester);
-    await tester.pump();
+    await mount(tester, enabled: false);
+    expect(remote.fetches, 0);
+    expect(slot, findsNothing);
+    final before = await measureStatusBar(tester);
+    await setCreature(tester, true);
     expect(remote.fetches, 1);
     expect(zoo.daemons, DaemonsSwitch.off);
     expect(slot, findsNothing);
-    final before = jsonDecode(
-      File('test/fixtures/status_bar_before_daemons.json').readAsStringSync(),
-    );
-    final now = await measureStatusBar(tester);
-    expect(jsonDecode(jsonEncode(now)), before);
+    expect(await measureStatusBar(tester), before);
     expect(slot, findsNothing);
     await unmount(tester);
   });
@@ -488,17 +827,25 @@ void main() {
     seedStatusBarWorkspace(app);
     await experiments.set(ExperimentalFeature.shareButton, true);
     final gate = Completer<void>();
-    await mount(tester, on: true, gate: gate);
+    await mount(tester, on: true, enabled: false, gate: gate);
+    expect(remote.fetches, 0);
+    expect(slot, findsNothing);
+    final before = await measureStatusBar(tester);
+    await setCreature(tester, true);
+    expect(remote.fetches, 1);
     expect(zoo.daemons, DaemonsSwitch.unknown);
-    final before = jsonDecode(
-      File('test/fixtures/status_bar_before_daemons.json').readAsStringSync(),
-    );
-    expect(jsonDecode(jsonEncode(await measureStatusBar(tester))), before);
+    expect(slot, findsNothing);
+    expect(await measureStatusBar(tester), before);
     gate.complete();
     await tester.pump();
     await tester.pump();
     expect(zoo.daemons, DaemonsSwitch.on);
     expect(slot, findsOneWidget, reason: 'on (200): as today');
+    expect(
+      await measureStatusBar(tester),
+      isNot(before),
+      reason: 'a present daemon is the state that may take bar space',
+    );
     await unmount(tester);
   });
 
@@ -603,7 +950,9 @@ void main() {
     final native = jsonEncode(nativeKeymapSnapshot(AppKeymap()));
     expect(native, contains('app.daemon_talk'));
     expect(await talkChord(tester), isTrue);
-    expect(find.byKey(const ValueKey('daemon-panel')), findsOneWidget);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('companion-home')), findsOneWidget);
+    expect(app.activeSwarm.isCompanions, isTrue);
     await unmount(tester);
     expect(daemonCommandsActive.value, isFalse, reason: 'the window is gone');
   });
@@ -734,7 +1083,7 @@ void main() {
     final before = tester.getRect(tab);
     // A press on a tab, held while the answer arrives.
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byKey(const ValueKey('workspace-status-bar'))),
+      tester.getCenter(find.byKey(const ValueKey('workspace-tab-bar'))),
     );
     gate.complete();
     await tester.pump();

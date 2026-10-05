@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/orchestrator/orchestrator_controller.dart';
 import 'package:harness/orchestrator/orchestrator_launcher.dart';
 import 'package:harness/orchestrator/orchestrator_workspace.dart';
+import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/pending_question.dart';
 import 'package:harness/widgets/web_pane_panel.dart';
 import 'package:harness/ws/ws_conn.dart';
@@ -43,6 +44,76 @@ void largeSurface(WidgetTester tester) {
 }
 
 void main() {
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'enlarged ${brightness.name} composer keeps Send visible and preserves its draft',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(880, 560);
+        addTearDown(tester.view.reset);
+        final previousBrightness = grid.AppTheme.brightness.value;
+        grid.AppTheme.brightness.value = brightness;
+        addTearDown(() => grid.AppTheme.brightness.value = previousBrightness);
+        final app = createApp();
+        final requests = <Map<String, dynamic>>[];
+        final model = OrchestratorController(
+          id: projectId,
+          request: (request) async {
+            requests.add(request);
+            return {'project': project()};
+          },
+        )..draft = 'Make the base wider.';
+        addTearDown(app.dispose);
+        addTearDown(model.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: grid.buildAppTheme(brightness: brightness),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: OrchestratorWorkspace(
+                notifier: app,
+                machineId: 'm',
+                projectId: projectId,
+                controller: model,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final composer = find.byKey(const ValueKey('orchestrator-composer'));
+        final send = find.byTooltip('Send to director');
+        expect(
+          tester.widget<TextField>(composer).controller!.text,
+          model.draft,
+        );
+        expect(send.hitTestable(), findsOneWidget);
+        expect(
+          tester.getRect(send).right,
+          lessThanOrEqualTo(tester.getRect(composer).right),
+        );
+        expect(
+          tester.getRect(find.text('Shift ↵ for a new line')).right,
+          lessThan(tester.getRect(send).left),
+        );
+        expect(tester.takeException(), isNull);
+        await tester.tap(send);
+        await tester.pumpAndSettle();
+        final sent = requests.where(
+          (request) => request['action'] == 'message',
+        );
+        expect(sent.single['text'], 'Make the base wider.');
+        expect(model.draft, isEmpty);
+        expect(tester.widget<TextField>(composer).controller!.text, isEmpty);
+        expect(tester.widget<TextField>(composer).focusNode!.hasFocus, isTrue);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
   test(
     'refresh failures remain visible and a later refresh recovers',
     () async {

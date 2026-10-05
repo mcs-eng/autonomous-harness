@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { CommanderMirror, type CommanderFrame } from './commander.js'
 import type { LiveEvent } from './normalize.js'
-import { BODY_MAX_CHARS, RECAP_MAX_CHARS, deriveTurnSummary } from './summarize.js'
+import { BODY_MAX_CHARS, RECAP_MAX_CHARS, deriveTurnSummary } from './deviceRecap.js'
 
 let dataDir = ''
 
@@ -44,6 +44,23 @@ describe('CommanderMirror recap events', () => {
     expect(mirror.recentAsks('session-ask')).toEqual(['Chiến tranh thế giới thứ hai kết thúc vào năm nào?'])
     // The recap is still exactly what it was — this adds a list, it does not change one.
     expect(mirror.recent('session-ask', 3)[0].recap).toBe('1945.')
+  })
+
+  it('permanently removes only the selected conversation from persisted recap history', async () => {
+    const options = { send: () => {}, sendWeb: () => {}, hasDevice: () => true, summarize: async () => 'Fixture recap', dataDir }
+    const mirror = new CommanderMirror(options)
+    for (const id of ['selected', 'kept']) mirror.ingest([
+      { type: 'turn_started', payload: { userMessage: 'question ' + id } },
+      { type: 'text_delta', payload: { content: 'answer ' + id } },
+      { type: 'turn_ended', payload: {} },
+    ] as LiveEvent[], id)
+    await vi.runAllTimersAsync()
+    mirror.deleteHistory('selected')
+    const reloaded = new CommanderMirror(options)
+    expect(reloaded.recent('selected')).toEqual([])
+    expect(reloaded.recentAsks('selected')).toEqual([])
+    expect(reloaded.recent('kept')).toHaveLength(1)
+    expect(reloaded.recentAsks('kept')).toEqual(['question kept'])
   })
 
   it('keeps the question even when the turn produces no summary at all', async () => {
@@ -371,14 +388,12 @@ describe('CommanderMirror recap events', () => {
     expect(mirror.recent('session-off', 1)).toHaveLength(0)
   })
 
-  it('alwaysGenerate may be a switch read per turn (the pair brain), and onSummary sees each stored recap', async () => {
-    let pairing = false
-    const summaries: Array<[string, { recap: string; body: string }]> = []
+  it('reads the alwaysGenerate setting for each turn', async () => {
+    let enabled = false
     const mirror = new CommanderMirror({
       send: () => {}, sendWeb: () => {},
       hasDevice: () => false,
-      alwaysGenerate: () => pairing,
-      onSummary: (sessionId, summary) => summaries.push([sessionId, summary]),
+      alwaysGenerate: () => enabled,
       summarize: async () => 'Fixed the flaky test\n\nPinned the clock in billing.spec.ts.',
       dataDir,
     })
@@ -387,15 +402,15 @@ describe('CommanderMirror recap events', () => {
       { type: 'text_delta', payload: { content: 'done' } },
       { type: 'turn_ended', payload: {} },
     ] as LiveEvent[]
-    mirror.ingest(turn, 'session-pair')
+    mirror.ingest(turn, 'session-setting')
     await vi.runAllTimersAsync()
     await Promise.resolve()
-    expect(summaries).toHaveLength(0)
-    pairing = true
-    mirror.ingest(turn, 'session-pair')
+    expect(mirror.recent('session-setting', 1)).toHaveLength(0)
+    enabled = true
+    mirror.ingest(turn, 'session-setting')
     await vi.runAllTimersAsync()
     await Promise.resolve()
-    expect(summaries).toEqual([['session-pair', { recap: 'Fixed the flaky test', body: 'Pinned the clock in billing.spec.ts.' }]])
+    expect(mirror.recent('session-setting', 1)).toMatchObject([{ recap: 'Fixed the flaky test', text: 'Pinned the clock in billing.spec.ts.' }])
   })
 
   it('runs the recap once when a turn closes twice (Stop hook + watcher race)', async () => {
@@ -507,6 +522,23 @@ describe('CommanderMirror recap events', () => {
         detail: 'command: rg TODO',
       },
     ])
+  })
+
+  it('withdraws unverified busy heartbeats without reporting a completed turn', () => {
+    const frames: CommanderFrame[] = []
+    let verified = false
+    const mirror = new CommanderMirror({ send: frame => frames.push(frame), sendWeb: () => {},
+      hasDevice: () => true, summarize: async () => null, dataDir,
+      verifiedWorking: () => verified })
+    mirror.ingest([{ type: 'turn_started', payload: { userMessage: 'old unfinished turn' } }] as LiveEvent[], 'stale')
+    frames.length = 0
+    expect(mirror.heartbeat('stale')).toBe(true)
+    mirror.replayAll()
+    expect(frames).toEqual([])
+    expect(mirror.isBusy('stale')).toBe(true)
+    verified = true
+    mirror.heartbeat('stale')
+    expect(frames[0].payload.kind).toBe('processing')
   })
 
   it('heartbeat re-emits processing while a turn is open, nothing when idle', () => {
@@ -749,22 +781,5 @@ describe('CommanderMirror keeps the complete final answer beside the clipped one
     expect(full).not.toContain('�')
     // A round trip through UTF-8 is lossless only if nothing was severed.
     expect(Buffer.from(full, 'utf8').toString('utf8')).toBe(full)
-  })
-})
-
-describe('CommanderMirror keeps the open tool calls for the pair\'s floor', () => {
-  it('a call is open from its tool_start to its tool_end, and a turn boundary clears them all', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'adapter-commander-tools-'))
-    const mirror = new CommanderMirror({ send: () => {}, sendWeb: () => {}, hasDevice: () => false, summarize: async () => null, dataDir: dir })
-    mirror.ingest([
-      { type: 'turn_started', payload: { userMessage: 'test it' } },
-      { type: 'tool_start', payload: { id: 't1', tool: 'Bash', input: { command: 'npm test', description: 'Run the tests' } } },
-      { type: 'tool_start', payload: { id: 't2', tool: 'Read', input: { file_path: '/w/a.ts' } } },
-      { type: 'tool_end', payload: { id: 't2', tool: 'Read', output: '', isError: false, summary: '' } },
-    ] as LiveEvent[], 's1')
-    expect(mirror.openTools('s1')).toEqual([{ name: 'Bash', input: { command: 'npm test', description: 'Run the tests' } }])
-    mirror.ingest([{ type: 'turn_ended', payload: {} }] as LiveEvent[], 's1')
-    expect(mirror.openTools('s1')).toEqual([])
-    rmSync(dir, { recursive: true, force: true })
   })
 })

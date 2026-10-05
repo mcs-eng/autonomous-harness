@@ -1,7 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/core/config.dart';
@@ -53,14 +56,35 @@ void main() {
     app.dispose();
   });
 
-  Future<void> show(WidgetTester tester, {String? pinnedKey}) async {
+  Future<void> show(
+    WidgetTester tester, {
+    String? pinnedKey,
+    Brightness brightness = Brightness.dark,
+    Size size = const Size(800, 600),
+    double scale = 1,
+  }) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = size;
+    addTearDown(tester.view.reset);
+    final oldBrightness = grid.AppTheme.brightness.value;
+    grid.AppTheme.brightness.value = brightness;
+    addTearDown(() => grid.AppTheme.brightness.value = oldBrightness);
     await tester.pumpWidget(
       MaterialApp(
-        theme: grid.buildAppTheme(brightness: Brightness.dark),
-        home: SharedAgentPage(
-          app: app,
-          dio: dio,
-          location: SharedAgentLocation(id, pinnedKey, 'stag'),
+        debugShowCheckedModeBanner: false,
+        theme: grid.buildAppTheme(brightness: brightness),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(scale)),
+          child: child!,
+        ),
+        home: RepaintBoundary(
+          key: const ValueKey('shared-access-preview'),
+          child: SharedAgentPage(
+            app: app,
+            dio: dio,
+            location: SharedAgentLocation(id, pinnedKey, 'stag'),
+          ),
         ),
       ),
     );
@@ -71,6 +95,22 @@ void main() {
     ) {
       await tester.pump(const Duration(milliseconds: 10));
     }
+  }
+
+  Future<void> capture(WidgetTester tester, String name) async {
+    final directory = Platform.environment['HARNESS_COMMENTS_CAPTURE_DIR'];
+    if (directory == null) return;
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byKey(const ValueKey('shared-access-preview')),
+    );
+    await tester.runAsync(() async {
+      final image = await boundary.toImage(pixelRatio: 2);
+      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+      await Directory(directory).create(recursive: true);
+      await File('$directory/$name.png')
+          .writeAsBytes(bytes!.buffer.asUint8List());
+      image.dispose();
+    });
   }
 
   testWidgets('incomplete and changed owner identities never open a viewer', (
@@ -102,7 +142,7 @@ void main() {
         find.textContaining('Sign in with an invited email'),
         findsOneWidget,
       );
-      expect(find.text('[ Sign in ]'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'Sign in'), findsOneWidget);
       expect(find.byType(SharedHarnessPanel), findsNothing);
       await tester.pumpWidget(const SizedBox());
       status = 403;
@@ -138,4 +178,35 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  for (final brightness in Brightness.values) {
+    for (final scale in [1.0, 2.0]) {
+      testWidgets(
+        'shared access remains readable ${brightness.name} at $scale text',
+        (tester) async {
+          status = 401;
+          await show(
+            tester,
+            pinnedKey: key,
+            brightness: brightness,
+            size: const Size(390, 360),
+            scale: scale,
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.textContaining('Sign in with an invited email'),
+            findsOneWidget,
+          );
+          final signIn = find.widgetWithText(TextButton, 'Sign in');
+          await tester.ensureVisible(signIn);
+          await tester.pumpAndSettle();
+          expect(signIn.hitTestable(), findsOneWidget);
+          expect(find.byType(SharedHarnessPanel), findsNothing);
+          expect(tester.takeException(), isNull);
+          await capture(tester, 'private-access-${brightness.name}-$scale');
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+    }
+  }
 }

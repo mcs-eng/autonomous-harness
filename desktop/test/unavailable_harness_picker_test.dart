@@ -3,12 +3,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/state/app_state.dart';
+import 'package:harness/state/harness_activity.dart';
 import 'package:harness/state/harness_sessions.dart';
 import 'package:harness/state/swarm_search.dart';
 import 'package:harness/terminal/terminal_text.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
 import 'package:harness/widgets/search_result_text.dart';
 import 'package:harness/widgets/swarm_resource_preview.dart';
+import 'package:harness/widgets/desktop_chrome.dart';
+import 'package:harness/widgets/harness_activity_mark.dart';
 import 'package:xterm/xterm.dart' show TerminalStyle;
 
 import 'keymap_host_test.dart' show key;
@@ -179,12 +182,27 @@ void main() {
       expect(controller.selected!.id, id);
       expect(controller.canAccept, isFalse);
       expect(
-        find.descendant(of: row, matching: find.text(label)),
+        find.descendant(
+          of: row,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is ActivityMark &&
+                widget.activity == HarnessActivity.offline,
+          ),
+        ),
         findsOneWidget,
       );
       expect(
         find.descendant(of: row, matching: find.text('33m')),
-        findsNothing,
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<Tooltip>(
+              find.descendant(of: row, matching: find.byType(Tooltip)),
+            )
+            .message,
+        contains(label),
       );
       expect(
         find.descendant(of: preview, matching: find.textContaining(label)),
@@ -195,9 +213,15 @@ void main() {
         contains(label),
       );
       final title = tester.widget<SearchResultText>(
-        find.descendant(of: row, matching: find.byType(SearchResultText)),
+        find.descendant(
+          of: row,
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is SearchResultText && w.text == controller.selected!.title,
+          ),
+        ),
       );
-      expect(title.style.color!.a, closeTo(.28, .01));
+      expect(title.style.color, DesktopChrome.selectionDetail);
       expect(find.textContaining('No room'), findsNothing);
       await key(tester, LogicalKeyboardKey.enter);
       await key(tester, LogicalKeyboardKey.enter, cmd: true);
@@ -225,10 +249,7 @@ void main() {
     terminalThemeStore.value = TerminalThemeChoice.tango;
     await tester.pump();
     expect(tester.takeException(), isNull);
-    expect(
-      tester.getSize(row).height,
-      closeTo(terminalCellSizeOf(tester.element(field)).height, .01),
-    );
+    expect(tester.getSize(row).height, greaterThanOrEqualTo(44));
     await capture(tester, 'unavailable-sessions-narrow');
     machine
       ..nodeOnline = true

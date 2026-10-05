@@ -182,6 +182,7 @@ class TerminalPromptKeys extends StatelessWidget {
     final focused = Focus(
       focusNode: focusNode,
       autofocus: true,
+      skipTraversal: true,
       onKeyEvent: (_, event) => _key(context, event),
       child: child,
     );

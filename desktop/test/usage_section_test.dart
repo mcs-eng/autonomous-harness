@@ -214,6 +214,32 @@ void main() {
     },
   );
 
+  testWidgets('usage selectors announce purpose as well as current scope', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    try {
+      final controller = controllerWith(const {});
+      await controller.load();
+      await pumpUsage(tester, controller);
+      final provider = tester
+          .getSemantics(find.bySemanticsLabel('Usage provider'))
+          .getSemanticsData();
+      final range = tester
+          .getSemantics(find.bySemanticsLabel('Usage date range'))
+          .getSemanticsData();
+      expect(provider.label, 'Usage provider');
+      expect(provider.value, 'Overview');
+      expect(range.label, 'Usage date range');
+      expect(
+        range.value,
+        tester.widget<AppSelectField<UsageRange>>(_rangeField).value.label,
+      );
+    } finally {
+      semantics.dispose();
+    }
+  });
+
   testWidgets('rests with nothing switched on, and offers the switches', (
     tester,
   ) async {

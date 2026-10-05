@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/app_theme.dart' as grid;
@@ -89,12 +90,14 @@ class _PaletteChoice extends StatelessWidget {
             ),
             side: WidgetStateProperty.resolveWith(
               (states) => BorderSide(
-                color: selected || states.contains(WidgetState.focused)
+                color: states.contains(WidgetState.focused)
+                    ? palette.foreground
+                    : selected
                     ? palette.accent
+                    : MediaQuery.highContrastOf(context)
+                    ? palette.foreground.withValues(alpha: .6)
                     : palette.foreground.withValues(alpha: .12),
-                width: selected || states.contains(WidgetState.focused)
-                    ? 1.5
-                    : 1,
+                width: MediaQuery.highContrastOf(context) ? 2 : 1.5,
               ),
             ),
             shape: WidgetStatePropertyAll(
@@ -117,7 +120,7 @@ class _PaletteChoice extends StatelessWidget {
                   SizedBox(
                     width: 16,
                     child: selected
-                        ? Icon(Icons.check, size: 16, color: palette.accent)
+                        ? Icon(AppIcons.check, size: 16, color: palette.accent)
                         : null,
                   ),
                 ],

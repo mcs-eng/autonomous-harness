@@ -84,6 +84,10 @@ export interface SessionSearchResult {
   /** Sessions in the index, and sessions still waiting for their first pass. */
   indexed: number
   pending: number
+  /** False until discovery and its queued first passes have finished. */
+  ready: boolean
+  /** A scan failed; any cached hits are still usable and a later search retries it. */
+  discoveryError?: boolean
   tookMs: number
 }
 
@@ -103,7 +107,11 @@ export interface SessionSearchIndexOptions {
    * Which sessions are open in a running process right now (external.ts `OpenSessions`), so a
    * conversation Harness did not start says whether a terminal still has it. `known` never waits.
    */
-  openSessions?: { known(): ReadonlyMap<string, 'terminal' | 'app' | 'harness' | 'maybe'>; fresh(): Promise<ReadonlyMap<string, 'terminal' | 'app' | 'harness' | 'maybe'>> }
+  openSessions?: {
+    known(): ReadonlyMap<string, 'terminal' | 'app' | 'harness' | 'maybe'>
+    fresh(): Promise<ReadonlyMap<string, 'terminal' | 'app' | 'harness' | 'maybe'>>
+    working?(sessionId: string): Promise<boolean | null>
+  }
   /** Looks again for conversations Harness did not start, before each sweep lists its sources. */
   discover?: () => Promise<unknown>
   /** Between full sweeps. */
@@ -135,10 +143,25 @@ export class SessionSearchIndex {
   private stopped = false
   private sweepTimer: NodeJS.Timeout | null = null
   private sliceStart = 0
+  private initialized = false
+  private discovering = false
+  private discoveryFailed = false
+  private discoveryStartedAt: number | undefined
+  private discoveryFinishedAt: number | undefined
   /** Callers waiting for a session's next pass (`tail`). */
   private readonly waiters = new Map<string, Array<() => void>>()
 
+  private readonly deletedSessions = new Set<string>()
+
   constructor(private readonly opts: SessionSearchIndexOptions) {}
+
+  deleteHistory(sessionId: string): void {
+    this.deletedSessions.add(sessionId)
+    this.sources.delete(sessionId)
+    this.queue.delete(sessionId)
+    this.dirty.delete(sessionId)
+    this.opts.store.removeSession(sessionId)
+  }
 
   /** The first sweep after `delayMs` (boot has other work), then one every `sweepEveryMs`. */
   start(delayMs = 15_000): void {
@@ -181,14 +204,29 @@ export class SessionSearchIndex {
 
   /** Queue every known session, newest first; drop sessions whose agent no longer exists. */
   sweep(): void {
-    if (this.stopped) return
+    if (this.stopped || this.discovering) return
+    this.discovering = true
+    this.discoveryFailed = false
+    this.discoveryStartedAt = Date.now()
+    const finish = (failed = false) => {
+      if (this.stopped) { this.discovering = false; return }
+      this.discoveryFailed = failed
+      try { this.sweepSources() }
+      catch (error) {
+        this.discoveryFailed = true
+        this.opts.log?.(`[search] source discovery failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      this.initialized = true
+      this.discovering = false
+      this.discoveryFinishedAt = Date.now()
+    }
     if (this.opts.discover) {
       // Which of them are open, looked at now: a search reads it without waiting.
       void this.opts.openSessions?.fresh().catch(() => undefined)
-      void this.opts.discover().catch(() => undefined).then(() => this.sweepSources())
+      void Promise.resolve().then(() => this.opts.discover!()).then(() => finish(), () => finish(true))
       return
     }
-    this.sweepSources()
+    finish()
   }
 
   private sweepSources(): void {
@@ -208,6 +246,11 @@ export class SessionSearchIndex {
 
   search(query: string, options: { limit?: number; from?: number; to?: number } = {}): SessionSearchResult {
     const started = performance.now()
+    // Opening welcome/search is an explicit demand for current history, including sessions
+    // started since boot. Keep a short cache across typing/retries, not the ten-minute idle sweep.
+    const stale = this.discoveryFinishedAt === undefined || Date.now() - this.discoveryFinishedAt >= 5_000
+    if ((!this.initialized || this.discoveryFailed || stale) && !this.discovering && !this.running &&
+        (this.discoveryStartedAt === undefined || Date.now() - this.discoveryStartedAt >= 1_000)) this.sweep()
     const hits = this.opts.store.search(query, options)
     // Whether a terminal still has it, as last looked: a search never waits for a process table.
     if (hits.some((hit) => hit.external) && this.opts.openSessions) {
@@ -220,7 +263,10 @@ export class SessionSearchIndex {
       }
     }
     const indexed = this.opts.store.counts().sessions
-    return { hits, indexed, pending: this.queue.size, tookMs: Math.round((performance.now() - started) * 10) / 10 }
+    return { hits, indexed, pending: this.queue.size,
+      ready: this.initialized && !this.discovering && !this.discoveryFailed && !this.running && this.queue.size === 0,
+      ...(this.discoveryFailed ? { discoveryError: true } : {}),
+      tookMs: Math.round((performance.now() - started) * 10) / 10 }
   }
 
   /**
@@ -251,7 +297,12 @@ export class SessionSearchIndex {
       // A preview of a conversation Harness did not start says whether a terminal has it, as of now.
       const open = await this.opts.openSessions?.fresh().catch(() => null)
       const where = open?.get(sessionId)
-      tail.external = { title: session.title ?? '', cwd: session.cwd ?? '', origin: session.origin ?? '', open: open?.has(sessionId) ?? false, ...(where ? { openIn: where } : {}) }
+      const working = open?.has(sessionId) ? await this.opts.openSessions?.working?.(sessionId).catch(() => null) : null
+      tail.external = {
+        title: session.title ?? '', cwd: session.cwd ?? '', origin: session.origin ?? '',
+        open: open?.has(sessionId) ?? false, ...(where ? { openIn: where } : {}),
+        ...(typeof working === 'boolean' ? { working } : {}),
+      }
     }
     return tail
   }
@@ -259,6 +310,11 @@ export class SessionSearchIndex {
   /** What the index holds about one session. */
   session(sessionId: string): IndexedSession | undefined {
     return this.opts.store.session(sessionId)
+  }
+
+  /** A bounded snapshot of the dated conversation text already indexed on this machine. */
+  recentConversations(from: number, to: number) {
+    return { ...this.opts.store.recentConversations(from, to), indexing: this.queue.size + (this.running ? 1 : 0) }
   }
 
   /** Moves a session to the head of the queue. */
@@ -302,7 +358,7 @@ export class SessionSearchIndex {
     if (!force && Date.now() - this.sourcesReadAt < 5_000) return
     const next = new Map<string, SearchSource>()
     for (const source of this.opts.sources()) {
-      if (!source.sessionId) continue
+      if (!source.sessionId || this.deletedSessions.has(source.sessionId)) continue
       const known = next.get(source.sessionId)
       // One session can be listed live and stopped at once: the fresher record wins.
       if (!known || source.changedAt > known.changedAt) next.set(source.sessionId, source)
@@ -313,6 +369,7 @@ export class SessionSearchIndex {
 
   /** One pass over one session: from where the last one stopped, or from the start. */
   async pass(source: SearchSource): Promise<void> {
+    if (this.deletedSessions.has(source.sessionId)) return
     const store = this.opts.store
     const existing = store.session(source.sessionId)
     const dirty = this.dirty.delete(source.sessionId)
@@ -324,6 +381,7 @@ export class SessionSearchIndex {
     if (!file || !source.transcriptPath || !normalize) {
       // Nothing to read (a terminal, a database-backed engine, a missing file): its name is still findable.
       if (existing?.header === header && existing.agentId === source.agentId) return
+      if (this.deletedSessions.has(source.sessionId)) return
       store.writeSession({
         sessionId: source.sessionId, agentId: source.agentId, engine: source.engine,
         path: existing?.path ?? source.transcriptPath ?? '', header,
@@ -339,6 +397,7 @@ export class SessionSearchIndex {
     const samePath = existing?.path === path
     if (samePath && existing.size === file.size && existing.mtime === mtime) {
       if (existing.header !== header || existing.agentId !== source.agentId) {
+        if (this.deletedSessions.has(source.sessionId)) return
         store.writeSession({ ...existing, header, agentId: source.agentId, ...externalFields(source, knownTitle) }, NO_TURN_DELETE, [])
       }
       return
@@ -382,6 +441,7 @@ export class SessionSearchIndex {
     // a daemon stopped between them resumes there.
     for (let start = WRITE_BATCH; start < turns.length; start += WRITE_BATCH) {
       const next = turns[start]
+      if (this.deletedSessions.has(source.sessionId)) return
       store.writeSession(
         { ...session, size: next.offset, mtime: 0, resumeOffset: next.offset, resumeTurn: next.turn },
         start === WRITE_BATCH ? fromTurn : NO_TURN_DELETE,
@@ -391,6 +451,7 @@ export class SessionSearchIndex {
       if (this.stopped) return
     }
     const written = Math.floor(Math.max(0, turns.length - 1) / WRITE_BATCH) * WRITE_BATCH
+    if (this.deletedSessions.has(source.sessionId)) return
     store.writeSession(session, written ? NO_TURN_DELETE : fromTurn, turns.slice(written))
     if (!resume) {
       this.opts.log?.(`[search] indexed ${source.sessionId.slice(0, 8)} · ${source.engine} · ${closed.length + (open ? 1 : 0)} turns · ${Math.round(file.size / 1024)} KB`)
@@ -410,6 +471,7 @@ export class SessionSearchIndex {
     if (existing && !dirty && existing.mtime === stamp) {
       const again = source.external ? headed(existing.title ?? '') : { header: source.header }
       if (existing.header !== again.header || existing.agentId !== source.agentId) {
+        if (this.deletedSessions.has(source.sessionId)) return
         store.writeSession({ ...existing, ...again, agentId: source.agentId }, NO_TURN_DELETE, [])
       }
       return
@@ -430,6 +492,7 @@ export class SessionSearchIndex {
     if (existing && existing.size === fingerprint && existing.mtime === stamp
       && existing.header === head.header && existing.agentId === source.agentId) return
     const changed = !existing || existing.size !== fingerprint
+    if (this.deletedSessions.has(source.sessionId)) return
     store.writeSession({
       sessionId: source.sessionId, agentId: source.agentId, engine: source.engine, path: '',
       ...head, size: fingerprint, mtime: stamp, resumeOffset: 0, resumeTurn: 0,

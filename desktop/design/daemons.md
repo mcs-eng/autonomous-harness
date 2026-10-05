@@ -6,6 +6,68 @@ says where the desktop keeps each part and what it chose where the contract
 leaves room. It replaces the local "terminal companion" (six species, canned
 chat, a local blind box), which is gone.
 
+## Illustrated collection and eggs
+
+When Settings → Experimental → Focus-bar creature is on, the creature now sits
+at the far right of the **top tab bar**, after Harness Store. The setting keeps
+its existing account, rollout and collection behavior. Turning it off removes
+the slot and any hover preview; it never deletes the saved collection.
+
+All ten init daemons use code-authored PNG artwork shared with the Pro drawing source:
+`daemons/tools/illustrated/`. The desktop bundles 64px slot images and 350px
+portraits. A small slot never decodes the larger image. PNGs are cached; a
+portrait animation repaints only its own boundary and stops for Reduce Motion,
+Motion off, hidden pages and background windows. No model or vector parser runs
+while drawing. Future species outside the init collection retain their existing renderer.
+
+Tab-bar artwork is centred on the visible idle pose, not the PNG canvas. Each
+growth stage and the egg family keep a fixed anchor through every frame, so
+breathing and hatching retain their registration. `IllustratedArt.center` and
+`SwarmDaemonArt.center` read matching generated source-pixel anchors from
+`illustrated_alignment.g.dart` and `assets/daemon-art/alignment.json`. AppKit drawing respects flipped coordinates.
+Native checks measure the painted centre at all thirty species/age combinations and for the egg.
+
+The zoo leads with a growth label (Hatchling, Young, Adult), a centred portrait,
+bond progress, and Rename / Card / Details. Details reveals lore, rarity,
+version and collected traits. A single companion is not repeated in an
+individuals section. The collection wraps on narrower windows and highlights
+only the selected name row. None of these presentation changes alter ownership,
+hatching, progress or pairing.
+
+Versions **0.1 / 1.0 / 2.0** show a hatchling, a young daemon, and its approved
+adult shape. Tim grows longer arms; the other nine grow from smaller proportions. Bond/XP thresholds, random draws, ownership,
+naming and consent are unchanged. All eight egg kinds use new shell artwork for
+p0–p4, rocking, bursting, falling shell halves and the open bowl. The hatchling
+rises behind that bowl as a silhouette before its colour appears. Collection
+cards, portraits, previews and every growth transition use the same artwork.
+Rolled traits remain metadata; arbitrary markings and accessories are not yet
+illustrated by the curated artwork.
+
+Hovering for 220ms reveals the full-size artwork below the tab bar without
+taking keyboard focus, hatching, or changing progress. Leaving, clicking,
+opening a modal, switching the experiment off or leaving the foreground closes
+it. Click retains the existing hatch/boop/panel action. Work frames in the slot
+still advance with real agent activity; the hover portrait may gently animate.
+
+The art adapter is `lib/daemons/illustrated_art.dart`; the isolated bitmap view
+is `lib/widgets/daemon_illustration.dart`. Native `daemonState.art` carries a
+validated bundled slot asset key, never a file path or downloaded artwork.
+Native hover emits `daemonHover` so Flutter owns the same preview on every
+platform. The bottom focus bar retains pane context and the existing voice line.
+
+Regenerate with `python3 daemons/tools/illustrated/generate.py`. The manifest
+records all 1,124 art keys, both resolutions, frame counts, source hashes and hatch
+registration. Review sheets live beside the generator. Test with
+`test/daemons/illustrated_art_test.dart`, `test/daemon_off_test.dart`, and
+`test/daemon_review_render_test.dart`, plus the native titlebar checks.
+
+Zoo → **Browse artwork** opens a local preview of all ten, including Beastie.
+Left/right and Previous/Next wrap through the collection; the named controls
+jump directly to a species. Stage, Expression and Pause change the preview.
+Escape returns to the zoo. This view has no account or collection writer: it
+never discovers, hatches, renames, pairs, or grants XP to a daemon. The regular
+collection still hides unearned species and the secret.
+
 ## Off: invisible and free
 
 Daemons ship dark ([daemons/README.md](../../daemons/README.md), "Off
@@ -29,7 +91,7 @@ existed, exactly:
 ### Experimental focus-bar creature
 
 Open **Settings → Experimental → Focus-bar creature** to start with an egg in
-the focus bar. Switch it off there to hide the creature, its
+the top tab bar. Switch it off there to hide the creature, its
 panel and any hatch. The activation shortcut has been removed entirely,
 including its command and native Mac binding. The switch works by mouse or
 keyboard and leaves focus in Settings.
@@ -214,61 +276,18 @@ computer or device (never needed):`, `elsewhere` and `machine`, dimmed. No
 copy implies a second computer is needed to hatch. Enter on one opens the
 place to practise it.
 
-## Status slot
+## Creature slot
 
-Eight cells plus a one-cell gutter each side in the bottom status bar, before
-the optional Share action and model selector, in
-the bar's font with ligatures off. The face sends its ten cells as drawn
-(`statusCell` centred on the version's base sprite, so a borrowed baton or a
-nap's `z` grows to the right and the face never shifts). A status cell is
-always exactly ten cells (render.mjs fills and cuts to `statusCells + 2`): a
-six-cell 1.0 sprite with a baton runs into the right gutter and ends there.
+The top-right slot has a fixed 44pt footprint, independent of mood, name, egg
+count and progress. All ten init species and eggs use the illustrated assets
+above; future species outside that set use a fitted legacy cell. When disabled,
+no space is reserved and the original tab layout returns.
 
-**Colour.** The slot is drawn in the status line's own text colour, whatever
-the daemon: daemon colours fail contrast on a green tmux bar and on the yellow
-message line. Daemon colours appear only on the terminal background (panel,
-reveal, zoo, card): a dark theme takes the xterm colour (moved toward legible
-below 3:1); a light theme takes the roster's `color.light` when it has one,
-else the colour darkened until it reaches 4.5:1. The grue brings its own pitch
-black wherever it is drawn: in the panel, the reveal, the zoo, the card, and on
-a light theme as a black eight-cell patch behind its eyes in the slot.
-Every terminal scheme the app ships today is dark, so the light rules wait for
-a light scheme; `debugDaemonTerminalTheme` draws them now for the review
-captures and `test/daemons/daemon_colors_test.dart` (Solarized Light).
-
-**Shiny.** A `*` in the slot's left gutter; the roster's `shiny.hex` (every
-daemon has one now; else the colour brighter and more saturated) on the
-terminal background: panel, zoo, card and reveal; the card reads
-`SHINY <RARITY>`.
-
-**Focus bar.** Only the egg or creature occupies its ten-cell slot. Do not put
-completed-turn counts, egg counts, or labels beside it. Its expression and work
-frames communicate activity; additional eggs, progress, and activity details
-live in the panel. Tooltips and accessibility retain details on demand. Counts
-never widen the slot or move its neighbors, including during hover.
-
-The underlying finished-turn details are cleared by a hover, opening the panel,
-or coming back to the window (after 4 s in front). With a pair brain the count
-is its `daemon_state.done.count` (every machine; the tooltip names the last few)
-and a look sends `daemon_presence { doneSeen: true }`; without one the window
-counts what it sees (a turn in the pane in front of you is already seen).
-
-![The native bar shows Git context and the creature alone](images/daemon-status-counts.png)
-
-Render the combined Git/creature fixture with `HARNESS_DAEMON_CAPTURE_DIR=/tmp/daemon-focus-bar
-flutter test test/daemon_review_render_test.dart --plain-name 'creature alone'`.
-Then use `HARNESS_NATIVE_STATUS_CAPTURE_DIR=/tmp/daemon-focus-bar
-bash tool/check_swarm_titlebar.sh /path/to/flutter --status-preview` for the
-actual AppKit controls. Both use synthetic state without launching the app.
-
-Clicking a ready egg hatches it; nothing hatches on its own. Otherwise a click
-boops the daemon and opens its panel. Hover is a look. Native updates carry the
-face in `daemonState` (`glyph`, `cell`, `foreground`,
-`patch`, voice, `voiceArmed`) and repaint only the slot and the line; hover comes back as `daemonLook`.
-
-While a hatch reveal runs, the slot keeps the egg and neither the Flutter bar
-nor native hears the hatchling's name, colour or face until the reveal has
-finished (the card is up) or been closed.
+The compact artwork alone occupies the slot. Additional eggs, progress and
+activity details live in the panel and accessibility descriptions. Hover is a
+look; clicking a ready egg hatches it, otherwise it boops and opens the panel.
+The reveal keeps showing an anonymous egg until the new creature is revealed.
+The footer's context and model geometry do not depend on the creature.
 
 ## Motion
 

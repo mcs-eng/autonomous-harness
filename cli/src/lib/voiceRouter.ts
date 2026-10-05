@@ -110,7 +110,7 @@ function ensureRouterConfigured(engine: RouterEngine): void {
 }
 
 /**
- * Tell the router which agents exist. Called from the same place the recap pool is synced, so the warm
+ * Tell the router which agents exist. Called whenever the active agents change, so the warm
  * worker always belongs to an engine the machine really runs.
  */
 export function setVoiceRouterSessions(sessions: Array<{ engine: string }>): void {
@@ -124,24 +124,6 @@ export function setVoiceRouterSessions(sessions: Array<{ engine: string }>): voi
   if (next === 'grok') setRouterOneShotDeviceConnected(false)
   console.log(`[voice-route] router engine=${next} model=${routerModelFor(next) || '(engine default)'}`)
   ensureRouterConfigured(next)
-}
-
-/**
- * One small prompt for the pair brain (pair/triage.ts), on the same warm router worker and model the voice
- * router classifies with — Haiku for Claude. The caller owns the budget. Null when this machine runs no
- * engine the router can use; the brain then speaks from its templates.
- */
-export async function runPairOneShot(
-  prompt: string,
-  opts: { timeoutMs: number; signal?: AbortSignal },
-  sessions: Array<{ engine: string }>,
-): Promise<string | null> {
-  const engine = chooseRouterEngine(sessions) ?? routerEngine
-  if (!engine) return null
-  const options = { prompt, model: routerModelFor(engine), effort: 'low' as const, cwd: ensureRouteScratch(), signal: opts.signal, timeoutMs: opts.timeoutMs }
-  if (engine === 'grok') return (await runGrokOneShot(options)).text ?? ''
-  ensureRouterConfigured(engine)
-  return (await runRouterOneShot(engine, options)).text ?? ''
 }
 
 /** Warm (device connected) / unwarm the router worker — wired to commander presence in cli.ts. */

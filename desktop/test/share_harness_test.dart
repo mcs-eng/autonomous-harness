@@ -14,8 +14,8 @@ import 'package:harness/auth/auth_session.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/shortcuts/app_keymap.dart';
-import 'package:harness/terminal/terminal_text.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
+import 'package:harness/terminal/terminal_text.dart' show terminalFontStore;
 import 'package:xterm/xterm.dart' show TerminalStyle;
 
 import 'support/real_fonts.dart';
@@ -43,19 +43,23 @@ class SharingApp extends AppNotifier {
 
 void main() {
   setUpAll(() async {
-    // Native captures use real fonts; Chrome exercises the same cell layout
-    // with the test font and does not read the host filesystem.
+    // Native captures use real fonts; Chrome uses its test font without
+    // reading the host filesystem.
     if (kIsWeb) return;
+    await loadRealFonts();
     if (Platform.isMacOS &&
         Platform.environment['HARNESS_SHARE_SCREENSHOT'] != null) {
-      final mono = ByteData.sublistView(
-        await File('/System/Library/Fonts/SFNSMono.ttf').readAsBytes(),
+      final sans = ByteData.sublistView(
+        await File('/System/Library/Fonts/SFNS.ttf').readAsBytes(),
       );
-      await (FontLoader(
-        '.AppleSystemUIFontMonospaced',
-      )..addFont(Future.value(mono))).load();
-    } else {
-      await loadRealFonts();
+      for (final family in [
+        '.AppleSystemUIFont',
+        'SF Pro Text',
+        'Roboto',
+        'Ubuntu Sans',
+      ]) {
+        await (FontLoader(family)..addFont(Future.value(sans))).load();
+      }
     }
     await (FontLoader(
       'MaterialIcons',
@@ -66,16 +70,26 @@ void main() {
     ShareAction manage, {
     Size size = const Size(900, 800),
     AppKeymap? keymap,
+    Brightness brightness = Brightness.dark,
+    double scale = 1,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
+    final oldBrightness = grid.AppTheme.brightness.value;
+    grid.AppTheme.brightness.value = brightness;
+    addTearDown(() => grid.AppTheme.brightness.value = oldBrightness);
     await tester.pumpWidget(
       MaterialApp(
-        theme: grid.buildAppTheme(brightness: Brightness.dark),
-        builder: (context, child) => keymap == null
-            ? child!
-            : KeymapProvider(keymap: keymap, child: child!),
+        debugShowCheckedModeBanner: false,
+        theme: grid.buildAppTheme(brightness: brightness),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(scale)),
+          child: keymap == null
+              ? child!
+              : KeymapProvider(keymap: keymap, child: child!),
+        ),
         home: RepaintBoundary(
           key: const Key('sharing-preview'),
           child: Scaffold(
@@ -127,7 +141,10 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pump();
     }
-    await tester.tap(find.byKey(ValueKey('share-field-$name')));
+    final target = find.byKey(ValueKey('share-field-$name'));
+    await tester.ensureVisible(target);
+    await tester.pumpAndSettle();
+    await tester.tap(target);
     await tester.pump();
   }
 
@@ -146,6 +163,11 @@ void main() {
     if (kIsWeb) return;
     final output = Platform.environment['HARNESS_SHARE_SCREENSHOT'];
     if (output == null) return;
+    final oldShadows = debugDisableShadows;
+    debugDisableShadows = false;
+    for (final object in tester.allRenderObjects) {
+      object.markNeedsPaint();
+    }
     await tester.pump(const Duration(milliseconds: 300));
     var region = tester.getRect(
       find.byKey(const ValueKey('share-form-surface')),
@@ -161,6 +183,11 @@ void main() {
       await File('$output.$state.png').writeAsBytes(png!.buffer.asUint8List());
       image.dispose();
     });
+    debugDisableShadows = oldShadows;
+    for (final object in tester.allRenderObjects) {
+      object.markNeedsPaint();
+    }
+    await tester.pump();
   }
 
   testWidgets(
@@ -214,12 +241,9 @@ void main() {
             .selected,
         isTrue,
       );
-      final cell = terminalCellSizeOf(
-        tester.element(find.byType(ShareHarnessDialog)),
-      );
       expect(
         tester.getSize(find.byKey(const ValueKey('share-choice-1'))).height,
-        closeTo(cell.height, .01),
+        greaterThanOrEqualTo(36),
       );
       await capture(tester, 'public-choice');
       await key(tester, LogicalKeyboardKey.tab, shift: true);
@@ -248,7 +272,7 @@ void main() {
   );
 
   testWidgets(
-    'narrow form preserves email drafts across pane navigation, live font/theme changes and remaps',
+    'narrow form preserves drafts and remaps while terminal font and theme changes leave its geometry intact',
     (tester) async {
       final map = MemoryKeymap()
         ..apply('''{"bindings":[
@@ -281,6 +305,7 @@ void main() {
         0,
         reason: 'unbound Enter stays unbound in an email editor',
       );
+      final editorBefore = tester.getRect(find.byType(TextField));
       terminalFontStore.value = TerminalStyle(
         fontSize: 22,
         fontFamily: originalFont.fontFamily,
@@ -293,7 +318,8 @@ void main() {
         'ken@example.com',
       );
       expect(tester.takeException(), isNull);
-      await capture(tester, 'narrow-tango');
+      expect(tester.getRect(find.byType(TextField)), editorBefore);
+      await capture(tester, 'narrow-desktop');
       await tester.tap(find.byKey(const ValueKey('share-back')));
       await tester.pump();
       expect(find.text('Copy link'), findsOneWidget);
@@ -364,6 +390,14 @@ void main() {
     await field(tester, 'comments');
     await tester.pumpAndSettle();
     expect(find.text('Start the conversation.'), findsOneWidget);
+    expect(find.byKey(const ValueKey('comments-heading')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('share-choices-surface')),
+        matching: find.text('Comments'),
+      ),
+      findsOneWidget,
+    );
     expect(calls, ['list', 'comments']);
     await tester.enterText(find.byType(TextField), 'Please review this step.');
     tester.view.physicalSize = const Size(900, 800);
@@ -376,7 +410,7 @@ void main() {
     expect(calls, ['list', 'comments']);
     await key(tester, LogicalKeyboardKey.escape);
     expect(find.text('Copy link'), findsOneWidget);
-    expect(find.text('[-]'), findsOneWidget);
+    expect(find.text('Hide'), findsOneWidget);
     expect(find.text('Private'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
@@ -502,7 +536,8 @@ void main() {
     await tester.tap(find.text('Share'));
     await tester.pumpAndSettle();
     expect(app.calls, [('machine', 'agent', 'list')]);
-    expect(find.text('Share Climate dashboard'), findsOneWidget);
+    expect(find.text('Share harness'), findsOneWidget);
+    expect(find.text('Climate dashboard'), findsOneWidget);
     await close(tester);
     await tester.pumpAndSettle();
     app.dispose();
@@ -572,7 +607,7 @@ void main() {
       });
       await field(tester, 'people');
       expect(find.text('No invited people yet.'), findsOneWidget);
-      expect(find.textContaining('cannot control your harness'), findsOneWidget);
+      expect(find.textContaining('cannot control your agent'), findsOneWidget);
       await tester.enterText(
         find.byType(TextField),
         'KEN@example.com; diego@example.com, ken@example.com',
@@ -718,6 +753,72 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  for (final brightness in Brightness.values) {
+    for (final scale in [1.0, 1.7]) {
+      testWidgets(
+        'sharing keeps actions and email entry usable in ${brightness.name} at $scale',
+        (tester) async {
+          final changes = <String>[];
+          await show(
+            tester,
+            (action, payload) async {
+              if (action != 'list' && action != 'comments') changes.add(action);
+              return {
+                'collaboration': true,
+                'shares': [],
+                'comments': [],
+                'canComment': true,
+              };
+            },
+            brightness: brightness,
+            scale: scale,
+            size: scale == 1 ? const Size(1280, 800) : const Size(480, 360),
+          );
+          expect(find.text('Copy link').hitTestable(), findsOneWidget);
+          expect(find.text('Close').hitTestable(), findsOneWidget);
+          await capture(tester, 'desktop-${brightness.name}-$scale');
+          await field(tester, 'people');
+          await tester.enterText(
+            find.byType(TextField),
+            'reviewer@example.com',
+          );
+          await tester.pumpAndSettle();
+          expect(find.byType(TextField).hitTestable(), findsOneWidget);
+          expect(find.text('Back').hitTestable(), findsOneWidget);
+          expect(changes, isEmpty);
+          await capture(tester, 'people-${brightness.name}-$scale');
+          await tester.tap(find.text('Back'));
+          await tester.pumpAndSettle();
+          expect(find.text('Copy link').hitTestable(), findsOneWidget);
+          await field(tester, 'options');
+          await field(tester, 'comments');
+          await tester.pumpAndSettle();
+          await tester.enterText(
+            find.byKey(const Key('comment-input')),
+            'Please review the latest version.',
+          );
+          await tester.pumpAndSettle();
+          final post = find.byKey(const ValueKey('comment-post'));
+          await tester.ensureVisible(post);
+          await tester.pumpAndSettle();
+          expect(post.hitTestable(), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('comments-heading')),
+            findsOneWidget,
+          );
+          await capture(tester, 'comments-${brightness.name}-$scale');
+          await tester.tap(find.text('Back'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Close'));
+          await tester.pumpAndSettle();
+          expect(find.byType(ShareHarnessDialog), findsNothing);
+          expect(changes, isEmpty);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
 
   testWidgets(
     'a stale presence refresh cannot erase a newly saved invitation',

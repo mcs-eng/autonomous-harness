@@ -16,7 +16,7 @@
 // Open NVS. Call once, early — everything below is a no-op until it has run.
 void config_store_init(void);
 
-// Screen brightness, 0..100. The dim overlay is applied by the UI; this only remembers the level.
+// Screen brightness, 0..255. The renderer applies it to the OLED panel.
 uint8_t config_load_brightness(void);
 void    config_save_brightness(uint8_t level);
 
@@ -25,7 +25,7 @@ bool config_load_muted(void);
 bool config_save_muted(bool muted);
 
 // Local Habitat experiments: bit 0 = legacy focus face, bit 2 = quiet reactions,
-// bit 3 = straight title (default: curved).
+// bit 3 = straight title (default: curved), bit 4 = do not follow the desktop companion.
 //
 // BIT 1 IS RETIRED, NOT FREE. It was rim scrolling — drag a finger around the bezel — and devices in
 // the field still hold it set. A new preference given that bit would inherit their answer, so the

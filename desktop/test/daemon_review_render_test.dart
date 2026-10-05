@@ -1,3 +1,4 @@
+import 'dart:async';
 // Real-font review captures of the daemon: the status slot in every mood and
 // nest stage (with a shiny `*`, alerts and replies), the hatch
 // reveal's frames and rarity tells (drop init's plates at the reveal size),
@@ -18,8 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/daemons/daemon_brain.dart';
 import 'package:harness/daemons/daemon_face.dart';
-import 'package:harness/daemons/plates.dart';
-import 'package:harness/daemons/render.dart';
+import 'package:harness/daemons/illustrated_art.dart';
 import 'package:harness/daemons/roster.dart';
 import 'package:harness/daemons/zoo.dart';
 import 'package:harness/daemons/zoo_controller.dart';
@@ -40,6 +40,8 @@ import 'package:harness/terminal/terminal_typography.dart';
 import 'package:harness/widgets/daemon_hatch.dart';
 import 'package:harness/widgets/daemon_panel.dart';
 import 'package:harness/widgets/daemon_slot.dart';
+import 'package:harness/widgets/daemon_illustration.dart';
+import 'package:harness/widgets/daemon_art_gallery.dart';
 import 'package:xterm/xterm.dart' show TerminalStyle, TerminalTheme;
 
 import 'daemons/zoo_test.dart' show FakeZooTransport;
@@ -145,6 +147,9 @@ Future<DaemonFace> _face(WidgetTester tester, Zoo zoo) async {
 }
 
 Future<void> _fonts() async {
+  await (FontLoader(
+    'MaterialIcons',
+  )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
   if (Platform.isMacOS) {
     for (final (family, path) in [
       ('.AppleSystemUIFont', '/System/Library/Fonts/SFNS.ttf'),
@@ -169,6 +174,8 @@ Future<void> _capture(
   Widget Function(BuildContext context) build, {
   Brightness brightness = Brightness.dark,
   Duration settle = const Duration(milliseconds: 50),
+  double textScale = 1,
+  bool highContrast = false,
   Future<void> Function()? act,
 }) async {
   tester.view.devicePixelRatio = 1;
@@ -201,7 +208,11 @@ Future<void> _capture(
         debugShowCheckedModeBanner: false,
         theme: grid.buildAppTheme(brightness: brightness),
         builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          data: MediaQuery.of(context).copyWith(
+            disableAnimations: true,
+            highContrast: highContrast,
+            textScaler: TextScaler.linear(textScale),
+          ),
           child: TerminalFontScope(child: child!),
         ),
         home: Builder(
@@ -219,6 +230,32 @@ Future<void> _capture(
     await act();
     await tester.pump(settle);
   }
+  // Bitmap decoding is real async work, outside the test's fake clock. Wait
+  // for the displayed providers so a passing capture cannot hide an empty
+  // portrait while the small, already-cached slot happens to be ready.
+  final images = find.byType(Image).evaluate().toList();
+  for (final element in images) {
+    var decoded = false;
+    Object? imageError;
+    unawaited(
+      precacheImage(
+        (element.widget as Image).image,
+        element,
+        onError: (error, _) => imageError = error,
+      ).then((_) => decoded = true),
+    );
+    // A provider already resolving in the fake zone needs pumps between its
+    // async asset reads. Awaiting that stream only in runAsync deadlocks it.
+    for (var attempt = 0; attempt < 500 && !decoded; attempt++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    expect(decoded, isTrue, reason: '$name: image decoding completed');
+    expect(imageError, isNull, reason: '$name: image decoding succeeded');
+  }
+  await tester.pump();
   expect(tester.takeException(), isNull, reason: name);
   final output = _output;
   if (output == null) return;
@@ -288,6 +325,89 @@ Widget _bar(
 
 void main() {
   setUpAll(_fonts);
+
+  for (final brightness in [Brightness.dark, Brightness.light]) {
+    for (final species in IllustratedArt.species) {
+      testWidgets('artwork gallery: $species ${brightness.name}', (
+        tester,
+      ) async {
+        await _capture(
+          tester,
+          'gallery-$species-${brightness.name}',
+          const Size(480, 680),
+          brightness: brightness,
+          (context) => Padding(
+            padding: const EdgeInsets.all(20),
+            child: DaemonArtGallery(onBack: () {}),
+          ),
+          act: () async {
+            await tester.tap(find.byKey(ValueKey('daemon-gallery-$species')));
+          },
+        );
+        final art = tester.widget<DaemonIllustration>(
+          find.byKey(const ValueKey('daemon-gallery-portrait')),
+        );
+        expect(art.art.stem, '${species}_adult_idle');
+        final next = tester.widget<TextButton>(
+          find.byKey(const ValueKey('daemon-gallery-next')),
+        );
+        expect(
+          next.style!.foregroundColor!.resolve({}),
+          currentTerminalTheme().foreground,
+        );
+        await tester.pumpWidget(const SizedBox());
+      });
+    }
+  }
+
+  testWidgets(
+    'Zoo artwork gallery wraps with keys and preserves the collection',
+    (tester) async {
+      final face = await _face(tester, _paired('tim', version: '0.1'));
+      face.settings.tab = 'zoo';
+      final before = jsonEncode(face.zoo.zoo.toJson());
+      var closed = false;
+      await _capture(
+        tester,
+        'gallery-narrow',
+        const Size(360, 760),
+        (context) => DaemonPanel(
+          face: face,
+          onClose: () => closed = true,
+          onHatch: (_) => fail('No hatching'),
+          onCommand: (_) => fail('No commands'),
+          shortcut: (_) => null,
+        ),
+        act: () async {
+          tester
+              .widget<TextButton>(find.byKey(const ValueKey('daemon-gallery')))
+              .onPressed!();
+        },
+      );
+      expect(find.text('Tim · 1 of 10'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(find.text('Beastie · 10 of 10'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(find.text('Tim · 1 of 10'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('daemon-gallery-stage')));
+      await tester.tap(find.byKey(const ValueKey('daemon-gallery-expression')));
+      await tester.pump();
+      final preview = tester.widget<DaemonIllustration>(
+        find.byKey(const ValueKey('daemon-gallery-portrait')),
+      );
+      expect(preview.art.stem, 'tim_baby_work');
+      expect(jsonEncode(face.zoo.zoo.toJson()), before);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(find.byType(DaemonArtGallery), findsNothing);
+      expect(find.text('Tim · Hatchling'), findsOneWidget);
+      expect(closed, isFalse);
+      expect(jsonEncode(face.zoo.zoo.toJson()), before);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 
   testWidgets('status slot: nest stages, versions, moods and voice', (
     tester,
@@ -575,38 +695,20 @@ void main() {
       if (frame.stage == HatchStage.card) {
         expect(find.byKey(const ValueKey('daemon-hatch-card')), findsOneWidget);
       }
-      // Drop init hatches plates: at the reveal size, still in a capture.
       if (frame.stage == HatchStage.colour ||
           frame.stage == HatchStage.silhouette) {
-        final plate = daemonPlates.frame(
-          id,
-          PlateSize.reveal,
-          '0.1',
-          DaemonMood.idle,
-        );
-        final shown = tester.widget<Text>(
-          find.byKey(
-            ValueKey(
-              frame.stage == HatchStage.silhouette
-                  ? 'daemon-hatch-silhouette'
-                  : 'daemon-hatch-portrait',
-            ),
+        final stage = find.byKey(
+          ValueKey(
+            frame.stage == HatchStage.silhouette
+                ? 'daemon-hatch-silhouette'
+                : 'daemon-hatch-colour',
           ),
         );
-        final text = shown.textSpan?.toPlainText() ?? shown.data!;
-        // The hatchling stands inside the open shell; the shell hides its
-        // bottom rows, while its upper rows keep the baked portrait.
-        final visible = plate.where((r) => r.trim().isNotEmpty).take(5);
-        for (final row in visible) {
-          expect(
-            text,
-            contains(
-              frame.stage == HatchStage.silhouette
-                  ? silhouette(row).trim()
-                  : row.trim(),
-            ),
-          );
-        }
+        expect(stage, findsOneWidget);
+        expect(
+          find.descendant(of: stage, matching: find.byType(DaemonIllustration)),
+          isNot(findsNothing),
+        );
       }
       await tester.pumpWidget(const SizedBox());
     });
@@ -699,6 +801,13 @@ void main() {
       null,
     ),
     (
+      'panel-tim-hatchling',
+      _paired('tim', version: '0.1', serial: 1),
+      Brightness.dark,
+      const DaemonWatch(),
+      null,
+    ),
+    (
       'panel-tim-zoo-box',
       _paired(
         'tim',
@@ -774,7 +883,9 @@ void main() {
       await _capture(
         tester,
         name,
-        const Size(520, 1100),
+        name == 'panel-tim-hatchling'
+            ? const Size(360, 760)
+            : const Size(520, 1100),
         brightness: brightness,
         act: tap == null
             ? null
@@ -786,7 +897,7 @@ void main() {
           child: Padding(
             padding: const EdgeInsets.all(10),
             child: SizedBox(
-              width: terminalCellSizeOf(context).width * 46,
+              width: 480,
               child: DaemonPanel(
                 face: face,
                 onClose: () {},
@@ -807,6 +918,20 @@ void main() {
         ),
       );
       expect(find.byKey(const ValueKey('daemon-panel')), findsOneWidget);
+      if (name == 'panel-tim-hatchling') {
+        expect(find.text('Tim · Hatchling'), findsOneWidget);
+        expect(find.text('Collection · 1 of 9 discovered'), findsOneWidget);
+        expect(find.byKey(const ValueKey('daemon-panel-lore')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('daemon-panel-individuals')),
+          findsNothing,
+        );
+        await tester.tap(find.byKey(const ValueKey('daemon-details')));
+        await tester.pump();
+        expect(find.byKey(const ValueKey('daemon-panel-lore')), findsOneWidget);
+        expect(face.zoo.zoo.daemons, hasLength(1));
+        expect(face.zoo.paired?.version, '0.1');
+      }
       if (name == 'panel-two-tims') {
         expect(find.textContaining('pip the tim'), findsWidgets);
         expect(find.textContaining('dot the tim'), findsOneWidget);
@@ -834,27 +959,21 @@ void main() {
       }
       if (name == 'panel-tim-zoo-box') {
         expect(find.text('[ ? ]'), findsNWidgets(6));
-        expect(find.text('1.0'), findsOneWidget);
+        expect(find.text('Young'), findsOneWidget);
         expect(find.textContaining('28/40'), findsOneWidget);
         // Drop init only: unix and tty are on hold, so no shelf, silhouette
         // or count of theirs shows.
         expect(
-          find.textContaining('drop 1 init  3/9  +secret'),
+          find.textContaining('Collection · 3 of 9 discovered + secret'),
           findsOneWidget,
         );
         expect(find.textContaining('unix'), findsNothing);
         expect(find.textContaining('tty'), findsNothing);
         expect(find.byKey(const ValueKey('daemon-zoo-tmux')), findsNothing);
-        // tim 2.0's portrait plate, frame 0 (a capture has Reduce Motion).
-        final shown = tester.widget<Text>(
+        final shown = tester.widget<DaemonIllustration>(
           find.byKey(const ValueKey('daemon-portrait')),
         );
-        expect(
-          shown.textSpan!.toPlainText(),
-          daemonPlates
-              .frame('tim', PlateSize.portrait, '2.0', DaemonMood.idle)
-              .join('\n'),
-        );
+        expect(shown.art.stem, 'tim_adult_idle');
       }
       if (name == 'panel-away-calm') {
         expect(face.mood, DaemonMood.idle, reason: 'asleep is not a failure');
@@ -1231,7 +1350,7 @@ void main() {
         child: Padding(
           padding: const EdgeInsets.all(10),
           child: SizedBox(
-            width: terminalCellSizeOf(context).width * 46,
+            width: 480,
             child: DaemonPanel(
               face: face,
               brain: brain,
@@ -1300,6 +1419,127 @@ void main() {
     await tester.pump();
   }
 
+  // Desktop chrome around the exact same fake zoo, brain and reveal state.
+  // Large text remains independent of the terminal art, and action details
+  // still have to fit wholly in the viewport before approval keys arm.
+  for (final (name, tab, brightness, size, scale) in [
+    ('desktop-now-dark', 'now', Brightness.dark, const Size(500, 760), 1.0),
+    ('desktop-now-light', 'now', Brightness.light, const Size(500, 760), 1.0),
+    ('desktop-now-scaled', 'now', Brightness.dark, const Size(360, 640), 1.7),
+    ('desktop-zoo-scaled', 'zoo', Brightness.light, const Size(360, 640), 1.7),
+    (
+      'desktop-settings-scaled',
+      'settings',
+      Brightness.light,
+      const Size(360, 640),
+      1.7,
+    ),
+    (
+      'desktop-lessons-scaled',
+      'lessons',
+      Brightness.dark,
+      const Size(360, 640),
+      1.7,
+    ),
+  ]) {
+    testWidgets('desktop daemon: $name', (tester) async {
+      final (face, brain) = await pairPanel(tester, tab);
+      await _capture(
+        tester,
+        name,
+        size,
+        brightness: brightness,
+        textScale: scale,
+        highContrast: scale > 1,
+        act: () async {
+          if (tab == 'now') {
+            final row = find.byKey(const ValueKey('daemon-row-ask:ask:7'));
+            await Scrollable.ensureVisible(tester.element(row), alignment: .05);
+            await tester.pump();
+          }
+          await settle(tester);
+        },
+        (context) => panelFor(context, face, brain),
+      );
+      final heading = tester.widget<Text>(
+        find.byKey(const ValueKey('daemon-panel-title')),
+      );
+      expect(heading.style!.fontFamily, grid.AppType.sansFamily);
+      if (tab == 'now') {
+        expect(
+          brain.wasShown('ask:7'),
+          isTrue,
+          reason: 'whole proposal and bounded detail can fit at this size',
+        );
+        expect(
+          find.byKey(const ValueKey('daemon-key-ask:ask:7-y')),
+          findsOneWidget,
+        );
+        final detail = tester.widget<DaemonDetailBox>(
+          find.byKey(const ValueKey('daemon-detail-ask:ask:7')),
+        );
+        expect(detail.text, contains('first prompt: run the migrations'));
+        expect(detail.style.fontFamily, terminalFontFamily);
+      }
+      await tester.pumpWidget(const SizedBox());
+      face.sync(const DaemonWatch());
+      await tester.pump(const Duration(minutes: 3));
+    });
+  }
+
+  for (final (name, stage, brightness) in [
+    ('desktop-hatch-name-dark', HatchStage.name, Brightness.dark),
+    ('desktop-hatch-name-light', HatchStage.name, Brightness.light),
+    ('desktop-hatch-consent-scaled', HatchStage.consent, Brightness.light),
+    ('desktop-hatch-suggest-scaled', HatchStage.suggest, Brightness.dark),
+  ]) {
+    testWidgets('desktop daemon: $name', (tester) async {
+      await _capture(
+        tester,
+        name,
+        const Size(360, 640),
+        brightness: brightness,
+        textScale: 1.7,
+        highContrast: true,
+        act: stage == HatchStage.name
+            ? () async {
+                await tester.ensureVisible(
+                  find.byKey(const ValueKey('daemon-hatch-name')),
+                );
+                await tester.pump();
+              }
+            : null,
+        (context) => Padding(
+          padding: const EdgeInsets.all(10),
+          child: DaemonHatchReveal(
+            roster: _roster,
+            egg: egg,
+            result: Future.value(
+              const ZooHatch(eggId: 'egg1', daemonId: 'tim', shiny: false),
+            ),
+            zoo: () => _paired('tim'),
+            onClose: () {},
+            still: HatchFrame(stage: stage, bannerRows: 5),
+            reduceMotion: true,
+          ),
+        ),
+      );
+      if (stage == HatchStage.name) {
+        final input = find.byKey(const ValueKey('daemon-hatch-name'));
+        await tester.ensureVisible(input);
+        await tester.tap(input);
+        await tester.enterText(input, 'Scout');
+        expect(tester.widget<TextField>(input).controller!.text, 'Scout');
+        expect(
+          tester.widget<TextField>(input).style!.fontFamily,
+          grid.AppType.sansFamily,
+        );
+        expect(tester.takeException(), isNull);
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   // ── round 4: consent, trust, and a panel you can scan ──────────────────
 
   testWidgets('panel tab 1: now (the line, what waits, the brief, what tim '
@@ -1323,8 +1563,8 @@ void main() {
       act: () => settle(tester),
       (context) => panelFor(context, face, brain),
     );
-    expect(find.text('1:now*'), findsOneWidget);
-    expect(find.text('<tim> start codex in ~/code/api?'), findsOneWidget);
+    expect(find.text('Now'), findsOneWidget);
+    expect(find.text('tim: start codex in ~/code/api?'), findsOneWidget);
     expect(find.text('codex@laptop'), findsOneWidget, reason: 'the harness');
     expect(
       find.textContaining('first prompt: run the migrations'),
@@ -1359,7 +1599,7 @@ void main() {
       const Size(560, 1250),
       (context) => panelFor(context, face, brain),
     );
-    expect(find.text('2:zoo*'), findsOneWidget);
+    expect(find.text('Zoo'), findsOneWidget);
     expect(find.byKey(const ValueKey('daemon-portrait')), findsOneWidget);
     expect(find.byKey(const ValueKey('daemon-panel-zoo')), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
@@ -1420,8 +1660,8 @@ void main() {
       const Size(560, 1300),
       (context) => panelFor(context, face, brain),
     );
-    expect(find.text('4:settings*'), findsOneWidget);
-    expect(find.text('(*) suggest'), findsOneWidget);
+    expect(find.text('Settings'), findsOneWidget);
+    expect(find.text('suggest'), findsOneWidget);
     expect(find.byKey(const ValueKey('daemon-panel-floor')), findsOneWidget);
     expect(
       find.textContaining('tim watches your harnesses since 2026-09-26'),
@@ -1469,7 +1709,7 @@ void main() {
       act: () => settle(tester),
       (context) => panelFor(context, face, brain),
     );
-    expect(find.text('(~) act on key  waits for your yes'), findsOneWidget);
+    expect(find.text('act on key · waits for your yes'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('daemon-key-confirm:confirm:autonomy:k1-y')),
       findsOneWidget,
@@ -1532,8 +1772,12 @@ void main() {
       brightness: Brightness.light,
       (context) => panelFor(context, face, brain),
     );
-    expect(find.text('(*) act within rules'), findsOneWidget);
-    expect(find.text('[act within rules]'), findsOneWidget, reason: 'badge');
+    expect(find.text('act within rules'), findsNWidgets(2));
+    expect(
+      find.byKey(const ValueKey('daemon-panel-autonomy-badge')),
+      findsOneWidget,
+      reason: 'badge',
+    );
     await tester.pumpWidget(const SizedBox());
     face.sync(const DaemonWatch());
     await tester.pump(const Duration(minutes: 3));
@@ -1864,21 +2108,10 @@ void main() {
           ),
           findsOneWidget,
         );
-        // The held frame is tim 2.0's reveal plate (done), on the morph's
-        // canvas.
-        final shown = tester.widget<Text>(
+        final shown = tester.widget<DaemonIllustration>(
           find.byKey(const ValueKey('daemon-hatch-portrait')),
         );
-        final plate = daemonPlates.frame(
-          'tim',
-          PlateSize.reveal,
-          '2.0',
-          DaemonMood.done,
-        );
-        expect(
-          shown.textSpan!.toPlainText().split('\n').map((r) => r.trim()),
-          plate.map((r) => r.trim()),
-        );
+        expect(shown.art.stem, 'tim_adult_done');
       }
       await tester.pumpWidget(const SizedBox());
     });
@@ -2114,12 +2347,16 @@ void main() {
         }
       } else {
         final slot = find.byKey(const ValueKey('daemon-slot'));
-        final cell = workspaceBarCellSizeOf(tester.element(slot));
         expect(
-          find.descendant(of: slot, matching: find.byType(Text)),
+          find.descendant(
+            of: slot,
+            matching: find.byWidgetPredicate(
+              (w) => w is DaemonIllustration || w is Text,
+            ),
+          ),
           findsOneWidget,
         );
-        expect(tester.getRect(slot).width, cell.width * 10);
+        expect(tester.getRect(slot).width, 44);
         expect(tester.getRect(slot).right, lessThanOrEqualTo(width));
       }
       await tester.pumpWidget(const SizedBox());

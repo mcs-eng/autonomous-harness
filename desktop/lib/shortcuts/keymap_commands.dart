@@ -29,26 +29,12 @@ class HarnessCommand {
   /// Workspace defaults come from the live shortcut table. A command cannot
   /// quietly propose different keys from the ones the user already uses.
   List<String> get keys {
-    if (!kIsWeb &&
-        id == 'navigation.commands' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      return const ['ctrl+shift+p'];
-    }
-    if (!kIsWeb &&
-        id == 'harnesses.list' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      return const ['ctrl+p'];
-    }
-    if (!kIsWeb &&
-        id == 'models.list' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      return const ['ctrl+i', 'cmd+i'];
-    }
-    if (!kIsWeb &&
-        id == 'picker.complete' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      // Ctrl-I opens Models on Linux, including from another picker scope.
-      return const ['tab'];
+    // Cmd-Alt-T cannot collapse to Alt-T in a browser: that is New Tab.
+    // Use the companion chord already used by the other Alt-prefix platform.
+    if (kIsWeb && id == 'app.daemon_talk') return const ['alt+shift+a'];
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      final linux = linuxAltCommandKeys[id];
+      if (linux != null) return linux;
     }
     return action == null
         ? extraKeys.map(platformWorkspaceBinding).toList(growable: false)
@@ -113,7 +99,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'swarm.new',
-    'New Swarm',
+    'New Tab',
     ShortcutGroup.navigate,
     action: ShortcutAction.newSwarm,
     nativeAction: 'new',
@@ -121,7 +107,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'swarm.close',
-    'Close Swarm',
+    'Close Tab',
     ShortcutGroup.navigate,
     action: ShortcutAction.closeSwarm,
     nativeAction: 'closeActive',
@@ -132,7 +118,7 @@ final harnessCommands = <HarnessCommand>[
   // key of their own in keybindings.jsonc.
   const HarnessCommand(
     'swarm.reopen',
-    'Reopen closed swarm or pane',
+    'Reopen closed tab or pane',
     ShortcutGroup.navigate,
     action: ShortcutAction.reopenClosedSwarm,
     nativeAction: 'reopen',
@@ -140,7 +126,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'swarm.next',
-    'Next Swarm',
+    'Next Tab',
     ShortcutGroup.navigate,
     action: ShortcutAction.nextSwarm,
     nativeAction: 'next',
@@ -149,7 +135,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'swarm.previous',
-    'Previous Swarm',
+    'Previous Tab',
     ShortcutGroup.navigate,
     action: ShortcutAction.previousSwarm,
     nativeAction: 'previous',
@@ -158,7 +144,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'swarm.rename',
-    'Rename Swarm',
+    'Rename Tab',
     ShortcutGroup.actions,
     action: ShortcutAction.renameSwarm,
     nativeAction: 'renameActive',
@@ -197,7 +183,7 @@ final harnessCommands = <HarnessCommand>[
   for (var i = 1; i <= 9; i++)
     HarnessCommand(
       'swarm.select_$i',
-      'Select swarm $i',
+      'Select tab $i',
       ShortcutGroup.navigate,
       keywords: const ['tab'],
       extraKeys: ['cmd+$i'],
@@ -262,7 +248,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'pane.move_to_tab',
-    'Move the pane to another swarm',
+    'Move the pane to another tab',
     ShortcutGroup.panes,
     action: ShortcutAction.movePaneToTab,
     nativeAction: 'movePaneToTab',
@@ -346,12 +332,13 @@ final harnessCommands = <HarnessCommand>[
     repeatable: true,
   ),
   const HarnessCommand(
+    // Keep this existing command ID for saved keybindings; it opens # Projects.
     'agent.open',
-    'Open Harness',
+    'Open Project',
     ShortcutGroup.actions,
     action: ShortcutAction.addAgent,
     nativeAction: 'addAgent',
-    keywords: ['resume', 'existing', 'pane'],
+    keywords: ['project', 'folder', 'repository', 'pane'],
   ),
   const HarnessCommand('agent.add', 'New Pane', ShortcutGroup.actions),
   const HarnessCommand(
@@ -450,11 +437,11 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'harnesses.list',
-    'Harnesses',
+    'Open Harness',
     ShortcutGroup.actions,
     nativeAction: 'sessions',
     extraKeys: ['cmd+p'],
-    keywords: ['manage', 'running', 'paused', 'sessions'],
+    keywords: ['open', 'resume', 'existing', 'running', 'paused', 'sessions'],
   ),
   const HarnessCommand(
     'project.add',
@@ -501,7 +488,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'team.open',
-    'Swarm conversation: view this swarm’s collaboration',
+    'Tab conversation: view this tab’s collaboration',
     ShortcutGroup.actions,
     action: ShortcutAction.team,
     keywords: [
@@ -511,6 +498,7 @@ final harnessCommands = <HarnessCommand>[
       'question',
       'reply',
       'inbox',
+      'tab',
       'swarm',
       'channel',
     ],
@@ -520,6 +508,13 @@ final harnessCommands = <HarnessCommand>[
     'Customize Harness',
     ShortcutGroup.actions,
     nativeAction: 'customize',
+  ),
+  const HarnessCommand(
+    'pane.toggle_shading',
+    'Toggle pane shading',
+    ShortcutGroup.panes,
+    extraKeys: ['cmd+shift+f'],
+    keywords: ['focus', 'shade', 'dim', 'appearance'],
   ),
   const HarnessCommand(
     'app.store',
@@ -719,7 +714,7 @@ final harnessCommands = <HarnessCommand>[
       context: KeymapContext.picker,
     ),
   for (final (name, key, label) in [
-    ('toggle', 'ctrl+s', 'Pause or resume the selected harness or model'),
+    ('toggle', 'ctrl+s', 'Stop the selected harness or start/stop a model'),
     ('more', 'ctrl+period', 'Search actions for the selected resource'),
     ('rename', 'ctrl+shift+r', 'Rename the selected machine'),
     ('settings', 'ctrl+l', 'Open the selected machine’s connection settings'),
@@ -738,7 +733,7 @@ final harnessCommands = <HarnessCommand>[
     ),
   const HarnessCommand(
     'picker.add_here',
-    'Add the selected harness',
+    'Start or add the selected harness',
     ShortcutGroup.actions,
     extraKeys: ['cmd+enter'],
     context: KeymapContext.picker,
@@ -773,10 +768,10 @@ final harnessCommands = <HarnessCommand>[
   // Launch and Project use arrows/Enter. Keep stable command identities for
   // explicit user bindings without reserving plain letters in these prompts.
   for (final (name, key, label) in [
-    ('agent', null, 'Choose an agent or harness'),
-    ('project', null, 'Choose the new harness’s project'),
-    ('task', null, 'Edit the new harness’s first task'),
-    ('options', null, 'Edit the new harness’s advanced options'),
+    ('agent', null, 'Choose the new agent'),
+    ('project', null, 'Choose the new agent’s project'),
+    ('task', null, 'Edit the new agent’s first message'),
+    ('options', null, 'Choose the new agent’s model'),
     // Project is a text filter. Keep these command identities available for
     // explicit user remaps, without taking ordinary letters from the editor.
     ('project_new', null, 'Name a new project'),
@@ -855,10 +850,10 @@ ResolvedKeymap get harnessDefaultKeymap =>
     );
 
 List<String> describeKeyStrokeKeys(KeyStroke stroke) => [
-  if (stroke.control) kIsWeb ? 'Ctrl' : '⌃',
-  if (stroke.alt) kIsWeb ? 'Alt' : '⌥',
-  if (stroke.shift) kIsWeb ? 'Shift' : '⇧',
-  if (stroke.command) kIsWeb ? 'Cmd' : '⌘',
+  if (stroke.control) controlKeyLabel,
+  if (stroke.alt) altKeyLabel,
+  if (stroke.shift) shiftKeyLabel,
+  if (stroke.command) commandKeyLabel,
   const {
         'left': '←',
         'right': '→',
@@ -887,6 +882,6 @@ List<String> describeKeyStrokeKeys(KeyStroke stroke) => [
       stroke.key.toUpperCase(),
 ];
 String describeKeyStroke(KeyStroke stroke) =>
-    describeKeyStrokeKeys(stroke).join(kIsWeb ? '+' : '');
+    describeKeyStrokeKeys(stroke).join(chordKeySeparator);
 String describeKeyBinding(KeyBinding binding) =>
     binding.keys.map(describeKeyStroke).join(' ');

@@ -7,3 +7,6 @@ import 'state/app_state.dart';
 /// `web/web_entry.dart` in its place (the conditional import in `main.dart`),
 /// so native code never reaches `lib/web/`.
 Widget authenticatedWorkspace(AppNotifier app) => SwarmScreen(notifier: app);
+
+/// A native build draws nothing around its screens.
+Widget appFrame(Widget app) => app;

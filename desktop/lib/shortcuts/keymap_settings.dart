@@ -1,3 +1,4 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:harness/terminal/terminal_text.dart';
@@ -72,7 +73,7 @@ class KeymapSettings extends StatelessWidget {
             if (keymap?.store != null)
               TextButton.icon(
                 onPressed: () => openKeyboardConfig(context),
-                icon: const Icon(Icons.edit_outlined, size: 16),
+                icon: const Icon(AppIcons.pencil, size: 16),
                 label: const Text('Edit keyboard config'),
                 style: TextButton.styleFrom(
                   foregroundColor: grid.AppPalette.textPrimary,

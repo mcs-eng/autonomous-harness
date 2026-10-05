@@ -11,6 +11,8 @@ import 'terminal_pane.dart';
 /// for their owner. Ties follow pane order, independently of keyboard focus.
 String tabHarnessType(AppNotifier app, Swarm tab) {
   if (tab.isStore) return 'store';
+  if (tab.isCompanions) return 'companions';
+  if (tab.isDevices) return 'devices';
   if (tab.isOrchestrator) return 'orchestrator';
   final counts = <String, int>{};
   for (final pane in tab.panes) {
@@ -102,10 +104,14 @@ Map<String, String> workspaceTabNames(AppNotifier app) {
           ? tab.name
           : tab.isStore
           ? 'store'
+          : tab.isCompanions
+          ? 'companions'
+          : tab.isDevices
+          ? Swarm.devicesName
           : tab.isOrchestrator
           ? 'orchestrator'
           : candidates[tab.id]!.isEmpty
-          ? 'new'
+          ? Swarm.defaultName
           : candidates[tab.id]!.reduce((a, b) {
               if (b.count != a.count) return b.count > a.count ? b : a;
               return repetitions(b) < repetitions(a) ? b : a;
@@ -139,7 +145,7 @@ class WorkspacePaneContext {
   final String machineName, provider, location, detail;
   final String projectName;
   final String? branch;
-  String? get agentId => pane.isWeb ? pane.ownerAgentId : pane.agentId;
+  String? get agentId => pane.isViewer ? pane.ownerAgentId : pane.agentId;
   String? get engine => agent?.engine ?? pane.session?.engineId;
   String get modelLabel => modelLabelWithEffort(
     provider,
@@ -182,7 +188,7 @@ class WorkspacePaneContext {
     final pane = app.focusedPane;
     if (pane == null) return null;
     final machine = app.stateOf(pane.machineId);
-    final agentId = pane.isWeb ? pane.ownerAgentId : pane.agentId;
+    final agentId = pane.isViewer ? pane.ownerAgentId : pane.agentId;
     final agent = _agentFor(app, pane.machineId, agentId);
     final project = agent == null ? null : machine?.projectOf(agent);
     final machineName = machine?.machine.displayName ?? pane.machineId;

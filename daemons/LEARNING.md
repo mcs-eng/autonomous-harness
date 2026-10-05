@@ -31,8 +31,9 @@ while pairing is on — and nothing of it, usage and lessons in launches include
 ### Notice (`signals.ts`)
 
 `LessonSignals` reads the same session events the pair sensor does (`emitSessionEvents`): turns,
-prompts, tool calls and their results. Replays, sub-agents, terminals and the pair harness are never
-read. Three signals:
+prompts, tool calls and their results. Replays, sub-agents, terminals and archived pair chats are never
+read. The current collection DSH's real conversation/work is included. Tool-free background reviews
+do not register as agents and cannot feed their own results back into the detector. Three signals:
 
 - **correction**: the person's next prompt after an agent's turn (finished or interrupted) starts by
   correcting it: `no, …`, `nope, …`, `don't …`, `do not …`, `stop, …`, `stop editing …`, `that's wrong`,
@@ -52,27 +53,84 @@ Each signal carries provenance for every turn involved — engine, machine name,
 the project as a **hash** (the folder's name is kept for words, never its path) — and its evidence, one
 line each, trimmed, redacted and with instructions to a model struck out. Failures and step sequences
 are kept in `ADAPTER_DATA_DIR/pair/learn/signals.json` (0600) so a restart does not forget the week.
+Quoted separators stay inside arguments; heredocs and compound scripts are omitted conservatively.
+The v2 detector rebuilds v1's derived step index, which could contain lines from script bodies. Existing
+lesson records and failure observations are preserved.
 
 ### Distill (`distill.ts`)
 
-Signals wait in a queue (20 at most) and are distilled three at a time, every ten minutes, when nothing
+Signals wait in a durable queue per collection (20 at most) and are distilled three at a time, every ten minutes, when nothing
 on the machine is working — or after an hour regardless. One signal becomes at most ONE lesson:
 
 - a **skill**: a kebab-case name, a one-line description, a body of at most 30 lines;
 - a **note**: at most 5 lines for the project's AGENTS.md.
 
-**Model off** (the default): templates only, for what needs no judgment — steps in order (a skill:
+**Before the DSH is ready:** observations wait. Opening Companions and completing its real agent setup
+supplies the learning engine, model, and effort; changing the agent's model changes learning too.
+The companion home's **Powered by** menu explicitly selects Codex or Claude Code.
+That choice is remembered per collection, without a Claude-first default for new
+collections or automatic provider fallback. Engine conversations remain separate;
+the persisted observation queue, history-review window, and deduplication state use
+one stable collection key, retained when changing engines. An explicit switch can
+retry a provider quota wait with the newly selected engine once it is ready. It
+does not bypass the hourly cap or revive cancelled/completed reviews.
+The ready CLI banner can supply that profile before the first message binds a conversation. This
+startup observation is scoped to the live agent and process, refreshed every 15 seconds, and expires
+after 45 seconds without a successful read. It is never saved as an empty conversation or reused by
+another process; a dummy first message is not required.
+An agent without a conversation is not automatically paused by the idle timer, since there is no
+conversation to resume. Explicit stop and experimental-off still stop it.
+Experimental-off and watching consent remain the gates. The legacy `pair.jsonc.model` field is no
+longer a separate intelligence switch. An observed profile is retained for that conversation's idle
+pause, never borrowed from another agent or account. Custom provider connections without a supported
+background runner report unavailable instead of silently using another credential/model.
+
+**Conservative template fallback:** for what needs no judgment — steps in order (a skill:
 `Run X before Y, and Y before Z.`), and only when the same steps ran at least three times across at least
 two sessions. Every step goes in as an inert code span (no backticks, no newlines, 80 characters at most).
 A failure or a correction teaches nothing without a model: the old "the failing test is flaky" template
 taught agents to rerun real failures, and is gone. Steps that push, deploy, publish, merge or delete (the
 floor's deny class) are no lesson.
 
-**Model on** (`pair.jsonc` `"model": true`): ONE one-shot per signal through the pair's `runPairOneShot`
-(the warm router pool, `runRouterOneShot`), 30 s budget, six an hour. The prompt says, three times, that
+**Model ready:** ONE tool-free review per signal through `CompanionIntelligence`, on the DSH's own
+engine, model and effort, with a 90 s budget, six an hour. These bounded reviews do not create a second
+interactive agent or write into the collection conversation. The prompt says, three times, that
 the expected answer is `{"lesson": null}`; it saves only what is specific, would change what an agent
 does, and is shown by the evidence; the evidence is fenced as untrusted data. A model that answers
-nothing is taken at its word; one that times out, fails or answers badly falls back to the template.
+nothing is taken at its word; one that times out, fails or answers badly can fall back to the template.
+Timeouts, failures, and hourly limits without a usable result leave observations queued for retry.
+`lessons list` includes readiness, the actual model, queued observations, pending lessons and the last
+review outcome; the Memories viewer presents this status. Approving a lesson remains the person's action.
+
+### Initial conversation review
+
+“Look back over 24 hours” in the companion's Memories viewer, or
+`harness pair lessons review-recent --hours 24`, explicitly queues an initial review.
+It captures up to 300 of the newest dated user/assistant turns in the local conversation
+index, within the requested 1–24 hour window. Missing timestamps never borrow a
+session's last activity. Tool output and hidden reasoning are excluded; excerpts are
+redacted and limited to 2,500 characters per side. The viewer reports incomplete index
+coverage instead of claiming to have read every conversation.
+
+The saved job belongs to the collection, groups turns by project, and reviews at most
+eight turns / 20,000 excerpt characters per batch. It uses the collection DSH's observed
+engine, model and effort, sharing the live learner's six calls per hour and 90-second
+budget. Larger reviews continue in the background, including after daemon restarts.
+No observed model means waiting, not choosing another model. Cancellation or disabling
+the experiment discards in-flight results. Reviewed turn hashes and existing lessons
+prevent overlapping reviews from repeating suggestions.
+Provider usage-limit notices keep the same snapshot queued with an hourly retry and a
+clear waiting state. The person can change the model in the agent pane and retry sooner;
+the learner never switches providers or credentials on its own.
+
+Each batch can propose up to three guarded lessons, with a reason, cited conversation
+titles, dates, turns and redacted evidence. Every lesson stays pending. The inbox offers
+Review, Approve and Skip; approval uses the existing person-only `daemon_act` path.
+A review capability is bound to the requesting verified window, collection, unchanged
+lesson text and a ten-minute expiry. The viewer acknowledges only text actually shown
+while scrolling, and retains the 400 ms arming delay. A deliberate review is available
+at `watch`; unsolicited suggestions remain suppressed there. No review automatically
+approves or publishes a lesson.
 
 ### Untrusted text (`guard.ts`)
 
@@ -234,13 +292,15 @@ project unless the person opted that project in.
 |---|---|
 | `lessons [list]` | every lesson: pending, approved, reverted, skipped; the folder and whether git is there |
 | `lessons show <id>` | its SKILL.md or NOTE.md, with provenance |
+| `lessons review-recent [--hours 24]` | queue a bounded review of 1–24 hours of local indexed conversations; pairing must be on |
+| `lessons cancel-review` | stop the collection's history review; already proposed lessons remain pending |
 | `lessons approve <id> [--create]` | person-only (Security): a challenge, the lesson shown, `[y/N]` at the terminal, then approved with the nonce (and published, exported); `--create` writes a new AGENTS.md for a note in an opted-in project |
 | `lessons skip <id>` | drops a pending lesson for good |
 | `lessons revert <id>` | `git revert` of its commit, and unpublished (its note taken out, its skill out of runtimes and exports) |
 | `lessons restore <id>` | person-only: an archived skill back in `skills/` (one commit), its unused clock started again |
 | `lessons export [--dry-run]` | what export would do; without `--dry-run`, person-only: does it |
 
-The verbs work with pairing off: the folder is the person's. An agent may list and show lessons; it can
+Existing lesson-management verbs work with pairing off: the folder is the person's. An agent may list and show lessons; it can
 never approve, restore or export (Security).
 
 ### Limits of L1
@@ -250,7 +310,7 @@ never approve, restore or export (Security).
   reach a plain session only in a project opted in to AGENTS.md.
 - Signals and pending lessons are **per machine**: a failure on the laptop and the same one on the
   office machine are not matched, and a lesson is proposed on the machine that noticed it, when you are
-  at it. The signal queue lives in memory.
+  at it. Observation and requested history-review queues persist per collection on that machine.
 - Approval is guarded against agents, not against same-user malware (Security).
 - Clients: `s`, the `lesson` brief item and the line's `detail` are new; a client that does not know them
   still sees the line, but its `y`/`n` count only once it sends `daemon_shown` for the line (as for every

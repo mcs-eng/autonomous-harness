@@ -13,10 +13,10 @@ import 'package:harness/terminal/terminal_text.dart';
 import 'package:harness/terminal/terminal_theme.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
 import 'package:harness/widgets/search_result_text.dart';
+import 'package:harness/widgets/desktop_chrome.dart';
+import 'package:harness/widgets/engine_identity.dart';
 import 'package:harness/widgets/new_harness_form.dart';
 import 'package:harness/widgets/swarm_switcher.dart';
-import 'package:harness/widgets/engine_identity.dart';
-import 'package:harness/widgets/prompt_context.dart';
 import 'package:xterm/xterm.dart';
 
 import 'keymap_host_test.dart' show MemoryKeymap, key;
@@ -26,12 +26,9 @@ import 'swarm_screen_test.dart' show terminal;
 import 'swarm_search_preview_test.dart' show seedPreviews;
 import 'swarm_state_test.dart' show createApp;
 
-TerminalTheme get _chromeTheme =>
-    terminalThemeFor(grid.AppTheme.palette.value, terminalThemeStore.value);
-
 void main() {
   testWidgets(
-    'terminal dialogs follow live chrome colors and pane font without losing focus',
+    'desktop dialogs keep native controls and terminal previews through theme changes',
     (tester) async {
       final originalPalette = grid.AppTheme.palette.value;
       final originalTheme = terminalThemeStore.value;
@@ -89,7 +86,6 @@ void main() {
 
       void checkAppearance() {
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
-        final chrome = _chromeTheme;
         expect(
           pane.theme.background,
           terminalScreenThemeFor(
@@ -102,22 +98,23 @@ void main() {
           find.descendant(of: input, matching: find.byType(EditableText)),
         );
         final panel = tester.widget<Material>(
-          find.byKey(const ValueKey('swarm-search-results')),
+          find
+              .descendant(
+                of: find.byKey(const ValueKey('swarm-search-results')),
+                matching: find.byType(Material),
+              )
+              .first,
         );
-        expect(panel.color, chrome.background);
-        expect(field.style!.color, chrome.foreground);
-        expect(field.cursorColor, chrome.cursor);
-        expect(editor.selectionColor, chrome.selection);
-        final row = find.byKey(
-          ValueKey('swarm-search-line:${search.selected!.id}'),
-        );
-        expect(tester.widget<Container>(row).color, chrome.selection);
-        final cell = terminalCellSizeOf(tester.element(input));
-        expect(tester.getSize(row).height, closeTo(cell.height, .01));
+        expect(panel.color, DesktopChrome.surface);
+        expect(field.style!.color, grid.AppPalette.textPrimary);
+        expect(field.cursorColor, grid.AppPalette.textPrimary);
         expect(
-          tester.getSize(find.byKey(ValueKey(search.selected!.id))).height,
-          closeTo(cell.height, .01),
+          editor.selectionColor,
+          DefaultSelectionStyle.of(tester.element(input)).selectionColor,
         );
+        final row = find.byKey(ValueKey(search.selected!.id));
+        expect(tester.widget<ListTile>(row).selected, isTrue);
+        expect(tester.getSize(row).height, greaterThan(40));
         expect(field.cursorWidth, 2);
         final rowTitles = tester.widgetList<SearchResultText>(
           find.byWidgetPredicate(
@@ -131,29 +128,29 @@ void main() {
           final row = search.rows.firstWhere((row) => row.title == title.text);
           expect(
             title.style.color,
-            search.canSubmit(row)
-                ? chrome.foreground
-                : chrome.foreground.withValues(alpha: .28),
+            row.id == search.selected?.id
+                ? search.sessionUnavailable(row) == null
+                      ? DesktopChrome.onSelection
+                      : DesktopChrome.selectionDetail
+                : search.sessionUnavailable(row) == null
+                ? DesktopChrome.foreground
+                : DesktopChrome.muted,
           );
         }
-        final previewText = tester.widgetList<Text>(
-          find.descendant(
-            of: find.byKey(const ValueKey('swarm-search-preview')),
-            matching: find.byType(Text),
-          ),
+        final previewText = find.descendant(
+          of: find.byKey(const ValueKey('swarm-search-preview')),
+          matching: find.byType(Text),
         );
-        expect(previewText, isNotEmpty);
-        for (final style in [
-          field.style!,
-          ...rowTitles.map((text) => text.style),
-          ...previewText.map((text) => text.style!),
-        ]) {
-          expect(style.fontFamily, pane.textStyle.fontFamily);
-          expect(style.fontFamilyFallback, pane.textStyle.fontFamilyFallback);
-          expect(style.fontSize, pane.textStyle.fontSize);
-          expect(style.height, pane.textStyle.height);
-          expect(style.letterSpacing, 0);
-          expect(style.wordSpacing, 0);
+        expect(previewText, findsWidgets);
+        for (final element in previewText.evaluate()) {
+          final style = DefaultTextStyle.of(element).style
+              .merge((element.widget as Text).style);
+          expect(
+            style.fontFamily,
+            isIn([grid.AppType.sansFamily, grid.AppType.monoFamily]),
+          );
+          expect(style.fontSize, isIn([11.0, 12.0, 13.0, 15.0]));
+          expect(style.height ?? 1, inInclusiveRange(1.0, 1.6));
         }
         expect(search.selected!.id, selectedId);
         expect(field.controller, same(controller));
@@ -188,13 +185,12 @@ void main() {
         of: preview,
         matching: find.text('Checkout retries'),
       );
-      final context = find.text('Test host:storefront  (feat/safe-retries)');
+      final context = find.text('Test host · storefront · feat/safe-retries');
       expect(context, findsOneWidget);
       expect(find.descendant(of: preview, matching: context), findsOneWidget);
-      final cell = terminalCellSizeOf(tester.element(input));
       expect(
-        tester.getTopLeft(context).dy - tester.getTopLeft(title).dy,
-        closeTo(cell.height, .01),
+        tester.getTopLeft(context).dy,
+        greaterThan(tester.getBottomLeft(title).dy),
       );
       expect(
         tester
@@ -205,15 +201,15 @@ void main() {
               ),
             )
             .map((text) => text.text),
-        ['Checkout retries'],
+        contains('Checkout retries'),
       );
       expect(find.text('git: feat/safe-retries'), findsNothing);
       await tester.enterText(input, 'Workspace sync');
       await tester.pumpAndSettle();
       final waiting = tester.widget<Text>(find.text('Needs your input'));
-      expect(waiting.style!.fontSize, 18);
-      expect(waiting.style!.height, 1.4);
-      expect(waiting.style!.color, _chromeTheme.yellow);
+      expect(waiting.style!.fontSize, 12);
+      expect(waiting.style!.height, 1.45);
+      expect(waiting.style!.color, grid.AppPalette.warn);
       await key(tester, LogicalKeyboardKey.escape);
       expect(find.byKey(const ValueKey('swarm-search-results')), findsNothing);
 
@@ -230,7 +226,6 @@ void main() {
 
       void checkSetupAppearance() {
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
-        final chrome = _chromeTheme;
         expect(
           pane.theme.background,
           terminalScreenThemeFor(
@@ -245,37 +240,26 @@ void main() {
         expect(
           tester
               .widget<Material>(
-                find.byKey(const ValueKey('new-harness-surface')),
+                find
+                    .descendant(
+                      of: find.byKey(
+                        const ValueKey('new-harness-chooser-surface'),
+                      ),
+                      matching: find.byType(Material),
+                    )
+                    .first,
               )
               .color,
-          chrome.background,
+          DesktopChrome.surface,
         );
-        expect(field.style!.color, chrome.foreground);
-        expect(field.cursorColor, chrome.cursor);
-        expect(editor.selectionColor, chrome.selection);
+        expect(field.style!.color, grid.AppPalette.textPrimary);
+        expect(field.cursorColor, grid.AppPalette.textPrimary);
         expect(
-          tester
-              .widgetList<Container>(
-                find.descendant(of: setup, matching: find.byType(Container)),
-              )
-              .where((container) => container.color == chrome.selection),
-          hasLength(1),
+          editor.selectionColor,
+          DefaultSelectionStyle.of(tester.element(setupInput)).selectionColor,
         );
-        for (final style in [
-          field.style!,
-          ...tester
-              .widgetList<Text>(
-                find.descendant(of: setup, matching: find.byType(Text)),
-              )
-              .map((text) => text.style!),
-        ]) {
-          expect(style.fontFamily, pane.textStyle.fontFamily);
-          expect(style.fontFamilyFallback, pane.textStyle.fontFamilyFallback);
-          expect(style.fontSize, pane.textStyle.fontSize);
-          expect(style.height, pane.textStyle.height);
-          expect(style.letterSpacing, 0);
-          expect(style.wordSpacing, 0);
-        }
+        expect(field.style!.fontFamily, grid.AppType.body().fontFamily);
+        expect(field.style!.fontSize, 14);
         expect(box.selected?.id, selectedOption);
         expect(field.controller, same(setupController));
         expect(setupController.value, setupEditing);
@@ -303,10 +287,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         tester
-            .widget<Text>(find.byKey(const ValueKey('new-harness-status')))
+            .widget<Text>(
+              find.descendant(
+                of: find.byKey(const ValueKey('new-harness-chooser-surface')),
+                matching: find.byKey(const ValueKey('new-harness-status')),
+              ),
+            )
             .style!
             .color,
-        _chromeTheme.red,
+        Theme.of(
+          tester.element(find.byKey(const ValueKey('new-harness-status'))),
+        ).colorScheme.error,
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();
@@ -329,55 +320,24 @@ void main() {
         of: results,
         matching: find.byWidgetPredicate(
           (widget) =>
-              widget is InkWell &&
+              widget is ListTile &&
               widget.key is ValueKey<String> &&
               rowIds.contains((widget.key! as ValueKey<String>).value),
         ),
       );
-      final input = find.byKey(const ValueKey('swarm-search-input'));
-      final cell = terminalCellSizeOf(tester.element(input));
-      for (final row in rows.evaluate()) {
-        final id = (row.widget.key! as ValueKey<String>).value;
-        final line = find.byKey(ValueKey('swarm-search-line:$id'));
-        expect(
-          tester.getSize(line).height,
-          closeTo(cell.height, .01),
-          reason: 'Selection occupies exactly one terminal line.',
-        );
-        expect(
-          tester.getSize(find.byKey(ValueKey(id))).height,
-          closeTo(cell.height, .01),
-          reason: 'The entire result occupies one line, with no spacer row.',
-        );
-        final title = find
-            .descendant(of: line, matching: find.byType(Text))
-            .first;
-        expect(
-          tester.getTopLeft(title).dx,
-          closeTo(tester.getTopLeft(input).dx, .01),
-        );
-      }
       final first = find.byKey(ValueKey(search.rows[0].id));
       final second = find.byKey(ValueKey(search.rows[1].id));
+      final rowHeight =
+          tester.getTopLeft(second).dy - tester.getTopLeft(first).dy;
+      expect(rowHeight, greaterThanOrEqualTo(48));
+      expect(rows.evaluate(), isNotEmpty);
       expect(
-        tester.getTopLeft(second).dy - tester.getTopLeft(first).dy,
-        closeTo(cell.height, .01),
+        find.descendant(of: results, matching: find.byType(EngineMark)),
+        findsWidgets,
       );
-      for (final type in [
-        ListTile,
-        Icon,
-        Image,
-        EngineMark,
-        PromptContextView,
-      ]) {
-        expect(
-          find.descendant(of: results, matching: find.byType(type)),
-          findsNothing,
-        );
-      }
       expect(search.rows.length, greaterThan(50));
       final list = find.byKey(const ValueKey('swarm-search-result-list'));
-      final capacity = (tester.getSize(list).height / cell.height).ceil();
+      final capacity = (tester.getSize(list).height / rowHeight).ceil();
       expect(rows.evaluate().length, lessThanOrEqualTo(capacity + 2));
       expect(rows.evaluate().length, lessThan(search.rows.length));
       final visited = <String>{};

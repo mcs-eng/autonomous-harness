@@ -1,3 +1,5 @@
+import 'dart:ui' show Brightness;
+
 import 'package:flutter/painting.dart';
 import 'package:xterm/xterm.dart';
 
@@ -11,13 +13,20 @@ String pullRequestIconAsset(String state) =>
       _ => 'git-pull-request',
     }}.svg';
 
+/// Desktop surfaces can supply [brightness] without a terminal theme. Existing
+/// terminal callers keep their theme's brightness and monochrome foreground.
 Color pullRequestIconColor(
   String state,
-  TerminalTheme theme, {
+  TerminalTheme? theme, {
   bool color = true,
+  Brightness? brightness,
 }) {
-  if (!color) return theme.foreground;
-  final light = theme.background.computeLuminance() > .5;
+  assert(theme != null || brightness != null);
+  assert(color || theme != null);
+  if (!color) return theme!.foreground;
+  final light = brightness != null
+      ? brightness == Brightness.light
+      : theme!.background.computeLuminance() > .5;
   return switch (state) {
     'Open' => Color(light ? 0xff1a7f37 : 0xff3fb950),
     'Merged' => Color(light ? 0xff8250df : 0xffbc8cff),

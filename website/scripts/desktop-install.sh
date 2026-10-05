@@ -263,6 +263,9 @@ mkdir -p "$ICON_DIR" 2>/dev/null || true
 DESKTOP_ENTRY_DIR="$HOME/.local/share/applications"
 mkdir -p "$DESKTOP_ENTRY_DIR" 2>/dev/null || true
 if [ -d "$DESKTOP_ENTRY_DIR" ]; then
+  # StartupWMClass ties the running window — app id com.autonomous.harness, set in the desktop
+  # repo's linux/CMakeLists.txt — to this entry. Without it GNOME's dock cannot match the two and
+  # shows the running app with a generic gear.
   cat > "$DESKTOP_ENTRY_DIR/harness.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -272,6 +275,7 @@ Exec=$DESTINATION
 Icon=$ICON_DIR/harness.png
 Terminal=false
 Categories=Development;
+StartupWMClass=com.autonomous.harness
 EOF
 fi
 

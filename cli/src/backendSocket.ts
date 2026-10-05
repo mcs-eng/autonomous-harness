@@ -1,4 +1,8 @@
+import type { PurgeAgentService } from './lib/purgeAgentService.js'
+import { ServiceUnavailableError } from './core/serviceHost.js'
+import type { ActivityFrame } from './lib/turnActivity.js'
 import { readSessionGitPullRequest } from './lib/sessionGitPullRequest.js'
+import { MonitorCompletions, type MonitorActivity } from './lib/harnessMonitor.js'
 import type { HarnessShareOwner } from './sharing/owner.js'
 import { SHARE_REQUEST_TYPES } from './sharing/protocol.js'
 import { AutonomousDeviceRelay } from './lib/autonomous-device/relay.js'
@@ -21,7 +25,7 @@ import type { AutonomousDeviceService, AutonomousDeviceFrame } from './lib/auton
 
 import { WebSocket } from 'ws'
 import { BACKEND_IDLE_DEADLINE_MS, watchSocketLiveness, type LivenessWatch } from './lib/wsLiveness.js'
-import { stat, readFile, readdir } from 'fs/promises'
+import { stat, readdir } from 'fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'path'
 import { hostname, homedir } from 'os'
@@ -30,13 +34,15 @@ import { AuthSessionManager, AuthSessionError } from './lib/authSession.js'
 import { VERSION } from './version.js'
 import { registry, projectDisplayName, type RegisteredSession } from './lib/registry.js'
 import { AgentStopError } from './lib/stopAgentService.js'
-import { isHiddenBuiltin } from './dsh/builtins.js'
+import type { CloseAgentService, CloseMode } from './lib/closeAgentService.js'
+import { MODEL_MANAGER_ID, isHiddenBuiltin } from './dsh/builtins.js'
 import { ENGINES, PROCESS_ENGINES, isTerminalEngine, type AgentEngine, type ProcessEngine } from './engines/types.js'
 import { listDir } from './lib/fsBrowse.js'
 import { linkCodexProfile, listCodexProfiles } from './lib/codexProfiles.js'
 import { gridCliPresence } from './lib/gridExec.js'
 import { GridFleetRpc, GRID_FLEET_PROTOCOL, GRID_FLEET_MAX_TIMEOUT_MS, parseGridFleetRequest } from './lib/gridFleetRpc.js'
 import { LocalModels } from './lib/localModels.js'
+import { appEngineOps, scanAppModels } from './lib/appModels.js'
 import { ApiConnectionError, ApiConnections, apiConnectionsRequest } from './lib/apiConnections.js'
 import { apiModelsRequest, rememberSavedApis, resolveApiTarget } from './lib/apiModels.js'
 import { gridCapableEngines, isApiLaunch, parseGridLaunchOverride, type GridLaunchOverride } from './lib/gridLaunch.js'
@@ -44,13 +50,18 @@ import {
   forgetGridModels, gridInventory, listAllGridModels, onGridModelsChanged, presentGridSections, retargetPrewarm, type GridSection,
 } from './lib/gridModels.js'
 import { resolveGridTarget } from './lib/gridTarget.js'
+import type { GridAttachResult } from './lib/gridAttach.js'
 import { parseNewAgentModel, resolveNewAgentModel } from './lib/newAgentModel.js'
 import { localGridTargetId, readLocalGridProfiles } from './lib/gridProfiles.js'
 import { deriveHarnessGridName } from './lib/gridDerive.js'
 import { AGENT_NAME_RE, FirstPromptUnsupportedError, MAX_FIRST_PROMPT_CHARS, NamedAgentUnsupportedError, permissionModeApproves, permissionModeFlags, supportsFirstPrompt, supportsNamedAgent } from './lib/engineLaunch.js'
+import { opencodeMajorVersion } from './engines/opencode/version.js'
 import { readAccountUsage, type AccountUsageReading } from './lib/accountUsage.js'
 import { probeEngines } from './lib/engineProbe.js'
 import { readMachineResources } from './lib/machineResources.js'
+import { harnessDevicesRequest, type HarnessDevicesService } from './lib/harnessDevices.js'
+import { createHarnessResourcesReader } from './lib/harnessResources.js'
+import { createHarnessStorageReader } from './lib/harnessTelemetry.js'
 import { AgentCreationReceipts, AgentCreationReceiptError, creationFingerprint, validCreationId, type AgentCreationStatus } from './lib/agentCreationReceipt.js'
 import { engineInstallRecipe } from './lib/engineInstall.js'
 import { parseProjectFolder, prepareProjectFolder, projectsRoot, ProjectFolderError } from './lib/projectFolder.js'
@@ -82,13 +93,15 @@ import { terminalHandoffRequest } from './lib/terminalHandoff.js'
 import { routeVoiceTask } from './lib/voiceRouter.js'
 import { tailFile } from './lib/sessions.js'
 import { stoppedAgents } from './lib/stoppedAgents.js'
-import { messagesToEvents, windowRawLines, subagentStatsFromRawLines, type SessionEvent } from './lib/normalize.js'
+import { messagesToEvents, windowRawLines, SubagentStats, type SessionEvent } from './lib/normalize.js'
+import { TranscriptPager } from './lib/transcriptPages.js'
+import { streamRecords } from './lib/transcriptTail.js'
 import { MediaPreviewError, readMediaPreviewChunk } from './lib/mediaPreview.js'
 import { ViewerForwarder } from './lib/viewerForwarder.js'
 import { InteractiveViewers } from './lib/interactiveViewer.js'
 import { OwnerCommands, OWNER_COMMAND_TYPES } from './lib/ownerCommands.js'
 import { VIEWER_DOWN_TYPES } from './lib/viewerWire.js'
-import { codexMessagesToEvents, windowCodexLines } from './engines/codex/normalizer.js'
+import { codexMessagesToEvents } from './engines/codex/normalizer.js'
 import { codexSubagentResolverFor } from './engines/codex/subagent.js'
 import { parseHostTheme, type HostTheme } from './lib/hostTheme.js'
 import { cursorMessagesToEvents, windowCursorLines } from './engines/cursor/normalizer.js'
@@ -123,7 +136,6 @@ import {
 } from './lib/terminalBinary.js'
 import { b64d, fingerprint, isWrapped } from './lib/e2ee/core.js'
 import { encryptRpcResult, PAIR_REQUESTS, PLATE_REQUEST, rpcResultType } from './lib/e2ee/applicationFrames.js'
-import type { PairEvent, PairService } from './pair/protocol.js'
 import { tmuxPaneInfo } from './lib/tmux.js'
 import { DEVICE_RECENT_SAFE_FRAME_BYTES, fitRecentReplyPayloadForDevice } from './lib/deviceRecentTrim.js'
 import { shouldReplayCommander } from './lib/commanderReplay.js'
@@ -142,6 +154,8 @@ import {
 
 // OpenCode has no per-session transcript file — its history is read from this SQLite store.
 const OPENCODE_DB = join(env.OPENCODE_DATA_DIR, 'opencode.db')
+/** History pages and line counts for the threads clients read (lib/transcriptPages.ts). */
+const transcriptPages = new TranscriptPager()
 // Kilo keeps history the same way opencode does, in its own store.
 const KILO_DB = join(env.KILO_DATA_DIR, 'kilo.db')
 const DEVIN_DB = join(env.DEVIN_HOME, 'sessions.db')
@@ -164,10 +178,6 @@ const APP_PRESENCE_UP_MS = 60_000
 // `this.ws` set, every later connect() returning early, and the daemon reporting "cloud
 // reconnecting…" until someone restarted it.
 const HANDSHAKE_TIMEOUT_MS = 15_000
-/** How long `resolveGridName` waits for a grid reconcile still in flight before answering with
- *  whatever is resolved. Well under the app's 12s `grid_models_list` timeout, leaving that RPC room
- *  for its own `grid` spawns; a reconcile slower than this lands by the next open. */
-const GRID_ATTACH_WAIT_MS = 6_000
 /** An `agent_update {opened: true}` for an agent opened less than this long ago is answered but not
  *  stamped or broadcast: a person flicking between two tabs, or two apps opening the same agent at
  *  once, would otherwise push a frame to every client for each flick. Exported for the spec. */
@@ -175,6 +185,9 @@ export const AGENT_OPENED_THROTTLE_MS = 3_000
 const BASE_DELAY_MS = 1_000
 const MAX_DELAY_MS = 30_000
 const QUEUE_MAX = 2_000
+/** Requests one local connection may queue before the daemon is ready (see `openRequests`). The app
+ *  sends a handful on connect; hundreds is a client looping, not a person. */
+const MAX_REQUESTS_BEFORE_READY = 256
 const DEVICE_AGENT_LIST_LIMIT = 100
 const DEVICE_AGENT_NAME_MAX_CODEPOINTS = 15
 const DEVICE_AGENT_NAME_MAX_BYTES = 39 // device project_t.name[40], including trailing NUL on-device.
@@ -217,8 +230,12 @@ export type DownTransport = 'relay' | 'local' | 'p2p'
  * `backend/src/services/MachineService.ts` — so there is nothing to stay compatible with. The
  * backend blocks its OWN `__`-prefixed control frames from web clients for the same reason; these
  * two escaped that rule because they are not `__`-prefixed.
+ *
+ * `device_keys_changed` and `devlog_append_result` are the backend's own too (the device key log,
+ * lib/e2ee/deviceLogSyncer.ts): forged, the first only makes this daemon re-read and verify the log,
+ * the second could fake an answer to its own append — neither is anything a client should be sending.
  */
-const BACKEND_ONLY_DOWN_TYPES = new Set(['machine_meta', 'machine_revoked', 'desk_changed', 'zoo_changed', 'machines_changed'])
+const BACKEND_ONLY_DOWN_TYPES = new Set(['machine_meta', 'machine_revoked', 'desk_changed', 'zoo_changed', 'machines_changed', 'device_keys_changed', 'devlog_append_result'])
 
 /** A frame type as the sender spelled it, fit for one log line: the relay chooses it, so it is bounded
  *  and escaped rather than trusted not to carry a newline that forges the next line. */
@@ -390,8 +407,11 @@ async function enrichSubagentStats(events: SessionEvent[], transcriptPath: strin
     const sub = e.payload.subagent
     if (!sub?.agentId || typeof sub.totalToolUseCount === 'number') continue
     try {
-      const txt = await readFile(join(subagentsDir, `agent-${sub.agentId}.jsonl`), 'utf8')
-      const stats = subagentStatsFromRawLines(txt.split('\n'))
+      // A line at a time: a long sub-agent's transcript is never held whole to count its calls.
+      const file = join(subagentsDir, `agent-${sub.agentId}.jsonl`)
+      const totals = new SubagentStats()
+      await streamRecords(file, 0, (await stat(file)).size, (line) => { totals.push(line) }, () => true)
+      const stats = totals.result()
       sub.totalToolUseCount = stats.totalToolUseCount
       if (sub.totalDurationMs === undefined) sub.totalDurationMs = stats.totalDurationMs
       if (sub.totalTokens === undefined) sub.totalTokens = stats.totalTokens
@@ -429,6 +449,7 @@ function gridModelsPayload(gridName: string | null, sections: GridSection[], row
 }
 
 export class BackendSocket {
+  harnessDevices: HarnessDevicesService | null = null
   private readonly gridFleet = new GridFleetRpc()
   // The Model Manager reads the grid it runs on through the same credential-less reader as every picker
   // (never `grid engines`, which carries the grid credential and so wakes a sleeping grid on every tick),
@@ -438,6 +459,10 @@ export class BackendSocket {
     machineName: () => this.machineDisplayName,
     inventory: gridInventory,
     onChanged: () => { forgetGridModels(); void this.pushGridModels() },
+    // Models Ollama, LM Studio and llama.cpp downloaded here, found by the Model Manager's own scan (the
+    // bundled harness), so the picker and that harness agree on what is here and what starts it.
+    appModels: () => scanAppModels({ node: process.execPath, packageDir: installedDsh(MODEL_MANAGER_ID)?.realDir ?? null, env: process.env }),
+    appEngines: appEngineOps(process.env),
   })
   /** This machine's name as Harness shows it (Machines), from the backend's `machine_meta`. Null
    *  until the first one arrives. */
@@ -468,6 +493,17 @@ export class BackendSocket {
   // real and must be counted once, so it is owed to the next link — not turned into a `ping`.
   private appOpenOwed = false
   private readonly downChains = new Map<string, Promise<void>>()
+  /**
+   * Requests wait here until the daemon is ready (`openRequests`), each in its connection's own order.
+   * The port answers long before start-up has wired every handler and confirmed the agents it
+   * restored; a request answered in between met a handler that was not there yet — refused with
+   * UNSUPPORTED_ON_REMOTE, or for `message` silently dropped — or a registry not yet reconciled.
+   */
+  private requestsOpen = true
+  private openRequestGate: () => void = () => {}
+  private requestGate: Promise<void> = Promise.resolve()
+  /** Requests waiting at the gate, per connection: a client that floods a starting daemon is closed. */
+  private readonly waitingAtGate = new Map<string, number>()
   private readonly localClients = new Map<string, LocalClientSink>()
   /**
    * Loopback clients that are TOOLS, not windows (`machine_select { tool: true }`): `harness pair`, the
@@ -496,6 +532,9 @@ export class BackendSocket {
   /** Called when the web deletes an agent (`agent_delete`) — cli.ts signals only the validated engine
    *  process and forgets the session. Keeps recap + agent name. */
   onDeleteAgent: ((sessionId: string) => void | Promise<void>) | null = null
+  purgeAgentService: PurgeAgentService | null = null
+  closeAgentService: CloseAgentService | null = null
+  cleanupPreview: (() => Promise<Record<string, unknown>>) | null = null
   /** Called on `agent_create` — cli.ts spawns a fresh tmux session running the requested engine in the
    *  requested folder and returns its process-agent. Session metadata may bind later through hooks. */
   onCreateAgent: ((input: {
@@ -545,6 +584,7 @@ export class BackendSocket {
   harnessSharing: HarnessShareOwner | null = null
   /** Answers the trust group's roster exchange (`group_sync`); null until the daemon wires it. */
   groupSync: { handle: (peerPub: string, payload: Record<string, unknown>) => Record<string, unknown> } | null = null
+  activityFrameProvider: ((session: RegisteredSession) => ActivityFrame | null) | null = null
   dshFrameProvider: ((session: RegisteredSession) => AgentDshContext | null) | null = null
   viewerTargetProvider: ((agentId: string) => string | null) | null = null
   readonly interactiveViewers = new InteractiveViewers(agentId => this.viewerTargetProvider?.(agentId) ?? null)
@@ -715,7 +755,7 @@ export class BackendSocket {
     >) | null = null
   /** Resume stopped work directly, or attach if it is already running. Never replaces a live
    * process and never falls back to a fresh conversation. */
-  onResumeAgent: BackendSocket['onRestartAgent'] = null
+  onResumeAgent: ((agentId: string, permissionMode?: string) => ReturnType<NonNullable<BackendSocket['onRestartAgent']>>) | null = null
   /** Called on `agent_fork` — cli.ts opens a NEW agent that starts with `agentId`'s whole history
    *  (lib/forkAgent.ts) and returns its process-agent, exactly as `agent_create` does. `level` says
    *  what the new agent actually got: the engine's own fork, or a handoff message. */
@@ -745,6 +785,14 @@ export class BackendSocket {
   recentProvider: RecentProvider | null = null
   /** The person's own last questions for an agent, newest first. See the `agent_recent` case. */
   recentAsksProvider: ((agentId: string, n: number) => string[]) | null = null
+  /** Writes the structured handoff file for an agent whose engine is about to change (the
+   *  `agent_handoff_prepare` case; cli.ts wires lib/agentHandoff.ts). It resolves with where the file is,
+   *  never with text for the next engine (the desktop words that prompt itself). A `HandoffError`'s `code`
+   *  is the error reply; any other failure replies `INTERNAL`. */
+  handoffProvider: ((req: { agentId: string; changeId: string; targetEngine: string }) =>
+    Promise<{ file: string | null; gitRepo: boolean; cwd: string; degraded: string[] }>) | null = null
+  monitorActivityProvider: ((sessionId: string) => MonitorActivity) | null = null
+  private readonly monitorCompletions = new MonitorCompletions()
   /** Answers `session_search` from this machine's transcript index (lib/sessionSearch/). Null when
    *  this Node has no `node:sqlite`. */
   sessionSearchProvider: ((query: string, options: { limit?: number; from?: number; to?: number }) => SessionSearchResult) | null = null
@@ -755,6 +803,8 @@ export class BackendSocket {
   /** Answers `usage_read` — this machine's own agent-account usage (lib/accountUsage.ts). A field
    *  rather than a direct call so a spec answers it without a real home, Keychain or network. */
   accountUsageReader: () => Promise<AccountUsageReading[]> = readAccountUsage
+  harnessResourcesReader = createHarnessResourcesReader(() => registry.advertised())
+  harnessStorageReader = createHarnessStorageReader()
   /** The grid listing currently out, shared by every `grid_models_list` for the same own grid
    *  that lands meanwhile. */
   private gridModelsInFlight: { key: string; grids: ReturnType<typeof listAllGridModels> } | null = null
@@ -764,27 +814,17 @@ export class BackendSocket {
   /** Receives `theme_set` — the desktop's pane colours, to become this machine's tmux
    *  `window-style` (lib/hostTheme.ts). Wired by cli.ts; null answers with UNSUPPORTED. */
   hostThemeSink: ((theme: HostTheme) => void) | null = null
-  /**
-   * The pair brain's sensor (pair/sensor.ts): answers the sealed `pair_*` RPCs another machine's brain
-   * sends, and the loopback-only `pair` request. Null answers UNSUPPORTED, like an older daemon.
-   */
-  pairService: PairService | null = null
-  /** The owning machine's reads and writes for the pair (pair/owner.ts). Null: those answer UNSUPPORTED. */
-  pairOwner: { handle: (type: string, payload: Record<string, unknown>, from: { connId: string; label?: string | null }) => Promise<Record<string, unknown>> } | null = null
-  /** The control interface (pair/control.ts) behind the loopback `pair` request: the verbs it answers. */
-  pairControl: { verbs: ReadonlySet<string>; local: (payload: Record<string, unknown>, connId: string) => Promise<Record<string, unknown>> } | null = null
-  /** The account's zoo changed (a `zoo_changed` from the backend) — cli.ts re-reads which daemon is paired. */
-  onZooChanged: ((revision: number) => void) | null = null
-  /**
-   * Whether daemons run at all (lib/daemonsSwitch.ts). Off, the loopback `pair` request (`harness pair`, the
-   * MCP server) is answered DAEMONS_OFF before any verb runs. Null: always on, as before the switch.
-   */
-  daemonsOn: (() => boolean) | null = null
-  /**
-   * An individual's art (pair/plateService.ts), for the phone's sealed `pair_plate_get` → `pair_plate`. Null
-   * answers UNSUPPORTED, like an older daemon. The service answers DAEMONS_OFF itself while daemons are off.
-   */
-  plateService: { get: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> } | null = null
+  /** The account's device key log grew (lib/e2ee/deviceLogSyncer.ts): re-read it from this machine's head. */
+  onDeviceKeysChanged: (() => void) | null = null
+  /** This machine's key was taken out of the account's device key log (`machine_revoked` says so). */
+  onDeviceRemoved: ((pub: string) => void) | null = null
+  /** Whether [pub] is this machine's own device key. Set, a `machine_revoked` naming another key (an earlier
+   *  install under the same machine id) does not sign this one out. Null: every removal signs out. */
+  isOwnDeviceKey: ((pub: string) => boolean) | null = null
+  /** The link to the backend just came up (each reconnect too). */
+  onLinkUp: (() => void) | null = null
+  /** Appends to the device key log waiting for the backend's answer, by requestId. */
+  private readonly devlogAppends = new Map<string, (payload: Record<string, unknown> | null) => void>()
   runtimeProfileProvider: ((session: RegisteredSession) => string | null) | null = null
   onRuntimeProfileUpdate: ((sessionId: string, selectedModel: string) => Promise<void>) | null = null
   /** Web↔adapter E2EE: group-encrypts user events, runs the CPace pairing, holds per-conn sessions. */
@@ -987,10 +1027,14 @@ export class BackendSocket {
   private gridNameResolution: Promise<void> | null = null
   /** Injected so the derivation (a `grid` spawn) is a seam in tests; see `lib/gridDerive.ts`. */
   deriveGridName: () => Promise<string | null> = deriveHarnessGridName
-  /** The daemon-start grid reconcile (`lib/gridAttach.ts`), while it is running — so the first
-   *  `grid_models_list` / retarget after an update waits for the sign-in it may still be arranging
-   *  rather than answering "no grid". Set by `cli.ts`; returns null when nothing is in flight. */
-  gridReadyProbe: (() => Promise<unknown> | null) | null = null
+  /** Have grid ready for a grid feature the person is using now (`lib/gridAttach.ts`): `grid` installed,
+   *  signed in as this account with its harness token, and — `ownGrid` — the account's own grid there.
+   *  Asked by acts only (Set up, Get, Use, a move onto a grid model, a Model Manager command), never by
+   *  a read. Set by `cli.ts`; null (tests) reads grid as it stands. */
+  ensureGrid: ((request?: { ownGrid?: boolean }) => Promise<GridAttachResult>) | null = null
+  /** Offline, cheap: is there a `grid` here holding a sign-in? Answers the list read's
+   *  `gridSetupNeeded`. Null (tests) reads as set up. */
+  gridSetUp: (() => boolean) | null = null
 
   /** Set the account's private grid name from the reconcile that just confirmed it, so the RPCs
    *  answer with it at once rather than waiting for the next `machine_meta` (`lib/gridAttach.ts`). */
@@ -1028,23 +1072,8 @@ export class BackendSocket {
    * work out for itself (`lib/gridDerive.ts`). A backend that predates `machine_meta.gridName`
    * left every picker empty while `grid models` listed the model fine; the derivation is the
    * skill's own rule, so the daemon and the agent it opens agree on which grid is "yours".
-   *
-   * Waits, once and briefly, for a grid reconcile still in flight — the machine that just updated is
-   * signing in to grid in the background, and a picker opened in that window would otherwise read
-   * "no grid" for the one moment the answer is about to arrive. Bounded so a slow reconcile (a fresh
-   * sign-in and a grid create) never holds the RPC past the app's own timeout; whatever is resolved
-   * by then is answered, and the next open — after the reconcile has landed — is correct regardless.
    */
   private async resolveGridName(): Promise<string | null> {
-    const inFlight = this.gridReadyProbe?.()
-    if (inFlight) {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      await Promise.race([
-        inFlight.catch(() => {}),
-        new Promise<void>((resolve) => { timer = setTimeout(resolve, GRID_ATTACH_WAIT_MS) }),
-      ])
-      if (timer) clearTimeout(timer)
-    }
     return this.harnessGridName ?? await this.deriveGridName()
   }
 
@@ -1067,6 +1096,22 @@ export class BackendSocket {
     void work.finally(() => {
       if (this.gridNameResolution === work) this.gridNameResolution = null
     })
+  }
+
+  /**
+   * Grid set up for an act, or the sentence saying why it could not be: null when it is ready — or
+   * when this daemon has no [ensureGrid] to ask (tests), which reads grid as it stands.
+   */
+  private async gridNotReady(ownGrid: boolean): Promise<string | null> {
+    if (!this.ensureGrid) return null
+    const ready = await this.ensureGrid({ ownGrid })
+    if (ready.status !== 'converged' && ready.status !== 'signed-in') {
+      return ready.detail || 'Grid could not be set up on this computer. Try again.'
+    }
+    if (ownGrid && ready.ownGrid && !['created', 'existed', 'adopted'].includes(ready.ownGrid)) {
+      return ready.detail || 'Your grid could not be created. Try again.'
+    }
+    return null
   }
 
   connect(): void {
@@ -1098,6 +1143,7 @@ export class BackendSocket {
       console.log(`[backend] connected → ${this.url}`)
       this.onStatus(true)
       this.drainQueue()
+      this.onLinkUp?.()
 
       this.heartbeat = watchSocketLiveness(ws, {
         onIdle: (idleMs) => console.log(`[backend] no traffic for ${Math.round(idleMs / 1000)}s — terminating the link`),
@@ -1214,6 +1260,7 @@ export class BackendSocket {
 
   async stop(): Promise<void> {
     this.closed = true
+    this.closeAgentService?.dispose()
     this.stopGridModelsPush()
     this.orchestratorService?.stop()
     this.teamService?.stop()
@@ -1233,6 +1280,7 @@ export class BackendSocket {
   /** Send an up-frame (event or RPC reply) to the WEB audience. Queued while disconnected.
    *  User-content events are group-encrypted (E2EE) here; system frames pass through as plaintext. */
   send(frame: Frame): void {
+    this.monitorCompletions.observe(frame)
     // Only an already-open orchestration service observes events; ordinary sessions
     // do not create project state or incur disk work. Project payloads stay local.
     this.orchestratorService?.ingest(frame)
@@ -1335,6 +1383,21 @@ export class BackendSocket {
     try { this.ws.send(packet); return true } catch { return false }
   }
 
+  /**
+   * Append one entry to the account's device key log, over this machine's own socket — the backend
+   * ties a machine's entries to the machine that sent them. Resolves to the backend's answer
+   * (`{head}` or `{error, head?}`), or null when it did not come in time.
+   */
+  appendDeviceLog(entry: Record<string, unknown>, timeoutMs = 15_000): Promise<Record<string, unknown> | null> {
+    const requestId = `dl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { this.devlogAppends.delete(requestId); resolve(null) }, timeoutMs)
+      timer.unref?.()
+      this.devlogAppends.set(requestId, (payload) => { clearTimeout(timer); resolve(payload) })
+      this.enqueue({ t: 'up', webEligible: false, frame: { type: 'devlog_append', payload: { requestId, entry } } })
+    })
+  }
+
   /** Send a user-level notification to every logged-in browser that owns this machine. */
   sendUser(frame: Frame): void {
     this.enqueue({ t: 'up', userEligible: true, webEligible: false, frame })
@@ -1410,7 +1473,6 @@ export class BackendSocket {
     if (!this.toolClients.delete(connId)) this.onLocalClient?.(connId, false)
     this.rowStateWindows.delete(connId)
     this.viewerForwarder.closeConnection(connId)
-    this.pairService?.unwatch(connId)
     this.interactiveViewers.closeConnection(connId); this.ownerCommands.closeConnection(connId)
     // The window left before any link could hear it attach: nothing happened, as far as the backend
     // is concerned, and a later link must not be told otherwise.
@@ -1538,11 +1600,40 @@ export class BackendSocket {
     console.warn(`[terminal-p2p] conn=${sid(connId)} fallback=relay reason=${reason}`)
   }
 
+  /** Hold requests at the gate until `openRequests`. The daemon calls this the moment it builds this
+   *  socket, before anything can reach it; a socket built without it answers at once. */
+  holdRequests(): void {
+    if (!this.requestsOpen) return
+    this.requestsOpen = false
+    this.requestGate = new Promise<void>((resolve) => { this.openRequestGate = resolve })
+  }
+
+  /** Let requests through: every handler is wired and the agents the daemon restored are confirmed.
+   *  Idempotent. Called once at the end of start-up — and by safe mode, so a daemon that could not
+   *  start still answers rather than leaving its clients waiting. */
+  openRequests(): void {
+    if (this.requestsOpen) return
+    this.requestsOpen = true
+    this.waitingAtGate.clear()
+    this.openRequestGate()
+  }
+
   private enqueueDown(frame: Frame, connId: string, transport: DownTransport = 'relay'): void {
     const key = connId || '__backend__'
+    if (!this.requestsOpen) {
+      const waiting = (this.waitingAtGate.get(key) ?? 0) + 1
+      this.waitingAtGate.set(key, waiting)
+      if (waiting > MAX_REQUESTS_BEFORE_READY && transport === 'local') {
+        console.warn(`[backend] local client ${key} sent ${waiting} requests before the daemon was ready — closing it`)
+        this.waitingAtGate.delete(key)
+        void this.unregisterLocalClient(connId)
+        return
+      }
+    }
     const previous = this.downChains.get(key) ?? Promise.resolve()
     const next = previous
       .catch(() => { /* prior failure is already logged */ })
+      .then(() => this.requestGate)
       .then(() => this.dispatchDown(frame, connId, transport))
       .catch((err) => {
         console.error('[backend] down-frame dispatch failed:', err instanceof Error ? err.message : err)
@@ -1623,7 +1714,7 @@ export class BackendSocket {
     const resultType = rpcResultType(type)
     if (connId && deviceDump.enabled && this.e2ee.sessionRole(connId) === 'device') deviceDump.record('out', 'legacy', connId, { type: resultType, payload: { requestId, ...payload } })
     // Before the E2EE wrap: an RPC reply is only readable here.
-    if (env.LOG_FRAMES && !TEAM_REQUEST_TYPES.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
+    if (env.LOG_FRAMES && !TEAM_REQUEST_TYPES.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
     if (this.localClients.has(connId)) {
       this.sendTo(connId, { type: resultType, payload: { requestId, ...payload } })
       return
@@ -1662,70 +1753,6 @@ export class BackendSocket {
       return
     }
     this.send({ type: resultType, payload: { requestId, ...payload } })
-  }
-
-  /**
-   * The pair brain's requests (daemons/BRAIN.md):
-   *   - `pair_watch` / `pair_journal` from another machine's brain, answered by the sensor;
-   *   - `pair_list`, `pair_read` and the writes (`pair_answer`, `pair_send`, `pair_stop`, `pair_start`,
-   *     `pair_pause`, `pair_resume`), answered by the owning machine's PairOwner (pair/owner.ts), which
-   *     re-checks the floor and journals every action;
-   *   - the loopback-only `pair`: the control interface's verbs (pair/control.ts) when it is wired, the
-   *     sensor's own read verbs otherwise.
-   * An older daemon answers every one of them UNSUPPORTED, which a brain already handles.
-   */
-  private handlePair(connId: string, type: string, payload: Record<string, unknown>, local: boolean,
-    reply: (t: string, rid: unknown, p: Record<string, unknown>) => void): void {
-    const requestId = payload.requestId
-    const service = this.pairService
-    const detached = (work: Promise<Record<string, unknown>>): void => {
-      void work.then((result) => reply(type, requestId, result)).catch(() => reply(type, requestId, { error: 'PAIR_FAILED' }))
-    }
-    if (type === 'pair') {
-      if (!local) { reply(type, requestId, { error: 'LOCAL_ONLY', detail: 'Ask the pair brain on this computer.' }); return }
-      if (this.daemonsOn && !this.daemonsOn()) { reply(type, requestId, { error: 'DAEMONS_OFF', detail: 'Daemons are off for this account or on this computer.' }); return }
-      const verb = typeof payload.verb === 'string' ? payload.verb : ''
-      const control = this.pairControl
-      if (control && control.verbs.has(verb)) { detached(control.local(payload, connId)); return }
-      if (!service) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
-      detached(service.local(payload))
-      return
-    }
-    // The machine-to-machine requests come from ANOTHER machine, sealed. This computer's own processes use
-    // `pair` (a tool) or the window's daemon_* frames; a loopback `pair_*` would be a local process
-    // claiming to be a remote brain — and the owner treats a remote request as one (daemons/BRAIN.md).
-    if (local) { reply(type, requestId, { error: 'REMOTE_ONLY', detail: 'pair_* requests come from another machine.' }); return }
-    if (!service) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
-    if (!service.enabled()) { reply(type, requestId, { error: 'PAIR_OFF' }); return }
-    if (type === 'pair_watch') {
-      if (payload.off === true) { service.unwatch(connId); reply(type, requestId, { ok: true }); return }
-      const snapshot = service.watch(connId, (event) => this.sendPairEvent(connId, event))
-      reply(type, requestId, { snapshot })
-      return
-    }
-    if (type === 'pair_journal') { reply(type, requestId, { ...service.journal(payload) }); return }
-    const owner = this.pairOwner
-    if (!owner) {
-      reply(type, requestId, type === 'pair_read' ? service.read(payload) : { error: 'UNSUPPORTED' })
-      return
-    }
-    // Detached: an answer keys a dialog and a pause saves a conversation, both seconds of work that must
-    // not hold the watch's pushes behind them on this connection.
-    detached(owner.handle(type, payload, { connId, label: this.e2ee.sessionLabel(connId) }))
-  }
-
-  /** One `pair_event` to one watcher: plaintext over loopback, sealed pairwise (`wrapTarget`) otherwise.
-   *  Through the same ordered queue as the watch's reply, and only while the link is up — a push for a
-   *  connection the backend has forgotten is dropped there anyway. False = stop pushing to it. */
-  private sendPairEvent(connId: string, event: PairEvent): boolean {
-    const payload = event as unknown as Record<string, unknown>
-    const local = this.localClients.get(connId)
-    if (local) return local.sendFrame({ type: 'pair_event', payload })
-    if (!this.isConnected()) return false
-    const frame = this.e2ee.wrapTarget(connId, 'pair_event', payload)
-    if (!frame) return false
-    this.sendTo(connId, frame)
-    return true
   }
 
   private async dispatchDown(frame: Frame, connId: string, transport: DownTransport = 'relay'): Promise<void> {
@@ -1814,10 +1841,15 @@ export class BackendSocket {
     // than as an opaque __e2e envelope.
     // Terminal frames contain raw keystrokes, paste text and screen bytes after
     // unwrap. Never pass them to the frame logger, even in diagnostic mode.
-    if (env.LOG_FRAMES && !TEAM_REQUEST_TYPES.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
+    if (env.LOG_FRAMES && !TEAM_REQUEST_TYPES.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
       logFrame('←', connId ? `conn:${sid(connId)}` : 'backend', frame)
     }
     const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => this.emitReply(connId, t, rid, p)
+    const lifecycleTarget = (frame.payload as { agentId?: unknown } | undefined)?.agentId
+    if (typeof lifecycleTarget === 'string' && this.purgeAgentService?.busy(lifecycleTarget)
+      && ['agent_close', 'agent_delete', 'agent_resume', 'agent_restart', 'agent_retarget', 'agent_update'].includes(type)) {
+      reply(type, (frame.payload as { requestId?: unknown }).requestId, { error: 'DELETE_IN_PROGRESS' }); return
+    }
     if (SHARE_REQUEST_TYPES.has(type)) {
       const p = (frame.payload ?? {}) as Record<string, unknown>
       const result = await this.harnessSharing?.manage(type, p).catch(() => ({ error: 'SHARING_UNAVAILABLE', detail: 'Sharing is temporarily unavailable. Try again.' }))
@@ -1855,7 +1887,6 @@ export class BackendSocket {
       this.autonomousDeviceRelay?.drop(connId)
       this.e2ee.dropSession(connId)
       this.viewerForwarder.closeConnection(connId)
-      this.pairService?.unwatch(connId)
       this.interactiveViewers.closeConnection(connId); this.ownerCommands.closeConnection(connId)
       await this.terminalP2p.closeConnection(connId, 'client_disconnected', false)
       this.p2pPendingOpens.delete(connId)
@@ -1872,7 +1903,23 @@ export class BackendSocket {
 
     // The machine was deleted/revoked from the web → stop for good (don't reconnect) and let the CLI
     // clear the saved token. `closed` blocks the reconnect that would otherwise fire on socket drop.
-    if (type === 'machine_revoked') { this.closed = true; this.onRevoked?.(); return }
+    if (type === 'machine_revoked') {
+      const p = (typeof frame.payload === 'object' && frame.payload !== null ? frame.payload : {}) as { reason?: unknown; pub?: unknown }
+      // Another key under this machine id was removed — an earlier install of this computer that this one
+      // waits behind (`device_conflict`). The frame goes to the machine id, so it reaches this install too:
+      // that removal is what lets this key register, not a sign-out. Re-read the log instead.
+      if (p.reason === 'device_removed' && typeof p.pub === 'string' && this.isOwnDeviceKey && !this.isOwnDeviceKey(p.pub)) {
+        this.onDeviceKeysChanged?.()
+        return
+      }
+      this.closed = true
+      // Removed from the account's device key log (not just signed out): the key itself is spent.
+      if (p.reason === 'device_removed' && typeof p.pub === 'string') {
+        try { this.onDeviceRemoved?.(p.pub) } catch { /* signing out still happens */ }
+      }
+      this.onRevoked?.()
+      return
+    }
 
     // The account's tabs changed on another computer (or in another window of this one): hand the
     // window the revision and let it fetch `/api/desk` through this daemon. Backend-only, like
@@ -1890,7 +1937,21 @@ export class BackendSocket {
     if (type === 'zoo_changed') {
       const revision = (typeof frame.payload === 'object' && frame.payload !== null ? (frame.payload as { revision?: unknown }).revision : undefined)
       this.sendLocal({ type: 'zoo_changed', payload: { revision: typeof revision === 'number' ? revision : 0 } })
-      this.onZooChanged?.(typeof revision === 'number' ? revision : 0)
+      return
+    }
+
+    // The account's device key log grew: this daemon re-reads and verifies it (deviceLogSyncer.ts), and
+    // the window re-reads its Devices list. Backend-only for the same reason as desk_changed.
+    if (type === 'device_keys_changed') {
+      this.onDeviceKeysChanged?.()
+      this.sendLocal({ type: 'device_keys_changed', payload: {} })
+      return
+    }
+    // The backend's answer to this machine's own append to the device key log.
+    if (type === 'devlog_append_result') {
+      const p = (typeof frame.payload === 'object' && frame.payload !== null ? frame.payload : {}) as Record<string, unknown>
+      const done = typeof p.requestId === 'string' ? this.devlogAppends.get(p.requestId) : undefined
+      if (done) { this.devlogAppends.delete(p.requestId as string); done(p) }
       return
     }
 
@@ -1992,21 +2053,12 @@ export class BackendSocket {
       return
     }
 
-    // The pair brain (daemons/BRAIN.md). `pair_*` come from another machine's brain and reach here only
-    // sealed — the default-deny above already refused them in the clear. `pair` is this computer's own.
-    if (PAIR_REQUESTS.has(type) || type === 'pair') {
-      this.handlePair(connId, type, payload, local, reply)
-      return
-    }
-    // An individual's art for the phone, sealed (the default-deny above refused it in the clear). A window
-    // on this computer asks `daemon_plate_get` over the Unix socket instead; the same request over loopback
-    // would let a TCP client past that, so it is refused like a loopback `pair_*`.
-    if (type === PLATE_REQUEST) {
-      if (local) { reply(type, requestId, { error: 'REMOTE_ONLY', detail: 'On this computer, ask daemon_plate_get over the daemon\'s socket.' }); return }
-      const plates = this.plateService
-      if (!plates) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
-      // Detached: a plate not drawn yet takes seconds, and this connection's other requests must not wait.
-      void plates.get(payload).then((result) => reply(type, requestId, result)).catch(() => reply(type, requestId, { error: 'RENDER_FAILED' }))
+    // Retired optional-feature requests remain reserved. Never reinterpret one as an
+    // ordinary command or weaken its existing encryption / local transport boundary.
+    if (PAIR_REQUESTS.has(type) || type === 'pair' || type === PLATE_REQUEST) {
+      const error = type === 'pair' && !local ? 'LOCAL_ONLY'
+        : type !== 'pair' && local ? 'REMOTE_ONLY' : 'UNSUPPORTED'
+      reply(type, requestId, { error })
       return
     }
 
@@ -2045,7 +2097,13 @@ export class BackendSocket {
       switch (type) {
         case 'machine_resources':
           // Sampling CPU must not hold up typing or other machine requests.
-          void readMachineResources()
+          void (payload.harnesses === true
+            ? this.harnessResourcesReader().then(async harnesses => {
+              if (payload.storage !== true) return { harnesses }
+              const storage = await this.harnessStorageReader(registry.advertised())
+              return { harnesses: { ...harnesses, agents: harnesses.agents.map(row => ({ ...row, ...storage.get(row.agentId) })) } }
+            })
+            : readMachineResources())
             .then(resources => reply(type, requestId, { ...resources }))
             .catch(() => reply(type, requestId, { error: 'UNAVAILABLE' }))
           return
@@ -2055,9 +2113,25 @@ export class BackendSocket {
         case 'grid_fleet_model_stop': {
           // A daemon-owned operation survives panel closure and a lost reply.
           // Keep hardware/catalog/network reads off the ordered terminal queue.
-          void this.resolveGridName().then(async grid => type === 'grid_fleet_models_list'
-            ? this.localModels.list(grid, payload.refresh === true)
-            : this.localModels.act(grid, payload.modelId, type === 'grid_fleet_model_download' ? 'download' : type === 'grid_fleet_model_start' ? 'start' : 'stop'))
+          //
+          // Grid is set up here only for an ACT: the picker's Set up (a list read carrying `setup`),
+          // a Get, a Use. The list read the app polls while a picker is open never sets anything up —
+          // it says whether it is needed (`gridSetupNeeded`). A Get needs a sign-in (the catalog is
+          // grid's); a Use serves on the account's own grid, and so does the Set up that offers it.
+          void (async () => {
+            const list = type === 'grid_fleet_models_list'
+            const setup = list ? payload.setup === true : type !== 'grid_fleet_model_stop'
+            const notReady = setup ? await this.gridNotReady(type !== 'grid_fleet_model_download') : null
+            const grid = await this.resolveGridName()
+            if (list) {
+              const snapshot = await this.localModels.list(grid, payload.refresh === true || setup)
+              const needed = this.gridSetUp ? !this.gridSetUp() : false
+              if (setup && !notReady) void this.pushGridModels()
+              return { ...snapshot, ...(needed ? { gridSetupNeeded: true } : {}), ...(notReady ? { gridSetupError: notReady } : {}) }
+            }
+            if (notReady) return { error: notReady }
+            return this.localModels.act(grid, payload.modelId, type === 'grid_fleet_model_download' ? 'download' : type === 'grid_fleet_model_start' ? 'start' : 'stop')
+          })()
             .then(result => reply(type, requestId, { ...result }))
             .catch(() => reply(type, requestId, { error: 'Models are unavailable. Try again.' }))
           return
@@ -2069,6 +2143,12 @@ export class BackendSocket {
           const request = parseGridFleetRequest(payload)
           if (!request || typeof requestId !== 'string') { reply(type, requestId, { error: 'INVALID_GRID_COMMAND' }); return }
           // Detached: pulls/builds can take minutes. Keep typing, cancellation, and telemetry responsive.
+          // ⚠️ Run against grid AS IT STANDS — never set up first. A Grid harness session issues these
+          // on its own the moment its viewer comes up (every open one, on every daemon start), so
+          // setting grid up here signed a machine in to grid right after a Harness-only sign-in,
+          // with nobody asking. Grid is set up by the picker's Set up, by making or opening a Model
+          // Manager, and by that harness's own `harness grid setup`; until then grid answers these in
+          // its own words.
           void this.gridFleet.run(connId, requestId, request)
             .then(result => reply(type, requestId, { ...result }))
             .catch(() => reply(type, requestId, { ok: false, code: 1, error: 'Grid command failed unexpectedly.' }))
@@ -2098,12 +2178,12 @@ export class BackendSocket {
           return
 
         case 'agents_list': {
-          const projects = await Promise.all(registry.advertised().map((s) => this.toProject(s)))
+          const sessions = registry.advertised()
+          const projects = await Promise.all(sessions.map((s) => this.toProject(s)))
           // Older clients/devices keep their live-only contract. The desktop picker
           // explicitly asks for stopped work and receives no stale terminal routes.
-          if (payload.includeStopped === true && this.e2ee.sessionRole(connId) !== 'device') {
-            projects.push(...await Promise.all(stoppedAgents.available(registry.advertised()).map(s => this.toStoppedProject(s))))
-          }
+          const savedSessions = payload.includeStopped === true && this.e2ee.sessionRole(connId) !== 'device' ? stoppedAgents.available(sessions) : []
+          projects.push(...await Promise.all(savedSessions.map(s => this.toStoppedProject(s))))
           // Ordered by creation time, oldest → newest — a stable tab order that doesn't reshuffle as
           // sessions become active (createdAt = the session's registeredAt). The id breaks a tie so the
           // order is TOTAL: without it two agents registered in the same millisecond fall through to array
@@ -2115,7 +2195,37 @@ export class BackendSocket {
             reply(type, requestId, { agents: projects.filter(deviceAgentRow).slice(0, DEVICE_AGENT_LIST_LIMIT).map(deviceAgentListItem) })
             return
           }
-          reply(type, requestId, { agents: projects })
+          if (payload.monitor === true) {
+            // Optional telemetry must never hold the ordered terminal-input queue.
+            void (async () => {
+              const [snapshot, storage] = await Promise.all([
+                this.harnessResourcesReader().catch(() => ({ agents: [], sampledAt: null, shared: [] })),
+                this.harnessStorageReader([...sessions, ...savedSessions]).catch(() => new Map()),
+              ])
+              const resources = new Map(snapshot.agents.map(row => [row.agentId, row]))
+              const byId = new Map(sessions.map(s => [s.agentId, s]))
+              reply(type, requestId, { agents: projects.map(agent => {
+                const session = byId.get(agent.id)
+                const activity = session ? this.monitorActivityProvider?.(session.sessionId) : null
+                const reading = resources.get(agent.id)
+                return { ...agent, monitor: {
+                  activity: activity && activity !== 'idle' ? activity : session ? this.monitorCompletions.state(session) : 'idle',
+                  activityKnown: this.monitorActivityProvider !== null,
+                  rssBytes: agent.status === 'stopped' ? 0 : reading?.memoryBytes ?? null,
+                  cpu: agent.status === 'stopped' ? 0 : reading?.cpuPercent ?? null,
+                  pid: reading?.processCount != null ? session?.processIdentity?.pid ?? null : null,
+                  sampledAt: snapshot.sampledAt,
+                  processCount: reading?.processCount ?? null,
+                  gpuMemoryBytes: reading?.gpuMemoryBytes ?? null,
+                  gpuPercent: reading?.gpuPercent ?? null,
+                  diskReadBytesPerSecond: reading?.diskReadBytesPerSecond ?? null,
+                  diskWriteBytesPerSecond: reading?.diskWriteBytesPerSecond ?? null,
+                  processes: reading?.processes ?? [],
+                  ...(storage.get(agent.id) ?? {}),
+                } }
+              }), sharedResources: snapshot.shared ?? [], sampledAt: snapshot.sampledAt })
+            })().catch(() => reply(type, requestId, { error: 'UNAVAILABLE' }))
+          } else reply(type, requestId, { agents: projects })
           return
         }
 
@@ -2127,13 +2237,14 @@ export class BackendSocket {
           // plainly beats inventing one: the web then shows the tab with an empty thread until the bind
           // lands, instead of pinning `currentSessionId` to an id no event will ever carry.
           if (!s || !s.sessionId) { reply(type, requestId, { sessions: [] }); return }
-          const lines = s.transcriptPath ? await tailFile(s.transcriptPath, Infinity) : []
+          // Counted from an index kept as the file grows (lib/transcriptPages.ts), not by reading it whole.
+          const messageCount = s.transcriptPath ? await transcriptPages.lineCount(s.transcriptPath) : 0
           reply(type, requestId, {
             sessions: [{
               id: s.sessionId,
               title: projectDisplayName(s),
               timestamp: new Date(s.registeredAt).toISOString(),
-              messageCount: lines.length,
+              messageCount,
               lastActivity: new Date(await lastActivityAt(s)).toISOString(),
               participants: [],
             }],
@@ -2254,14 +2365,42 @@ export class BackendSocket {
           const rawLimit = payload.limit
           const limit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 500) : undefined
           const before = typeof payload.before === 'string' ? payload.before : undefined
+          if (s.engine === 'claude' || s.engine === 'codex') {
+            // Only the page asked for is read (lib/transcriptPages.ts): the whole history of a long session
+            // is more memory than the daemon has. Without a limit, the newest lines that fit a page, and
+            // the cursor to the rest when they do not all fit — a cursor the full-transcript reply never had.
+            const opts = limit ? { limit, before } : {}
+            const page = s.engine === 'codex'
+              ? await transcriptPages.codex(s.transcriptPath, opts)
+              : await transcriptPages.claude(s.transcriptPath, opts)
+            const st = await stat(s.transcriptPath).catch(() => null)
+            const timestamp = new Date(st?.mtimeMs ?? Date.now()).toISOString()
+            if (page.staleCursor) {
+              reply(type, requestId, { id: sessionId, title: projectDisplayName(s), events: [], timestamp, engine: s.engine, hasMore: false, oldestCursor: null, staleCursor: true })
+              return
+            }
+            const events = s.engine === 'codex'
+              ? codexMessagesToEvents(page.lines, codexSubagentResolverFor(s.codexHome))
+              : messagesToEvents(page.lines)
+            await enrichSubagentStats(events, s.transcriptPath)
+            // Older pages must not inject a spurious end-of-transcript marker mid-scroll.
+            if (limit && before && events[events.length - 1]?.type === 'done') events.pop()
+            reply(type, requestId, {
+              id: sessionId,
+              title: projectDisplayName(s),
+              events,
+              timestamp,
+              engine: s.engine,
+              ...(limit || page.hasMore ? { hasMore: page.hasMore, oldestCursor: page.oldestCursor } : {}),
+            })
+            return
+          }
           const lines = await tailFile(s.transcriptPath, Infinity)
           const st = await stat(s.transcriptPath).catch(() => null)
           const timestamp = new Date(st?.mtimeMs ?? Date.now()).toISOString()
 
           if (!limit) {
-            const fullEvents = s.engine === 'codex'
-              ? codexMessagesToEvents(lines, codexSubagentResolverFor(s.codexHome))
-              : s.engine === 'cursor'
+            const fullEvents = s.engine === 'cursor'
                 ? cursorMessagesToEvents(lines, sessionId, await loadCursorReplayTaskLinks(cursorConfigDir(), sessionId, cursorDataDir()))
                 : s.engine === 'muse'
                   ? museMessagesToEvents(lines)
@@ -2319,9 +2458,7 @@ export class BackendSocket {
             })
             return
           }
-          const w = s.engine === 'codex'
-            ? windowCodexLines(lines, { limit, before })
-            : s.engine === 'cursor'
+          const w = s.engine === 'cursor'
               ? windowCursorLines(lines, { limit, before })
               : s.engine === 'pi'
                 ? windowPiLines(lines, { limit, before })
@@ -2332,9 +2469,7 @@ export class BackendSocket {
             reply(type, requestId, { id: sessionId, title: projectDisplayName(s), events: [], timestamp, engine: s.engine, hasMore: false, oldestCursor: null, staleCursor: true })
             return
           }
-          const events = s.engine === 'codex'
-            ? codexMessagesToEvents(w.window, codexSubagentResolverFor(s.codexHome))
-            : s.engine === 'cursor'
+          const events = s.engine === 'cursor'
               ? cursorMessagesToEvents(
                   w.window,
                   sessionId,
@@ -2560,6 +2695,40 @@ export class BackendSocket {
           return
         }
 
+        case 'agent_handoff_prepare': {
+          // "Change agent": before the engine is swapped, write what the old one did into the project
+          // (`.harness/handoff/`) so the new one can read it. It writes into the user's folder and runs
+          // git there, so only the owner may ask: the loopback window, or a sealed `web` session. A
+          // `device` (the dial) and a shared viewer never do.
+          if (!local && this.e2ee.sessionRole(connId) !== 'web') { reply(type, requestId, { error: 'OWNER_REQUIRED' }); return }
+          const agentId = payload.agentId
+          if (typeof agentId !== 'string' || agentId.length === 0 || agentId.length > 200) { reply(type, requestId, { error: 'MISSING_AGENT_ID' }); return }
+          const changeId = payload.changeId
+          if (typeof changeId !== 'string' || !/^[0-9a-f]{32}$/.test(changeId)) { reply(type, requestId, { error: 'BAD_CHANGE_ID' }); return }
+          const targetEngine = payload.targetEngine
+          if (typeof targetEngine !== 'string' || !(ENGINES as readonly string[]).includes(targetEngine)) { reply(type, requestId, { error: 'BAD_ENGINE' }); return }
+          const provider = this.handoffProvider
+          if (!provider) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
+          // DETACHED from this connection's ordered RPC chain, like `engines_probe`: it reads a whole
+          // session and runs git, and a window's next request must not queue behind it. The reply names
+          // fixed fields only; whatever else the provider returned stays here.
+          // Called inside the executor so a provider that throws before returning its promise lands in
+          // the same catch (and the same message-free log) as one that rejects.
+          void new Promise<Awaited<ReturnType<typeof provider>>>((resolve) => resolve(provider({ agentId, changeId, targetEngine })))
+            .then((r) => reply(type, requestId, { agentId, file: r.file, gitRepo: r.gitRepo, cwd: r.cwd, degraded: r.degraded }))
+            .catch((e: unknown) => {
+              // Only a HandoffError's code goes on the wire, and only code-shaped: the reply never carries
+              // a message or anything else the provider put in it.
+              const code = typeof e === 'object' && e !== null ? (e as { code?: unknown }).code : undefined
+              const known = (e as { name?: unknown } | null)?.name === 'HandoffError' && typeof code === 'string' && /^[A-Z][A-Z_]{0,39}$/.test(code)
+              // Name and errno code only: a message can quote the project path or, from a parser, a
+              // slice of the transcript it choked on.
+              if (!known) console.error(`[handoff] prepare failed: ${e instanceof Error ? e.name : typeof e}${typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? ` ${code}` : ''}`)
+              reply(type, requestId, { error: known ? code : 'INTERNAL' })
+            })
+          return
+        }
+
         case 'voice_route': {
           // Voice router (REMOTE machine): pick the best-fit agent for a transcribed Overview voice task,
           // using each agent's name + recent-turn recap. Once asked plaintext by the backend's legacy
@@ -2629,6 +2798,7 @@ export class BackendSocket {
           // clock was set back) never throttles: the next open corrects it.
           let opened = false
           if (hasOpened) {
+            this.closeAgentService?.cancel(s.agentId)
             const since = Date.now() - (s.lastOpenedAt ?? 0)
             if (!s.lastOpenedAt || since < 0 || since >= AGENT_OPENED_THROTTLE_MS) {
               s = registry.markOpened(s.agentId) ?? s
@@ -2676,7 +2846,9 @@ export class BackendSocket {
           let projectFolder
           try { projectFolder = parseProjectFolder(payload) }
           catch (error) {
-            reply(type, requestId, { error: error instanceof ProjectFolderError ? error.code : 'INVALID_PROJECT_SOURCE' }); return
+            reply(type, requestId, error instanceof ProjectFolderError
+              ? { error: error.code, detail: error.message }
+              : { error: 'INVALID_PROJECT_SOURCE' }); return
           }
           // A terminal opens where a terminal app would — the home directory — when the client names
           // no folder; every other engine works IN a folder and must be told which.
@@ -2760,7 +2932,8 @@ export class BackendSocket {
             if (typeof payload.agent !== 'string' || !AGENT_NAME_RE.test(payload.agent)) {
               reply(type, requestId, { error: 'INVALID_AGENT', detail: 'agent must be 1-64 letters, digits, `-` or `_`' }); return
             }
-            if (!supportsNamedAgent(engine)) {
+            // OpenCode v2 counts as no way: its TUI exits 1 on `--agent` (engineLaunch.ts).
+            if (!supportsNamedAgent(engine, engine === 'opencode' ? opencodeMajorVersion() : null)) {
               reply(type, requestId, { error: 'AGENT_UNSUPPORTED', detail: new NamedAgentUnsupportedError(engine).message }); return
             }
             agent = payload.agent
@@ -2933,10 +3106,22 @@ export class BackendSocket {
           if (picked && payload.grid === undefined && !clear) {
             // The grid the model was picked FROM, when the picker says (a shared grid's section);
             // the account's own grid otherwise, as before.
-            const pickedGrid = typeof payload.gridName === 'string' && payload.gridName.trim()
-              ? payload.gridName.trim()
-              : await this.resolveGridName()
+            // A move onto a grid model is a grid feature in use: grid is signed in first, if it is not
+            // yet — and the account's own grid made sure of when that is where the model is.
+            // A `local:` target is resolved from THIS machine's configured Grid profile
+            // (gridProfiles.ts), never from the relay: cloud sign-in proves nothing about it, so
+            // the setup gate does not apply — the profile's own `grid --local info` is the check.
+            const named = typeof payload.gridName === 'string' && payload.gridName.trim() ? payload.gridName.trim() : null
             const targetId = typeof payload.gridTarget === 'string' ? payload.gridTarget.trim() : undefined
+            const localTarget = targetId?.startsWith('local:') ?? false
+            if (!localTarget) {
+              const notReady = await this.gridNotReady(!named || named === this.harnessGridName)
+              if (notReady) {
+                reply(type, requestId, { error: 'GRID_UNAVAILABLE', detail: notReady })
+                return
+              }
+            }
+            const pickedGrid = named ?? await this.resolveGridName()
             const resolved = await resolveGridTarget(pickedGrid, picked, targetId)
             if (!resolved) {
               reply(type, requestId, { error: 'GRID_UNAVAILABLE', detail: 'Could not read this machine\'s grid endpoint.' })
@@ -2988,10 +3173,66 @@ export class BackendSocket {
         // Delete an agent: signal its validated engine process and drop it from the list. Idempotent — an already
         // gone target still acks + re-emits agent_deleted so the web/device converge. E2EE-gated (the
         // frame arrived decrypted). Keeps the persisted recap + agent name for a later resume.
+        case 'agents_cleanup_preview': {
+          if (!this.cleanupPreview) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
+          void this.cleanupPreview().then(result => reply(type, requestId, result), error => reply(type, requestId, {
+            error: error?.code ?? 'TABS_UNAVAILABLE', detail: error instanceof Error ? error.message : 'Could not check open tabs.',
+          }))
+          return
+        }
+        case 'agent_close': {
+          if (!this.closeAgentService) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
+          const { agentId, sessionId, createdAt, mode } = payload
+          if (typeof agentId !== 'string' || typeof sessionId !== 'string' || typeof createdAt !== 'string'
+            || typeof mode !== 'string' || !['inspect', 'idle', 'now', 'after_task', 'cancel'].includes(mode)) {
+            reply(type, requestId, { error: 'INVALID_CLOSE_REQUEST' }); return
+          }
+          // Saving/exit may take seconds; terminal input and unrelated agents keep flowing.
+          void this.closeAgentService.request({ agentId, sessionId, createdAt, mode: mode as CloseMode,
+            ...(payload.onlyIfHidden === true ? { onlyIfHidden: true } : {}) })
+            .then(result => reply(type, requestId, result), () => reply(type, requestId, { error: 'CLOSE_FAILED' }))
+          return
+        }
+        case 'agent_worktree_delete':
+        case 'agent_purge': {
+          if (!local && this.e2ee.sessionRole(connId) !== 'web') { reply(type, requestId, { error: 'OWNER_REQUIRED' }); return }
+          if (!this.purgeAgentService) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
+          const { agentId, sessionId, createdAt, mode, reviewId, path, discardChanges, choices, includeWorktree } = payload
+          const selected = choices && typeof choices === 'object' ? choices as Record<string, unknown> : null
+          if (typeof agentId !== 'string' || !(sessionId === null || typeof sessionId === 'string')
+            || typeof createdAt !== 'number' || !Number.isFinite(createdAt)
+            || (mode !== 'inspect' && mode !== 'delete' && !(type === 'agent_worktree_delete' && mode === 'describe'))
+            || (mode === 'delete' && typeof reviewId !== 'string')
+            || (choices !== undefined && (!selected
+              || typeof selected.sessionData !== 'boolean' || typeof selected.worktreeData !== 'boolean'))) {
+            reply(type, requestId, { error: 'INVALID_DELETE_REQUEST' }); return
+          }
+          const deletion = { agentId, sessionId, createdAt, mode: mode as 'inspect' | 'delete',
+            ...(typeof reviewId === 'string' ? { reviewId } : {}),
+            ...(typeof path === 'string' ? { path } : {}), discardChanges: discardChanges === true,
+            includeWorktree: includeWorktree === true,
+            ...(selected ? { choices: { sessionData: selected.sessionData as boolean, worktreeData: selected.worktreeData as boolean } } : {}) }
+          const operation = type === 'agent_worktree_delete'
+            ? this.purgeAgentService.worktreeRequest({ ...deletion, mode: mode as 'describe' | 'inspect' | 'delete' })
+            : this.purgeAgentService.request(deletion)
+          void operation
+            .then(result => {
+              if (result.deleted === true || result.worktreeDeleted === true) void this.harnessStorageReader([], true)
+              reply(type, requestId, result)
+            }, () => reply(type, requestId, { error: 'DELETE_FAILED' }))
+          return
+        }
         case 'agent_delete': {
           const target = (payload.agentId as string | undefined) || (payload.sessionId as string | undefined)
           if (!target) { reply(type, requestId, { error: 'MISSING_AGENT_ID' }); return }
           if (!this.onDeleteAgent) { reply(type, requestId, { error: 'UNSUPPORTED' }); return }
+          if (Object.hasOwn(payload, 'expectedSessionId')) {
+            const current = registry.byAgent(target)
+            if (!current || (current.sessionId || null) !== payload.expectedSessionId) {
+              reply(type, requestId, { error: 'SESSION_CHANGED', detail: 'This conversation changed. Refresh and review it before stopping.' })
+              return
+            }
+          }
           try { await this.onDeleteAgent(target) }
           catch (error) {
             if (!(error instanceof AgentStopError)) throw error
@@ -3011,12 +3252,19 @@ export class BackendSocket {
           const operation = type === 'agent_resume' ? 'resume' : 'restart'
           const restart = operation === 'resume' ? this.onResumeAgent : this.onRestartAgent
           if (!restart) { reply(type, requestId, { error: 'UNSUPPORTED_ON_REMOTE' }); return }
+          const permissionMode = payload.permissionMode
+          if (permissionMode !== undefined && (operation !== 'resume' || typeof permissionMode !== 'string'
+            || !['ask', 'auto', 'plan', 'full'].includes(permissionMode))) {
+            reply(type, requestId, { error: 'INVALID_PERMISSION_MODE' }); return
+          }
+          const invoke = () => permissionMode === undefined ? restart(target) : this.onResumeAgent!(target, permissionMode)
           const creationId = payload.creationId
           if (creationId !== undefined) {
             if (!validCreationId(creationId)) { reply(type, requestId, { error: 'INVALID_CREATION_ID' }); return }
             try {
-              void this.agentCreations.run(creationId, creationFingerprint({ operation, agentId: target }), async () => {
-                const result = await restart(target)
+              void this.agentCreations.run(creationId, creationFingerprint({ operation, agentId: target,
+                ...(permissionMode === undefined ? {} : { permissionMode }) }), async () => {
+                const result = await invoke()
                 if (result.ok) return { state: 'created', agentId: result.session.agentId, resumed: result.resumed }
                 // RESTART_FAILED can follow an unobserved relaunch. Never silently
                 // replace that process again when a caller checks this intent.
@@ -3030,7 +3278,7 @@ export class BackendSocket {
             }
             return
           }
-          const result = await restart(target)
+          const result = await invoke()
           if (!result.ok) {
             reply(type, requestId, result.detail ? { error: result.error, detail: result.detail } : { error: result.error })
             return
@@ -3283,6 +3531,17 @@ export class BackendSocket {
           return
         }
 
+        // Physical devices belong to this machine; only its owner or loopback tools may manage them.
+        case 'harness_devices_list':
+        case 'harness_device_settings': {
+          if (!local && this.e2ee.sessionRole(connId) !== 'web') {
+            reply(type, requestId, { error: 'OWNER_REQUIRED' })
+            return
+          }
+          reply(type, requestId, await harnessDevicesRequest(this.harnessDevices, type, payload))
+          return
+        }
+
         // The colours the desktop paints its panes with, so tmux answers a TUI's OSC 10/11 with
         // them instead of with whatever terminal happened to attach first (lib/hostTheme.ts).
         case 'theme_set': {
@@ -3300,6 +3559,13 @@ export class BackendSocket {
           return
       }
     } catch (err) {
+      // A service on the core boundary that failed or is off (core/serviceHost.ts): the host has logged
+      // it, and the client may ask again — the service can be back after the daemon restarts.
+      if (err instanceof ServiceUnavailableError) {
+        console.warn(`[backend] ${type}: ${err.message}`)
+        if (requestId !== undefined) reply(type, requestId, { error: 'SERVICE_UNAVAILABLE', service: err.service, retryable: true })
+        return
+      }
       console.error(`[backend] dispatch ${type} failed:`, err)
       if (requestId !== undefined) reply(type, requestId, { error: 'INTERNAL' })
     }
@@ -3346,6 +3612,7 @@ export class BackendSocket {
       selectedModel: this.runtimeProfileProvider?.(s) ?? null,
       terminalAvailable: registry.terminalAvailable(s.agentId),
       dsh: this.dshFrameProvider?.(s) ?? null,
+      activity: () => this.activityFrameProvider?.(s) ?? null,
     })
   }
 }

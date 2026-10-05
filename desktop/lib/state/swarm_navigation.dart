@@ -316,6 +316,7 @@ class SwarmDestination {
     this.machineLabel = '',
     this.agentId,
     this.modelId,
+    this.agentEngine,
     this.storeId,
     this.engine,
     this.closedId,
@@ -361,6 +362,8 @@ class SwarmDestination {
   final DateTime? lastActivityAt;
   final String? swarmId, machineId, agentId, engine;
   final String? modelId;
+  final String? agentEngine;
+  bool get isAgentChoice => agentEngine != null;
   bool get isModel => modelId != null;
   final String? storeId;
   bool get isStoreEntry => storeId != null;
@@ -414,6 +417,7 @@ class SwarmDestination {
       !isNote &&
       !isModel &&
       !isStoreEntry &&
+      !isAgentChoice &&
       pickerQuery == null &&
       external == null;
   bool get hasView => swarmId != null;
@@ -794,8 +798,7 @@ class SwarmLocationCatalog {
   }
 }
 
-/// Open Harness sorts by last use — activity, or a person opening the harness
-/// in any client, whichever is later — the same time it shows beside each
+/// Open Harness sorts by conversation activity — the same time shown beside each
 /// session, within each [SwarmMatchStrength]: typing "hn" puts the harness named
 /// hn first, however many newer ones live in a folder whose path spells h…n.
 /// Undated rows come last; ties retain visit recency and search relevance.
@@ -819,7 +822,7 @@ List<SwarmDestination> rankSwarmDestinationsByActivity(
     final strength = a.strength.index.compareTo(b.strength.index);
     if (strength != 0) return strength;
     // What was said is ranked by the index, which weighs how well it matched
-    // against how long ago; last use decides between equal answers.
+    // against how long ago; conversation activity decides between equal answers.
     if (a.strength == SwarmMatchStrength.said ||
         a.strength == SwarmMatchStrength.content) {
       final said = b.said.compareTo(a.said);
@@ -928,7 +931,7 @@ Future<bool> activateSwarmSearchSelection(
         .where((tab) => tab.id == destinationSwarmId)
         .firstOrNull;
     if (placement == HarnessPlacement.currentTab) {
-      if (target == null || target.isStore || target.isOrchestrator) {
+      if (target == null || target.isUtility || target.isOrchestrator) {
         return false;
       }
       final existing = target.panes.any(
@@ -1312,7 +1315,7 @@ List<SwarmDestination> swarmDestinations(
         detail: [
           // Project and machine rows name their kind; a tab beside them
           // without one read as some fourth, unnamed thing.
-          if (!swarm.isStore) 'Swarm',
+          if (!swarm.isStore) 'Tab',
           _countLabel(members.length, 'harness'),
           if (projects.isNotEmpty) _countLabel(projects.length, 'project'),
           if (machines.isNotEmpty) _countLabel(machines.length, 'machine'),

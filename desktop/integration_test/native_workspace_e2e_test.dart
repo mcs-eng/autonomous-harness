@@ -36,6 +36,7 @@ import 'package:harness/settings/settings_screen.dart';
 import 'package:harness/settings/settings_section.dart';
 import 'package:harness/settings/sections/shortcuts_section.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:harness/shared/widgets/app_select_field.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/new_harness.dart';
@@ -54,9 +55,11 @@ import 'package:harness/ws/ws_conn.dart';
 
 import '../test/keymap_host_test.dart' show key;
 import '../test/support/mixed_agents.dart';
+import '../test/support/guest_app.dart';
 import '../test/support/password_cli.dart';
 import '../test/support/machine_api.dart';
 import '../test/support/rename_connection.dart';
+import '../test/support/resource_picker.dart';
 import '../test/support/stop_connection.dart';
 import '../test/support/fork_connection.dart';
 import '../test/support/restart_connection.dart';
@@ -78,6 +81,28 @@ import '../test/usage_jsonl_scanners_test.dart'
     show jsonlRoot, jsonlRow, jsonlScanner;
 import '../test/signout_recovery_test.dart'
     show SignOutFixture, signOutApp, signOutHost;
+
+Future<void> openMachineEditor(
+  WidgetTester tester,
+  String machineId,
+  String action,
+) async {
+  if (resourceScope('@').evaluate().isEmpty) {
+    await key(tester, LogicalKeyboardKey.keyM, cmd: true);
+    await tester.pumpAndSettle();
+  }
+  await selectResource(tester, 'machine:$machineId');
+  await tester.tap(find.byKey(ValueKey('resource-action:picker.$action')));
+  await tester.pumpAndSettle();
+}
+
+Future<void> closeMachinePicker(WidgetTester tester) async {
+  for (var step = 0; resourceField.evaluate().isNotEmpty && step < 4; step++) {
+    await key(tester, LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+  }
+  expect(resourceField, findsNothing);
+}
 
 class _CreationConnection extends WsConn {
   _CreationConnection({this.products = const []})
@@ -208,17 +233,6 @@ class _FirstCreationApp extends AppNotifier {
 }
 
 class _WorkspaceLinks implements PeerLinkClient {
-  @override
-  Future<CliLinkConnectResult> connectWithCode(
-    String machineId,
-    String code, {
-    required String label,
-    String? displayName,
-    String? expectedFingerprint,
-  }) async => const CliLinkConnectResult(
-    error: 'Code linking is not used by this fixture.',
-  );
-
   final requests = <String>[];
   final replies = <Completer<CliLinkConnectResult>>[];
 
@@ -246,6 +260,17 @@ class _WorkspaceLinks implements PeerLinkClient {
 /// Run with FLUTTER_TEST=1. This fixture never bootstraps the real CLI, loads a
 /// Harness home, or creates real agents; it mounts the real native workspace
 /// around in-memory sessions and simulates creation and machine-link requests.
+Future<void> waitForWorkspace(
+  WidgetTester tester,
+  bool Function() ready, {
+  required String reason,
+}) async {
+  for (var i = 0; i < 100 && !ready(); i++) {
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+  expect(ready(), isTrue, reason: reason);
+}
+
 void main() {
   if (!kUnderTest) {
     throw StateError('Native workspace fixtures require FLUTTER_TEST=1');
@@ -271,7 +296,7 @@ void main() {
     (tester) async {
       final provisioner = SetupProvisioner();
       final app =
-          AppNotifier(
+          GuestTestApp(
               config: AppConfig.dev,
               authSession: AuthSession(),
               configStore: null,
@@ -307,8 +332,8 @@ void main() {
           theme: grid.buildAppTheme(brightness: Brightness.dark),
           home: ListenableBuilder(
             listenable: app,
-            builder: (_, _) => app.status == AppStatus.unauthenticated
-                ? const Scaffold(body: Text('Sign-in reached'))
+            builder: (_, _) => app.status == AppStatus.authenticated
+                ? const Scaffold(body: Text('Guest workspace reached'))
                 : EnvironmentSetupScreen(notifier: app),
           ),
         ),
@@ -368,8 +393,13 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
-      expect(app.status, AppStatus.unauthenticated);
-      expect(find.text('Sign-in reached'), findsOneWidget);
+      await waitForWorkspace(
+        tester,
+        () => app.status == AppStatus.authenticated,
+        reason: 'Setup completes its async startup before opening the guest workspace',
+      );
+      expect(app.signedIn, isFalse);
+      expect(find.text('Guest workspace reached'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },
@@ -393,6 +423,8 @@ void main() {
               agentId: 'a0',
               agentName: 'Fixture',
               engineId: 'codex',
+              // An established stream has already consumed its initial claim.
+              takeover: false,
               send: connection.sendTerminalFrame,
               sendBinary: (frame) async {
                 if (frame.kind == TerminalBinaryKind.input) input.add(frame);
@@ -453,11 +485,19 @@ void main() {
         'protocolVersion': 3,
         'backend': 'tmux',
         'available': true,
+        'features': {'noTakeover': true},
       });
       await tester.pump(const Duration(milliseconds: 100));
+      await waitForWorkspace(
+        tester,
+        () => connection.frames.any((frame) => frame.type == 'terminal_open'),
+        reason:
+            'Reconnect opens the visible terminal after discovery completes',
+      );
       final open = connection.frames
           .lastWhere((frame) => frame.type == 'terminal_open')
           .payload;
+      expect(open['takeover'], isFalse);
       await session.handleFrame('terminal_ready', {
         'requestId': open['requestId'],
         'agentId': 'a0',
@@ -528,7 +568,7 @@ void main() {
       await app.expire();
       await tester.pumpAndSettle();
       expect(app.allPanes, isEmpty);
-      expect(find.text('Sign in'), findsOneWidget);
+      expect(find.text('Continue with Google'), findsOneWidget);
       expect(find.text('Could not sign in'), findsNothing);
       await key(tester, LogicalKeyboardKey.enter);
       // Restored panes wait for their machines with an indeterminate spinner.
@@ -593,7 +633,7 @@ void main() {
     expect(cli.attempts, hasLength(2));
     cli.attempts.last.complete();
     await tester.pumpAndSettle();
-    expect(find.text('Sign in'), findsOneWidget);
+    expect(find.text('Continue with Google'), findsOneWidget);
     await key(tester, LogicalKeyboardKey.enter);
     expect(cli.logins, 1);
     expect(tester.takeException(), isNull);
@@ -990,17 +1030,18 @@ void main() {
       await startHarness(tester);
       await settle();
       expect(connection.installs, ['autonomous/circuit']);
-      expect(
-        inPane('Installing Autonomous Circuit on This Mac'),
-        findsOneWidget,
-      );
+      expect(inPane('Setting up Autonomous Circuit'), findsOneWidget);
+      expect(inPane('On This Mac'), findsOneWidget);
       await say({
         'id': 'autonomous/circuit',
         'phase': 'setup',
         'line': 'npm ci',
       });
       await settle();
-      expect(inPane('✓'), findsOneWidget);
+      expect(
+        find.descendant(of: pane, matching: find.byIcon(AppIcons.circleCheck)),
+        findsOneWidget,
+      );
       expect(inPane('npm ci'), findsWidgets);
       await say({
         'id': 'autonomous/circuit',
@@ -1014,13 +1055,23 @@ void main() {
         'detail': 'setup exited 1',
       });
       await settle();
-      expect(inPane('✗'), findsOneWidget);
+      expect(
+        inPane('Autonomous Circuit could not be installed'),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: pane, matching: find.byIcon(AppIcons.circleAlert)),
+        findsWidgets,
+      );
       expect(connection.creates, isEmpty);
 
       await key(tester, LogicalKeyboardKey.enter);
       await settle();
       expect(connection.installs, hasLength(2));
-      expect(inPane('✗'), findsNothing);
+      expect(
+        find.descendant(of: pane, matching: find.byIcon(AppIcons.circleAlert)),
+        findsNothing,
+      );
       await say({'id': 'autonomous/circuit', 'phase': 'done'});
       connection.reply!.complete({'ok': true});
       await settle();
@@ -1033,8 +1084,48 @@ void main() {
     },
   );
 
+  testWidgets('native Cmd-N focuses the restored task without a click', (
+    tester,
+  ) async {
+    final connection = _CreationConnection();
+    final app = createApp(connectionForTest: (_) => connection);
+    app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
+    seedMixedAgents(app);
+    app.machineStates['m']!
+      ..localOnly = true
+      ..terminalCapabilityAvailable = true;
+    await app.agentPreference.remember('codex');
+    await app.agentPreference.selectLaunch('terminal');
+    final terminalInput = <TerminalBinaryFrame>[];
+    app.adoptSessionForTest(terminal('a0', terminalInput));
+    addTearDown(app.dispose);
+    addTearDown(connection.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: grid.buildAppTheme(brightness: Brightness.dark),
+        home: SwarmScreen(notifier: app, nativeTabs: true),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 200));
+    await key(tester, LogicalKeyboardKey.keyN, cmd: true);
+    await tester.pumpAndSettle();
+    final field = find.byKey(const ValueKey('new-harness-task'));
+    expect(tester.widget<TextField>(field).focusNode!.hasPrimaryFocus, isTrue);
+    final box = tester
+        .widget<NewHarnessForm>(find.byType(NewHarnessForm))
+        .controller;
+    expect(box.engine, 'codex');
+    await tester.enterText(field, 'Ready to type');
+    expect(box.task, 'Ready to type');
+    expect(connection.creates, isEmpty);
+    expect(terminalInput, isEmpty);
+    await tester.tap(find.byKey(const ValueKey('new-harness-close')));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
-    'native first workspace stays quiet until New Harness is requested',
+    'native first workspace offers the shared composer without starting work',
     (tester) async {
       final connection = _CreationConnection();
       final app = _FirstCreationApp(connection);
@@ -1055,8 +1146,16 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 200));
       await tester.pump(const Duration(milliseconds: 200));
-      expect(find.byType(NewHarnessForm), findsNothing);
+      expect(find.byType(NewHarnessForm), findsOneWidget);
       expect(find.byType(WorkspaceWelcome), findsOneWidget);
+      expect(connection.creates, isEmpty);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('new-harness-task')))
+            .focusNode!
+            .hasFocus,
+        isTrue,
+      );
       await key(tester, LogicalKeyboardKey.keyN, cmd: true);
       await tester.pump(const Duration(milliseconds: 200));
       final box = tester
@@ -1064,17 +1163,23 @@ void main() {
           .controller;
       expect(box.engine, 'codex');
       expect(box.needsProject, isTrue);
-      await startHarness(tester);
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('new-harness-field-start')),
+            )
+            .onPressed,
+        isNull,
+      );
       expect(connection.creates, isEmpty);
       expect(box.requiredChoice?.message, 'Choose a project.');
+      await openLaunchRow(tester, 'project');
       await tester.tap(
         find.byKey(
           ValueKey('new-harness-option-${NewHarnessController.newProjectId}'),
         ),
       );
       await tester.pump();
-      expect(box.field, NewHarnessField.machine);
-      await key(tester, LogicalKeyboardKey.enter);
       expect(box.field, NewHarnessField.projectName);
       await typeHarnessQuery(tester, 'first-project');
       await key(tester, LogicalKeyboardKey.enter);
@@ -1101,7 +1206,7 @@ void main() {
   );
 
   testWidgets(
-    'native JEV navigation returns to the original pane and hands off to New Swarm',
+    'native JEV navigation returns to the original pane and hands off to New Tab',
     (tester) async {
       final app = createApp();
       final input = <TerminalBinaryFrame>[];
@@ -1229,11 +1334,11 @@ void main() {
       await command('Keyboard practice');
       expect(learning.finished, isTrue);
       final filter = find.byKey(const ValueKey('practice-filter'));
-      await tester.enterText(filter, 'New Swarm');
+      await tester.enterText(filter, 'New Tab');
       await tester.pump();
       await key(tester, LogicalKeyboardKey.enter);
       await key(tester, LogicalKeyboardKey.keyT, cmd: true);
-      expect(find.text('[x] New Swarm'), findsOneWidget);
+      expect(find.byKey(const ValueKey('practice-completed')), findsOneWidget);
       await key(tester, LogicalKeyboardKey.keyW, cmd: true);
       expect(app.swarms, [original]);
       expect(original.panes, panes);
@@ -1410,7 +1515,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 80));
       final sharedTab = app.activeSwarm;
       expect(sharedTab, isNot(same(source)));
-      expect(sharedTab.name, 'Fix login redirect');
+      expect(sharedTab.name, 'openharness');
       expect(sharedTab.panes.single.session, same(claude));
       expect(source.panes, [firstPane, secondPane]);
       await key(tester, LogicalKeyboardKey.keyW, cmd: true);
@@ -1462,7 +1567,7 @@ void main() {
   );
 
   for (final (label, shortcut) in [
-    ('New Swarm', LogicalKeyboardKey.keyT),
+    ('New Tab', LogicalKeyboardKey.keyT),
     ('Open Harness', LogicalKeyboardKey.keyP),
   ]) {
     testWidgets('native created $label gets terminal input without a click', (
@@ -1489,10 +1594,18 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 200));
+      final expectedTask = shortcut == LogicalKeyboardKey.keyT
+          ? 'Keep the task from my new tab'
+          : 'Check retargeted keyboard input';
       if (shortcut == LogicalKeyboardKey.keyT) {
         await key(tester, shortcut, cmd: true);
+        await tester.pumpAndSettle();
         expect(find.byType(WorkspaceWelcome), findsOneWidget);
         expect(find.byKey(const ValueKey('swarm-search-input')), findsNothing);
+        await tester.enterText(
+          find.byKey(const ValueKey('new-harness-task')),
+          expectedTask,
+        );
       }
       await key(tester, LogicalKeyboardKey.keyP, cmd: true);
       final search = find.byKey(const ValueKey('swarm-search-input'));
@@ -1511,11 +1624,19 @@ void main() {
             .widget<NewHarnessForm>(find.byType(NewHarnessForm))
             .controller
             .task,
-        'Check retargeted keyboard input',
+        isEmpty,
+      );
+      // Ordinary Cmd-N forms now start fresh after dismissal or retargeting.
+      // Enter a reviewed task here, then keep checking that creation hands
+      // input directly to its new terminal rather than the original session.
+      await tester.enterText(
+        find.byKey(const ValueKey('new-harness-task')),
+        expectedTask,
       );
       await startHarness(tester);
       await tester.pump(const Duration(milliseconds: 200));
       await tester.pump();
+      expect(connection.creates.single['prompt'], expectedTask);
       expect(find.byType(NewHarnessForm), findsNothing);
       expect(app.activeSwarm, same(destination));
       expect(
@@ -1683,7 +1804,7 @@ void main() {
   }
 
   testWidgets(
-    'native creation resets canceled edits and launches the reviewed choices',
+    'native creation preserves canceled edits and launches the reviewed choices',
     (tester) async {
       final connection = _CreationConnection();
       final app = createApp(connectionForTest: (_) => connection);
@@ -1755,30 +1876,19 @@ void main() {
       );
 
       await openLaunchRow(tester, 'project');
-      await typeHarnessQuery(tester, 'does-not-match-any-existing-project');
-      for (
-        var step = 0;
-        prompt().selected?.id != NewHarnessController.existingProjectId &&
-            step < 8;
-        step++
-      ) {
-        await key(tester, LogicalKeyboardKey.arrowDown);
-      }
-      expect(prompt().selected?.id, NewHarnessController.existingProjectId);
-      await key(tester, LogicalKeyboardKey.enter);
-      expect(prompt().field, NewHarnessField.machine);
-      await key(tester, LogicalKeyboardKey.enter);
-      expect(prompt().field, NewHarnessField.project);
-      expect(
-        prompt().options.any(
-          (option) => option.id == NewHarnessController.browseId,
-        ),
-        isTrue,
+      await tester.tap(find.byKey(const ValueKey('new-harness-repo-machine')));
+      await tester.pumpAndSettle();
+      final localMachine = find.byKey(
+        const ValueKey('new-harness-machine-option-m'),
       );
-      await key(tester, LogicalKeyboardKey.escape);
-      expect(prompt().field, NewHarnessField.machine);
-      await key(tester, LogicalKeyboardKey.escape);
+      expect(localMachine, findsOneWidget);
       expect(prompt().field, NewHarnessField.projectMenu);
+      await key(tester, LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(localMachine, findsNothing);
+      expect(prompt().field, NewHarnessField.projectMenu);
+      await key(tester, LogicalKeyboardKey.escape);
+      expect(prompt().field, NewHarnessField.launch);
 
       await openLaunchRow(tester, 'approvals');
       await typeHarnessQuery(tester, 'Plan first');
@@ -1796,21 +1906,13 @@ void main() {
       );
       expect(connection.creates, isEmpty);
 
-      // A canceled draft does not become the next Cmd-N's defaults.
+      // Dismissing a draft preserves the reviewed choices and prompt.
       await key(tester, LogicalKeyboardKey.keyN, cmd: true);
-      await tester.pump(const Duration(milliseconds: 80));
-      expect(prompt().engine, 'codex');
-      expect(prompt().modeLabel, 'Auto-approve');
-      expect(prompt().task, '');
-      expect(prompt().project.folder, '/work/openharness');
-      await openLaunchRow(tester, 'agent');
-      await typeHarnessQuery(tester, 'claude');
-      await key(tester, LogicalKeyboardKey.enter);
-      await openLaunchRow(tester, 'approvals');
-      await typeHarnessQuery(tester, 'Plan first');
-      await key(tester, LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
       expect(prompt().engine, 'claude');
       expect(prompt().mode, 'plan');
+      expect(prompt().task, task);
+      expect(prompt().project.folder, '/work/openharness');
       await startHarness(tester);
       await tester.pump(const Duration(milliseconds: 200));
       expect(find.byType(NewHarnessForm), findsNothing);
@@ -1818,7 +1920,7 @@ void main() {
       expect(source.panes.length, 2);
       expect(source.panes.first, same(original));
       expect(app.focusedPane!.agentId, 'made');
-      expect(connection.creates.single['prompt'], isNull);
+      expect(connection.creates.single['prompt'], task);
       expect(connection.creates.single, containsPair('engine', 'claude'));
       expect(connection.creates.single, containsPair('permissionMode', 'plan'));
       expect(
@@ -1876,12 +1978,12 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 200));
-      final field = find.byKey(const ValueKey('connect-password-studio-input'));
+      final field = find.byKey(const ValueKey('remote-password-connect-field'));
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
+      await openMachineEditor(tester, 'studio', 'resource_connect');
       expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
       await tester.enterText(field, 'fixture password');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await key(tester, LogicalKeyboardKey.enter);
       await tester.pump();
       expect(links.requests, ['studio']);
       expect(tester.widget<TextField>(field).readOnly, isTrue);
@@ -1896,7 +1998,7 @@ void main() {
       expect(links.requests, ['studio', 'studio']);
       await key(tester, LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('machines-panel')), findsNothing);
+      await closeMachinePicker(tester);
       expect(app.focusedPane, same(pane));
       expect(input, isEmpty);
       await key(tester, LogicalKeyboardKey.arrowLeft);
@@ -1904,6 +2006,7 @@ void main() {
       input.clear();
       await key(tester, LogicalKeyboardKey.keyM, cmd: true);
       await tester.pumpAndSettle();
+      await openMachineEditor(tester, 'studio', 'resource_connect');
       expect(tester.widget<TextField>(field).readOnly, isTrue);
       expect(tester.widget<TextField>(field).controller!.text, isEmpty);
       await key(tester, LogicalKeyboardKey.enter);
@@ -1916,8 +2019,7 @@ void main() {
       expect(field, findsNothing);
       expect(pane.session, same(session));
       expect(input, isEmpty);
-      await key(tester, LogicalKeyboardKey.escape);
-      await tester.pumpAndSettle();
+      await closeMachinePicker(tester);
       await key(tester, LogicalKeyboardKey.arrowRight);
       await tester.pump(const Duration(milliseconds: 20));
       expect(input.single.bytes, [27, 91, 67]);
@@ -1959,32 +2061,33 @@ void main() {
       await tester.pumpAndSettle();
       await key(tester, LogicalKeyboardKey.keyM, cmd: true);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Set password'));
-      await tester.pumpAndSettle();
-      final password = find.byKey(const ValueKey('make-available-password'));
+      await openMachineEditor(tester, 'm', 'resource_settings');
+      final password = find.byKey(const ValueKey('remote-password-field'));
       expect(tester.widget<TextField>(password).focusNode!.hasFocus, isTrue);
       await tester.enterText(password, 'fixture password');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.enterText(
+        find.byKey(const ValueKey('remote-password-confirm-field')),
+        'fixture password',
+      );
+      await key(tester, LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
       expect(cli.passwords, ['fixture password']);
-      await key(tester, LogicalKeyboardKey.escape);
-      await tester.pumpAndSettle();
-      await key(tester, LogicalKeyboardKey.keyM, cmd: true);
-      await tester.pumpAndSettle();
-      expect(find.text('Saving password…'), findsOneWidget);
+      await closeMachinePicker(tester);
+      await openMachineEditor(tester, 'm', 'resource_settings');
+      expect(find.text('Saving…'), findsOneWidget);
       expect(cli.passwords, hasLength(1));
       cli.setReply!.complete(cli.setResult);
       await tester.pumpAndSettle();
-      expect(find.text('Change password'), findsOneWidget);
-      await tester.tap(find.text('Change password'));
+      expect(find.text('Password saved.'), findsOneWidget);
+      await openMachineEditor(tester, 'm', 'resource_settings');
+      expect(find.text('Password is set.'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('machine-form:Change')));
       await tester.pumpAndSettle();
       expect(tester.widget<TextField>(password).focusNode!.hasFocus, isTrue);
       expect(tester.widget<TextField>(password).controller!.text, isEmpty);
-      await tester.tap(find.text('Cancel'));
+      await tester.tap(find.byKey(const ValueKey('machine-form:Cancel')));
       await tester.pumpAndSettle();
-      expect(find.text('Change password'), findsOneWidget);
-      await key(tester, LogicalKeyboardKey.escape);
-      await tester.pumpAndSettle();
+      await closeMachinePicker(tester);
       expect(app.focusedPane, same(pane));
       expect(pane.session, same(session));
       expect(input, isEmpty);
@@ -2024,52 +2127,46 @@ void main() {
     await tester.pumpAndSettle();
     await key(tester, LogicalKeyboardKey.keyM, cmd: true);
     await tester.pumpAndSettle();
-    Future<void> action(String label) async {
-      final options = find.byTooltip(
-        'Options for ${app.stateOf('studio')!.machine.displayName}',
-      );
-      await tester.ensureVisible(options);
-      await tester.tap(options);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(label));
-      await tester.pumpAndSettle();
-    }
+    Future<void> action(String label) => openMachineEditor(
+      tester,
+      'studio',
+      label == 'Rename' ? 'resource_rename' : 'resource_remove',
+    );
 
     await action('Rename');
     final rename = find.byKey(const Key('machine-rename-input'));
     expect(tester.widget<TextField>(rename).focusNode!.hasFocus, isTrue);
-    tester.testTextInput.enterText('Office builder');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.enterText(rename, 'Office builder');
+    await key(tester, LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
     expect(api.renames, [('studio', 'Office builder')]);
     await key(tester, LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
+    expect(resourceScope('@'), findsOneWidget);
     await action('Rename');
     expect(tester.widget<TextField>(rename).readOnly, isTrue);
     expect(api.renames, hasLength(1));
     api.renameReply!.complete('Office builder');
     await tester.pumpAndSettle();
-    expect(find.text('Office builder'), findsOneWidget);
+    expect(find.text('Office builder'), findsWidgets);
     await action('Remove from account…');
     await key(tester, LogicalKeyboardKey.enter); // Cancel is the default.
     await tester.pumpAndSettle();
     expect(api.deletes, isEmpty);
     await action('Remove from account…');
-    await tester.tap(find.byKey(const Key('machine-delete-confirm')));
+    await tester.tap(find.byKey(const ValueKey('machine-form:Delete')));
     await tester.pumpAndSettle();
     expect(api.deletes, ['studio']);
     await key(tester, LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     await action('Remove from account…');
-    expect(find.text('Deleting machine…'), findsOneWidget);
+    expect(find.text('Deleting…'), findsOneWidget);
     expect(api.deletes, hasLength(1));
     api.deleteReply!.complete();
     await tester.pumpAndSettle();
     expect(app.stateOf('studio'), isNull);
-    expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
-    await key(tester, LogicalKeyboardKey.escape);
-    await tester.pumpAndSettle();
+    expect(resourceScope('@'), findsOneWidget);
+    await closeMachinePicker(tester);
     expect(app.focusedPane, same(pane));
     expect(pane.session, same(session));
     expect(input, isEmpty);
@@ -2304,7 +2401,7 @@ void main() {
         const WsRequestTimeout('agent_fork'),
       );
       await tester.pumpAndSettle();
-      expect(find.text('enter  check status'), findsOneWidget);
+      expect(find.text('Check status'), findsOneWidget);
       await key(tester, LogicalKeyboardKey.enter);
       expect(connection.checks, [
         {'creationId': id},
@@ -2383,7 +2480,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.text(
-          'Started a new conversation. The previous session could not be resumed.',
+          'Started a new conversation. The previous conversation could not be resumed.',
         ),
         findsOneWidget,
       );

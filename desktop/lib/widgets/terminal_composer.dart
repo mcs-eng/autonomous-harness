@@ -1,8 +1,8 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../theme/app_theme.dart';
@@ -344,9 +344,7 @@ class ComposerGrip extends StatelessWidget {
                   width: 40,
                   height: height,
                   child: Icon(
-                    expanded
-                        ? LucideIcons.chevronDown300
-                        : LucideIcons.chevronUp300,
+                    expanded ? AppIcons.chevronDown : AppIcons.chevronUp,
                     size: 12,
                     // One step up from the faint ink this started on, in both directions at once:
                     // the token resolves lighter on dark and darker on light, so the glyph gains

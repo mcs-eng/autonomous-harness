@@ -8,6 +8,7 @@ import 'package:xterm/xterm.dart' show TerminalTheme;
 import '../daemons/daemon_lines.dart';
 import '../daemons/daemon_plate_client.dart';
 import '../daemons/individuals.dart';
+import '../daemons/illustrated_art.dart';
 import '../daemons/plates.dart';
 import '../daemons/render.dart';
 import '../daemons/roster.dart';
@@ -15,9 +16,10 @@ import '../daemons/zoo.dart';
 import '../shared/theme/app_theme.dart';
 import '../terminal/terminal_text.dart';
 import '../terminal/terminal_theme_store.dart';
-import 'box_chrome.dart';
+import 'desktop_chrome.dart';
 import 'daemon_consent.dart';
 import 'daemon_portrait.dart';
+import 'daemon_illustration.dart';
 import 'daemon_slot.dart';
 
 /// Where the reveal is. Exposed so render checks can draw any moment of it.
@@ -254,9 +256,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
   /// Each row of the rise.
   static const riseRow = 55;
 
-  /// How deep the hatchling stands in the bottom half once it is out.
-  static const sunk = 2;
-
   /// Each of the morph's three frames.
   static const morphFrame = 160;
 
@@ -269,8 +268,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
   HatchStage _stage = HatchStage.egg;
   int _frame = 0;
   int? _risen;
-  int _loopTick = 0;
-  Timer? _loopTimer;
   String? _lid;
   int _bannerRows = 0;
   int? _morph;
@@ -343,7 +340,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
   void dispose() {
     _closed = true;
     _waitTimer?.cancel();
-    _loopTimer?.cancel();
     if (_waitDone case final done? when !done.isCompleted) done.complete();
     _focus.dispose();
     _copyFocus.dispose();
@@ -406,9 +402,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     if (_waitDone case final done? when !done.isCompleted) done.complete();
   }
 
-  List<PlateFrame> _eggFrames(String stage) =>
-      daemonPlates.egg(_kind, PlateSize.reveal, stage);
-
   /// Step through an egg stage's frames: [first] ms for the first, [each]
   /// for the rest, [times] through.
   Future<bool> _play(
@@ -418,7 +411,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     int? first,
     int times = 1,
   }) async {
-    final frames = _eggFrames(name).length;
+    final frames = IllustratedArt.egg(kind: _kind, stage: name).frames;
     for (var round = 0; round < times; round++) {
       for (var i = 0; i < max(1, frames); i++) {
         _show(() {
@@ -537,7 +530,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       });
       if (!await _wait(silhouetteFor)) return;
       _show(() => _stage = HatchStage.colour);
-      _startLoop();
       if (!await _wait(320)) return;
       _show(() => _lid = def.lid ?? '-');
       if (!await _wait(120)) return;
@@ -552,8 +544,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         if (!await _wait(90)) return;
       }
     }
-    _loopTimer?.cancel();
-    _loopTimer = null;
     final naming = widget.onName != null && _owned != null;
     _show(() {
       _stage = naming ? HatchStage.name : HatchStage.card;
@@ -569,18 +559,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       } else {
         (widget.needsConsent ? _nextFocus : _copyFocus).requestFocus();
       }
-    });
-  }
-
-  /// The hatchling's idle loop steps while it stands in the shell, before
-  /// the card, unless nothing may move.
-  void _startLoop() {
-    final h = _hatchling;
-    if (widget.reduceMotion || h == null || h.frames.length < 2) return;
-    _loopTimer?.cancel();
-    _loopTimer = Timer.periodic(Duration(milliseconds: h.frameMs), (_) {
-      if (!_alive) return;
-      setState(() => _loopTick++);
     });
   }
 
@@ -755,8 +733,28 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     final card = _card;
     if (card == null) return;
     try {
-      await Clipboard.setData(ClipboardData(text: cardCodeBlock(card)));
-      if (mounted) setState(() => _copyNote = 'Copied as a code block.');
+      await Clipboard.setData(
+        ClipboardData(
+          text: IllustratedArt.supports(_def?.id)
+              ? illustratedCardDetails(
+                  card,
+                  _portraitArt?.frames.first.rows.length ??
+                      cardPortrait(
+                        roster,
+                        _def!,
+                        roster.rules.versions.first,
+                      ).length,
+                )
+              : cardCodeBlock(card),
+        ),
+      );
+      if (mounted) {
+        setState(
+          () => _copyNote = IllustratedArt.supports(_def?.id)
+              ? 'Details copied.'
+              : 'Copied as a code block.',
+        );
+      }
     } catch (_) {
       if (mounted) setState(() => _copyNote = 'Could not copy.');
     }
@@ -805,14 +803,13 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       ]),
       builder: (context, _) {
         final theme = currentTerminalTheme();
-        final cell = terminalCellSizeOf(context);
         final pitch = _pitch;
-        final background = pitch ? daemonPitch : theme.background;
         // On the black stage the ink is light, whatever the theme.
         final fg = pitch ? const Color(0xffd0d0d0) : theme.foreground;
-        final ink = terminalContentStyle(color: fg)
-            .copyWith(fontFeatures: daemonTextFeatures);
-        final muted = fg.withValues(alpha: .6);
+        final ink = terminalContentStyle(color: fg).copyWith(
+          fontFeatures: daemonTextFeatures,
+          fontWeight: FontWeight.normal,
+        );
         return CallbackShortcuts(
           bindings: {const SingleActivator(LogicalKeyboardKey.escape): _escape},
           child: Focus(
@@ -824,28 +821,31 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
               label: 'Hatching',
               child: Material(
                 key: const ValueKey('daemon-hatch'),
-                color: background,
+                color: DesktopChrome.surface,
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(kTerminalCornerRadius),
-                  side: terminalPaneBorder(focused: true),
+                  borderRadius: BorderRadius.circular(
+                    DesktopChrome.dialogRadius,
+                  ),
+                  side: BorderSide(
+                    color: MediaQuery.highContrastOf(context)
+                        ? DesktopChrome.foreground.withValues(alpha: .6)
+                        : DesktopChrome.rim,
+                  ),
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: SingleChildScrollView(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: cell.width * 2,
-                    vertical: cell.height,
-                  ),
+                  padding: const EdgeInsets.all(24),
                   // A steady stage: the egg, the hatchling standing in it
                   // and the banner all fit, so the reveal never jumps before
                   // the card.
                   child: ConstrainedBox(
                     constraints: BoxConstraints(
-                      minHeight: cell.height * _stageRows,
+                      minHeight: _stage.index < HatchStage.card.index ? 390 : 0,
                     ),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       mainAxisAlignment: MainAxisAlignment.center,
-                      children: _children(theme, cell, ink, muted, pitch),
+                      children: _children(theme, ink, pitch),
                     ),
                   ),
                 ),
@@ -857,223 +857,92 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     );
   }
 
-  /// The rows every moment of the egg is drawn on: the egg at the reveal
-  /// size, with room above its bottom half for the tallest hatchling of the
-  /// released drops to stand in it.
-  int get _canvasRows {
-    final egg = _eggFrames('open').firstOrNull;
-    if (egg == null) return 0;
-    final rim = _rim(egg);
-    var tallest = _hatchling?.rows.length ?? 0;
-    for (final d in roster.released(DateTime.now())) {
-      if (!d.plate) continue;
-      tallest = max(
-        tallest,
-        daemonPlates
-            .frame(
-              d.id,
-              PlateSize.reveal,
-              roster.rules.versions.first,
-              DaemonMood.idle,
-            )
-            .length,
-      );
-    }
-    return egg.rows.length + max(0, tallest - rim - sunk);
-  }
-
-  /// The first row of the bottom half the hatchling rises out of.
-  static int _rim(PlateFrame open) {
-    final at = open.rows.indexWhere((r) => r.trim().isNotEmpty);
-    return at < 0 ? 0 : at;
-  }
-
-  /// Rows the stage keeps before the card: the egg's canvas at the
-  /// portrait's line height, with its banner under it.
-  double get _stageRows => max(14, (_canvasRows + 5) * 1.15 + 1);
-
   /// The egg at this moment, as rows on the stage's canvas and the colour of
   /// each cell: the shell in its kind's gradient, the light inside in the
   /// rarity's colour once it opens (a secret's dimmed), and from the rise on
   /// the hatchling standing in the bottom half, as `#` in the faint colour
   /// until it fills with its own.
   Widget _eggStage(TerminalTheme theme, TextStyle ink) {
-    final egg = _eggFrames(switch (_stage) {
+    final stage = switch (_stage) {
       HatchStage.egg => 'p4',
       HatchStage.rock => 'rock',
-      HatchStage.burst => 'burst',
+      HatchStage.burst || HatchStage.pitch => 'burst',
       HatchStage.tumble => 'tumble',
       _ => 'open',
-    });
-    if (egg.isEmpty) return const SizedBox.shrink();
-    final frame = egg[_frame % egg.length];
-    final background = _pitch ? daemonPitch : theme.background;
-    final eggInk = daemonEggInk(
-      roster,
-      _kind,
-      theme,
-      light: _light,
-      dim: _dim,
-      background: background,
-    );
-    final canvasRows = max(_canvasRows, frame.rows.length);
-    final top = canvasRows - frame.rows.length;
-    final hatchling = switch (_stage) {
-      HatchStage.rise ||
-      HatchStage.silhouette ||
-      HatchStage.colour ||
-      HatchStage.banner => _hatchling,
-      _ => null,
     };
+    final key = ValueKey(switch (_stage) {
+      HatchStage.egg => 'daemon-hatch-egg',
+      HatchStage.rock => 'daemon-hatch-egg-rock',
+      HatchStage.burst => 'daemon-hatch-egg-burst-$_light',
+      HatchStage.tumble => 'daemon-hatch-egg-tumble',
+      HatchStage.open => 'daemon-hatch-egg-open',
+      HatchStage.rise => 'daemon-hatch-rise',
+      HatchStage.silhouette => 'daemon-hatch-silhouette',
+      _ => 'daemon-hatch-colour',
+    });
+    final rising = _stage == HatchStage.rise;
+    final showCreature =
+        rising ||
+        _stage == HatchStage.silhouette ||
+        _stage == HatchStage.colour ||
+        _stage == HatchStage.banner;
     final def = _def;
-    final silhouetted =
-        _stage == HatchStage.rise || _stage == HatchStage.silhouette;
-    final hFrame = hatchling == null
-        ? null
-        : hatchling.frames[silhouetted
-              ? 0
-              : _loopTick % hatchling.frames.length];
-    final hRows = hFrame?.rows.length ?? 0;
-    final risen = min(_risen ?? hRows, hRows);
-    final rim = top + _rim(frame);
-    // The hatchling's top row: out of sight in the bottom half at first,
-    // then a row higher each step, until it stands [sunk] rows deep.
-    final hTop = rim + sunk - risen;
-    final width = max(
-      frame.rows.first.length,
-      hFrame?.rows.fold<int>(0, (w, r) => max(w, r.length)) ?? 0,
-    );
-    final eggLeft = (width - frame.rows.first.length) ~/ 2;
-    final hWidth = hFrame?.rows.fold<int>(0, (w, r) => max(w, r.length)) ?? 0;
-    final hLeft = (width - hWidth) ~/ 2;
-    final faint = ink.color!.withValues(alpha: .35);
-    final shiny = _hatch?.shiny == true;
-    final PlateCellInk? bodyInk = def == null || hatchling == null
-        ? null
-        : !def.plate
-        ? null
-        : daemonIndividualInk(
-                roster,
-                def,
-                hatchling.traits,
-                theme,
-                shiny: shiny,
-                background: background,
-              ) ??
-              daemonPlateInk(
-                roster,
-                def,
-                theme,
-                shiny: shiny,
-                background: background,
-              );
-    final lineColour = def == null
-        ? faint
-        : daemonColor(def, theme, shiny: shiny);
-    final rows = <String>[];
-    final colours = <List<Color?>>[];
-    for (var r = 0; r < canvasRows; r++) {
-      final er = r - top;
-      final hr = r - hTop;
-      final row = StringBuffer();
-      final rowColours = <Color?>[];
-      for (var c = 0; c < width; c++) {
-        final ec = c - eggLeft;
-        final eggCh =
-            er >= 0 &&
-                er < frame.rows.length &&
-                ec >= 0 &&
-                ec < frame.rows[er].length
-            ? frame.rows[er][ec]
-            : ' ';
-        final hc = c - hLeft;
-        final hCh =
-            hFrame != null &&
-                hr >= 0 &&
-                hr < hRows &&
-                r < rim + sunk &&
-                hc >= 0 &&
-                hc < hFrame.rows[hr].length
-            ? hFrame.rows[hr][hc]
-            : ' ';
-        // Above the rim the hatchling is in front; from the rim down the
-        // shell hides what is still inside.
-        final shellFirst = r >= rim;
-        final useShell = eggCh != ' ' && (shellFirst || hCh == ' ');
-        if (useShell) {
-          row.write(eggCh);
-          rowColours.add(
-            eggInk.cell(frame.rows.length, er, eggCh, frame.mat(er, ec)),
-          );
-        } else if (hCh != ' ') {
-          if (silhouetted) {
-            row.write('#');
-            rowColours.add(faint);
-          } else {
-            row.write(hCh);
-            rowColours.add(
-              bodyInk?.cell(hRows, hr, hCh, hFrame!.mat(hr, hc)) ?? lineColour,
-            );
-          }
-        } else {
-          row.write(' ');
-          rowColours.add(null);
-        }
-      }
-      rows.add(row.toString());
-      colours.add(rowColours);
-    }
-    final size = ink.fontSize ?? 13;
-    final style = ink.copyWith(
-      height: 1.15,
-      shadows: [
-        Shadow(
-          color: eggInk.glow.withValues(alpha: _dim ? .3 : .4),
-          blurRadius: size * .8,
-        ),
-      ],
-    );
+    final rows = _hatchling?.rows.length ?? 1;
+    final progress = rising
+        ? ((_risen ?? rows) / max(1, rows)).clamp(0.0, 1.0)
+        : 1.0;
     return FittedBox(
       fit: BoxFit.scaleDown,
-      child: RepaintBoundary(
-        child: Text.rich(
-          TextSpan(
+      child: SizedBox.square(
+        dimension: 350,
+        child: ClipRect(
+          child: Stack(
+            key: key,
             children: [
-              for (final (r, row) in rows.indexed) ...[
-                ...canvasRowSpans(row, colours[r], style),
-                if (r < rows.length - 1) TextSpan(text: '\n', style: style),
-              ],
+              if (showCreature && def != null)
+                ClipRect(
+                  clipper: const _HatchBowlClipper(),
+                  child: Transform.translate(
+                    offset: Offset(0, 30 - progress * 120),
+                    child: DaemonPortrait(
+                      roster: roster,
+                      def: def,
+                      version: roster.rules.versions.first,
+                      style: ink.copyWith(
+                        color: ink.color!.withValues(alpha: .42),
+                      ),
+                      theme: theme,
+                      size: PlateSize.reveal,
+                      silhouette: rising || _stage == HatchStage.silhouette,
+                      animate:
+                          !widget.reduceMotion &&
+                          widget.still == null &&
+                          (_stage == HatchStage.colour ||
+                              _stage == HatchStage.banner),
+                      lid: _lid,
+                      traits: _hatchling?.traits,
+                      art: _hatchling?.art,
+                      semanticsLabel: rising || _stage == HatchStage.silhouette
+                          ? 'A hatchling emerging'
+                          : '${def.id}, newly hatched',
+                    ),
+                  ),
+                ),
+              DaemonIllustration(
+                art: IllustratedArt.egg(kind: _kind, stage: stage),
+                frame: _frame,
+                silhouette: _dim
+                    ? theme.foreground.withValues(alpha: .4)
+                    : null,
+                semanticsLabel: '$stage egg',
+              ),
             ],
           ),
-          key: ValueKey(switch (_stage) {
-            HatchStage.egg => 'daemon-hatch-egg',
-            HatchStage.rock => 'daemon-hatch-egg-rock',
-            HatchStage.burst => 'daemon-hatch-egg-burst-$_light',
-            HatchStage.tumble => 'daemon-hatch-egg-tumble',
-            HatchStage.open => 'daemon-hatch-egg-open',
-            HatchStage.rise => 'daemon-hatch-rise',
-            HatchStage.silhouette => 'daemon-hatch-silhouette',
-            _ => 'daemon-hatch-portrait',
-          }),
-          semanticsLabel: switch (_stage) {
-            HatchStage.egg || HatchStage.rock => 'An egg, hatching',
-            HatchStage.burst ||
-            HatchStage.tumble ||
-            HatchStage.open => 'The egg opens',
-            HatchStage.rise || HatchStage.silhouette => 'A silhouette',
-            _ =>
-              def == null
-                  ? 'A hatchling'
-                  : '${def.id} ${roster.rules.versions.first}',
-          },
-          style: style,
         ),
       ),
     );
   }
 
-  /// A portrait on the stage (a merged duplicate's): a plate at the reveal
-  /// size, or its line portrait.
   Widget _portrait(
     DaemonDef def,
     String version,
@@ -1084,34 +953,74 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     DaemonMood mood = DaemonMood.idle,
     bool shiny = false,
     List<String>? rows,
+    String? growFrom,
+    double growth = 1,
   }) => FittedBox(
     fit: BoxFit.scaleDown,
-    child: DaemonPortrait(
-      roster: roster,
-      def: def,
-      version: version,
-      style: ink.copyWith(height: 1.15),
-      theme: theme,
-      size: PlateSize.reveal,
-      mood: mood,
-      shiny: shiny,
-      rows: rows,
-      background: daemonBackdrop(def) ?? theme.background,
-      animate: !widget.reduceMotion && widget.still == null,
-      lid: _lid,
-      textKey: key,
-      semanticsLabel: label,
+    child: IllustratedArt.supports(def.id) && growFrom != null && growth < 1
+        ? SizedBox.square(
+            dimension: 350,
+            child: Stack(
+              key: key,
+              children: [
+                Opacity(
+                  opacity: 1 - growth,
+                  child: DaemonIllustration(
+                    art: IllustratedArt.daemon(
+                      def.id,
+                      version: growFrom,
+                      traits: _traits,
+                    ),
+                  ),
+                ),
+                Opacity(
+                  opacity: growth,
+                  child: DaemonIllustration(
+                    art: IllustratedArt.daemon(
+                      def.id,
+                      traits: _traits,
+                      version: version,
+                      mood: mood,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          )
+        : DaemonPortrait(
+            roster: roster,
+            def: def,
+            version: version,
+            style: ink.copyWith(height: 1.15),
+            theme: theme,
+            size: PlateSize.reveal,
+            mood: mood,
+            shiny: shiny,
+            rows: rows,
+            background: daemonBackdrop(def) ?? theme.background,
+            animate: !widget.reduceMotion && widget.still == null,
+            lid: _lid,
+            textKey: key,
+            semanticsLabel: label,
+          ),
+  );
+
+  /// Artwork keeps the selected terminal font and background while ordinary
+  /// controls follow the desktop appearance and accessibility text size.
+  Widget _artWell(Widget child, Color background) => ClipRRect(
+    borderRadius: BorderRadius.circular(8),
+    child: ColoredBox(
+      color: background,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: MediaQuery.withNoTextScaling(child: child),
+      ),
     ),
   );
 
-  List<Widget> _children(
-    TerminalTheme theme,
-    Size cell,
-    TextStyle ink,
-    Color muted,
-    bool pitch,
-  ) {
+  List<Widget> _children(TerminalTheme theme, TextStyle ink, bool pitch) {
     final def = _def;
+    final stageGround = pitch ? daemonPitch : theme.background;
     if (_stage == HatchStage.consent || _stage == HatchStage.suggest) {
       final name = _owned?.name ?? def?.id ?? 'it';
       return [
@@ -1119,7 +1028,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
           alignment: Alignment.centerLeft,
           child: DaemonConsent(
             name: name,
-            ink: ink.color,
             step: _stage == HatchStage.consent
                 ? DaemonConsentStep.watch
                 : DaemonConsentStep.suggest,
@@ -1145,15 +1053,16 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         Text(
           'The egg did not open.',
           key: const ValueKey('daemon-hatch-failed'),
-          style: ink,
+          style: DesktopChrome.heading(),
         ),
+        const SizedBox(height: 8),
         Text(
           'harnessd could not be reached. It is still in your zoo.',
           textAlign: TextAlign.center,
-          style: ink.copyWith(color: muted),
+          style: DesktopChrome.text(size: 13),
         ),
-        SizedBox(height: cell.height),
-        _button('[ close ]', _close, theme, ink),
+        const SizedBox(height: 20),
+        _button('Close', _close),
       ];
     }
     if (def == null ||
@@ -1162,10 +1071,10 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         _stage == HatchStage.burst ||
         _stage == HatchStage.tumble ||
         _stage == HatchStage.open) {
-      return [_eggStage(theme, ink)];
+      return [_artWell(_eggStage(theme, ink), stageGround)];
     }
     if (_stage == HatchStage.merged || _stage == HatchStage.grew) {
-      return _merged(def, theme, cell, ink, muted);
+      return _merged(def, theme, ink);
     }
     final shiny = _hatch?.shiny == true;
     final traits = _traits;
@@ -1179,8 +1088,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     final rows = bannerRows(def.id);
     final carded = _stage == HatchStage.card || _stage == HatchStage.name;
     final card = carded ? _card : null;
-    // The shared banner face (daemons/banner.json), monospace, at a line
-    // height that keeps its rows from touching.
+    // The banner and serialized card are terminal artwork, not UI labels.
     final banner = ink.copyWith(height: 1.15);
     final cardGround = pitch
         ? const Color(0xff0c0c0c)
@@ -1191,212 +1099,199 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
               '${oneInText(oneIn(roster, def.id, traits))}'
         : null;
     return [
-      if (_stage == HatchStage.pitch)
-        Padding(
-          padding: EdgeInsets.only(bottom: cell.height),
-          child: Text(
-            'It is pitch black. You are likely to be eaten by a grue.',
-            key: const ValueKey('daemon-hatch-pitch'),
-            textAlign: TextAlign.center,
-            style: ink.copyWith(color: const Color(0xff949494)),
-          ),
+      _artWell(
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_stage == HatchStage.pitch)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Text(
+                  'It is pitch black. You are likely to be eaten by a grue.',
+                  key: const ValueKey('daemon-hatch-pitch'),
+                  textAlign: TextAlign.center,
+                  style: ink.copyWith(color: const Color(0xff949494)),
+                ),
+              ),
+            if (_stage != HatchStage.pitch && card == null)
+              _eggStage(theme, ink),
+            if (_bannerRows > 0) ...[
+              const SizedBox(height: 8),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  IllustratedArt.supports(def.id)
+                      ? IllustratedArt.name(def.id)
+                      : rows.take(_bannerRows).join('\n'),
+                  key: const ValueKey('daemon-hatch-banner'),
+                  semanticsLabel: def.id,
+                  style: banner,
+                ),
+              ),
+            ],
+            if (carded) ...[
+              const SizedBox(height: 8),
+              Text(
+                rarityStamp(roster, def, shiny: shiny),
+                key: const ValueKey('daemon-hatch-stamp'),
+                style: ink.copyWith(color: rarity, letterSpacing: 1),
+              ),
+              if (flags != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  flags,
+                  key: const ValueKey('daemon-hatch-flags'),
+                  textAlign: TextAlign.center,
+                  style: ink,
+                ),
+              ],
+              if (card != null) ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: cardGround,
+                    border: Border.all(color: ink.color!.withValues(alpha: .2)),
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: DaemonCardText(
+                      key: const ValueKey('daemon-hatch-card'),
+                      lines: card,
+                      illustration: IllustratedArt.supports(def.id)
+                          ? IllustratedArt.daemon(
+                              def.id,
+                              version: version,
+                              traits: _traits,
+                            )
+                          : null,
+                      portraitRows:
+                          art?.frames.first.rows.length ??
+                          cardPortrait(roster, def, version).length,
+                      style: ink.copyWith(fontSize: (ink.fontSize ?? 13) * .92),
+                      colour: daemonColor(def, theme, shiny: shiny),
+                      backdrop: daemonBackdrop(def),
+                      mats: art?.frames.first.mats,
+                      plate:
+                          daemonIndividualInk(
+                            roster,
+                            def,
+                            traits,
+                            theme,
+                            shiny: shiny,
+                            background: cardGround,
+                          ) ??
+                          daemonPlateInk(
+                            roster,
+                            def,
+                            theme,
+                            shiny: shiny,
+                            background: cardGround,
+                          ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ],
         ),
-      if (_stage != HatchStage.pitch && card == null) _eggStage(theme, ink),
-      if (_bannerRows > 0) ...[
-        SizedBox(height: cell.height / 2),
-        Text(
-          rows.take(_bannerRows).join('\n'),
-          key: const ValueKey('daemon-hatch-banner'),
-          semanticsLabel: def.id,
-          style: banner,
-        ),
-      ],
+        stageGround,
+      ),
       if (carded) ...[
-        SizedBox(height: cell.height / 2),
+        const SizedBox(height: 16),
         Text(
-          rarityStamp(roster, def, shiny: shiny),
-          key: const ValueKey('daemon-hatch-stamp'),
-          style: ink.copyWith(color: rarity, letterSpacing: 1),
-        ),
-        if (flags != null) ...[
-          SizedBox(height: cell.height / 2),
-          Text(
-            flags,
-            key: const ValueKey('daemon-hatch-flags'),
-            textAlign: TextAlign.center,
-            style: ink,
-          ),
-        ],
-        SizedBox(height: cell.height / 2),
-        Text(
-          "fork() returned 0. it's a ${def.id}.",
+          'Meet ${def.id}.',
           key: const ValueKey('daemon-hatch-words'),
           textAlign: TextAlign.center,
-          style: ink.copyWith(color: muted),
+          style: DesktopChrome.heading(),
         ),
         if (card != null) ...[
-          SizedBox(height: cell.height),
-          Container(
-            padding: EdgeInsets.all(cell.width),
-            decoration: BoxDecoration(
-              color: cardGround,
-              border: Border.all(color: ink.color!.withValues(alpha: .2)),
-            ),
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: DaemonCardText(
-                key: const ValueKey('daemon-hatch-card'),
-                lines: card,
-                portraitRows:
-                    art?.frames.first.rows.length ??
-                    cardPortrait(roster, def, version).length,
-                style: ink.copyWith(fontSize: (ink.fontSize ?? 13) * .92),
-                colour: daemonColor(def, theme, shiny: shiny),
-                backdrop: daemonBackdrop(def),
-                mats: art?.frames.first.mats,
-                plate:
-                    daemonIndividualInk(
-                      roster,
-                      def,
-                      traits,
-                      theme,
-                      shiny: shiny,
-                      background: cardGround,
-                    ) ??
-                    daemonPlateInk(
-                      roster,
-                      def,
-                      theme,
-                      shiny: shiny,
-                      background: cardGround,
-                    ),
-              ),
-            ),
-          ),
-          SizedBox(height: cell.height / 2),
+          const SizedBox(height: 16),
           if (_stage == HatchStage.name)
-            ..._namePrompt(def, theme, cell, ink, muted)
-          else
-            Row(
+            ..._namePrompt(def)
+          else ...[
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
               children: [
                 _button(
-                  '[ copy ]',
+                  'Copy card',
                   _copy,
-                  theme,
-                  ink,
                   focusNode: _copyFocus,
                   key: const ValueKey('daemon-hatch-copy'),
                 ),
-                SizedBox(width: cell.width),
                 if (widget.needsConsent)
                   _button(
-                    '[ next ]',
+                    'Next',
                     _toConsent,
-                    theme,
-                    ink,
                     focusNode: _nextFocus,
                     key: const ValueKey('daemon-hatch-next'),
                   )
                 else
-                  _button('[ close ]', _close, theme, ink),
-                SizedBox(width: cell.width * 2),
-                Expanded(
-                  child: Text(
-                    _copyNote ?? 'esc closes',
-                    style: ink.copyWith(color: muted),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
+                  _button('Close', _close),
               ],
             ),
+            const SizedBox(height: 8),
+            Text(_copyNote ?? 'Esc closes', style: DesktopChrome.metadata()),
+          ],
         ],
       ],
     ];
   }
 
-  /// `name > _`: what to call it. Enter names it (empty skips), Escape or
-  /// `[ skip ]` goes on without a name; it can be named later in the zoo.
-  List<Widget> _namePrompt(
-    DaemonDef def,
-    TerminalTheme theme,
-    Size cell,
-    TextStyle ink,
-    Color muted,
-  ) => [
+  /// Enter names it (empty skips); Escape or Skip continues without a name.
+  List<Widget> _namePrompt(DaemonDef def) => [
     Text(
-      'what will you call it?',
+      'What will you call it?',
       key: const ValueKey('daemon-hatch-name-question'),
-      style: ink,
+      style: DesktopChrome.text(size: 13),
     ),
+    const SizedBox(height: 8),
     TextField(
       key: const ValueKey('daemon-hatch-name'),
       controller: _name,
       focusNode: _nameFocus,
       maxLength: 24,
-      style: ink,
-      cursorWidth: cell.width,
-      cursorHeight: cell.height,
-      cursorColor: theme.cursor,
+      style: DesktopChrome.text(size: 13),
+      cursorColor: DesktopChrome.accent,
       decoration: InputDecoration(
-        prefixText: 'name > ',
-        prefixStyle: ink.copyWith(color: muted),
+        labelText: 'Name',
         hintText: individualName(
           def.id,
           serial: _owned?.serial ?? _hatch?.serial,
         ),
-        hintStyle: ink.copyWith(color: muted.withValues(alpha: .35)),
         counterText: '',
         errorText: _nameError,
-        errorStyle: ink.copyWith(color: theme.red),
-        isDense: true,
-        border: InputBorder.none,
-        enabledBorder: InputBorder.none,
-        focusedBorder: InputBorder.none,
-        contentPadding: EdgeInsets.zero,
       ),
       onSubmitted: (_) => _saveName(),
     ),
-    Row(
+    const SizedBox(height: 12),
+    Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 8,
+      runSpacing: 8,
       children: [
         _button(
-          '[ name it ]',
+          'Name it',
           _saveName,
-          theme,
-          ink,
           key: const ValueKey('daemon-hatch-name-save'),
         ),
-        SizedBox(width: cell.width),
         _button(
-          '[ skip ]',
+          'Skip',
           _endNaming,
-          theme,
-          ink,
           key: const ValueKey('daemon-hatch-name-skip'),
-        ),
-        SizedBox(width: cell.width * 2),
-        Expanded(
-          child: Text(
-            'enter names it · esc skips',
-            style: ink.copyWith(color: muted),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
         ),
       ],
     ),
+    const SizedBox(height: 8),
+    Text('Enter names it · Esc skips', style: DesktopChrome.metadata()),
   ];
 
   /// A merged duplicate (a server from before individuals): yours, at its
   /// version and in its colour (shiny now, if the duplicate was), `tim ·
   /// +150 xp`, then how it grew.
-  List<Widget> _merged(
-    DaemonDef def,
-    TerminalTheme theme,
-    Size cell,
-    TextStyle ink,
-    Color muted,
-  ) {
+  List<Widget> _merged(DaemonDef def, TerminalTheme theme, TextStyle ink) {
     final hatch = _hatch!;
     final owned = _owned;
     final grew = _stage == HatchStage.grew ? _grew : null;
@@ -1414,7 +1309,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     final mood = grew == null ? DaemonMood.idle : DaemonMood.done;
     return [
       Container(
-        color: daemonBackdrop(def),
+        color: daemonBackdrop(def) ?? theme.background,
         child: _portrait(
           def,
           version,
@@ -1428,6 +1323,8 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
           label: '${def.id} $version',
           mood: mood,
           shiny: shiny,
+          growFrom: morphing ? from : null,
+          growth: _morph == null ? 1 : (_morph! / 4).clamp(0.0, 1.0),
           rows: morphing
               ? morphPortrait(
                   still(from, DaemonMood.idle),
@@ -1439,13 +1336,13 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
               : still(version, mood),
         ),
       ),
-      SizedBox(height: cell.height / 2),
+      const SizedBox(height: 8),
       Text(
         '$name · +${hatch.xp} xp',
         key: const ValueKey('daemon-hatch-merged'),
-        style: ink.copyWith(color: theme.yellow, letterSpacing: 1),
+        style: DesktopChrome.heading(),
       ),
-      SizedBox(height: cell.height / 2),
+      const SizedBox(height: 8),
       Text(
         [
           'another ${def.id}. +${hatch.xp} xp.',
@@ -1453,14 +1350,14 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         ].join(' '),
         key: const ValueKey('daemon-hatch-words'),
         textAlign: TextAlign.center,
-        style: ink.copyWith(color: muted),
+        style: DesktopChrome.metadata(),
       ),
       if (grew != null) ...[
-        SizedBox(height: cell.height / 2),
+        const SizedBox(height: 8),
         Text(
           '$name grew: bond ${grew.$1} · ${grew.$2}',
           key: const ValueKey('daemon-hatch-grew'),
-          style: ink.copyWith(color: theme.green),
+          style: DesktopChrome.text(size: 13, medium: true),
         ),
         // Its room is kept while the portrait morphs, so nothing moves when
         // the changelog line appears.
@@ -1472,73 +1369,44 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
                 ? const ValueKey('daemon-hatch-changelog')
                 : null,
             textAlign: TextAlign.center,
-            style: ink.copyWith(color: muted),
+            style: DesktopChrome.metadata(),
           ),
         ),
       ],
-      SizedBox(height: cell.height),
+      const SizedBox(height: 16),
       if (widget.needsConsent)
         _button(
-          '[ next ]',
+          'Next',
           _toConsent,
-          theme,
-          ink,
           focusNode: _nextFocus,
           key: const ValueKey('daemon-hatch-next'),
         )
       else
-        _button('[ close ]', _close, theme, ink),
+        _button('Close', _close),
     ];
   }
 
   Widget _button(
     String label,
-    VoidCallback onPressed,
-    TerminalTheme theme,
-    TextStyle ink, {
+    VoidCallback onPressed, {
     FocusNode? focusNode,
     Key? key,
-  }) => TextButton(
+  }) => DesktopPill(
     key: key,
+    label: label,
     focusNode: focusNode,
     onPressed: onPressed,
-    style:
-        TextButton.styleFrom(
-          minimumSize: Size.zero,
-          padding: EdgeInsets.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          foregroundColor: ink.color,
-          shape: const RoundedRectangleBorder(),
-          splashFactory: NoSplash.splashFactory,
-        ).copyWith(
-          overlayColor: WidgetStateProperty.resolveWith(
-            (states) =>
-                states.any(
-                  {
-                    WidgetState.hovered,
-                    WidgetState.focused,
-                    WidgetState.pressed,
-                  }.contains,
-                )
-                ? theme.selection.withValues(alpha: .5)
-                : Colors.transparent,
-          ),
-        ),
-    child: Text(
-      label,
-      style: ink.copyWith(color: _pitch ? ink.color : theme.cursor),
-    ),
   );
 }
 
 /// The plate a hatchling rises as: its idle loop's frames (material rows
 /// with them), how long each shows, and its traits.
 class _Hatchling {
-  const _Hatchling(this.frames, this.frameMs, this.traits);
-  final List<PlateFrame> frames;
-  final int frameMs;
+  _Hatchling(List<PlateFrame> frames, int frameMs, this.traits)
+    : art = DaemonIndividualArt(frames, frameMs);
+  final DaemonIndividualArt art;
   final DaemonTraits? traits;
-  List<String> get rows => frames.first.rows;
+  List<String> get rows => art.frames.first.rows;
 }
 
 /// One row of a drawn canvas as spans, each cell in its own colour (null:
@@ -1570,4 +1438,13 @@ List<InlineSpan> canvasRowSpans(
   }
   flush();
   return spans;
+}
+
+/// Keep a rising hatchling inside the bowl until it emerges above the rim.
+class _HatchBowlClipper extends CustomClipper<Rect> {
+  const _HatchBowlClipper();
+  @override
+  Rect getClip(Size size) => Rect.fromLTRB(88, 0, 264, 200);
+  @override
+  bool shouldReclip(_HatchBowlClipper oldClipper) => false;
 }

@@ -206,7 +206,7 @@ class TeamController extends ChangeNotifier {
   }
 
   Future<String> _consult(String machineId, String agentId, String key) async {
-    if (channelTabId == null) return 'Choose a swarm first.';
+    if (channelTabId == null) return 'Choose a tab first.';
     final attempt = _consultAttempts.putIfAbsent(
       key,
       () => {
@@ -218,12 +218,12 @@ class TeamController extends ChangeNotifier {
     );
     try {
       final result = await _call(attempt);
-      if (_disposed) return 'Swarm instruction sent.';
+      if (_disposed) return 'Tab instruction sent.';
       _consultAttempts.remove(key);
       error = null;
       final receipt = (result['consultation'] as Map?)?['receipt'] as Map?;
       _notify();
-      return 'Consult swarm · ${teamDeliveryLabel(receipt?.cast<String, dynamic>())}';
+      return 'Consult tab · ${teamDeliveryLabel(receipt?.cast<String, dynamic>())}';
     } catch (e) {
       if (e is TeamRequestError && !e.uncertain) _consultAttempts.remove(key);
       final message =

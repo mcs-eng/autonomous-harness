@@ -58,12 +58,6 @@ static void ui_swarms_replace(const cable_swarm_t *rows,int n,const char *id) {
     assert(!held&&n>=0&&n<=SWARMS_MAX);swarm_calls++;swarm_count=n;
     memcpy(swarms,rows,(size_t)n*sizeof *rows);snprintf(selected,sizeof selected,"%s",id?id:"");
 }
-static int tile_count;
-static void ui_tiles_replace(const cable_tile_t *rows,int n,const char *id) {
-    assert(n>=0&&n<=SWARM_TILES_MAX&&!strcmp(selected,id?id:""));tile_count=n;
-    for(int i=0;i<n;i++)assert(rows[i].x1>=0&&rows[i].x2<=1000&&rows[i].x1<rows[i].x2&&
-                              rows[i].y1>=0&&rows[i].y2<=1000&&rows[i].y1<rows[i].y2);
-}
 static void ui_notif_replace(const cable_notif_t *rows,int n) {
     assert(!held&&n>=0&&n<=8);notice_calls++;notice_count=n;memcpy(notices,rows,(size_t)n*sizeof *rows);
 }
@@ -112,7 +106,7 @@ int main(void) {
         cJSON_Delete(p);
     }
     p=cJSON_Parse("{\"selected\":\"tab\",\"items\":[],\"tiles\":[{\"x1\":0,\"y1\":0,\"x2\":1000,\"y2\":1000},{\"x1\":-1,\"y1\":0,\"x2\":1000,\"y2\":1000},{\"x1\":0,\"y1\":0,\"x2\":1e300,\"y2\":1000},{\"x1\":0,\"y1\":0,\"x2\":10,\"y2\":1e999}]}");
-    assert(p);handle_swarms(p);cJSON_Delete(p);assert(tile_count==1);
+    assert(p);handle_swarms(p);cJSON_Delete(p);assert(swarm_count==0 && !strcmp(selected,"tab")); // Round firmware ignores legacy spatial tiles.
     p=cJSON_Parse("{\"items\":[{\"agentId\":\"failed\",\"failed\":true},{\"agentId\":\"question\",\"question\":true},{\"agentId\":\"legacy\"}]}");
     assert(p);handle_notifications(p);cJSON_Delete(p);
     assert(notice_count==3 && notices[0].failed && !notices[0].question &&

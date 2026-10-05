@@ -73,6 +73,12 @@ class ZooDaemonGrew extends ZooEvent {
   final bool versionChanged;
 }
 
+/// A fresh hatch after the initial collection read.
+class ZooDaemonHatched extends ZooEvent {
+  const ZooDaemonHatched(this.daemon);
+  final ZooDaemon daemon;
+}
+
 /// Whether this window has daemons at all.
 enum DaemonsSwitch {
   /// Not decided yet: no profile, or the first read has no answer. Nothing
@@ -384,7 +390,16 @@ class ZooController extends ChangeNotifier {
     }
     for (final daemon in next.daemons) {
       final was = before.byUid(daemon.uid);
-      if (was != null && daemon.bond > was.bond) {
+      final age = _now().difference(daemon.hatchedDate);
+      if (was == null &&
+          !age.isNegative &&
+          age <= const Duration(seconds: 15)) {
+        _events.add(ZooDaemonHatched(daemon));
+      }
+      if (was != null &&
+          (daemon.bond > was.bond ||
+              roster.versionIndex(daemon.version) >
+                  roster.versionIndex(was.version))) {
         _events.add(
           ZooDaemonGrew(daemon, versionChanged: daemon.version != was.version),
         );

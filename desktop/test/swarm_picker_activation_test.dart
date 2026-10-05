@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/terminal/terminal_binary.dart';
-import 'package:harness/terminal/terminal_text.dart';
 import 'package:harness/state/swarm_navigation.dart';
 
 import 'swarm_screen_test.dart' show mount, terminal;
@@ -27,8 +26,7 @@ void main() {
     expect(find.byKey(const ValueKey('swarm-search-new-agent')), findsNothing);
     final panelRect = tester.getRect(results);
     final fieldRect = tester.getRect(field);
-    final cell = terminalCellSizeOf(tester.element(field));
-    expect(fieldRect.left - panelRect.left, closeTo(cell.width * 4, .01));
+    expect(fieldRect.left - panelRect.left, inInclusiveRange(40, 64));
     expect(fieldRect.right, lessThanOrEqualTo(panelRect.right));
     final listRect = tester.getRect(
       find.byWidgetPredicate(
@@ -36,8 +34,10 @@ void main() {
             widget is Semantics && widget.properties.label == 'Search results',
       ),
     );
-    // The prompt fills the list column; the other half is its preview.
-    expect(listRect.width, closeTo((panelRect.width - 1) / 2, .01));
+    // Upstream now keeps results full width until a row is selected: the
+    // empty finder shows type hints instead of a preview. Once a row carries
+    // a preview, the desktop split is an 11:14 list-to-preview ratio.
+    expect(listRect.width, closeTo(panelRect.width, .01));
     expect(fieldRect.width, greaterThan(listRect.width / 2));
     expect(fieldRect.right, lessThanOrEqualTo(listRect.right));
     await chord(tester, LogicalKeyboardKey.keyN);

@@ -12,14 +12,27 @@ enum HarnessActivity {
   done('✓', 'Finished · unread'),
   working('⠋', 'Working'),
   starting('◌', 'Starting'),
+  unknown('◌', 'Status unavailable'),
   idle('', 'Idle'),
-  paused('||', 'Paused'),
+  paused('×', 'Stopped'),
   offline('⊘', 'Offline');
 
   const HarnessActivity(this.mark, this.label);
   final String mark;
   final String label;
 }
+
+/// The same status vocabulary for native tabs and the menu bar overview.
+/// Callers supply the pane's theme color, including the monochrome preference.
+Map<String, Object> nativeActivityPayload(
+  HarnessActivity activity, {
+  int? color,
+}) => {
+  'mark': activity.mark,
+  'label': activity.label,
+  'working': activity == HarnessActivity.working,
+  'color': ?color,
+};
 
 const activitySpinnerFrames = [
   '⠋',
@@ -73,6 +86,9 @@ HarnessActivity? harnessActivity(
   if (app.agentUnread.kindFor(machineId, agentId) == AlertKind.done) {
     return HarnessActivity.done;
   }
+  if (machine.unknownActivityAgentIds.contains(agentId)) {
+    return HarnessActivity.unknown;
+  }
   return HarnessActivity.idle;
 }
 
@@ -82,7 +98,7 @@ HarnessActivity? tabActivity(AppNotifier app, Swarm tab) {
   HarnessActivity? result;
   final seen = <(String, String)>{};
   for (final pane in tab.panes) {
-    final id = pane.isWeb ? pane.ownerAgentId : pane.agentId;
+    final id = pane.isViewer ? pane.ownerAgentId : pane.agentId;
     if (id == null || !seen.add((pane.machineId, id))) continue;
     final state = harnessActivity(app, pane.machineId, id);
     if (state != null && (result == null || state.index < result.index)) {

@@ -7,6 +7,7 @@ import 'package:archive/archive.dart' show ZLibDecoder;
 import 'package:xterm/xterm.dart';
 
 import '../core/crash_log.dart';
+import '../core/sleep_aware.dart';
 import 'terminal_binary.dart';
 import 'terminal_input.dart';
 import 'terminal_viewport.dart';
@@ -270,11 +271,19 @@ class TerminalSession extends ChangeNotifier {
   bool _openStallRecovered = false;
   bool _disposed = false;
   int _generation = 0;
-  bool _remoteCursorVisible = true;
+  final _remoteCursorVisible = ValueNotifier(true);
+
+  /// The program's cursor visibility, independent of the local blink phase.
+  /// Views can stop their cursor clock while the program draws its own caret.
+  /// This is separate from session notifications: an escape sequence must not
+  /// rebuild the workspace or change input ownership.
+  ValueListenable<bool> get remoteCursorVisibility => _remoteCursorVisible;
+
   bool _cursorBlinkPhaseVisible = true;
   List<int> _utf8Tail = const [];
   final List<int> _inputBytes = [];
   Timer? _heartbeat;
+  int _heartbeatTick = 0;
   DateTime? _lastStreamActivityAt;
   Timer? _ackTimer;
   Timer? _inputTimer;
@@ -391,7 +400,6 @@ class TerminalSession extends ChangeNotifier {
     _lastRealignedTo = null;
     _resizeSeq = 0;
     _utf8Tail = const [];
-    _remoteCursorVisible = true;
     _cursorBlinkPhaseVisible = true;
     _resyncRequested = false;
     _resyncAttempts = 0;
@@ -403,6 +411,7 @@ class TerminalSession extends ChangeNotifier {
     rows = _clampRows(initialRows);
     if (!preserveTerminal) terminal = _newTerminal()..resize(cols, rows);
     status = TerminalSessionStatus.opening;
+    _remoteCursorVisible.value = true;
     _openRequestId =
         'term_${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(1 << 31)}';
     notifyListeners();
@@ -469,7 +478,7 @@ class TerminalSession extends ChangeNotifier {
     // Armed unconditionally (not just on reopen attempts): a `terminal_open` sent through a silently
     // stale relay session never gets ANY reply — nothing else would ever notice or recover from that.
     _resyncTimer?.cancel();
-    _resyncTimer = Timer(
+    _resyncTimer = SleepAwareTimer(
       resyncTimeout,
       () => unawaited(_handleOpenTimeout(openPayload, generation)),
     );
@@ -496,7 +505,7 @@ class TerminalSession extends ChangeNotifier {
     }
     if (sent) {
       _resyncTimer?.cancel();
-      _resyncTimer = Timer(
+      _resyncTimer = SleepAwareTimer(
         resyncTimeout,
         () => unawaited(_handleOpenTimeout(openPayload, generation)),
       );
@@ -566,10 +575,12 @@ class TerminalSession extends ChangeNotifier {
         if (!watching) takeover = false;
         _resyncTimer?.cancel();
         _resyncTimer = null;
-        _heartbeat = Timer.periodic(
-          const Duration(seconds: 5),
-          (_) => unawaited(_sendHeartbeat()),
-        );
+        _heartbeatTick = 0;
+        _heartbeat = Timer.periodic(const Duration(seconds: 5), (timer) {
+          final slept = sleptSinceTick(timer, _heartbeatTick);
+          _heartbeatTick = timer.tick;
+          unawaited(_sendHeartbeat(afterSleep: slept));
+        });
         _armInitialKeyframeWatchdog();
         return true;
       case 'terminal_keyframe':
@@ -770,8 +781,8 @@ class TerminalSession extends ChangeNotifier {
             cols = _clampCols(nextCols);
             rows = _clampRows(nextRows);
             _utf8Tail = decoded.tail;
-            _remoteCursorVisible = terminal.cursorVisibleMode;
             _cursorBlinkPhaseVisible = true;
+            _remoteCursorVisible.value = terminal.cursorVisibleMode;
             _expectedSeq = frame.seq + 1;
             _lastRenderedSeq = frame.seq;
             _resyncRequested = false;
@@ -889,22 +900,26 @@ class TerminalSession extends ChangeNotifier {
   /// is always parsed against [_remoteCursorVisible], so blinking cannot turn
   /// a remote DECTCEM hide/show command into terminal input or corrupt its
   /// authoritative cursor state.
-  void setCursorBlinkPhase(bool visible) {
-    if (_cursorBlinkPhaseVisible == visible) return;
+  /// Returns whether the effective cursor visibility changed and needs paint.
+  bool setCursorBlinkPhase(bool visible) {
+    if (_cursorBlinkPhaseVisible == visible) return false;
+    final wasVisible = terminal.cursorVisibleMode;
     _cursorBlinkPhaseVisible = visible;
     _applyCursorVisibility();
+    return wasVisible != terminal.cursorVisibleMode;
   }
 
   void _writeTerminalText(String text) {
-    terminal.setCursorVisibleMode(_remoteCursorVisible);
+    terminal.setCursorVisibleMode(_remoteCursorVisible.value);
     terminal.write(text);
-    _remoteCursorVisible = terminal.cursorVisibleMode;
-    _applyCursorVisibility();
+    final remoteVisible = terminal.cursorVisibleMode;
+    terminal.setCursorVisibleMode(remoteVisible && _cursorBlinkPhaseVisible);
+    _remoteCursorVisible.value = remoteVisible;
   }
 
   void _applyCursorVisibility() {
     terminal.setCursorVisibleMode(
-      _remoteCursorVisible && _cursorBlinkPhaseVisible,
+      _remoteCursorVisible.value && _cursorBlinkPhaseVisible,
     );
   }
 
@@ -1484,8 +1499,12 @@ class TerminalSession extends ChangeNotifier {
     }
   }
 
-  Future<void> _sendHeartbeat() async {
+  Future<void> _sendHeartbeat({bool afterSleep = false}) async {
     if (status != TerminalSessionStatus.controlling || streamId == null) return;
+    // The first beat after the computer slept: the stream was quiet because nobody here was running,
+    // not because it died. Its silence is measured afresh from now — the daemon carries the lease over
+    // the same gap — instead of declaring TERMINAL_STREAM_TIMEOUT and throwing away typed input.
+    if (afterSleep) _lastStreamActivityAt = _now();
     final generation = _generation;
     final sent = await send('terminal_alive', {'streamId': streamId});
     if (!sent && _isCurrent(generation)) {
@@ -1522,7 +1541,7 @@ class TerminalSession extends ChangeNotifier {
 
   void _armInitialKeyframeWatchdog() {
     _resyncTimer?.cancel();
-    _resyncTimer = Timer(resyncTimeout, () {
+    _resyncTimer = SleepAwareTimer(resyncTimeout, () {
       if (streamId != null && _expectedSeq == null) {
         unawaited(_requestResync('TERMINAL_KEYFRAME_TIMEOUT'));
       }
@@ -1557,7 +1576,7 @@ class TerminalSession extends ChangeNotifier {
       return;
     }
     _resyncTimer?.cancel();
-    _resyncTimer = Timer(resyncTimeout, () {
+    _resyncTimer = SleepAwareTimer(resyncTimeout, () {
       if (_resyncRequested && streamId == currentStream) {
         unawaited(_sendResyncAttempt());
       }
@@ -1692,6 +1711,7 @@ class TerminalSession extends ChangeNotifier {
     _disposed = true;
     _generation++;
     _cancelTimers();
+    _remoteCursorVisible.dispose();
     super.dispose();
   }
 }

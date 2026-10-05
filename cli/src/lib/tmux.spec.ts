@@ -446,6 +446,33 @@ describe('tmux process primitives', () => {
   })
 
   it.each([
+    'codex --help',
+    '/opt/bin/codex -h',
+    'codex --version',
+    'codex -V',
+    'node /opt/node_modules/@openai/codex/bin/codex.js --help',
+    'node --require setup.js /opt/node_modules/@openai/codex/bin/codex.js --help',
+    'env CODEX_HOME=/tmp/profile codex --help',
+    'ori --log-level debug codex --help',
+  ])('does not adopt a capability probe as the restarted engine: %s', args => {
+    const commands: AgentCommandOwnershipSnapshot = {
+      ...ownership(), engineFileKeys: new Map([['codex', new Set(['codex-file'])]]),
+    }
+    // A known binary is still only a probe. File ownership must not override argv.
+    expect(engineProcessMatchScore({ executable: 'codex', args, imageFileKey: 'codex-file' }, 'codex', commands)).toBe(0)
+  })
+
+  it.each([
+    'codex resume 01234567-89ab-cdef-0123-456789abcdef',
+    'codex --no-daemon resume 01234567-89ab-cdef-0123-456789abcdef',
+    'codex "explain --help"',
+    'codex -- "--help"',
+    'codex --model --help',
+  ])('keeps interactive launches and prompt text: %s', args => {
+    expect(engineProcessMatchScore({ executable: 'codex', args }, 'codex')).toBeGreaterThan(0)
+  })
+
+  it.each([
     ['codex', 'codex-aarch64-apple-darwin'],
     ['codex', 'codex-x86_64-unknown-linux-musl'],
     ['kilo', 'kilo-darwin-arm64'],
@@ -541,6 +568,29 @@ describe('tmux process primitives', () => {
     expect(engineProcessMatchScore({ executable: comm, args: `${python} -m hermes_cli.main` }, 'hermes')).toBe(2)
   })
 
+  it('reads Hermes out of its launcher as macOS `ps` really prints it, newlines as \\012', () => {
+    // 0.21.5's launcher is a multi-line `-c` script, and macOS `ps` writes argv through vis(3): each
+    // newline arrives as the four characters `\012`, a backslash as `\\`. Matching that text as Python
+    // found no statement separator after `import os, re, sys`, so a running Hermes scored 0 — its pane
+    // was restored as a terminal, and every hook it sent was "not a descendant of that engine process".
+    const python = '/Users/demo/.hermes/tools/python-3.14.7+20260901-darwin-arm64/bin/python3'
+    const source = [
+      'import os, re, sys',
+      "os.environ.pop('PYTHONHOME', None)",
+      "os.environ.pop('PYTHONPATH', None)",
+      "sys.path.insert(0, '/Users/demo/.hermes/hermes-agent')",
+      "if sys.argv[1:2] == ['--print-runtime-command']: sys.dont_write_bytecode = True",
+      'from hermes_constants import get_default_hermes_root',
+      "os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or str(get_default_hermes_root())",
+      'import hermes_bootstrap',
+      "sys.exit('a path with a \\\\ in it') if False else None",
+      'from hermes_cli.main import main',
+      'sys.exit(main())',
+    ].join('\\012') + '\\012'
+    expect(engineProcessMatchScore({ executable: '/Users/demo', args: `${python} -I -c ${source}` }, 'hermes')).toBe(2)
+    expect(engineProcessMatchScore({ executable: '/Users/demo', args: `${python} -I -c ${source.replace('hermes_cli.main', 'acp_adapter.entry')}` }, 'hermes')).toBe(0)
+  })
+
   it('recognizes managed Hermes runpy launchers without relying on their install directory', () => {
     const bootstrap = "import os, sys, runpy; os.environ.pop('PYTHONHOME', None); os.environ.pop('PYTHONPATH', None); os.environ.pop('VIRTUAL_ENV', None); sys.path.insert(0, '/opt/custom install'); os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or str(__import__('hermes_constants').get_default_hermes_root()); import hermes_bootstrap; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
     const old = "import sys, runpy; sys.path.insert(0, '/opt/hermes-agent'); runpy.run_module('hermes_cli.main', run_name='__main__')"
@@ -589,6 +639,34 @@ describe('tmux process primitives', () => {
     const conflict = ownership(['same-file'], ['same-file'])
     expect(engineProcessMatchScore({ executable: 'agent', args: 'agent', imageFileKey: 'same-file' }, 'cursor', conflict)).toBe(0)
     expect(engineProcessMatchScore({ executable: 'agent', args: 'agent', imageFileKey: 'same-file' }, 'grok', conflict)).toBe(0)
+  })
+
+  it('never scores a Cursor package path mentioned inside a quoted prompt argument', () => {
+    // The prefix cursor must share argvTokens' escape dialect: the regex tokenizer this
+    // replaces let one `\"` inside a quoted PROMPT close the token early, so the Cursor path a
+    // prompt merely MENTIONED posed as an executable entrypoint and the matcher awarded score 3.
+    // The second case is the round-2 variant: the tokenizer is now correct, so the prompt is one
+    // token — and a prompt ENDING in the path must not score on a suffix match either.
+    const row = {
+      executable: 'node',
+      args: 'node /tmp/worker.js Explain " /tmp/cursor-agent/versions/123/index.js " please',
+    }
+    expect(engineProcessMatchScore(row, 'cursor', ownership())).toBe(0)
+    const endsInPath = {
+      executable: 'node',
+      args: String.raw`node /tmp/worker.js "Explain \"foo\" /tmp/cursor-agent/versions/123/index.js"`,
+    }
+    expect(engineProcessMatchScore(endsInPath, 'cursor', ownership())).toBe(0)
+    // The same package layout as a real executable prefix still scores — both the `--`-separated
+    // shape and a bare positional, which the launcher's `exec -a` rewrite leaves behind.
+    expect(engineProcessMatchScore({
+      executable: 'agent',
+      args: 'agent -- /tmp/cursor-agent/versions/123/index.js',
+    }, 'cursor', ownership())).toBe(3)
+    expect(engineProcessMatchScore({
+      executable: 'agent',
+      args: 'agent /opt/cursor-agent/versions/1.2.3/index.js',
+    }, 'cursor', ownership())).toBe(3)
   })
 
   it('does not treat a daemon role named agent as the colliding CLI command', () => {
@@ -886,7 +964,7 @@ describe('tmux process primitives', () => {
 
   /** Review cycle-6 P2: codex.exe/claude.exe native names scored 0 while opencode.exe scored. */
   it.each(['claude', 'codex'] as const)('recognises native Windows %s.exe basenames', (engine) => {
-    expect(engineProcessMatchScore({ executable: `${engine}.exe`, args: `${engine}.exe --version` }, engine))
+    expect(engineProcessMatchScore({ executable: `${engine}.exe`, args: `${engine}.exe --continue` }, engine))
       .toBeGreaterThan(0)
   })
 
@@ -902,14 +980,15 @@ describe('tmux process primitives', () => {
       executable: '/tmp/not\\codex',
       args: '/tmp/not\\codex --version',
     }, 'codex')).toBe(0)
-    // The Windows dialect still splits on both separators.
+    // The Windows dialect still splits on both separators. A real argv, not a
+    // `--version` capability probe (probes score 0 by design upstream).
     expect(engineProcessMatchScore({
       executable: 'C:\\tools\\not\\codex.exe',
-      args: 'C:\\tools\\not\\codex.exe --version',
+      args: 'C:\\tools\\not\\codex.exe --continue',
     }, 'codex')).toBeGreaterThan(0)
     expect(engineProcessMatchScore({
       executable: '\\\\nas\\share\\not\\codex.exe',
-      args: '\\\\nas\\share\\not\\codex.exe --version',
+      args: '\\\\nas\\share\\not\\codex.exe --continue',
     }, 'codex')).toBeGreaterThan(0)
   })
 

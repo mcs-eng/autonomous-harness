@@ -27,6 +27,10 @@ class DeviceSettings {
     required this.scrollReversed,
     required this.round,
     required this.voiceLang,
+    this.followCompanion,
+    this.companion,
+    this.companionProtocol,
+    this.companionDetails,
   });
 
   final int brightness;
@@ -36,6 +40,26 @@ class DeviceSettings {
   final int face;
   final bool muted, quiet, straightTitle, focusFace, scrollReversed, round;
   final String voiceLang;
+  final bool? followCompanion;
+  final String? companion;
+  final int? companionProtocol;
+  final DialCompanion? companionDetails;
+
+  /// Last-reported values for the local device library. Restoring these never
+  /// marks a device connected or sends settings back to it.
+  Map<String, Object?> toJson() => {
+    'brightness': brightness,
+    'character': character,
+    'face': face,
+    'muted': muted,
+    'quiet': quiet,
+    'straightTitle': straightTitle,
+    'focusFace': focusFace,
+    'scrollReversed': scrollReversed,
+    'round': round,
+    'voiceLang': voiceLang,
+    if (followCompanion != null) 'followCompanion': followCompanion,
+  };
 
   /// Read with `is`, never `as`, and refused whole when a field is missing: a default here is a value
   /// this window invented, and the pane would then offer a setting the device does not have.
@@ -46,23 +70,89 @@ class DeviceSettings {
     final character = value['character'];
     final face = value['face'];
     final lang = value['voiceLang'];
-    if (brightness is! num || character is! num || face is! num || lang is! String) {
+    if (brightness is! num ||
+        character is! num ||
+        face is! num ||
+        lang is! String) {
       return null;
     }
     final muted = flag('muted'), quiet = flag('quiet');
     final straight = flag('straightTitle'), focus = flag('focusFace');
     final scroll = flag('scrollReversed'), round = flag('round');
-    if (muted == null || quiet == null || straight == null ||
-        focus == null || scroll == null || round == null) {
+    if (muted == null ||
+        quiet == null ||
+        straight == null ||
+        focus == null ||
+        scroll == null ||
+        round == null) {
       return null;
     }
     return DeviceSettings(
       brightness: brightness.round().clamp(0, 100),
       character: character.round(),
       face: face.round(),
-      muted: muted, quiet: quiet, straightTitle: straight,
-      focusFace: focus, scrollReversed: scroll, round: round,
+      muted: muted,
+      quiet: quiet,
+      straightTitle: straight,
+      focusFace: focus,
+      scrollReversed: scroll,
+      round: round,
       voiceLang: lang,
+      followCompanion: value['followCompanion'] is bool
+          ? value['followCompanion'] as bool
+          : null,
+      companion: value['companion'] is String
+          ? value['companion'] as String
+          : null,
+      companionProtocol: value['companionProtocol'] == 2 ? 2 : null,
+      companionDetails: value['companionProtocol'] == 2
+          ? DialCompanion.fromJson(value['companionDetails'])
+          : null,
+    );
+  }
+}
+
+/// The identity acknowledged by the physical screen, not an optimistic choice.
+class DialCompanion {
+  const DialCompanion({
+    required this.id,
+    required this.uid,
+    required this.version,
+    required this.seed,
+    required this.colour,
+    required this.mark,
+  });
+
+  final String id, uid, version;
+  final int seed, colour, mark;
+
+  static DialCompanion? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final id = value['id'], uid = value['uid'], version = value['version'];
+    final seed = value['seed'], colour = value['colour'], mark = value['mark'];
+    if (id is! String ||
+        uid is! String ||
+        uid.isEmpty ||
+        uid.length > 64 ||
+        !const ['0.1', '1.0', '2.0'].contains(version) ||
+        seed is! int ||
+        seed < 0 ||
+        seed > 0xffffffff ||
+        colour is! int ||
+        colour < -1 ||
+        colour > 5 ||
+        mark is! int ||
+        mark < 0 ||
+        mark > 4) {
+      return null;
+    }
+    return DialCompanion(
+      id: id,
+      uid: uid,
+      version: version as String,
+      seed: seed,
+      colour: colour,
+      mark: mark,
     );
   }
 }
@@ -122,8 +212,12 @@ class DialStatus {
   /// Read with `is`, never `as`: this crosses a socket, so its shape belongs to the other end.
   static DialStatus fromJson(Map<String, dynamic> json) => DialStatus(
     attached: json['attached'] == true,
-    id: json['id'] is String && (json['id'] as String).isNotEmpty ? json['id'] as String : null,
-    mac: json['mac'] is String && (json['mac'] as String).isNotEmpty ? json['mac'] as String : null,
+    id: json['id'] is String && (json['id'] as String).isNotEmpty
+        ? json['id'] as String
+        : null,
+    mac: json['mac'] is String && (json['mac'] as String).isNotEmpty
+        ? json['mac'] as String
+        : null,
     settings: DeviceSettings.fromJson(json['settings']),
     devices: [
       if (json['devices'] is List)
@@ -189,5 +283,27 @@ class DialState extends ChangeNotifier {
       _storage?.write(_seenKey, '1').catchError((_) {});
     }
     notifyListeners();
+  }
+
+  /// A lost host connection cannot leave USB controls writable. Retain the
+  /// last readings until the daemon greets this window again.
+  void disconnect() {
+    if (!status.attached && !devices.any((d) => d.attached)) return;
+    apply(
+      DialStatus(
+        attached: false,
+        devices: [
+          for (final device in devices)
+            DialStatus(
+              attached: false,
+              id: device.id,
+              mac: device.mac,
+              fw: device.fw,
+              hw: device.hw,
+              settings: device.settings,
+            ),
+        ],
+      ),
+    );
   }
 }

@@ -201,10 +201,10 @@ void main() {
       await tester.pump(const Duration(milliseconds: 50));
       expect(tails, [null]);
       await tester.pump(const Duration(seconds: 10));
-      expect(tails, [null], reason: 'nothing refreshes while Cmd-P is open');
-      expect(find.text('Working'), findsOneWidget);
-      // Under a minute old reads "now", not "0m".
+      expect(tails, [null], reason: 'the managed preview is not refetched');
+      // The row keeps its activity time beside the shared status mark.
       expect(find.text('now'), findsOneWidget);
+      expect(find.text('Working'), findsOneWidget);
       expect(find.text('0m'), findsNothing);
 
       final list = find.byKey(const ValueKey('session-tail:m:s7'));
@@ -216,11 +216,6 @@ void main() {
       );
       final before = find.textContaining('answer 13', findRichText: true);
       expect(newest, findsOneWidget);
-      expect(before, findsOneWidget);
-      expect(
-        tester.getTopLeft(before).dy,
-        lessThan(tester.getTopLeft(newest).dy),
-      );
       final listBox = tester.getRect(list);
       expect(
         tester.getBottomLeft(newest).dy,
@@ -231,10 +226,13 @@ void main() {
       expect(find.textContaining('Matched earlier'), findsOneWidget);
       // The searched words stand out in the turns.
       final ask = tester.widget<RichText>(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is RichText &&
-              widget.text.toPlainText().contains('step 14 of the retention'),
+        find.descendant(
+          of: list,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is RichText &&
+                widget.text.toPlainText().contains('step 14 of the retention'),
+          ),
         ),
       );
       final bold = <String>[];
@@ -262,12 +260,30 @@ void main() {
         findsNothing,
       );
 
-      // The latest ask is in view, so nothing is pinned above the turns.
-      expect(find.byKey(const ValueKey('preview-last-ask')), findsNothing);
+      // The long answer fills the viewport; the latest ask stays readable
+      // in the pinned header even while its original turn is above the fold.
+      expect(find.byKey(const ValueKey('preview-last-ask')), findsOneWidget);
 
       // Shift-Up scrolls toward older turns, Shift-Down back.
       final controller = tester.widget<ListView>(list).controller!;
       expect(controller.position.pixels, 0);
+      // The latest long answer can fill the viewport. Reveal the preceding
+      // turn before checking order instead of depending on modal geometry.
+      await tester.scrollUntilVisible(
+        before,
+        80,
+        scrollable: find.descendant(
+          of: list,
+          matching: find.byType(Scrollable),
+        ),
+      );
+      expect(before, findsOneWidget);
+      expect(
+        tester.getTopLeft(before).dy,
+        lessThan(tester.getTopLeft(newest).dy),
+      );
+      controller.jumpTo(0);
+      await tester.pump();
       await key(tester, LogicalKeyboardKey.arrowUp, shift: true);
       await tester.pump();
       expect(controller.position.pixels, greaterThan(0));
@@ -289,8 +305,14 @@ void main() {
         ),
         findsOneWidget,
       );
-      controller.jumpTo(controller.position.maxScrollExtent);
-      await tester.pump();
+      await tester.scrollUntilVisible(
+        find.text('Start of conversation'),
+        160,
+        scrollable: find.descendant(
+          of: list,
+          matching: find.byType(Scrollable),
+        ),
+      );
       expect(
         find.textContaining('answer 5', findRichText: true),
         findsOneWidget,

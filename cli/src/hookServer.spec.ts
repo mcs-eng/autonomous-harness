@@ -63,23 +63,7 @@ async function start(overrides: Partial<HookServerHandlers> = {}) {
 }
 
 describe('process-owned hook server', () => {
-  it('attributes prompt text only after resolving the actual engine process', async () => {
-    const entry = { engine: 'claude', agentId: 'agent-scope', sessionId: 'session-scope', runtimes: [{ backend: 'tmux', paneId: '%41' }] } as RegisteredSession
-    const onPromptSubmitted = vi.fn()
-    const resolveHookAgent = vi.fn(async () => null as RegisteredSession | null)
-    const registration = vi.spyOn(registry, 'register').mockReturnValue({ entry, isNew: false, evicted: null, rebound: null, orphaned: null })
-    try {
-      const { base, headers } = await start({ onPromptSubmitted, resolveHookAgent })
-      const submit = () => fetch(`${base}/api/hook/session-start`, { method: 'POST', headers, body: JSON.stringify({
-        engine: 'claude', sessionId: entry.sessionId, tmuxPane: '%41', hookEvent: 'UserPromptSubmit', prompt: 'ask a peer\nfor evidence',
-      }) })
-      await submit()
-      expect(onPromptSubmitted).not.toHaveBeenCalled()
-      resolveHookAgent.mockResolvedValue(entry)
-      expect((await submit()).status).toBe(200)
-      expect(onPromptSubmitted).toHaveBeenCalledExactlyOnceWith('agent-scope', 'ask a peer\nfor evidence')
-    } finally { registration.mockRestore() }
-  })
+
   it('runs targeted resolution and rejects a hook without a matching pane engine process', async () => {
     const resolveHookAgent = vi.fn(async () => null)
     const { handlers, base, headers } = await start({ resolveHookAgent })
@@ -287,59 +271,18 @@ describe('account Experimental settings proxy', () => {
   })
 })
 
-describe('the zoo proxy', () => {
-  it('reads the zoo ungated and writes its ops only with the local header, body passed through', async () => {
-    const zoo = { daemons: [], eggs: [], pair: null, habits: [], firstEgg: false, pity: 0, easter: [] }
-    const ops = vi.fn(async (body: unknown) => ({ status: 200, body: { success: true, data: { revision: 2, zoo, hatched: [], echo: body } } }))
-    const deskRead = vi.fn()
-    const { base } = await start({
-      onZooRead: async () => ({ status: 200, body: { success: true, data: { revision: 1, zoo } } }),
-      onZooOps: ops,
-      onDeskRead: deskRead,
-    })
-    const read = await fetch(`${base}/api/zoo`)
-    expect(await read.json()).toEqual({ success: true, data: { revision: 1, zoo } })
-    expect(deskRead).not.toHaveBeenCalled()                  // its own document: a zoo read never reads the desk
-
-    const refused = await fetch(`${base}/api/zoo/ops`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"ops":[]}' })
-    expect(refused.status).toBe(403)
-    expect(ops).not.toHaveBeenCalled()
-
-    const body = { ops: [{ op: 'zoo.habit', key: 'turn' }] }
-    const written = await fetch(`${base}/api/zoo/ops`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: JSON.stringify(body) })
-    expect(((await written.json()) as { data: unknown }).data).toMatchObject({ revision: 2, hatched: [], echo: body })
-    expect(ops).toHaveBeenCalledWith(body)
-
-    const bad = await fetch(`${base}/api/zoo/ops`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: '{nope' })
-    expect(bad.status).toBe(400)
-  })
-
-  it('passes a signed-out answer through as it came, the way the desk does', async () => {
-    const signedOut = { status: 401, body: { success: false, error: { code: 'NOT_SIGNED_IN', message: 'Not signed in' } } }
-    const { base } = await start({ onZooRead: async () => signedOut, onZooOps: async () => signedOut })
-    const read = await fetch(`${base}/api/zoo`)
-    expect(read.status).toBe(401)
-    expect(await read.json()).toEqual(signedOut.body)
-    const write = await fetch(`${base}/api/zoo/ops`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: '{"ops":[{"op":"zoo.habit","key":"turn"}]}' })
-    expect(write.status).toBe(401)
-  })
-
-  it('passes a daemons-off answer through as it came: the window hides daemons on the 404', async () => {
-    const off = { status: 404, body: { success: false, error: { code: 'DAEMONS_OFF', message: 'Daemons are off for this account or on this computer.' } } }
-    const { base } = await start({ onZooRead: async () => off, onZooOps: async () => off })
-    const read = await fetch(`${base}/api/zoo`)
-    expect(read.status).toBe(404)
-    expect(await read.json()).toEqual(off.body)
-    const write = await fetch(`${base}/api/zoo/ops`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: '{"ops":[{"op":"zoo.habit","key":"turn"}]}' })
-    expect(write.status).toBe(404)
-    expect(await write.json()).toEqual(off.body)
-  })
-
-  it('answers 503 on a daemon built without the zoo', async () => {
-    const { base } = await start()
-    expect((await fetch(`${base}/api/zoo`)).status).toBe(503)
-    expect((await fetch(`${base}/api/zoo/ops`, { method: 'POST', headers: { 'x-adapter-local': '1' }, body: '{}' })).status).toBe(503)
-  })
+describe('optional feature routes are absent from core', () => {
+  it.each(['/api/zoo', '/api/zoo/ops', '/api/hook/memory-context', '/api/hook/memory-emitted', '/api/hook/opencode-memory-runtime'])(
+    'does not handle %s or consult account metadata', async path => {
+      const me = vi.fn(async () => ({ status: 200, body: {} }))
+      const { base } = await start({ onAuthMe: me })
+      const response = await fetch(`${base}${path}`, {
+        method: path === '/api/zoo' ? 'GET' : 'POST', headers: { 'x-adapter-local': '1' }, body: path === '/api/zoo' ? undefined : '{}',
+      })
+      expect(response.status).toBe(404)
+      expect(me).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe('the Harness Store proxy', () => {
@@ -483,6 +426,32 @@ describe('requests must name this server', () => {
     expect(onLogs).not.toHaveBeenCalled()
   })
 
+  it('answers every request even when its handler throws, instead of leaving the caller waiting', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onStop = vi.fn(() => { throw new Error('stop failed after the answer') })
+    const { base } = await start({
+      onStatus: async () => { throw new Error('status read failed') },
+      onLogs: () => { throw 'log file gone' },
+      onStop,
+    })
+    // Before the answer: a 500 the caller can act on, at once.
+    const status = await fetch(`${base}/api/status`)
+    expect(status.status).toBe(500)
+    expect(await status.json()).toEqual({ error: 'INTERNAL' })
+    // After the headers went out: the response is ended, not left open.
+    const logs = await fetch(`${base}/api/logs`)
+    expect(logs.status).toBe(200)
+    expect(await logs.text()).toBe('')
+    // After the response ended: nothing more to send, and nothing breaks.
+    const stop = await fetch(`${base}/api/stop`, { method: 'POST', headers: { 'x-adapter-local': '1' } })
+    expect(await stop.json()).toEqual({ ok: true })
+    await vi.waitFor(() => expect(onStop).toHaveBeenCalled())
+    expect(error).toHaveBeenCalledWith('[hooks] GET /api/status failed:', 'status read failed')
+    expect(error).toHaveBeenCalledWith('[hooks] GET /api/logs failed:', 'log file gone')
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('[hooks] POST /api/stop failed:', 'stop failed after the answer'))
+    error.mockRestore()
+  })
+
   it('serves a status that has to read before it answers', async () => {
     // A harness's `updatedAt` is when its conversation last moved, which is read from its transcript.
     const { base } = await start({ onStatus: async () => ({ sessions: [{ id: 'a', updatedAt: 42 }] }) })
@@ -607,5 +576,53 @@ describe('the daemon socket', () => {
     expect(started.localSocket).toBeNull()
     expect(started.port).toBeGreaterThan(0)
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('the device history and dismiss endpoints', () => {
+  const local = { 'x-adapter-local': '1', 'content-type': 'application/json' }
+
+  it('history needs the local header', async () => {
+    const onDevicesHistory = vi.fn(async () => ({ status: 200, body: { rows: [], complete: true, frozen: null } }))
+    const { base } = await start({ onDevicesHistory })
+    expect((await fetch(`${base}/api/devices/history`)).status).toBe(403)
+    expect(onDevicesHistory).not.toHaveBeenCalled()
+    const ok = await fetch(`${base}/api/devices/history`, { headers: local })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ rows: [], complete: true, frozen: null })
+  })
+
+  it('dismiss needs the local header, parses the body and refuses bad JSON', async () => {
+    const onDevicesDismiss = vi.fn(() => ({ status: 200, body: { ok: true } }))
+    const { base } = await start({ onDevicesDismiss })
+    const post = (body: string, headers: Record<string, string> = local) => fetch(`${base}/api/devices/dismiss`, { method: 'POST', headers, body })
+    expect((await post('{}', { 'content-type': 'application/json' })).status).toBe(403)
+    expect(onDevicesDismiss).not.toHaveBeenCalled()
+    expect((await post('{bad')).status).toBe(400)
+    expect((await post(JSON.stringify({ pub: 5 }))).status).toBe(400)
+    expect((await post(JSON.stringify({ pub: 'k' }))).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({ pub: 'k' })
+    expect((await post(JSON.stringify({ baseline: true }))).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({ baseline: true })
+    expect((await post('{}')).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({})
+    // The keys a window displayed: a list of strings, bounded.
+    expect((await post(JSON.stringify({ pubs: ['a', 'b'] }))).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({ pubs: ['a', 'b'] })
+    expect((await post(JSON.stringify({ pubs: 'a' }))).status).toBe(400)
+    expect((await post(JSON.stringify({ pubs: ['a', 5] }))).status).toBe(400)
+    expect((await post(JSON.stringify({ pubs: Array.from({ length: 257 }, (_, i) => `k${i}`) }))).status).toBe(400)
+  })
+
+  it('rebaseline passes the previewed head on, and refuses a malformed one', async () => {
+    const onDevicesRebaseline = vi.fn(async () => ({ status: 200, body: {} }))
+    const { base } = await start({ onDevicesRebaseline })
+    const post = (body: unknown) => fetch(`${base}/api/devices/rebaseline`, { method: 'POST', headers: local, body: JSON.stringify(body) })
+    expect((await post({ confirm: true, head: { seq: 3, hash: 'h' } })).status).toBe(200)
+    expect(onDevicesRebaseline).toHaveBeenLastCalledWith(true, { seq: 3, hash: 'h' })
+    expect((await post({ confirm: true })).status).toBe(200)
+    expect(onDevicesRebaseline).toHaveBeenLastCalledWith(true, undefined)
+    expect((await post({ confirm: true, head: { seq: -1, hash: 'h' } })).status).toBe(400)
+    expect((await post({ confirm: true, head: 'x' })).status).toBe(400)
   })
 })

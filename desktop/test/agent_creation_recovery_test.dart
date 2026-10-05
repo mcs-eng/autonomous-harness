@@ -95,7 +95,7 @@ void main() {
     'new pane',
     'shortcut',
     'search shortcut',
-    'new swarm',
+    'new tab',
   ]) {
     for (final dismissal in ['outside', 'escape']) {
       testWidgets('$entry creation dismisses once on $dismissal', (
@@ -116,7 +116,7 @@ void main() {
             await tester.sendKeyEvent(LogicalKeyboardKey.enter);
             expect(find.byType(AlertDialog), findsNothing);
             await chord(tester, LogicalKeyboardKey.keyN);
-          case 'new swarm':
+          case 'new tab':
             await chord(tester, LogicalKeyboardKey.keyT);
             await chord(tester, LogicalKeyboardKey.keyN);
           case 'search shortcut':
@@ -141,7 +141,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsNothing);
         expect(find.byType(SwarmSearchResults), findsNothing);
-        if (entry == 'new swarm') {
+        if (entry == 'new tab') {
           expect(app.swarms, hasLength(2));
           expect(app.panes, isEmpty);
           await chord(tester, LogicalKeyboardKey.keyW);
@@ -233,6 +233,8 @@ void main() {
         final field = find.byKey(const ValueKey('swarm-search-input'));
         if (entry == 'Open') {
           await openHarnessPicker(tester);
+          expect(find.byType(SwarmSearchResults), findsOneWidget);
+          await chord(tester, LogicalKeyboardKey.keyN);
         } else {
           await chord(tester, LogicalKeyboardKey.keyP, shift: true);
           await tester.enterText(field, '> $entry');
@@ -240,8 +242,6 @@ void main() {
           await tester.sendKeyEvent(LogicalKeyboardKey.enter);
           await tester.pump();
         }
-        expect(find.byType(SwarmSearchResults), findsOneWidget);
-        await chord(tester, LogicalKeyboardKey.keyN);
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsOneWidget);
         expect(find.byType(SwarmSearchResults), findsNothing);
@@ -411,7 +411,7 @@ void main() {
   });
 
   test(
-    'lost creation reply recovers into the original swarm and counts once',
+    'lost creation reply recovers into the original tab and counts once',
     () async {
       final connection = _Connection();
       final app = createApp(connectionForTest: (_) => connection);
@@ -600,7 +600,7 @@ void main() {
     );
   }
 
-  test('closing the original swarm does not block recovery or add into a different swarm', () async {
+  test('closing the original tab does not block recovery or add into a different tab', () async {
     final connection = _Connection();
     final app = createApp(connectionForTest: (_) => connection);
     addTearDown(app.dispose);

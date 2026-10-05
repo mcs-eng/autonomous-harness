@@ -1,4 +1,4 @@
-//! One held connection per machine to the daemon's loopback socket (`/api/local-ws`), selected onto
+//! One held connection per machine to this OS user's private daemon socket (`/api/local-ws`), selected onto
 //! that machine — this computer's own, or another the daemon relays to (relay + P2P live inside the
 //! daemon; this side never sees anything but plaintext frames).
 //!
@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -45,6 +47,22 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SocketIo fo
 
 type Pending = Arc<Mutex<HashMap<String, (String, oneshot::Sender<(String, Value)>)>>>;
 
+/// The daemon's owner-only socket, shared with Desktop. Never fall back to TCP: loopback is shared
+/// by every OS user, so the process holding a port may belong to a completely different account.
+pub fn socket_path(port: u16) -> PathBuf {
+    let dir = std::env::var_os("ADAPTER_DATA_DIR").filter(|s| !s.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".harness/cli/data"));
+    dir.join(format!("daemon-{port}.sock"))
+}
+
+async fn connect_owned(path: &Path) -> std::io::Result<tokio::net::UnixStream> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Harness requires a private daemon socket owned by this OS user"));
+    }
+    tokio::net::UnixStream::connect(path).await
+}
+
 // Clear requests on every exit, including cancellation and failures before selection.
 // Otherwise RPC clones can keep their own waiters alive until the full request deadline.
 struct PendingGuard(Pending);
@@ -67,6 +85,10 @@ pub struct Link {
 impl Link {
     /// Dial and select [machine_id]. Events (including `Connected` / `Closed`) arrive on [sink].
     pub fn spawn(port: u16, machine_id: &str, generation: u64, sink: mpsc::UnboundedSender<Event>) -> Link {
+        Self::spawn_at(port, socket_path(port), machine_id, generation, sink)
+    }
+
+    fn spawn_at(port: u16, socket_path: PathBuf, machine_id: &str, generation: u64, sink: mpsc::UnboundedSender<Event>) -> Link {
         let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let guard = PendingGuard(pending.clone());
@@ -85,7 +107,7 @@ impl Link {
                 let io: Box<dyn SocketIo> = if crate::local::is_local(&id) {
                     Box::new(crate::local::connect(port).await.map_err(tokio_tungstenite::tungstenite::Error::Io)?)
                 } else {
-                    Box::new(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(tokio_tungstenite::tungstenite::Error::Io)?)
+                    Box::new(connect_owned(&socket_path).await.map_err(tokio_tungstenite::tungstenite::Error::Io)?)
                 };
                 tokio_tungstenite::client_async(&url, io).await
             }).await;
@@ -245,9 +267,19 @@ impl Link {
 // ── REST on the same port (machines, desk, status) ──────────────────────────────
 
 pub async fn http_json(port: u16, method: &str, path: &str, body: Option<&Value>) -> Result<Value, RpcError> {
+    http_json_for(port, method, path, body, Duration::from_secs(15)).await
+}
+
+/// [http_json] with its own wait: a long poll (`POST /api/pair` holds the request for as long as a
+/// phone's handshake runs) needs more than the usual 15 s.
+pub async fn http_json_for(port: u16, method: &str, path: &str, body: Option<&Value>, wait: Duration) -> Result<Value, RpcError> {
+    http_json_at(port, &socket_path(port), method, path, body, wait).await
+}
+
+async fn http_json_at(port: u16, socket: &Path, method: &str, path: &str, body: Option<&Value>, wait: Duration) -> Result<Value, RpcError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let work = async {
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| RpcError::new("DAEMON_UNREACHABLE", e.to_string()))?;
+        let mut stream = connect_owned(socket).await.map_err(|e| RpcError::new("DAEMON_UNREACHABLE", e.to_string()))?;
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAccept: application/json\r\nx-adapter-local: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -268,7 +300,7 @@ pub async fn http_json(port: u16, method: &str, path: &str, body: Option<&Value>
         }
         Ok(if value.get("success").is_some() && value.get("data").is_some() { value["data"].clone() } else { value })
     };
-    tokio::time::timeout(Duration::from_secs(15), work).await.unwrap_or_else(|_| Err(RpcError::new("TIMEOUT", "the daemon did not answer")))
+    tokio::time::timeout(wait, work).await.unwrap_or_else(|_| Err(RpcError::new("TIMEOUT", "the daemon did not answer")))
 }
 
 fn dechunk(body: &[u8]) -> Vec<u8> {
@@ -288,11 +320,55 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct TestSocket(PathBuf);
+    impl Drop for TestSocket { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+    fn listener() -> (tokio::net::UnixListener, TestSocket) {
+        let path = PathBuf::from(format!("/tmp/hn-daemon-{}.sock", uuid::Uuid::new_v4().simple()));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        (listener, TestSocket(path))
+    }
+
+    #[tokio::test]
+    async fn rest_uses_only_the_users_private_socket_and_never_the_tcp_listener() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let foreign = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = foreign.local_addr().unwrap().port();
+        let (owned, socket) = listener();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = owned.accept().await.unwrap();
+            let mut bytes = [0u8; 4096];
+            let n = peer.read(&mut bytes).await.unwrap();
+            assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("GET /api/desk "));
+            let body = r#"{"owner":"this-user","tabs":[]}"#;
+            peer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let desk = http_json_at(port, &socket.0, "GET", "/api/desk", None, Duration::from_secs(15)).await.unwrap();
+        assert_eq!(desk["owner"], "this-user");
+        server.await.unwrap();
+        std::fs::remove_file(&socket.0).unwrap();
+        assert!(http_json_at(port, &socket.0, "GET", "/api/desk", None, Duration::from_secs(15)).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(50), foreign.accept()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_public_sockets_and_symlinks_before_sending_any_request() {
+        let (owned, socket) = listener();
+        std::fs::set_permissions(&socket.0, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(connect_owned(&socket.0).await.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        std::fs::set_permissions(&socket.0, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = TestSocket(socket.0.with_extension("link"));
+        std::os::unix::fs::symlink(&socket.0, &alias.0).unwrap();
+        assert_eq!(connect_owned(&alias.0).await.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(tokio::time::timeout(Duration::from_millis(50), owned.accept()).await.is_err());
+    }
 
     #[tokio::test]
     async fn cancel_closes_socket_and_releases_rpc_clones() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let (listener, socket) = listener();
+        let port = 19418;
         let (sink, mut events) = mpsc::unbounded_channel();
         let (requested, request_seen) = oneshot::channel();
         let server = tokio::spawn(async move {
@@ -307,7 +383,7 @@ mod recovery_tests {
                 }
             }
         });
-        let link = Link::spawn(port, "test-peer", 1, sink);
+        let link = Link::spawn_at(port, socket.0.clone(), "test-peer", 1, sink);
         assert!(matches!(tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap(), Some(Event::Machine { event: MachineEvent::Connected, .. })));
         let clone = link.clone();
         let rpc = tokio::spawn(async move { clone.request("terminal_open", json!({}), Duration::from_secs(45)).await });
@@ -323,8 +399,8 @@ mod recovery_tests {
 
     #[tokio::test]
     async fn selection_failure_releases_pending_requests_immediately() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let (listener, socket) = listener();
+        let port = 19418;
         let (sink, _events) = mpsc::unbounded_channel();
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
@@ -332,7 +408,7 @@ mod recovery_tests {
             let _select = ws.next().await;
             ws.send(Message::text(json!({"type":"machine_select_error", "payload":{"error":"NO_PEER_LINK"}}).to_string())).await.unwrap();
         });
-        let link = Link::spawn(port, "test-peer", 1, sink);
+        let link = Link::spawn_at(port, socket.0.clone(), "test-peer", 1, sink);
         let result = tokio::time::timeout(Duration::from_secs(2), link.request("agents_list", json!({}), Duration::from_secs(20))).await.unwrap();
         assert_eq!(result.unwrap_err().code, "DISCONNECTED");
         assert!(link.pending.lock().unwrap().is_empty());

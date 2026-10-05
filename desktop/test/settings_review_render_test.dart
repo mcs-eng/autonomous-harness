@@ -56,8 +56,8 @@ void main() {
         'packages/lucide_icons_flutter/assets/lucide.ttf',
       ),
       (
-        'packages/lucide_icons_flutter/Lucide300',
-        'packages/lucide_icons_flutter/assets/build_font/LucideVariable-w300.ttf',
+        'packages/lucide_icons_flutter/Lucide400',
+        'packages/lucide_icons_flutter/assets/build_font/LucideVariable-w400.ttf',
       ),
     ]) {
       await (FontLoader(family)..addFont(rootBundle.load(path))).load();

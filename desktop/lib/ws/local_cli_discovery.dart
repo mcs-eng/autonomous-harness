@@ -44,6 +44,13 @@ class LocalCliEndpoint {
   /// on the loopback port. [wsUri] names the same endpoint either way.
   final String? socketPath;
 
+  /// The daemon is still on its first scan for agents (`discoveryReady: false`). NOT part of
+  /// readiness, for the same reason [backendOnline] is not: its socket already serves every agent it
+  /// knows, restored tiles wait as intent and attach as each agent's `agent_synced` arrives, so
+  /// holding the app on "Starting local service…" for the scan only made the window late (owner,
+  /// 2026-10-01; measured 2–2.5 s of a cold start). The next probe clears it.
+  final bool scanning;
+
   const LocalCliEndpoint({
     required this.computerId,
     required this.wsUri,
@@ -53,6 +60,7 @@ class LocalCliEndpoint {
     this.backendOnline = true,
     this.agentProjects = const {},
     this.socketPath,
+    this.scanning = false,
   });
 }
 
@@ -190,6 +198,10 @@ Future<void> runHarnessStart(HarnessCliRunner runner) async {
 
 Future<void> _defaultSpawnCommand() => runHarnessStart(HarnessCliRunner());
 
+Future<void> _defaultStopCommand() async {
+  await HarnessCliRunner().run(['stop']);
+}
+
 /// The wall-clock window in which the supervisor may spawn `harness start`: seconds :10–:20 of
 /// every minute. The CLI's own updater ticks at :45 (`ADAPTER_UPDATE_SLOT_SEC` in the harness CLI's
 /// `config/env.ts`), so a spawn and an update handoff — both of which take the daemon's spawn lock —
@@ -278,6 +290,7 @@ class LocalCliDiscovery {
       );
 
   final Future<void> Function() _spawnCommand;
+  final Future<void> Function() _stopCommand;
 
   /// Which way the daemon is reached — its socket or the loopback port. Shared
   /// with REST and the local WebSocket; [probe] decides it.
@@ -288,12 +301,14 @@ class LocalCliDiscovery {
     Dio? dio,
     LocalMachineIdentity? identity,
     Future<void> Function()? spawnCommand,
+    Future<void> Function()? stopCommand,
     LocalDaemonTransport? transport,
   }) : _injectedIdentity = identity,
        transport =
            transport ??
            LocalDaemonTransport.detect(Uri.parse(config.localCliBaseUrl)),
        _spawnCommand = spawnCommand ?? _defaultSpawnCommand,
+       _stopCommand = stopCommand ?? _defaultStopCommand,
        _dio =
            dio ??
            Dio(
@@ -412,6 +427,26 @@ class LocalCliDiscovery {
   /// The WSL distribution the CLI runs in, when [usesWslCli] is true.
   String? get wslDistro => identity.usesWsl ? _identityWslDistro : null;
 
+  /// Stops the running daemon and starts one from this process, so the new daemon descends from
+  /// the app (see `core/process_responsibility.dart` on why that matters). Returns the probe
+  /// [ensureRunning] ends on.
+  Future<LocalCliProbe> restart({
+    Duration stopTimeout = const Duration(seconds: 10),
+  }) async {
+    try {
+      await _stopCommand();
+    } catch (_) {
+      // Judged by the port below, not by the exit code.
+    }
+    final deadline = DateTime.now().add(stopTimeout);
+    var seen = await probe();
+    while (seen.alive && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 250));
+      seen = await probe();
+    }
+    return ensureRunning();
+  }
+
   /// Keeps the local daemon alive for as long as the returned [Timer] runs: polls [probe] every
   /// [checkInterval] and, when the port has gone quiet, spawns `harness start` and gives it a short
   /// grace window to bind its port before concluding the attempt failed. Failed spawn attempts back
@@ -457,8 +492,11 @@ class LocalCliDiscovery {
     void Function(LocalCliEndpoint endpoint)? onReady,
     void Function(LocalCliEndpoint endpoint)? onSnapshot,
     void Function(bool online)? onBackendOnline,
+    Future<void> Function(int pid)? checkOwner,
   }) {
     var backoff = initialBackoff;
+    // The daemon pid [checkOwner] last saw: it is asked once per daemon, not once per tick.
+    int? ownerCheckedPid;
     var nextSpawnAllowedAt = DateTime.now();
     var quietTicks = 0;
     var wasReady = false;
@@ -508,6 +546,17 @@ class LocalCliDiscovery {
           }
           final seen = await probe();
           observe(seen);
+          // A new daemon — replaced from a terminal while the app is open, say. Awaited inside the
+          // tick so the spawn path below cannot race a restart [checkOwner] makes.
+          final seenPid = seen.pid;
+          if (checkOwner != null &&
+              seen.ready &&
+              seenPid != null &&
+              seenPid != ownerCheckedPid) {
+            ownerCheckedPid = seenPid;
+            await checkOwner(seenPid);
+            return;
+          }
           // Running — ready or on its way. Nothing to spawn, nothing to back off from.
           if (seen.alive) return;
           quietTicks += 1;
@@ -699,16 +748,9 @@ class LocalCliDiscovery {
     if (body == null) {
       return const LocalCliProbe.notReady('not a harness status');
     }
-    // New CLIs expose the initial terminal scan explicitly. A missing field means an older CLI and
-    // remains accepted for backward compatibility; false means the daemon is alive but not ready to
-    // publish an authoritative empty/non-empty agent list yet.
-    if (body['discoveryReady'] == false) {
-      return LocalCliProbe.notReady(
-        'still scanning for agents',
-        pid: pid,
-        version: version,
-      );
-    }
+    // New CLIs expose the initial terminal scan explicitly; false means the daemon is alive but its
+    // agent list is not complete yet. Reported, not gated on — see [LocalCliEndpoint.scanning].
+    final scanning = body['discoveryReady'] == false;
     // `connected` is the daemon's own backend-socket state. It used to gate readiness — so a
     // computer that could not reach the backend never got past "Starting local service…", with a
     // daemon, tmux and every agent sitting right there on the loopback. It is reported instead
@@ -768,6 +810,7 @@ class LocalCliDiscovery {
           _daemonPathPlatform(identity),
         ),
         socketPath: socketPath,
+        scanning: scanning,
       ),
       pid: pid,
       version: version,

@@ -163,7 +163,7 @@ let historyCheckWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, h
   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
 historyCheckWindow.isReleasedWhenClosed = false
 private let historyCheckMessenger = HistoryCheckMessenger()
-let historyCheckTitlebar = SwarmTitlebar(window: historyCheckWindow, messenger: historyCheckMessenger)
+let historyCheckTitlebar = SwarmTitlebar(window: historyCheckWindow, messenger: historyCheckMessenger, installStatusItem: false)
 do {
   if CommandLine.arguments.contains("--history-performance") {
     try historyCheckTitlebar.benchmarkHistoryUpdates()

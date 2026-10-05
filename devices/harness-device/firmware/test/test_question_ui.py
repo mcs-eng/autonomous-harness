@@ -79,8 +79,6 @@ static void display_lock(void) {}
 static void display_unlock(void) {}
 static int wakes;
 static void display_wake(void) { wakes++; }
-static int shown;
-static void notice_show_question(const char *id) { assert(id && *id); shown++; view(INBOX); }
 static bool queue(action_t a) {
     if (congested) return false;
     queued=a; if (a.kind==A_ANSWER) queued_answers++; return true;
@@ -104,6 +102,16 @@ static bool cable_client_answer_reviewed(const char *id,const char *fetch,const 
 #define ERROR ht_rgb(HT_THEME_ERROR)
 #define SEL ht_rgb(HT_THEME_SELECTION)
 #define COPY(dst,src) copy(dst,sizeof(dst),src)
+'''
+# The production helpers are skin-aware; this harness has no Focus skin, so they are the mono calls.
+code += '''
+static bool focus_skin(void){return false;}
+static const ht_font_t *focus_face_for(const ht_font_t *m){return m;}
+static void focus_put(ht_scene_t *f,int x,int y,int w,const ht_font_t *font,uint16_t ink,uint16_t bg,const char *t,bool c){(void)c;ht_text(f,x,y,w,font,ink,bg,t);}
+static void text_in(ht_scene_t *f,int x,int y,int w,const ht_font_t *m,const char *t,uint16_t c,bool centred){(void)centred;ht_text(f,x,y,w,m,c,BG,t);}
+static int ui_rows(const char *t,const ht_font_t *f,int w){return ht_text_rows(t,f,w);}
+static bool ui_can_display(const char *t,const ht_font_t *f,int w,int l){return ht_can_display(t,f,w,l);}
+static int ui_wrap(ht_scene_t *s,int x,int y,int w,int n,int skip,const ht_font_t *f,uint16_t fg,const char *t){return ht_wrap(s,x,y,w,n,skip,f,fg,t);}
 '''
 for name in ['notice_sync_view','copy','control','text','center','heading','question_view','question_rows',
              'question_text','render_question','render_choices','render_answer_review',
@@ -230,16 +238,10 @@ int main(int argc,char **argv) {
     reset(false);s.view=MESSAGE;visit.available=true;strcpy(visit.agent,"b");b_known=false;
     ui_focus_project("b");assert(!strcmp(s.pending_focus,"b") && s.view==MESSAGE);
     b_known=true;ui_focus_project("b");assert(s.view==QUESTION && s.q.loading && !strcmp(s.q.agent,"b"));
-    // A question TAKES THE GLASS from a screen a person is only reading — its card, to be read; the
-    // answer is given in the app. No answer screen opens and nothing is fetched to answer with.
-    reset(false);view(HOME);reads=0;wakes=0;shown=0;
-    ui_question_show("b","Other","M2","q-b2",NULL);
-    assert(s.view==INBOX && shown==1 && wakes==1 && reads==0);
-    // ...and not from one they are in the middle of, nor from under a finger. The alert still counts.
-    reset(false);view(HOME);s.touch_down=true;notices=0;shown=0;
-    ui_question_show("b","Other","M2","q-b3",NULL);assert(s.view==HOME && notices==1 && !shown);
-    reset(false);s.view=VOICE;shown=0;ui_question_show("b","Other","M2","q-b4",NULL);assert(s.view==VOICE && !shown);
-    reset(false);s.view=DRAFT;shown=0;ui_question_show("b","Other","M2","q-b5",NULL);assert(s.view==DRAFT && !shown);
+    // A question does NOT change the screen — the home face shows it in the recap's place — but it
+    // does wake the display, and it still counts in the bell until it is answered.
+    reset(false);view(HOME);wakes=0;notices=0;
+    ui_question_show("b","Other","M2","q-b2",NULL);assert(s.view==HOME && wakes==1 && notices==1);
     // The ESP32 compiler's -O0 restrict analysis sees the enclosing global s,
     // not the disjoint options/answer fields. Exercise every selected subset
     // at their real capacities and prove that no neighboring state changes.

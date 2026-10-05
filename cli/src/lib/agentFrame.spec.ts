@@ -56,6 +56,15 @@ describe('agentFrame', () => {
     expect(moved.grid).not.toHaveProperty('targetId')
   })
 
+  it('F1 sends a fork origin to clients as name and id only, never its transcript', async () => {
+    const row = session(null)
+    row.forkedFrom = { agentId: 'p', name: 'P', sessionId: 'p-sess', transcriptPath: '/x/p-sess.jsonl' }
+    const frame = await agentFrame(row, { selectedModel: null, terminalAvailable: true })
+    expect(frame.forkedFrom).toEqual({ agentId: 'p', name: 'P' })
+    expect(JSON.stringify(frame)).not.toContain('p-sess.jsonl')
+    expect(JSON.stringify(frame)).not.toContain('p-sess')
+  })
+
   it('reports no assignment as null rather than omitting the field', async () => {
     const frame = await agentFrame(session(null), { selectedModel: null, terminalAvailable: true })
     expect(frame).toHaveProperty('grid', null)

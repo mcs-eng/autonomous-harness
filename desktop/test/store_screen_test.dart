@@ -311,7 +311,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('New Harness'), findsNothing);
-      expect(find.text('Resume Harness'), findsNothing);
+      expect(find.text('Open Harness'), findsNothing);
       final action = find.byKey(const ValueKey('store-primary-action'));
       expect(
         find.descendant(of: action, matching: find.text('Update')),
@@ -689,11 +689,14 @@ void main() {
         reason: 'no stars, no post',
       );
       // The fourth star.
-      final stars = find.descendant(
+      final fourthStar = find.descendant(
         of: find.byKey(const ValueKey('store-review-stars')),
-        matching: find.byType(Icon),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics && widget.properties.label == '4 stars',
+        ),
       );
-      await tester.tap(stars.at(3));
+      await tester.tap(fourthStar);
       await tester.pump();
       await tester.enterText(
         find.byKey(const ValueKey('store-review-title')),

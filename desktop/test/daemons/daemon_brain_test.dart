@@ -43,6 +43,152 @@ void main() {
   });
   tearDown(() => brain.dispose());
 
+  test('opening the terminal sends no words and pins the reply to the current individual', () async {
+    brain.bindConversation('account:test', 'tim-one');
+    final opening = brain.openConversation();
+    expect(sent.single.$1, 'daemon_open');
+    expect(sent.single.$2['companionUid'], 'tim-one');
+    expect(sent.single.$2.containsKey('text'), isFalse);
+    brain.receive('daemon_open_result', {
+      'requestId': sent.single.$2['requestId'],
+      'ok': true,
+      'agentId': 'pair-tim',
+    });
+    expect((await opening)['ok'], isTrue);
+    expect(brain.pairAgentId, 'pair-tim');
+    expect(brain.talk, isEmpty);
+    final stale = brain.openConversation();
+    final requestId = sent.last.$2['requestId'];
+    brain.bindConversation('account:test', 'gnu-one');
+    brain.receive('daemon_open_result', {
+      'requestId': requestId,
+      'ok': true,
+      'agentId': 'pair-tim',
+    });
+    expect((await stale)['error'], 'STALE_COMPANION');
+    expect(brain.pairAgentId, 'pair-tim');
+    brain.bindConversation('account:another', 'other-tim');
+    expect(brain.pairAgentId, isNull);
+  });
+
+  test('daemon state restores the collection terminal without matching a character workspace', () {
+    brain.bindConversation('account:test', 'tim-one');
+    brain.receive('daemon_state', {
+      'pair': 'tim',
+      'companionHarness': {
+        'agentId': 'collection-agent',
+        'state': 'ready',
+        'model': 'opus',
+        'engine': 'claude',
+      },
+    });
+    expect(brain.pairAgentId, 'collection-agent');
+    expect(brain.pairEngine, 'claude');
+    brain.bindConversation('account:test', 'gnu-one');
+    expect(brain.pairAgentId, 'collection-agent');
+    brain.bindConversation(null, null);
+    expect(brain.pairAgentId, isNull);
+    expect(brain.pairEngine, isNull);
+  });
+
+  test('an explicit engine choice commits only after success and cannot cross accounts', () async {
+    brain.bindConversation('account:test', 'tim-one');
+    brain.receive('daemon_state', {
+      'pair': 'tim',
+      'companionHarness': {'agentId': 'old-agent', 'engine': 'claude'},
+    });
+    final failed = brain.openConversation(engine: 'codex');
+    expect(sent.last.$2['engine'], 'codex');
+    expect(brain.pairEngine, 'claude');
+    brain.receive('daemon_open_result', {
+      'requestId': sent.last.$2['requestId'],
+      'ok': false,
+      'error': 'BUSY',
+    });
+    await failed;
+    expect(brain.pairEngine, 'claude');
+    final opening = brain.openConversation(engine: 'codex');
+    brain.receive('daemon_open_result', {
+      'requestId': sent.last.$2['requestId'],
+      'ok': true,
+      'agentId': 'codex-agent',
+      'engine': 'codex',
+    });
+    await opening;
+    expect(brain.pairEngine, 'codex');
+    expect(brain.pairAgentId, 'codex-agent');
+    final stale = brain.openConversation(engine: 'claude');
+    final request = sent.last.$2['requestId'];
+    brain.bindConversation('account:other', 'other-tim');
+    brain.receive('daemon_open_result', {
+      'requestId': request,
+      'ok': true,
+      'agentId': 'old-agent',
+      'engine': 'claude',
+    });
+    expect((await stale)['error'], 'STALE_COMPANION');
+    expect(brain.pairEngine, isNull);
+    expect(brain.pairAgentId, isNull);
+  });
+
+  test('recent conversation survives a window restart, scoped to account and individual', () async {
+    brain.bindConversation('account:one', 'tim-one');
+    await Future<void>.delayed(Duration.zero);
+    brain.receive('daemon_say', {
+      'id': 'saved-reply',
+      'mood': 'say',
+      'from': 'pair',
+      'line': 'Hello.',
+      'reply': 'Our first little conversation.',
+      'companionUid': 'tim-one',
+    });
+    await brain.flushConversation();
+    final next = DaemonBrain(send: (_, _) => true, storage: storage);
+    addTearDown(next.dispose);
+    next.bindConversation('account:one', 'tim-one');
+    await Future<void>.delayed(Duration.zero);
+    expect(next.talk.single.text, 'Our first little conversation.');
+    next.bindConversation('account:one', 'gnu-one');
+    await Future<void>.delayed(Duration.zero);
+    expect(next.talk, isEmpty);
+    next.bindConversation('account:two', 'tim-one');
+    await Future<void>.delayed(Duration.zero);
+    expect(next.talk, isEmpty);
+  });
+
+  test(
+    'full replies stay out of status text and never cross companion identities',
+    () {
+      brain.bindConversation('account:one', 'tim-one');
+      final reply = {
+        'id': 'chat-one',
+        'mood': 'say',
+        'from': 'pair',
+        'line': 'A short hello.',
+        'reply': 'A longer answer.\n\nWith a second paragraph.',
+        'companionUid': 'tim-one',
+        'actions': [
+          {'key': 'y', 'label': 'approve'},
+        ],
+      };
+      final spoken = <DaemonSay>[];
+      brain.said.listen(spoken.add);
+      brain.receive('daemon_say', reply);
+      brain.receive('daemon_say', reply);
+      expect(brain.talk, [
+        (you: false, text: 'A longer answer.\n\nWith a second paragraph.'),
+      ]);
+      expect(spoken.first.line, 'A short hello.');
+      expect(spoken.first.actions, isEmpty);
+      brain.bindConversation('account:one', 'gnu-one');
+      expect(brain.talk, isEmpty);
+      brain.receive('daemon_say', reply);
+      expect(brain.talk, isEmpty);
+      brain.bindConversation('account:two', 'tim-one');
+      expect(brain.pairAgentId, isNull);
+    },
+  );
+
   test('daemon_state: every machine, the +n, asks and what it did', () {
     expect(brain.active, isFalse);
     brain.receive('daemon_state', {
@@ -379,7 +525,7 @@ void main() {
     brain.talkTo('hello?');
     expect(brain.talkError, 'harnessd is not reachable.');
     expect(changes, greaterThan(4));
-    for (var i = 0; i < 10; i++) {
+    for (var i = 0; i < DaemonBrain.talkKept + 10; i++) {
       brain.talkTo('$i');
     }
     expect(brain.talk, hasLength(DaemonBrain.talkKept));

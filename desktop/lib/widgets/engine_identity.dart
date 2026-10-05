@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness/terminal/terminal_text.dart';
 
 import '../core/harness_catalog.dart';
@@ -617,6 +617,17 @@ const _harnesses = <String, EngineIdentity>{
     color: Color(0xffb5d9ae),
     asset: 'assets/engine-icons/godogen.png',
   ),
+  // An original package mark (a shield with code under a lens), not Trail of
+  // Bits' own logo: the wrapper loads their plugins, it does not wear their brand.
+  'autonomous/trailofbits-skills': EngineIdentity(
+    id: 'autonomous/trailofbits-skills',
+    label: 'Trail of Bits Skills',
+    category: 'Security',
+    tagline: 'Skills to enhance AI-assisted security analysis and testing',
+    creator: 'Trail of Bits',
+    color: Color(0xff7fd1c7),
+    asset: 'assets/engine-icons/trailofbits-skills.png',
+  ),
   // Of the eight studios of 2026-09-18, three wear their project's own mark —
   // Comfy's `assets/logo.svg`, Dimensional's favicon, Bonsai's desktop icon
   // from IfcOpenShell. The other five (Ableton AI, autoresearch-mlx,
@@ -801,6 +812,7 @@ const knownHarnessBase = <String, String>{
   'autonomous/roundtable': 'claude',
   'autonomous/jev-browser': 'claude',
   'autonomous/godogen': 'claude',
+  'autonomous/trailofbits-skills': 'claude',
   'autonomous/ollama': 'codex',
   'autonomous/mlx-lm': 'codex',
   'autonomous/vllm': 'codex',
@@ -977,7 +989,7 @@ class EngineMark extends StatelessWidget {
           )
         : identity.id == kTerminalEngine
         ? Icon(
-            LucideIcons.terminal,
+            AppIcons.terminal,
             key: const ValueKey('engine-icon-terminal'),
             size: size,
             // The shell's pale steel is 1.8:1 on a light workspace; there it

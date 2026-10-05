@@ -232,7 +232,7 @@ const List<AppShortcut> kAppShortcuts = [
       meta: true,
       shift: true,
     ),
-    label: 'Move this pane to another swarm',
+    label: 'Move this pane to another tab',
     group: ShortcutGroup.panes,
   ),
 
@@ -363,22 +363,7 @@ List<AppShortcut> appShortcuts({bool swarmMode = true}) =>
                     }.contains(shortcut.action) &&
                     !shortcut.activator.control))
               shortcut,
-          if (swarmMode)
-            for (final shortcut in kSwarmShortcuts)
-              if (!kIsWeb &&
-                  shortcut.action == ShortcutAction.addAgent &&
-                  defaultTargetPlatform == TargetPlatform.linux)
-                AppShortcut(
-                  action: shortcut.action,
-                  activator: const SingleActivator(
-                    LogicalKeyboardKey.keyO,
-                    control: true,
-                  ),
-                  label: shortcut.label,
-                  group: shortcut.group,
-                )
-              else
-                shortcut,
+          if (swarmMode) ...kSwarmShortcuts,
           if (kDebugSurfaceEnabled) kDebugShortcut,
         ]
         .where(
@@ -388,13 +373,63 @@ List<AppShortcut> appShortcuts({bool swarmMode = true}) =>
         .map(_platformShortcut)
         .toList(growable: false);
 
-/// The browser owns Command/Control keys such as Print, New Tab and Close.
-/// Web uses Option/Alt as its workspace prefix. Editing and terminal Control
-/// keys keep their normal behavior; help and live bindings share this mapping.
-String get workspaceCommandModifier => kIsWeb ? 'alt' : 'cmd';
+/// The browser owns Command/Control keys such as Print, New Tab and Close,
+/// and a Linux desktop owns Super — Hyprland and GNOME bind most Super chords
+/// to windows and workspaces before the app sees them. Both use Option/Alt as
+/// the workspace prefix. Editing and terminal Control keys keep their normal
+/// behavior; help and live bindings share this mapping.
+bool get altWorkspacePrefix =>
+    kIsWeb || defaultTargetPlatform == TargetPlatform.linux;
+
+String get workspaceCommandModifier => altWorkspacePrefix ? 'alt' : 'cmd';
+
+/// Where "⌘ becomes Alt" would take a key a Linux terminal program already
+/// answers — Alt+Enter is the engine prompt's newline, Alt+T Claude Code's
+/// thinking toggle, Alt+F/B/D the shell's word motions — the command moves to
+/// Alt-Shift instead, and whatever that displaced moves on to a free key.
+const _linuxAltShortcuts = <ShortcutAction, SingleActivator>{
+  ShortcutAction.newSwarm: SingleActivator(
+    LogicalKeyboardKey.keyT,
+    alt: true,
+    shift: true,
+  ),
+  ShortcutAction.newTerminal: SingleActivator(
+    LogicalKeyboardKey.enter,
+    alt: true,
+    shift: true,
+  ),
+  // tmux's `prefix z`, which ⌘⏎ stands for on a Mac.
+  ShortcutAction.zoomPane: SingleActivator(LogicalKeyboardKey.keyZ, alt: true),
+  ShortcutAction.routeTask: SingleActivator(
+    LogicalKeyboardKey.keyB,
+    alt: true,
+    shift: true,
+  ),
+  ShortcutAction.findTerminal: SingleActivator(
+    LogicalKeyboardKey.keyF,
+    alt: true,
+    shift: true,
+  ),
+  ShortcutAction.showDebug: SingleActivator(
+    LogicalKeyboardKey.keyX,
+    alt: true,
+    shift: true,
+  ),
+};
+
+/// The keymap's string-bound commands, moved for the same reasons.
+const linuxAltCommandKeys = <String, List<String>>{
+  // VS Code's key, kept from before Linux took Alt.
+  'navigation.commands': ['ctrl+shift+p'],
+  'harnesses.list': ['alt+shift+p'],
+  'pane.split_down': ['alt+shift+d'],
+  // Alt-Shift-F already opens terminal Find on Linux.
+  'pane.toggle_shading': ['ctrl+alt+f'],
+  'app.daemon_talk': ['alt+shift+a'],
+};
 
 String platformWorkspaceBinding(String keys) {
-  if (!kIsWeb || !keys.split('+').contains('cmd')) return keys;
+  if (!altWorkspacePrefix || !keys.split('+').contains('cmd')) return keys;
   final parts = keys.split('+');
   return {
     for (final part in parts) part == 'cmd' ? workspaceCommandModifier : part,
@@ -402,7 +437,7 @@ String platformWorkspaceBinding(String keys) {
 }
 
 SingleActivator _platformActivator(SingleActivator keys) {
-  if (!kIsWeb || !keys.meta) return keys;
+  if (!altWorkspacePrefix || !keys.meta) return keys;
   final modifier = workspaceCommandModifier;
   return SingleActivator(
     keys.trigger,
@@ -414,11 +449,32 @@ SingleActivator _platformActivator(SingleActivator keys) {
   );
 }
 
-AppShortcut _platformShortcut(AppShortcut shortcut) => !kIsWeb
+/// ⌥⌘←/→ is the Mac's tab key, as in Safari and Chrome. With Alt as the
+/// prefix it would be Alt+arrows — the shell's word motions and the
+/// browser's Back/Forward — so Linux and the web keep Alt-Shift-brackets.
+const _altPrefixTabShortcuts = <ShortcutAction, SingleActivator>{
+  ShortcutAction.nextSwarm: SingleActivator(
+    LogicalKeyboardKey.bracketRight,
+    alt: true,
+    shift: true,
+  ),
+  ShortcutAction.previousSwarm: SingleActivator(
+    LogicalKeyboardKey.bracketLeft,
+    alt: true,
+    shift: true,
+  ),
+};
+
+AppShortcut _platformShortcut(AppShortcut shortcut) => !altWorkspacePrefix
     ? shortcut
     : AppShortcut(
         action: shortcut.action,
-        activator: _platformActivator(shortcut.activator),
+        activator:
+            (shortcut.activator.meta
+                ? _altPrefixTabShortcuts[shortcut.action]
+                : null) ??
+            (kIsWeb ? null : _linuxAltShortcuts[shortcut.action]) ??
+            _platformActivator(shortcut.activator),
         label: shortcut.label,
         group: shortcut.group,
       );
@@ -440,13 +496,13 @@ const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.addAgent,
     activator: SingleActivator(LogicalKeyboardKey.keyO, meta: true),
-    label: 'Open Harness',
+    label: 'Open Project',
     group: ShortcutGroup.actions,
   ),
   AppShortcut(
     action: ShortcutAction.newSwarm,
     activator: SingleActivator(LogicalKeyboardKey.keyT, meta: true),
-    label: 'New Swarm',
+    label: 'New Tab',
     group: ShortcutGroup.navigate,
   ),
   // ⌘⇧T is New Terminal, as it is in a terminal app. "Reopen last closed
@@ -489,7 +545,7 @@ const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.closeSwarm,
     activator: SingleActivator(LogicalKeyboardKey.keyW, meta: true),
-    label: 'Close Swarm',
+    label: 'Close Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(
@@ -499,33 +555,33 @@ const kSwarmShortcuts = [
       meta: true,
       shift: true,
     ),
-    label: 'Rename Swarm',
+    label: 'Rename Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(
     action: ShortcutAction.nextSwarm,
     activator: SingleActivator(
-      LogicalKeyboardKey.bracketRight,
+      LogicalKeyboardKey.arrowRight,
       meta: true,
-      shift: true,
+      alt: true,
     ),
-    label: 'Next Swarm',
+    label: 'Next Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(
     action: ShortcutAction.previousSwarm,
     activator: SingleActivator(
-      LogicalKeyboardKey.bracketLeft,
+      LogicalKeyboardKey.arrowLeft,
       meta: true,
-      shift: true,
+      alt: true,
     ),
-    label: 'Previous Swarm',
+    label: 'Previous Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(
     action: ShortcutAction.nextSwarm,
     activator: SingleActivator(LogicalKeyboardKey.tab, control: true),
-    label: 'Next Swarm',
+    label: 'Next Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(
@@ -535,7 +591,7 @@ const kSwarmShortcuts = [
       control: true,
       shift: true,
     ),
-    label: 'Previous Swarm',
+    label: 'Previous Tab',
     group: ShortcutGroup.navigate,
   ),
   AppShortcut(
@@ -636,9 +692,9 @@ List<ShortcutRow> shortcutRows() {
   // The digits are not in [kAppShortcuts] — nine near-identical rows would bury
   // everything around them — so they join here, at the end of their group.
   final digits = ShortcutRow(
-    label: 'Select swarms 1–9',
-    chords: const [
-      [kIsWeb ? 'Alt' : '⌘', '1 – $kTabDigitCount'],
+    label: 'Select tabs 1–9',
+    chords: [
+      [workspaceKeyLabel, '1 – $kTabDigitCount'],
     ],
     group: ShortcutGroup.navigate,
   );
@@ -664,31 +720,31 @@ class TerminalKey {
 /// "why is there no shortcut for X" is answered by seeing that X already
 /// belongs to something.
 List<TerminalKey> get kTerminalOwnedKeys => [
-  if (defaultTargetPlatform == TargetPlatform.linux) ...const [
-    TerminalKey(['⌃', '⇧', 'C'], 'Copy'),
-    TerminalKey(['⌃', '⇧', 'V'], 'Paste'),
-    TerminalKey(['⌃', '⇧', 'A'], 'Select all'),
-  ] else if (defaultTargetPlatform == TargetPlatform.windows) ...const [
-    TerminalKey(['⌃', '⇧', 'C'], 'Copy'),
-    TerminalKey(['⌃', 'V'], 'Paste'),
-    TerminalKey(['⌃', 'A'], 'Select all'),
+  if (defaultTargetPlatform == TargetPlatform.linux) ...[
+    TerminalKey([controlKeyLabel, shiftKeyLabel, 'C'], 'Copy'),
+    TerminalKey([controlKeyLabel, shiftKeyLabel, 'V'], 'Paste'),
+    TerminalKey([controlKeyLabel, shiftKeyLabel, 'A'], 'Select all'),
+  ] else if (defaultTargetPlatform == TargetPlatform.windows) ...[
+    TerminalKey([controlKeyLabel, shiftKeyLabel, 'C'], 'Copy'),
+    TerminalKey([controlKeyLabel, 'V'], 'Paste'),
+    TerminalKey([controlKeyLabel, 'A'], 'Select all'),
   ] else ...const [
     TerminalKey(['⌘', 'C'], 'Copy'),
     TerminalKey(['⌘', 'V'], 'Paste'),
     TerminalKey(['⌘', 'A'], 'Select all'),
   ],
   const TerminalKey(['esc'], 'Interrupt the engine'),
-  const TerminalKey(['⌥', '⏎'], "Newline in the engine's prompt"),
+  TerminalKey([altKeyLabel, '⏎'], "Newline in the engine's prompt"),
   // Kept as short as the rows around them: the deck's narrowest card is 280px, where a label much
   // past thirty characters takes a second line to itself.
-  const TerminalKey(['⌥', '⌫'], 'Delete the previous word'),
+  TerminalKey([altKeyLabel, '⌫'], 'Delete the previous word'),
   // ⌘⌫ is taken in the pane on Apple only — elsewhere ⌘ is Super and stays the app's.
   if (defaultTargetPlatform == TargetPlatform.macOS ||
       defaultTargetPlatform == TargetPlatform.iOS)
     const TerminalKey(['⌘', '⌫'], "Delete to the line's start"),
   // On Windows ⌃C copies while output is selected; the interrupt is what it does with nothing selected.
   TerminalKey(
-    const ['⌃', 'C'],
+    [controlKeyLabel, 'C'],
     defaultTargetPlatform == TargetPlatform.windows
         ? 'Copy selection, else interrupt'
         : 'Cancel / interrupt in the agent',
@@ -726,18 +782,44 @@ Map<ShortcutActivator, VoidCallback> buildShortcutBindings({
 /// a string (a tooltip, a test's failure message).
 typedef KeyChord = List<String>;
 
+/// The browser and Linux spell modifiers out, joined by `+`, the way their own
+/// apps print a chord; only a Mac draws Apple's glyphs.
+bool get spellsModifierKeys => kIsWeb || linuxKeyLabels;
+
+/// The native Linux app, whose command key is Super.
+bool get linuxKeyLabels =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
+/// The workspace prefix as a keycap: ⌘ on a Mac, Alt where
+/// [altWorkspacePrefix] moved it.
+String get workspaceKeyLabel => altWorkspacePrefix ? 'Alt' : '⌘';
+
+String get controlKeyLabel => spellsModifierKeys ? 'Ctrl' : '⌃';
+String get altKeyLabel => spellsModifierKeys ? 'Alt' : '⌥';
+String get shiftKeyLabel => spellsModifierKeys ? 'Shift' : '⇧';
+
+/// The command key: ⌘ on a Mac, and on Linux the logo key a PC keyboard has
+/// in its place, which the desktop calls Super.
+String get commandKeyLabel => kIsWeb
+    ? 'Cmd'
+    : linuxKeyLabels
+    ? 'Super'
+    : '⌘';
+
+String get chordKeySeparator => spellsModifierKeys ? '+' : '';
+
 /// The caps for [activator], in the order Apple prints them.
 KeyChord describeShortcutKeys(SingleActivator activator) => [
-  if (activator.control) kIsWeb ? 'Ctrl' : '⌃',
-  if (activator.alt) kIsWeb ? 'Alt' : '⌥',
-  if (activator.shift) kIsWeb ? 'Shift' : '⇧',
-  if (activator.meta) kIsWeb ? 'Cmd' : '⌘',
+  if (activator.control) controlKeyLabel,
+  if (activator.alt) altKeyLabel,
+  if (activator.shift) shiftKeyLabel,
+  if (activator.meta) commandKeyLabel,
   _keyLabel(activator.trigger),
 ];
 
 /// "⇧⌘]" — the way a Mac menu prints it, in the order Apple prints it.
 String describeShortcut(SingleActivator activator) =>
-    describeShortcutKeys(activator).join(kIsWeb ? '+' : '');
+    describeShortcutKeys(activator).join(chordKeySeparator);
 
 String _keyLabel(LogicalKeyboardKey key) {
   // keyLabel spells these out ("Arrow Left"), which is not how a Mac prints a

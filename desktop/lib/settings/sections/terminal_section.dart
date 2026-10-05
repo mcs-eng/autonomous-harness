@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
@@ -8,6 +9,7 @@ import '../../shared/theme/app_theme.dart' as grid;
 import '../../shared/widgets/app_icon_button.dart';
 import '../../shared/widgets/app_select_field.dart';
 import '../../shared/widgets/setting_row.dart';
+import '../../shortcuts/app_shortcuts.dart' show linuxKeyLabels;
 import '../../terminal/terminal_font_store.dart';
 import '../../terminal/terminal_theme.dart';
 import '../../terminal/terminal_theme_store.dart';
@@ -134,6 +136,7 @@ class _SchemeField extends StatelessWidget {
     grid.AppTheme.watch(context);
     return AppSelectField<TerminalThemeChoice>(
       key: const Key('terminal-colour-scheme-dropdown'),
+      semanticLabel: 'Terminal colors',
       width: SettingRow.controlWidth,
       value: scheme,
       options: [
@@ -165,6 +168,7 @@ class _FamilyField extends StatelessWidget {
     grid.AppTheme.watch(context);
     return AppSelectField<TerminalFontChoice>(
       key: const Key('terminal-font-family-dropdown'),
+      semanticLabel: 'Terminal font',
       width: SettingRow.controlWidth,
       value: family,
       // The faces this OS actually has, plus whatever is selected. The second
@@ -201,7 +205,7 @@ class _SizeStepper extends StatelessWidget {
     grid.AppTheme.watch(context);
     return Container(
       width: SettingRow.controlWidth,
-      height: grid.AppControl.height,
+      constraints: const BoxConstraints(minHeight: grid.AppControl.height),
       padding: const EdgeInsets.symmetric(horizontal: 4),
       decoration: BoxDecoration(
         // A recessed well, the same one [AppSelectField] sits in — the two
@@ -214,7 +218,7 @@ class _SizeStepper extends StatelessWidget {
         children: [
           AppIconButton(
             key: const Key('terminal-font-size-decrease'),
-            icon: Icons.remove_rounded,
+            icon: AppIcons.minus,
             size: 16,
             tooltip: 'Smaller',
             onPressed: size <= TerminalFontStore.minSize
@@ -228,7 +232,7 @@ class _SizeStepper extends StatelessWidget {
           ),
           AppIconButton(
             key: const Key('terminal-font-size-increase'),
-            icon: Icons.add_rounded,
+            icon: AppIcons.plus,
             size: 16,
             tooltip: 'Larger',
             onPressed: size >= TerminalFontStore.maxSize
@@ -347,10 +351,12 @@ class _ResetRow extends StatelessWidget {
       spacing: 10,
       runSpacing: 8,
       children: [
-        Text(
-          '⌘0',
-          style: grid.AppType.monoMeta(color: grid.AppPalette.textFaint),
-        ),
+        // ⌘0 is the Mac's View menu row; Linux binds no font-size keys.
+        if (!linuxKeyLabels)
+          Text(
+            '⌘0',
+            style: grid.AppType.monoMeta(color: grid.AppPalette.textFaint),
+          ),
         OutlinedButton(
           key: const Key('terminal-settings-reset-button'),
           // Dead at the default, because that is what pressing it would leave

@@ -181,7 +181,7 @@ void main() {
   );
 
   test(
-    'a dial-selected agent adds a view without replacing swarm membership',
+    'a dial-selected agent adds a view without replacing tab membership',
     () async {
       // The carousel cannot reach this agent any more, but the pull-down switcher still names it and the
       // window is still told. What happens then is ordinary selection — the focused tile becomes it —
@@ -316,7 +316,7 @@ void main() {
   });
 
   test(
-    'a dial_swarm frame switches the swarm, and an unknown id is ignored',
+    'a dial_swarm frame switches the tab, and an unknown id is ignored',
     () async {
       // The dial's swarm line. It sends the id it was given; the switch is the ordinary one, so the desk
       // it re-describes is the other swarm's panes — which is what the dial's carousel then walks.
@@ -348,7 +348,7 @@ void main() {
         'payload': {'swarmId': second},
       });
       expect(app.activeSwarmId, second);
-      expect(_desk(app), isEmpty, reason: 'the new swarm has no panes yet');
+      expect(_desk(app), isEmpty, reason: 'the new tab has no panes yet');
       app.dispose();
     },
   );

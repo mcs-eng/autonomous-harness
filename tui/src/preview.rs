@@ -28,7 +28,11 @@ pub fn lines(app: &App, kind: &PickerKind, id: &str) -> Vec<Line<'static>> {
         PickerKind::Keys => id.split_once('\t').map(|(k, c)| vec![Line::from(vec![bold(format!("{} {k}", crate::keys::name(&app.keymap.prefix)))]), Line::raw(""), Line::raw(c.to_string())]).unwrap_or_default(),
         PickerKind::Buffers => app.paste.get(id).map(|b| b.data.lines().map(|l| ansi_line(l, crate::theme::fzf_opts().tabstop)).collect()).unwrap_or_default(),
         PickerKind::Store => store(app, id),
-        PickerKind::Models => vec![Line::raw(id.rsplit(':').next().unwrap_or(id).to_string())],
+        // ── models: a Models view row's facts and what Enter does (models.rs) ──
+        PickerKind::Models if crate::models::is_row(id) => crate::models::preview(app, id),
+        PickerKind::Models => vec![Line::raw(id.rsplit(':').next().unwrap_or(id).to_string()), Line::raw(""), Line::raw("Enter switches this harness to it.")],
+        // ── machines & devices ──
+        PickerKind::Devices(view) => crate::devices::preview(app, *view, id),
         _ => vec![],
     }
 }
@@ -38,7 +42,7 @@ fn harness(app: &App, machine_id: &str, agent_id: &str) -> Vec<Line<'static>> {
     let state = app.fleet.state_of(a);
     let (word, color) = match state {
         State::NeedsInput => ("waiting on you", Color::Yellow), State::Working => ("working", Color::Cyan), State::Done => ("finished a turn", Color::Green),
-        State::Ready => ("idle", Color::Green), State::Starting => ("starting", Color::Yellow), State::Failed => (if a.launch == "failed" { "failed to start" } else { "failed" }, Color::Red),
+        State::Unknown => ("status unavailable", Color::DarkGray), State::Ready => ("idle", Color::Green), State::Starting => ("starting", Color::Yellow), State::Failed => (if a.launch == "failed" { "failed to start" } else { "failed" }, Color::Red),
         State::Paused => ("paused — enter resumes it", Color::DarkGray), State::Offline => ("offline", Color::DarkGray),
     };
     let home = app.homes.get(machine_id).cloned().unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
@@ -80,7 +84,7 @@ fn harness(app: &App, machine_id: &str, agent_id: &str) -> Vec<Line<'static>> {
             let name = app.session_list().into_iter().find(|(i, _)| *i == sid).map(|(_, n)| n).unwrap_or_default();
             format!("in {name}:{n} — enter goes to it")
         });
-        out.push(dim(place.unwrap_or_else(|| "enter opens it in a window · C-v beside · C-x below · M-enter here".into())).into());
+        out.push(dim(place.unwrap_or_else(|| "enter adds a pane here · C-t new window · C-v beside · C-x below · M-enter here".into())).into());
         return out;
     }
     // What it asks, or why it failed, first: at 80×24 the preview is a few rows.
@@ -148,7 +152,7 @@ fn harness(app: &App, machine_id: &str, agent_id: &str) -> Vec<Line<'static>> {
         let name = app.session_list().into_iter().find(|(i, _)| *i == sid).map(|(_, n)| n).unwrap_or_default();
         format!("in {name}:{n} — enter goes to it")
     });
-    out.push(dim(place.unwrap_or_else(|| "enter opens it in a window · C-v beside · C-x below · M-enter here".into())).into());
+    out.push(dim(place.unwrap_or_else(|| "enter adds a pane here · C-t new window · C-v beside · C-x below · M-enter here".into())).into());
     out
 }
 
@@ -265,7 +269,7 @@ fn external(app: &App, id: &str) -> Vec<Line<'static>> {
     }
     out.push(Line::raw(""));
     out.push(if x.open { Line::styled("Open in another terminal or app — close it there to open it here", Style::default().fg(Color::Yellow)) }
-        else { dim("enter resumes it in a window · C-v beside · C-x below · M-enter here — without permission prompts, as the desktop resumes it").into() });
+        else { dim("enter resumes it as a pane here · C-t new window · C-v beside · C-x below · M-enter here — without permission prompts, as the desktop resumes it").into() });
     out
 }
 
@@ -283,7 +287,7 @@ fn session(app: &App, id: &str) -> Vec<Line<'static>> {
 
 fn machine(app: &App, id: &str) -> Vec<Line<'static>> {
     let Some(m) = app.fleet.machine(id) else { return vec![] };
-    let mut out = vec![Line::from(vec![bold(m.name.clone()), dim(if m.local { "  this computer" } else { "" })]), Line::raw("")];
+    let mut out = vec![Line::from(vec![bold(app.fleet.machine_name(id)), dim(if m.local { "  this computer" } else { "" })]), Line::raw("")];
     if let Some(rtt) = app.rtt.get(id) { out.push(kv("rtt", format!("{}ms", rtt.as_millis()))) }
     // Its agent accounts' rate limits (claude 5h 42% week 18%).
     for u in app.usage.get(id).into_iter().flatten() { out.push(kv("limits", u.line())) }

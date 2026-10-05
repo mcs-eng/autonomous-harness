@@ -171,7 +171,10 @@ void main() {
       final contrast =
           (hintInk.computeLuminance() + .05) /
           (grid.AppPalette.swarmField.computeLuminance() + .05);
-      expect(contrast, greaterThanOrEqualTo(4.5));
+      expect(
+        contrast >= 1 ? contrast : 1 / contrast,
+        greaterThanOrEqualTo(4.5),
+      );
       for (final command in [
         'agent.new',
         'harnesses.list',

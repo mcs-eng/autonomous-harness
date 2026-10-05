@@ -1,3 +1,4 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 
 import '../core/project_folder.dart';
@@ -96,7 +97,7 @@ class WorkspaceResume extends StatelessWidget {
                   foregroundColor: grid.AppPalette.accentOnSurface,
                 ),
                 onPressed: onAttention,
-                icon: const Icon(Icons.chat_bubble_outline, size: 16),
+                icon: const Icon(AppIcons.messageSquare, size: 16),
                 label: Text(
                   '$waiting ${waiting == 1 ? 'session needs' : 'sessions need'} your input',
                 ),
@@ -153,7 +154,7 @@ class WorkspaceResume extends StatelessWidget {
                     ),
                   ),
                 ),
-                trailing: const Icon(Icons.arrow_forward, size: 18),
+                trailing: const Icon(AppIcons.arrowRight, size: 18),
                 onTap: () => onOpen(row),
               ),
             ),

@@ -1,7 +1,8 @@
+import 'package:harness/shared/theme/app_icons.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/app_theme.dart' as grid;
 import '../../shared/theme/workspace_bar_style.dart';
@@ -46,8 +47,8 @@ class WebAppMenuButton extends StatelessWidget {
         width: widthOf(context),
         height: workspaceBarControlHeight(context),
         child: Icon(
-          LucideIcons.menu,
-          size: 17,
+          AppIcons.menu,
+          size: 16,
           color: theme.foreground.withValues(
             alpha: !enabled
                 ? .28
@@ -73,6 +74,8 @@ class WebAppMenuButton extends StatelessWidget {
     );
     final chosen = await showPaneMenu<String>(
       context: context,
+      // Opened by a click: no row is lit until the pointer picks one.
+      focusFirst: false,
       position: RelativeRect.fromLTRB(
         origin.dx,
         origin.dy + box.size.height + 6,

@@ -85,6 +85,7 @@ pub async fn run(args: &[String], explicit_port: Option<u16>, socket: Option<&st
     let name = name.map(str::to_string);
     let cmd = args.first()?.as_str();
     match cmd {
+        "os-action" => Some(crate::ipc::call(args, socket.as_deref(), name.as_deref()).await),
         "view" | "open-viewer" => Some(crate::viewer::cli(port, &args[1..], socket.as_deref(), name.as_deref()).await),
         // Every harness on every machine (hn's; `ls` is tmux's list-sessions).
         // The running client knows each one's state (what it asks, does, did); with none, the
@@ -291,7 +292,11 @@ async fn offline(port: u16, args: &[String], name: Option<&str>) -> i32 {
     if !doc.get("sessions").map(Value::is_array).unwrap_or(false) { doc["sessions"] = json!([]) }
     // The desk's session: named as it was, else for this computer; its windows the desk's tabs.
     let (local, list) = machines(port).await.unwrap_or_default();
-    let machine_name = list.iter().find(|(id, _, _)| *id == local).map(|(_, n, _)| n.clone()).unwrap_or_else(crate::app::hostname);
+    let machine_name = list.iter().find(|(id, _, _)| *id == local).map(|(_, n, _)| n.clone()).unwrap_or_else(|| {
+        let mut fleet = crate::fleet::Fleet::default();
+        fleet.load_cache(&local);
+        fleet.local_machine_name()
+    });
     let rows = doc["sessions"].as_array().cloned().unwrap_or_default();
     let desk_row = rows.iter().find(|r| r.get("desk").and_then(Value::as_bool).unwrap_or(false));
     let desk_name = desk_row.and_then(|r| r.get("name").and_then(Value::as_str)).map(str::to_string).unwrap_or(machine_name);
@@ -405,10 +410,10 @@ pub(crate) async fn machines(port: u16) -> Result<(String, Vec<(String, String, 
     let status = http_json(port, "GET", "/api/status", None).await.map_err(|e| format!("the daemon is not running ({e}) — harness start"))?;
     let local = status.get("machineId").and_then(Value::as_str).unwrap_or("").to_string();
     let reply = http_json(port, "GET", "/api/machines", None).await.unwrap_or(json!({}));
-    let mut out = vec![(local.clone(), crate::app::hostname(), true)];
+    let mut out = vec![(local.clone(), crate::fleet::machine_display_name(&local, None), true)];
     for row in reply.get("machines").and_then(Value::as_array).cloned().unwrap_or_default() {
         let id = row.get("machineId").and_then(Value::as_str).unwrap_or("").to_string();
-        let name = ["name", "hostname"].iter().filter_map(|k| row.get(*k).and_then(Value::as_str)).find(|s| !s.trim().is_empty()).unwrap_or(&id).to_string();
+        let name = crate::fleet::machine_display_name(&id, row.get("name").and_then(Value::as_str));
         // This computer by the name the fleet (and the status line) gives it.
         if id == local { out[0].1 = name; continue }
         if id.is_empty() { continue }
