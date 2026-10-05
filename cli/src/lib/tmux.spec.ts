@@ -641,6 +641,22 @@ describe('tmux process primitives', () => {
     expect(engineProcessMatchScore({ executable: 'agent', args: 'agent', imageFileKey: 'same-file' }, 'grok', conflict)).toBe(0)
   })
 
+  it('never scores a Cursor package path mentioned inside a quoted prompt argument', () => {
+    // The prefix cursor must share argvTokens' escape dialect: the regex tokenizer this
+    // replaces let one `\"` inside a quoted PROMPT close the token early, so the Cursor path a
+    // prompt merely MENTIONED posed as an executable entrypoint and the matcher awarded score 3.
+    const row = {
+      executable: 'node',
+      args: 'node /tmp/worker.js Explain " /tmp/cursor-agent/versions/123/index.js " please',
+    }
+    expect(engineProcessMatchScore(row, 'cursor', ownership())).toBe(0)
+    // The same package layout as a real executable prefix still scores.
+    expect(engineProcessMatchScore({
+      executable: 'agent',
+      args: 'agent -- /tmp/cursor-agent/versions/123/index.js',
+    }, 'cursor', ownership())).toBe(3)
+  })
+
   it('does not treat a daemon role named agent as the colliding CLI command', () => {
     expect(ambiguousAgentProcess({
       executable: '/usr/sbin/distnoted',

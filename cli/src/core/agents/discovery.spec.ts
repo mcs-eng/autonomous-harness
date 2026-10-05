@@ -15,6 +15,9 @@ const seen = (over: Partial<DiscoveredTerminalAgent> = {}): DiscoveredTerminalAg
   primaryRuntimeKey: 'tmux:%0',
   processIdentity: { pid: 42, startMarker: 'now' },
   args: 'claude',
+  // A boundary-faithful argv is the default evidence class (Linux/WSL /proc): only from it may
+  // discovery read the bypass flag and the permission mode (review cycle-6, P1 security).
+  argsBoundaryFaithful: true,
   ...over,
 }) as unknown as DiscoveredTerminalAgent
 
@@ -134,6 +137,28 @@ describe('discovery', () => {
       const mode = permissionModeFromArgv('codex', 'codex --dangerously-bypass-approvals-and-sandbox')
       expect(vi.mocked(run.deps.registry.setPermissionMode).mock.calls).toEqual(mode ? [['a1', mode]] : [])
       expect(mode, 'this fixture must name a mode').not.toBeNull()
+    })
+
+    it('reads no bypass flag or permission mode from flattened argv, and leaves the stored state alone', async () => {
+      // Flattened `ps` text (macOS): one prompt argument carrying the flag text must not flip
+      // the row's persisted permission state, which a restart would then repeat (P1 security).
+      const run = setup()
+      const flattened = seen({
+        engine: 'codex',
+        args: 'codex Explain --dangerously-bypass-approvals-and-sandbox please',
+        argsBoundaryFaithful: false,
+      } as Partial<DiscoveredTerminalAgent>)
+      run.rows.set('a1', row())
+      await run.handlers.onObserved(flattened, row())
+      expect(run.deps.registry.setBypassPermission).not.toHaveBeenCalled()
+      expect(run.deps.registry.setPermissionMode).not.toHaveBeenCalled()
+      // The same argv with faithful boundaries is exactly the evidence the writes want.
+      const faithful = seen({ engine: 'codex', args: flattened.args, argsBoundaryFaithful: true } as Partial<DiscoveredTerminalAgent>)
+      const second = setup()
+      second.rows.set('a1', row())
+      await second.handlers.onObserved(faithful, row({ engine: 'codex' } as Partial<RegisteredSession>))
+      expect(second.deps.registry.setBypassPermission).toHaveBeenCalled()
+      expect(second.deps.registry.setPermissionMode).toHaveBeenCalledWith('a1', 'full')
     })
 
     it('adopts the engine someone typed into a terminal, and announces it', async () => {

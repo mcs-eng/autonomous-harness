@@ -2749,6 +2749,40 @@ describe('agent_retarget onto a Local model resolves web tools', () => {
     expect(warned.join('\n')).toMatch(/web tools unavailable .* older than/)
     expect(reply?.payload).not.toHaveProperty('error')
   })
+
+  it('retargets a local Grid profile while the cloud grid is signed out, without asking it to set up', async () => {
+    // A `local:` target is resolved from this machine's own configured profile: cloud sign-in
+    // proves nothing about it, so the setup gate must not run and must not refuse the move.
+    fake = installFakeGrid(plan)
+    const profileId = `backend-retarget-${randomUUID()}`
+    const gridHome = `${env.ADAPTER_DATA_DIR}/${profileId}`
+    chmodSync(env.ADAPTER_DATA_DIR, 0o700)
+    mkdirSync(gridHome, { mode: 0o700 })
+    setLocalGridProfile({ id: profileId, label: 'Retarget fleet', gridHome, gridName: GRID_NAME })
+    const { localGridTargetId } = await import('./lib/gridProfiles.js')
+    const targetId = localGridTargetId({ id: profileId, label: 'Retarget fleet', gridHome, gridName: GRID_NAME })
+    const seen: Array<{ agentId: string; grid: unknown }> = []
+    const socket = new BackendSocket('token')
+    socket.onRetargetAgent = async (input) => { seen.push(input); return { ok: true } }
+    // Cloud setup fails outright: not signed in, no grid of the account's own.
+    socket.ensureGrid = vi.fn(async () => ({ status: 'no-name' as const, name: null, detail: 'Not signed in.' }))
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    ws.message(sealedDown(socket, 'web-1', 'agent_retarget', {
+      requestId: 'r', agentId: 'a1', gridModel: 'Qwen-Test', gridName: GRID_NAME, gridTarget: targetId,
+    }))
+    await vi.waitFor(() => expect(parseSent(ws).some((item) => (item.frame as { type?: string } | undefined)?.type === 'agent_retarget_result')).toBe(true), { timeout: 10_000 })
+    const reply = parseSent(ws)
+      .map((item) => item.frame as { type?: string; payload?: Record<string, unknown> } | undefined)
+      .find((frame) => frame?.type === 'agent_retarget_result')?.payload
+    await socket.stop()
+    removeLocalGridProfile(profileId)
+    expect(reply).toMatchObject({ retargeted: true })
+    expect(reply).not.toHaveProperty('error')
+    expect(socket.ensureGrid).not.toHaveBeenCalled()
+    expect(seen[0]).toMatchObject({ agentId: 'a1' })
+  })
 })
 
 /**

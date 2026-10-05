@@ -82,21 +82,6 @@ export interface ProcessRow extends ProcessIdentity {
   entrypointFileKey?: string
 }
 
-const ARGV_TOKEN = /"[^"]*"|'[^']*'|\S+/g
-
-function unquoteArgvToken(token: string): string {
-  const doubleQuoted = token.startsWith('"') && token.endsWith('"')
-  if (doubleQuoted) {
-    // Same escape dialect argvTokens() parses (review cycle-2/3, P1): inside double quotes `\\`
-    // is one backslash and `\"` is a literal quote. The repair's quote() doubles every
-    // backslash, so a relayed Windows path re-read through this prefix cursor must collapse
-    // the pairs or suffix package-layout checks (`@openai[\/\\]codex…`) see `\\` and miss.
-    return token.slice(1, -1).replace(/\\([\\"])/g, '$1')
-  }
-  const singleQuoted = token.startsWith("'") && token.endsWith("'")
-  return singleQuoted ? token.slice(1, -1) : token
-}
-
 export function argvTokens(args: string): string[] {
   // Escape-aware split, symmetric with the repair's quote() (review cycle-2/3, P1 security).
   // Inside DOUBLE quotes: `\\` is one literal backslash, `\"` is a literal quote (never a
@@ -148,14 +133,43 @@ export function argvTokens(args: string): string[] {
  * prompt suffix once per candidate engine. Keep the same token grammar as
  * argvTokens, but stop scanning as soon as the consumer has enough evidence. */
 function argvPrefix(args: string): () => string | undefined {
-  const pattern = new RegExp(ARGV_TOKEN)
-  let done = false
+  // Same escape-aware scan argvTokens() runs (review cycle-2/3, P1 security), one token per
+  // call. The regex tokenizer this replaces split on ANY quote, so one escaped `\"` inside a
+  // quoted PROMPT argument closed the token early and let a path mentioned in prompt text pose
+  // as an executable entrypoint (`hasCursorPackageEntrypoint` scored it, the process matcher
+  // trusted the score). Single-quoted shells treat backslashes literally, so the single-quote
+  // branch does not process escapes — same as argvTokens().
+  let index = 0
   return () => {
-    if (done) return undefined
-    const match = pattern.exec(args)
-    if (match) return unquoteArgvToken(match[0])
-    done = true // RegExp.exec resets lastIndex at EOF; never restart the prefix.
-    return undefined
+    while (index < args.length && /\s/.test(args[index])) index++
+    if (index >= args.length) return undefined
+    let token = ''
+    if (args[index] === '"' || args[index] === "'") {
+      const close = args[index]
+      index++
+      while (index < args.length && args[index] !== close) {
+        if (close === '"' && args[index] === '\\') {
+          const next = args[index + 1]
+          if (next === '\\' || next === '"') {
+            token += next
+            index += 2
+          } else {
+            token += args[index]
+            index++
+          }
+          continue
+        }
+        token += args[index]
+        index++
+      }
+      if (index < args.length) index++ // consume the closing quote
+    } else {
+      while (index < args.length && !/\s/.test(args[index])) {
+        token += args[index]
+        index++
+      }
+    }
+    return token
   }
 }
 

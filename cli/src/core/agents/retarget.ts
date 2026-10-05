@@ -231,9 +231,12 @@ export function createAgentRetargeter({
         return { ok: false, error: 'RESPAWN_FAILED', detail: outcome.detail }
       }
       // Both are read from the one cached environment of the new pid, so this costs no extra `ps`.
+      // The launch the move just BUILT is the one to classify against — `grid`, not the row's old
+      // `session.gridLaunch`: a move from the engine's own login to a grid had nothing recorded,
+      // and classifying against the old record answered null over a retarget that had just worked.
       const [gateway, assignment] = await Promise.all([
         probeGatewayRuntime(outcome.processIdentity),
-        restartedGridAssignment(outcome.processIdentity, session.engine, session.gridLaunch ?? undefined),
+        restartedGridAssignment(outcome.processIdentity, session.engine, grid ?? undefined),
       ])
       registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind, assignment)
       // The launch that just worked is the one a restart or a post-reboot restore must repeat — and

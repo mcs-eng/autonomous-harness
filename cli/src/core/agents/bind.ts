@@ -19,7 +19,7 @@ import { transcriptIsFirstTurn } from '../../lib/firstTurnReplay.js'
 import { sid } from '../../lib/log.js'
 import { projectDisplayName, type registry, type RegisteredSession } from '../../lib/registry.js'
 import type { SessionInputController } from '../../lib/sessionInput.js'
-import { claudeContinuation, findLiveSession, findResumedTranscript } from '../../lib/sessionRepair.js'
+import { claudeContinuation, findCorroboratedResumeSession, findLiveSession, findResumedTranscript } from '../../lib/sessionRepair.js'
 import type { StoppedAgentStore } from '../../lib/stoppedAgents.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
 import type { SwarmPromptScopes } from '../../teams/promptScope.js'
@@ -243,10 +243,33 @@ export function createBinding({
       return
     }
 
-    let sessionId = observed.resumeSessionId
+    // A resume id read from flattened `ps` text is only a hint: the token scan cannot prove its
+    // origin when the string has no faithful boundaries (review cycle-7, P1 security). The store
+    // corroboration below must independently identify the same live session before it can bind.
+    let sessionId = observed.argsBoundaryFaithful ? observed.resumeSessionId : null
     let transcriptPath: string | undefined
     let hermesHome: string | undefined
     let source = 'terminal-resume'
+    // macOS has no /proc argv. Treat a resume id parsed from flattened `ps` as a hint only, then
+    // require the engine's own store to identify that exact id and the observed PID to hold its
+    // transcript open. This restores evidence-backed old-session resumes without letting prompt text
+    // choose another process's recently updated session.
+    if (!sessionId && observed.resumeSessionId) {
+      const startedAtMs = Date.parse(observed.processIdentity.startMarker)
+      if (Number.isFinite(startedAtMs)) {
+        const corroborated = await findCorroboratedResumeSession(
+          observed.engine,
+          observed.cwd,
+          startedAtMs,
+          observed.resumeSessionId,
+          { pid: observed.processIdentity.pid, codexHome: agent.codexHome ?? undefined },
+        )
+        if (corroborated) {
+          sessionId = corroborated.sessionId
+          transcriptPath = corroborated.transcriptPath
+        }
+      }
+    }
     if (sessionId) {
       if (isRecentlyDeleted(sessionId)) return
       const owner = registry.bySession(sessionId)
@@ -255,7 +278,9 @@ export function createBinding({
         const ownerStarted = Date.parse(owner.processIdentity?.startMarker ?? '')
         if (Number.isFinite(ownerStarted) && (!Number.isFinite(observedStarted) || observedStarted <= ownerStarted)) return
       }
-      transcriptPath = observed.engine === 'cursor'
+      // `??=`: a transcript the CORROBORATION above already identified is the one this PID holds
+      // open — re-deriving it from the store re-opens the ambiguity corroboration just resolved.
+      transcriptPath ??= observed.engine === 'cursor'
         ? await findCursorTranscript(cursorDataDir(), sessionId) ?? undefined
         : observed.engine === 'grok'
           ? await findGrokTranscript(homes.grok, observed.cwd, sessionId) ?? undefined

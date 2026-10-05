@@ -107,14 +107,19 @@ export function createDiscoveryHandlers({
     // that did not yet) learns it here, before any pane recreation ever needs it.
     // `observed.engine`, not `current.engine`: for a terminal that just adopted one, the row's
     // engine was `terminal` a line ago, which has no bypass flag and would read every launch as "no".
-    registry.setBypassPermission(current.agentId, bypassPermissionActive(observed.engine, observed.args))
-    // And the exact MODE, fill-only: a row that recorded one at create is authoritative, and one
-    // that never did (adopted from a terminal, written by an older build, created by a path that
-    // passes no mode) learns it from the same argv — so its restart brings back
-    // `--dangerously-skip-permissions`, not the auto mode `bypassPermission` alone would pick.
-    if (!current.permissionMode) {
-      const mode = permissionModeFromArgv(observed.engine, observed.args)
-      if (mode) registry.setPermissionMode(current.agentId, mode)
+    // ONLY boundary-faithful argv counts: flattened `ps` text lets one prompt argument carrying
+    // the flag text flip the state, and a persisted prompt-enabled bypass survives relaunch
+    // (review cycle-6, P1 security). No faithful evidence here leaves the stored state alone.
+    if (observed.argsBoundaryFaithful) {
+      registry.setBypassPermission(current.agentId, bypassPermissionActive(observed.engine, observed.args))
+      // And the exact MODE, fill-only: a row that recorded one at create is authoritative, and one
+      // that never did (adopted from a terminal, written by an older build, created by a path that
+      // passes no mode) learns it from the same argv — so its restart brings back
+      // `--dangerously-skip-permissions`, not the auto mode `bypassPermission` alone would pick.
+      if (!current.permissionMode) {
+        const mode = permissionModeFromArgv(observed.engine, observed.args)
+        if (mode) registry.setPermissionMode(current.agentId, mode)
+      }
     }
     // Same idea for a Codex profile: a row that never learned which CODEX_HOME its process runs
     // under learns it from the process, before the hook path validates a transcript against it.

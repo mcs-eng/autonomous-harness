@@ -118,6 +118,10 @@ describe('retargeting an agent', () => {
       expect(run.deps.agentReconciler.holdRoute).toHaveBeenCalled()
       expect(restartAgent).toHaveBeenCalledWith({ engine: 'claude', sessionId: 's1' }, true, {})
       expect(run.deps.registry.updateProcessIdentity).toHaveBeenCalledWith('a1', expect.objectContaining({ pid: 2 }), 'none', undefined)
+      // The assignment is classified against the launch this move BUILT, not the row's old one:
+      // a row that came from the engine's own login has nothing recorded, and classifying
+      // against the stale record answered null over a retarget that had just worked.
+      expect(run.deps.restartedGridAssignment).toHaveBeenCalledWith(expect.anything(), 'claude', grid)
       expect(run.deps.registry.setGridLaunch).toHaveBeenCalledWith('a1', { override: grid, webSearch: 'off' })
       expect(run.deps.registry.setSubscriptionModel).toHaveBeenCalledWith('a1', 'opus')
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)

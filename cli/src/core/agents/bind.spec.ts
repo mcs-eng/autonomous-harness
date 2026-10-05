@@ -8,7 +8,7 @@ import { findCursorTranscript } from '../../engines/cursor/discovery.js'
 import { findGrokTranscript } from '../../engines/grok/session.js'
 import { isRecentlyDeleted } from '../../lib/deletedSessions.js'
 import type { RegisteredSession } from '../../lib/registry.js'
-import { claudeContinuation, findLiveSession, findResumedTranscript } from '../../lib/sessionRepair.js'
+import { claudeContinuation, findCorroboratedResumeSession, findLiveSession, findResumedTranscript } from '../../lib/sessionRepair.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
 import { createBinding, statBirthMs, type BindDeps, type RegisteredMeta } from './bind.js'
 
@@ -20,6 +20,7 @@ vi.mock('../../engines/grok/session.js', () => ({ findGrokTranscript: vi.fn(asyn
 vi.mock('../../lib/deletedSessions.js', () => ({ isRecentlyDeleted: vi.fn(() => false) }))
 vi.mock('../../lib/sessionRepair.js', () => ({
   claudeContinuation: vi.fn(async () => null),
+  findCorroboratedResumeSession: vi.fn(async () => null),
   findLiveSession: vi.fn(async () => null),
   findResumedTranscript: vi.fn(async () => '/t/resumed.jsonl'),
 }))
@@ -195,8 +196,11 @@ describe('binding a running process to its session', () => {
     runtimes: [],
     primaryRuntimeKey: 'tmux:%0',
     processIdentity: { pid: 42, startMarker: '2026-10-04T10:00:00Z' },
+    // Boundary-faithful argv is the default evidence class: only it may name the session a
+    // resume reopens (review cycle-7, P1 security). Flattened text must corroborate first.
+    argsBoundaryFaithful: true,
     ...over,
-  }) as DiscoveredTerminalAgent
+  }) as unknown as DiscoveredTerminalAgent
 
   beforeEach(() => { vi.spyOn(console, 'log').mockImplementation(() => {}) })
   afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
@@ -322,6 +326,33 @@ describe('binding a running process to its session', () => {
       run.bySession.set('r', agent({ agentId: 'a1' }))
       await run.binding.bindObservedAgent(observed({ resumeSessionId: 'r' } as Partial<DiscoveredTerminalAgent>))
       expect(run.deps.registry.register).toHaveBeenCalledTimes(3)
+    })
+
+    it('binds a resume named on a faithful command line without asking the store to corroborate it', async () => {
+      const run = setup()
+      vi.mocked(run.deps.registry.byProcess).mockReturnValue(agent({ sessionId: '' }))
+      await run.binding.bindObservedAgent(observed({ resumeSessionId: 'faithful-r' } as Partial<DiscoveredTerminalAgent>))
+      expect(findCorroboratedResumeSession).not.toHaveBeenCalled()
+      expect(run.deps.registry.register).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'faithful-r' }))
+    })
+
+    it('never binds a resume id from flattened prompt text unless the store corroborates it (P1 security)', async () => {
+      const run = setup()
+      vi.mocked(run.deps.registry.byProcess).mockReturnValue(agent({ sessionId: '' }))
+      const flattened = observed({ resumeSessionId: 'prompt-r', argsBoundaryFaithful: false } as Partial<DiscoveredTerminalAgent>)
+      // No corroboration: the id is a hint only, and nothing registers.
+      await run.binding.bindObservedAgent(flattened)
+      expect(run.deps.registry.register).not.toHaveBeenCalled()
+      expect(findCorroboratedResumeSession).toHaveBeenCalledWith(
+        'claude', '/work', Date.parse('2026-10-04T10:00:00Z'), 'prompt-r',
+        { pid: 42, codexHome: undefined },
+      )
+      // The store identifies the exact id and this PID holds its transcript: it binds.
+      vi.mocked(findCorroboratedResumeSession).mockResolvedValueOnce({ sessionId: 'prompt-r', transcriptPath: '/t/prompt-r.jsonl' })
+      await run.binding.bindObservedAgent(flattened)
+      expect(run.deps.registry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'prompt-r', transcriptPath: '/t/prompt-r.jsonl' }),
+      )
     })
 
     it('moves a session from the agent that had it, telling everything that held it for that agent', async () => {

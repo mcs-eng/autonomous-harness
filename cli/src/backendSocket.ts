@@ -3108,14 +3108,20 @@ export class BackendSocket {
             // the account's own grid otherwise, as before.
             // A move onto a grid model is a grid feature in use: grid is signed in first, if it is not
             // yet — and the account's own grid made sure of when that is where the model is.
+            // A `local:` target is resolved from THIS machine's configured Grid profile
+            // (gridProfiles.ts), never from the relay: cloud sign-in proves nothing about it, so
+            // the setup gate does not apply — the profile's own `grid --local info` is the check.
             const named = typeof payload.gridName === 'string' && payload.gridName.trim() ? payload.gridName.trim() : null
-            const notReady = await this.gridNotReady(!named || named === this.harnessGridName)
-            if (notReady) {
-              reply(type, requestId, { error: 'GRID_UNAVAILABLE', detail: notReady })
-              return
+            const targetId = typeof payload.gridTarget === 'string' ? payload.gridTarget.trim() : undefined
+            const localTarget = targetId?.startsWith('local:') ?? false
+            if (!localTarget) {
+              const notReady = await this.gridNotReady(!named || named === this.harnessGridName)
+              if (notReady) {
+                reply(type, requestId, { error: 'GRID_UNAVAILABLE', detail: notReady })
+                return
+              }
             }
             const pickedGrid = named ?? await this.resolveGridName()
-            const targetId = typeof payload.gridTarget === 'string' ? payload.gridTarget.trim() : undefined
             const resolved = await resolveGridTarget(pickedGrid, picked, targetId)
             if (!resolved) {
               reply(type, requestId, { error: 'GRID_UNAVAILABLE', detail: 'Could not read this machine\'s grid endpoint.' })
