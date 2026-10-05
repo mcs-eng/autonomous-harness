@@ -108,7 +108,7 @@ void main() {
         final close = find.byKey(ValueKey('tab-close:${first.id}'));
         expect(close.hitTestable(), findsOneWidget);
         if (keyboard) {
-          final glyph = find.descendant(of: close, matching: find.text('x'));
+          final glyph = find.descendant(of: close, matching: find.byType(Icon));
           Focus.of(tester.element(glyph)).requestFocus();
           await tester.pump();
           await tester.sendKeyEvent(LogicalKeyboardKey.enter);

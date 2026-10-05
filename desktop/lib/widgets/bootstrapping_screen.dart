@@ -125,7 +125,7 @@ class _BootstrappingScreenState extends State<BootstrappingScreen> {
                           else
                             FilledButton.icon(
                               onPressed: widget.onRetry,
-                              icon: const Icon(Icons.refresh, size: 18),
+                              icon: const Icon(AppIcons.refreshCw, size: 18),
                               label: const Text('Try again'),
                             ),
                           const SizedBox(width: 12),

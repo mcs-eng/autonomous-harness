@@ -6,7 +6,7 @@ import 'dart:convert';
 import 'package:harness/shared/theme/app_icons.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart'
-    show ValueListenable, defaultTargetPlatform, kIsWeb, listEquals;
+    show ValueListenable, kIsWeb, listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -555,7 +555,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
   Widget _sidebarButton() => IconButton(
     key: const ValueKey('project-sidebar-toggle'),
     tooltip: 'Projects and machines',
-    icon: const Icon(Icons.view_sidebar_outlined, size: 20),
+    icon: const Icon(AppIcons.panelLeft, size: 20),
     onPressed: () {
       if (_narrowSidebar) {
         _scaffold.currentState?.openDrawer();
@@ -7243,6 +7243,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                                                       HarnessPlacement
                                                                           .currentTab,
                                                                 ),
+                                                            resume: _resumeWork(),
                                                             onStore: _openStore,
                                                             onResourceSearch:
                                                                 (query) =>
@@ -7259,120 +7260,22 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                             ),
                                           ),
                                         ),
-                                  child: Focus.withExternalFocusNode(
-                                    focusNode: _canvasFocus,
-                                    includeSemantics: false,
-                                    child: Stack(
-                                      children: [
-                                        Positioned.fill(
-                                          child: PaneGrid(
-                                            notifier: app,
-                                            swarmMode: true,
-                                            soloFocused: _compact(context),
-                                            empty:
-                                                app.panes.isEmpty &&
-                                                    !app.activeSwarm.isStore &&
-                                                    !app
-                                                        .activeSwarm
-                                                        .isOrchestrator
-                                                ? newHarnessOpensInBox ||
-                                                          app
-                                                              .activeSwarm
-                                                              .isNewTabPage
-                                                      ? _startGuide()
-                                                      : HarnessStartPage(
-                                                          key: ValueKey(
-                                                            'harness-start:${app.activeSwarmId}',
-                                                          ),
-                                                          focusNode:
-                                                              _startSearchFocus,
-                                                          createSearch: () => SwarmSearchController(
-                                                            app,
-                                                            _navigation.recent,
-                                                            projects: _projects,
-                                                            commands:
-                                                                _searchCommands,
-                                                            recentCommands: () =>
-                                                                _navigation
-                                                                    .recentCommands,
-                                                            // The first box a new
-                                                            // person meets is the same
-                                                            // box: its placeholder
-                                                            // promises `?` and a way
-                                                            // to create, so it has them.
-                                                            modes: _searchModes,
-                                                            adding: true,
-                                                            offersCreate: true,
-                                                            placement:
-                                                                HarnessPlacement
-                                                                    .currentTab,
-                                                            catalog:
-                                                                _searchCatalog,
-                                                          ),
-                                                          onNewTab: _newTab,
-                                                          onNewPane: () =>
-                                                              unawaited(
-                                                                _addAgent(
-                                                                  query: '',
-                                                                ),
-                                                              ),
-                                                          onCommands:
-                                                              _showSearchCommands,
-                                                          onQuickStart:
-                                                              _learning.offer
-                                                              ? _startQuickStart
-                                                              : null,
-                                                          onPractice:
-                                                              _practiceKeyboard,
-                                                          onNew: () => _newAgent(
-                                                            placement:
-                                                                HarnessPlacement
-                                                                    .currentTab,
-                                                          ),
-                                                          onNewWithTask:
-                                                              (
-                                                                task,
-                                                              ) => _newAgent(
-                                                                task: task,
-                                                                placement:
-                                                                    HarnessPlacement
-                                                                        .currentTab,
-                                                              ),
-                                                          resume: _resumeWork(),
-                                                          onStore: _openStore,
-                                                          onResourceSearch:
-                                                              (
-                                                                query,
-                                                              ) => _openSearch(
-                                                                adding: true,
-                                                                query: query,
-                                                              ),
-                                                          onChoose:
-                                                              _chooseStartSearch,
-                                                        )
-                                                : null,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
                             ),
-                            if (app.activeSwarm.isOrchestrator)
-                              OrchestratorWorkspace(
-                                key: ValueKey(
-                                  'orchestrator:${app.activeSwarm.orchestratorId}',
-                                ),
-                                notifier: app,
-                                machineId:
-                                    app.activeSwarm.orchestratorMachineId!,
-                                projectId: app.activeSwarm.orchestratorId!,
-                              ),
-                              notifier: app,
-                              machineId: app.activeSwarm.orchestratorMachineId!,
-                              projectId: app.activeSwarm.orchestratorId!,
+                          ),
+                        if (app.activeSwarm.isOrchestrator)
+                          OrchestratorWorkspace(
+                            key: ValueKey(
+                              'orchestrator:${app.activeSwarm.orchestratorId}',
                             ),
+                            notifier: app,
+                            machineId: app.activeSwarm.orchestratorMachineId!,
+                            projectId: app.activeSwarm.orchestratorId!,
+                          ),
                           if (app.activeSwarm.isStore)
                             StoreTab(
                               key: ValueKey('store-tab:${app.activeSwarmId}'),
@@ -7864,19 +7767,10 @@ class _SwarmScreenState extends State<SwarmScreen> {
           names[shown[index].id]!,
       ];
       final toolHeight = workspaceBarControlHeight(context);
-      // Windows reserves Meta+W for Widgets. Keep a visible close action beside
-      // each tab, using the same view-only close path as the existing shortcut.
-      final closeCells =
-          !kIsWeb && defaultTargetPlatform == TargetPlatform.windows ? 3 : 0;
-      final closeWidth = closeCells * cell.width;
+      // Tabs close on Windows (Meta+W is taken); upstream's new
+      // DesktopWorkspaceTab owns the close cell, including the fork's
+      // pinned-close patch, so the old minimumTabWidth budget chain is gone.
       final prefs = appearancePrefsStore.value.prompt;
-      final minimumTabWidths = [
-        for (var i = 0; i < labels.length; i++)
-          activities[i] == null
-              ? closeWidth
-              : ('${i + 1}:'.length + 4 + closeCells) * cell.width,
-      ];
-      final minimumTabWidth = minimumTabWidths.fold(0.0, math.max);
       final storeWidth = math.min(
         WorkspaceStoreButton.widthOf(context),
         // Keep one complete tab revealable; the optional Store label truncates

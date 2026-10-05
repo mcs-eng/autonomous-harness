@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter_windows/webview_flutter_windows.dart';
 
@@ -229,7 +230,7 @@ class _WindowsWebViewerState extends State<WindowsWebViewer> {
               title: Text(_downloadNotice!),
               trailing: IconButton(
                 tooltip: 'Dismiss download notice',
-                icon: const Icon(Icons.close, size: 16),
+                icon: const Icon(AppIcons.close, size: 16),
                 onPressed: () => setState(() => _downloadNotice = null),
               ),
             ),

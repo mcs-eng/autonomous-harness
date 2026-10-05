@@ -14,7 +14,6 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/terminal/terminal_text.dart';
-import 'package:harness/terminal/terminal_theme.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
 import 'package:harness/widgets/search_result_text.dart';
 import 'package:harness/widgets/desktop_chrome.dart';

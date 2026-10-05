@@ -21,8 +21,10 @@ void main() {
     for (final file in Directory(
       'lib',
     ).listSync(recursive: true).whereType<File>()) {
-      if (!file.path.endsWith('.dart') ||
-          file.path.endsWith('/app_icons.dart')) {
+      // Windows lists with backslashes; normalize before the suffix checks so
+      // the catalogue itself is skipped on every host.
+      final path = file.path.replaceAll(String.fromCharCode(92), '/');
+      if (!path.endsWith('.dart') || path.endsWith('/app_icons.dart')) {
         continue;
       }
       final lines = file.readAsLinesSync();
@@ -31,7 +33,7 @@ void main() {
         if (RegExp(r'\b(?:Icons|CupertinoIcons|LucideIcons)\.\w+')
                 .hasMatch(code) ||
             code.contains('package:lucide_icons_flutter/')) {
-          violations.add('${file.path}:${i + 1}');
+          violations.add('${path}:${i + 1}');
         }
       }
     }

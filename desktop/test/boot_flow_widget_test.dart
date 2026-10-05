@@ -841,7 +841,8 @@ void main() {
         find.textContaining('Could not check your saved sign-in'),
         findsNothing,
       );
-      expect(find.text('Sign in'), findsOneWidget);
+      // Upstream's wall offers the providers, not one bare Sign in button.
+      expect(find.text('Continue with Google'), findsOneWidget);
       // The wall keeps the way back to this computer without an account.
       expect(
         find.byKey(const Key('use-without-account-button')),

@@ -4,6 +4,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/shortcuts/app_shortcuts.dart' show altWorkspacePrefix;
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/widgets/pane_resize_handle.dart';
@@ -32,6 +33,10 @@ void main() {
       // This fork's strip also carries the 48px project-sidebar button.
       tester.view.physicalSize = const Size(648, 800);
       await tester.pump();
+      // The fork runs this test on Linux too, and upstream made Linux use Alt
+      // as the workspace prefix: chords the fork used to send as Cmd arrive as
+      // Alt there (see altWorkspacePrefix in app_shortcuts).
+      final prefix = altWorkspacePrefix;
       final strip = find.byType(ReorderableListView);
       Future<void> visible() async {
         await tester.pump();
@@ -48,7 +53,12 @@ void main() {
         expect(bounds.right, lessThanOrEqualTo(viewport.right + .001));
       }
 
-      await key(tester, LogicalKeyboardKey.digit9, cmd: true);
+      await key(
+        tester,
+        LogicalKeyboardKey.digit9,
+        cmd: !prefix,
+        alt: prefix,
+      );
       expect(app.activeSwarmId, tabs[8]);
       await visible();
       for (var i = 0; i < 2; i++) {
@@ -66,7 +76,7 @@ void main() {
         ].every((frames) => frames.isEmpty),
         isTrue,
       );
-      await key(tester, LogicalKeyboardKey.keyW, cmd: true);
+      await key(tester, LogicalKeyboardKey.keyW, cmd: !prefix, alt: prefix);
       await visible();
       app.reorderSwarm(app.activeSwarmId, 0);
       await tester.pump();

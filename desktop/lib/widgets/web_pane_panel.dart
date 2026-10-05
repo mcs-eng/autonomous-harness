@@ -504,7 +504,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
         backgroundColor: grid.AppPalette.windowBg,
         reload: _windowsReload,
         fallbackBuilder: (title, detail, retry) => _Notice(
-          icon: LucideIcons.unplug,
+          icon: AppIcons.unplug,
           title: title,
           detail: _browserFailure ?? detail,
           action: Wrap(
@@ -514,7 +514,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
               TextButton(onPressed: retry, child: const Text('Retry')),
               TextButton.icon(
                 onPressed: _openingBrowser ? null : _openBrowser,
-                icon: const Icon(LucideIcons.externalLink, size: 16),
+                icon: const Icon(AppIcons.externalLink, size: 16),
                 label: Text(_openingBrowser ? 'Opening…' : 'Open in browser'),
               ),
             ],
@@ -526,7 +526,6 @@ class _WebPanePanelState extends State<WebPanePanel> {
       // No embedded webview on this platform (it ships for macOS only — see
       // [webviewAvailable]), so the page it would have shown opens in the
       // browser instead of sitting here as text (openharness#108).
-      final page = url == null ? null : Uri.tryParse(url);
       return _Notice(
         key: const ValueKey('web-pane-placeholder'),
         icon: AppIcons.globe,
@@ -541,7 +540,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
         action: TextButton.icon(
           key: const ValueKey('web-pane-open-in-browser'),
           onPressed: uri == null || _openingBrowser ? null : _openBrowser,
-          icon: const Icon(LucideIcons.externalLink, size: 16),
+          icon: const Icon(AppIcons.externalLink, size: 16),
           label: Text(_openingBrowser ? 'Opening…' : 'Open in browser'),
         ),
       );
@@ -595,7 +594,7 @@ class _ViewerActions extends StatelessWidget {
           IconButton(
             tooltip: 'Open viewer in browser',
             visualDensity: VisualDensity.compact,
-            icon: const Icon(LucideIcons.externalLink, size: 16),
+            icon: const Icon(AppIcons.externalLink, size: 16),
             onPressed: onBrowser,
           ),
         PaneHeaderButton(

@@ -106,11 +106,13 @@ abstract final class AppIcons {
   static const layoutGrid = LucideIcons.layoutGrid400;
   static const link2 = LucideIcons.link2400;
   static const listFilter = LucideIcons.listFilter400;
+  static const listX = LucideIcons.listX400;
   static const loaderCircle = LucideIcons.loaderCircle400;
   static const lock = LucideIcons.lock400;
   static const logOut = LucideIcons.logOut400;
   static const maximize = LucideIcons.maximize400;
   static const menu = LucideIcons.menu400;
+  static const messageSquare = LucideIcons.messageSquare400;
   static const messageCircleQuestionMark =
       LucideIcons.messageCircleQuestionMark400;
   static const messagesSquare = LucideIcons.messagesSquare400;
@@ -123,6 +125,7 @@ abstract final class AppIcons {
   static const packageOpen = LucideIcons.packageOpen400;
   static const palette = LucideIcons.palette400;
   static const paperclip = LucideIcons.paperclip400;
+  static const panelLeft = LucideIcons.panelLeft400;
   static const panelsTopLeft = LucideIcons.panelsTopLeft400;
   static const pause = LucideIcons.pause400;
   static const pencil = LucideIcons.pencil400;
@@ -152,6 +155,7 @@ abstract final class AppIcons {
   static const snowflake = LucideIcons.snowflake400;
   static const sparkles = LucideIcons.sparkles400;
   static const square = LucideIcons.square400;
+  static const squareArrowOutUpRight = LucideIcons.squareArrowOutUpRight400;
   static const squareCheck = LucideIcons.squareCheck400;
   static const squarePlus = LucideIcons.squarePlus400;
   static const squareTerminal = LucideIcons.squareTerminal400;

@@ -16,10 +16,10 @@ import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/widgets/swarm_icon.dart';
 import 'package:xterm/xterm.dart';
 
+import 'swarm_interactions_test.dart' show chord;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
 import 'swarm_switcher_test.dart' show jumpField;
-import 'support/open_harness.dart';
 
 class _UnopenedAgent extends Agent {
   _UnopenedAgent()

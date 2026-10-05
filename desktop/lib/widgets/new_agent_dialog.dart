@@ -1362,7 +1362,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                   detail: 'Browser workspace on this PC',
                   creator: 'DeepSeek',
                   description: 'Launch the official browser UI in WSL. Separate from Harness terminal panes and task routing.',
-                  mark: (size) => Icon(Icons.open_in_browser, size: size),
+                  mark: (size) => Icon(AppIcons.squareArrowOutUpRight, size: size),
                 ),
                 AgentChoice(
                   id: 'zcode-desktop',
@@ -1371,7 +1371,7 @@ class _NewAgentDialogState extends State<_NewAgentDialog> {
                   detail: 'Desktop app on this PC',
                   creator: 'Z.ai',
                   description: 'Open the installed official desktop app. Choose your project and sign in there.',
-                  mark: (size) => Icon(Icons.desktop_windows, size: size),
+                  mark: (size) => Icon(AppIcons.monitor, size: size),
                 ),
               ],
               for (final identity in allEngines)

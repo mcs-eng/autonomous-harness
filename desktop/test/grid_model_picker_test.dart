@@ -713,10 +713,10 @@ void main() {
         onSelected: (model) => picked = model,
       );
 
-      expect(find.text('LOCAL · BRAN FLEET · BRAN-A'), findsOneWidget);
+      expect(find.text('Local · Bran fleet · bran-a'), findsOneWidget);
       // Fork: the account's own grid keeps upstream's heading beside a
       // registered local fleet's.
-      expect(find.text('ON YOUR MACHINES'), findsOneWidget);
+      expect(find.text('On your machines'), findsOneWidget);
       final rows = find.widgetWithText(ModelPickerRow, 'qwen3.5:12b');
       expect(rows, findsNWidgets(2));
       await tester.tap(rows.first);

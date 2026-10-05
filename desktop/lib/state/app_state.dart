@@ -4153,9 +4153,16 @@ class AppNotifier extends ChangeNotifier {
     final revision = _authRevision;
     if (!_authWorkCurrent(revision)) return;
     _cancelEnvironmentRecheckTimer();
+    // The FIRST check holds the quiet pre-flight screen (upstream: "All
+    // checks passed. Opening your workspace…") while the CLI answers; a RETRY
+    // after a failure stays on the bootstrapping surface, which carries the
+    // error, the status line and the Try again way back.
+    final retrying = _bootError != null;
     _bootError = null;
-    _bootStatusMessage = 'Checking sign-in…';
-    status = AppStatus.bootstrapping;
+    _bootStatusMessage = retrying ? 'Checking sign-in…' : null;
+    status = !retrying && viewer == null
+        ? AppStatus.checkingEnvironment
+        : AppStatus.bootstrapping;
     notifyListeners();
     // Auth now lives entirely with the local `harness` CLI — it owns the SSO session on disk and
     // refreshes it itself. This app never reads, stores, or refreshes a token of its own; it just
@@ -4935,8 +4942,6 @@ class AppNotifier extends ChangeNotifier {
       onBackendOnline: (online) {
         if (_authWorkCurrent(revision)) _noteBackendOnline(online);
       },
-      onSnapshot: _updateLocalProjectSnapshot,
-      onBackendOnline: _noteBackendOnline,
       checkOwner: _daemonOwner == null
           ? null
           : (daemonPid) => _daemonOwner.check(daemonPid),

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -96,12 +97,12 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                         // machine tree gave way to it with the 2026-09-23 sync.
                         AppIconButton(
                           key: const ValueKey('project-sidebar-machines'),
-                          icon: Icons.dns_outlined,
+                          icon: AppIcons.server,
                           tooltip: 'Machines',
                           onPressed: widget.onShowMachines,
                         ),
                         AppIconButton(
-                          icon: Icons.chevron_left,
+                          icon: AppIcons.chevronLeft,
                           tooltip: 'Hide sidebar',
                           onPressed: widget.onCollapse,
                         ),
@@ -115,7 +116,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                       controller: _filter,
                       decoration: const InputDecoration(
                         hintText: 'Find project or session',
-                        prefixIcon: Icon(Icons.search, size: 18),
+                        prefixIcon: Icon(AppIcons.search, size: 18),
                         isDense: true,
                       ),
                       onChanged: (value) =>
@@ -136,7 +137,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                           ),
                           onPressed: widget.onAddProject,
                           icon: const Icon(
-                            Icons.create_new_folder_outlined,
+                            AppIcons.folderPlus,
                             size: 16,
                           ),
                           label: const Text('Add folder'),
@@ -343,7 +344,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
           machine.nodeOnline == false ||
           machine.connectionStatus != ConnectionStatus.connected)
         AppIconButton(
-          icon: Icons.info_outline,
+          icon: AppIcons.info,
           tooltip: 'Machine connection details',
           onPressed: () => _showRecovery(location.machineId),
         ),
@@ -351,7 +352,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         key: ValueKey(
           'new-project-agent:${location.machineId}:${location.folder}',
         ),
-        icon: Icons.add,
+        icon: AppIcons.plus,
         tooltip: available
             ? 'New agent here\n$host\n${location.folder}'
             : machine?.machine.isShared == true
@@ -374,7 +375,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         if (saved != null && menu != null)
           AppIconButton(
             key: ValueKey('project-menu:${group.id}'),
-            icon: Icons.more_horiz,
+            icon: AppIcons.ellipsis,
             tooltip: 'Folder actions',
             onPressed: () => menu.isOpen ? menu.close() : menu.open(),
           ),
@@ -383,8 +384,8 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         key: ValueKey('project:${group.id}'),
         label: heading,
         icon: _collapsed.contains(group.id)
-            ? Icons.chevron_right
-            : Icons.expand_more,
+            ? AppIcons.chevronRight
+            : AppIcons.chevronDown,
         tooltip: heading == group.name
             ? '${group.name} · ${group.agents.length} sessions'
             : '$heading\n${group.name} · ${group.agents.length} sessions',
@@ -398,7 +399,9 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: actions,
               ),
-        trailingWidth: 24.0 * actions.length,
+        // AppIconButton's desktop target is 32px (was 24): budget one box per
+        // action or the trailing Row overflows the slot upstream now reserves.
+        trailingWidth: 32.0 * actions.length,
         trailingAlwaysVisible: true,
       );
     }
@@ -419,7 +422,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
     final sessions = group.agents.length;
     return [
       AppMenuItem(
-        icon: Icons.playlist_remove,
+        icon: AppIcons.listX,
         label: 'Remove from sidebar',
         detail: sessions == 0
             ? 'The folder itself is not touched.'
@@ -512,7 +515,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
               key: ValueKey(
                 'project-agent-menu:${row.machineId}:${row.agent.id}',
               ),
-              icon: Icons.more_horiz,
+              icon: AppIcons.ellipsis,
               tooltip: 'Session actions',
               onPressed: () => menu.isOpen ? menu.close() : menu.open(),
             ),
@@ -583,7 +586,7 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
         : null;
     final terminal = isTerminalEngine(row.agent.engine);
     final item = AppMenuItem(
-      icon: Icons.delete_outline,
+      icon: AppIcons.trash2,
       label: terminal ? 'Stop terminal…' : 'Stop harness…',
       danger: reason == null,
       detail:
@@ -805,7 +808,7 @@ class _LocalModeLine extends StatelessWidget {
       child: Row(
         children: [
           Icon(
-            Icons.laptop_outlined,
+            AppIcons.laptop,
             size: 16,
             color: grid.AppPalette.textSecondary,
           ),

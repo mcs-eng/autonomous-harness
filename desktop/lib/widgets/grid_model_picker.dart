@@ -763,6 +763,7 @@ class _ModelPickerPanelState extends State<_ModelPickerPanel>
 
   @override
   Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
     final sections = widget.sections;
     final total = sections.fold<int>(0, (n, s) => n + _matching(s).length);
     final rows = <Widget>[];

@@ -801,37 +801,42 @@ class _CheckRow extends StatelessWidget {
     final (color, icon, statusLabel) = switch (status) {
       EnvironmentStepStatus.ready => (
         AppColors.success,
-        Icons.check_circle,
+        AppIcons.circleCheck,
         'Ready',
       ),
       EnvironmentStepStatus.failed => (
-        AppColors.danger,
-        Icons.cancel_outlined,
+        // Upstream (94f9ce344) moved this row off AppColors.danger to
+        // colorScheme.error: the danger ink measures 4.40:1 on the setup
+        // panel, under the 4.5 floor the upstream contrast test enforces on
+        // every palette. The stale danger value came from a conflict
+        // resolution, not a fork decision, so upstream's choice stands.
+        Theme.of(context).colorScheme.error,
+        AppIcons.circleX,
         'Missing',
       ),
       EnvironmentStepStatus.unavailable => (
         AppColors.warning,
-        Icons.help_outline,
+        AppIcons.circleHelp,
         'Not checked',
       ),
       EnvironmentStepStatus.needsTerminal => (
         AppColors.warning,
-        Icons.circle_outlined,
+        AppIcons.circle,
         'Terminal',
       ),
       EnvironmentStepStatus.running => (
         AppColors.accent,
-        Icons.circle_outlined,
+        AppIcons.circle,
         'Working',
       ),
       EnvironmentStepStatus.notApplicable => (
         AppColors.muted,
-        Icons.remove_circle_outline,
+        AppIcons.circleMinus,
         'Not applicable',
       ),
       _ => (
         AppColors.muted,
-        Icons.circle_outlined,
+        AppIcons.circle,
         checking ? 'Checking' : 'Required',
       ),
     };

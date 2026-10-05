@@ -26,9 +26,6 @@ import 'swarm_screen_test.dart' show terminal;
 import 'swarm_search_preview_test.dart' show seedPreviews;
 import 'swarm_state_test.dart' show createApp;
 
-TerminalTheme get _chromeTheme =>
-    terminalThemeFor(grid.AppTheme.palette.value, terminalThemeStore.value);
-
 void main() {
   testWidgets(
     'desktop dialogs keep native controls and terminal previews through theme changes',
@@ -89,7 +86,6 @@ void main() {
 
       void checkAppearance() {
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
-        final chrome = _chromeTheme;
         expect(
           pane.theme.background,
           terminalScreenThemeFor(
@@ -230,7 +226,6 @@ void main() {
 
       void checkSetupAppearance() {
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
-        final chrome = _chromeTheme;
         expect(
           pane.theme.background,
           terminalScreenThemeFor(

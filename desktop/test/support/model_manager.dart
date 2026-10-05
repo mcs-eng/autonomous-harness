@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:harness/auth/auth_session.dart';
+import 'package:harness/auth/cli_link.dart' show RemotePasswordStatus;
 import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/dsh_catalog.dart';
@@ -165,6 +166,19 @@ class ModelManagerTestApp extends AppNotifier {
     signingIn = false;
     notifyListeners();
   }
+
+  /// No real CLI exists under widget tests. The default
+  /// [AppNotifier.remotePasswordStatus] shells out, and on Windows the fork's
+  /// runner resolves through a live WSL probe whose in-flight `.timeout`
+  /// timer is still pending when a test ends — failing it for a timer the
+  /// widget under test never asked about. Mirror the no-CLI answer a real
+  /// missing binary produces; password-flow tests use an app that overrides
+  /// this with a scripted status.
+  @override
+  Future<RemotePasswordStatus> remotePasswordStatus() async =>
+      const RemotePasswordStatus(
+        error: 'Could not read this computer’s password status. Try again.',
+      );
 
   /// Machines Grid was set up on, in order — a list read carrying `setup`.
   final gridSetups = <String>[];

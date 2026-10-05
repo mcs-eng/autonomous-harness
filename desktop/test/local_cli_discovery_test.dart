@@ -731,12 +731,12 @@ void main() {
     const computerId = '0123456789abcdef0123456789abcdef';
     final identityFile = File('${scratch.path}/computer-id')
       ..writeAsStringSync(computerId);
-    var statusReads = 0;
+    var scanned = false;
+    // Answers, but not ready yet: for another computer until it flips.
     server = await serveStatus(
       0,
       () => readyStatus(
-        computerId,
-        extra: {'discoveryReady': ++statusReads > 1},
+        scanned ? computerId : 'fedcba9876543210fedcba9876543210',
       ),
     );
     var spawned = false;
@@ -747,11 +747,11 @@ void main() {
         spawned = true;
       },
     );
+    Future.delayed(const Duration(milliseconds: 700), () => scanned = true);
     final probe = await discovery.ensureRunning(
       readyTimeout: const Duration(seconds: 5),
     );
     expect(probe.state, LocalCliProbeState.ready);
-    expect(statusReads, greaterThanOrEqualTo(2));
     expect(spawned, isFalse, reason: 'a running daemon is never spawned over');
   });
 

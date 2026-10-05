@@ -156,8 +156,19 @@ Future<void> loadPreviewFonts() async {
     await load(family, ['/System/Library/Fonts/Menlo.ttc']);
   }
   await load('MaterialIcons', ['$materialFonts/MaterialIcons-Regular.otf']);
+  // The pub cache is PUB_CACHE when set, ~/.pub-cache on Linux/macOS, and
+  // %LOCALAPPDATA%\Pub\Cache on a standard Windows Flutter install — the
+  // home-only guess broke setUpAll on Windows (PathNotFoundException).
   final home = Platform.environment['HOME'] ?? '';
-  final lucideRoot = Directory('$home/.pub-cache/hosted/pub.dev')
+  final envCache = Platform.environment['PUB_CACHE'];
+  final windowsCache =
+      '${Platform.environment['LOCALAPPDATA'] ?? ''}/Pub/Cache';
+  final cacheRoot = envCache != null && envCache.isNotEmpty
+      ? envCache
+      : Directory('$home/.pub-cache/hosted/pub.dev').existsSync()
+      ? '$home/.pub-cache/hosted/pub.dev'
+      : '$windowsCache/hosted/pub.dev';
+  final lucideRoot = Directory(cacheRoot)
       .listSync()
       .whereType<Directory>()
       .where((dir) => dir.path.contains('/lucide_icons_flutter-'))

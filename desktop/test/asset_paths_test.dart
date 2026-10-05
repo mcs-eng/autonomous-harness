@@ -95,7 +95,7 @@ void main() {
     for (final file in Directory(
       'assets',
     ).listSync(recursive: true).whereType<File>()) {
-      final path = file.path.replaceAll('\', '/');
+      final path = file.path.replaceAll('\\', '/');
       final name = path.split('/').last;
       final dir = path.substring(0, path.length - name.length);
       // These two directories are selected by the literal slot/portrait ternary.
@@ -116,7 +116,7 @@ void main() {
                 Directory(dir)
                     .listSync()
                     .whereType<File>()
-                    .map((f) => f.path.replaceAll('\', '/').split('/').last)
+                    .map((f) => f.path.replaceAll('\\', '/').split('/').last)
                     .toList(),
           )
           .where((s) => s != name && s.split('.').first == stem);
