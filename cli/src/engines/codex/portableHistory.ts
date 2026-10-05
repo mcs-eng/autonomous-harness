@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fsyncSync, fstatSync, lstatSync, openSync, readSync, realpathSync, renameSync, rmSync, writeSync, type Stats } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, relative } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { resolveCodexRollout } from './rollout.js'
 
 type JsonObject = Record<string, unknown>
@@ -162,7 +162,7 @@ export function prepareCodexResume(source: CodexResumeSource): { repairedItems: 
     before = lstatSync(file)
   }
   const rel = relative(realpathSync(sessions), realpathSync(file))
-  if (!before.isFile() || before.isSymbolicLink() || isAbsolute(rel) || rel === '..' || rel.startsWith('../')
+  if (!before.isFile() || before.isSymbolicLink() || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)
     || (typeof process.getuid === 'function' && before.uid !== process.getuid())) {
     throw new Error('Codex rollout is outside the session profile or is not an owned regular file')
   }
