@@ -167,6 +167,7 @@ export function prepareCodexResume(source: CodexResumeSource): { repairedItems: 
     throw new Error('Codex rollout is outside the session profile or is not an owned regular file')
   }
   const input = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+  let inputOpen = true
   try {
     const unchanged = () => {
       if (!sameFile(before, fstatSync(input)) || !sameFile(before, lstatSync(file!))) throw changedDuringPreparation()
@@ -181,10 +182,14 @@ export function prepareCodexResume(source: CodexResumeSource): { repairedItems: 
     const temporary = `${file}.reasoning-tmp-${suffix}`
     let backup: number | undefined
     let output: number | undefined
+    let backupOpen = false
+    let outputOpen = false
     let verifiedBackup = false
     try {
       backup = openSync(backupPath, 'wx', 0o600)
+      backupOpen = true
       output = openSync(temporary, 'wx', 0o600)
+      outputOpen = true
       // Re-read into private files only after every record has validated. The digest proves the
       // backup and repaired output came from the exact bytes inspected, even across chunk reads.
       const copied = scanHistory(input, before.size, source.sessionId, (original, repaired) => {
@@ -196,14 +201,23 @@ export function prepareCodexResume(source: CodexResumeSource): { repairedItems: 
       fsyncSync(output)
       unchanged()
       verifiedBackup = true
+      // Windows refuses to replace a file while a handle to it or to its replacement is open (EPERM).
+      // Close every handle first; the flags are cleared before each close so a failure is not masked
+      // by a second close in the cleanup below.
+      outputOpen = false
+      closeSync(output)
+      backupOpen = false
+      closeSync(backup)
+      inputOpen = false
+      closeSync(input)
       renameSync(temporary, file)
       return { repairedItems: copied.repairedItems, repairedBytes: copied.repairedBytes, backupPath }
     } finally {
-      if (output !== undefined) { closeSync(output); rmSync(temporary, { force: true }) }
+      if (output !== undefined) { if (outputOpen) closeSync(output); rmSync(temporary, { force: true }) }
       if (backup !== undefined) {
-        closeSync(backup)
+        if (backupOpen) closeSync(backup)
         if (!verifiedBackup) rmSync(backupPath, { force: true })
       }
     }
-  } finally { closeSync(input) }
+  } finally { if (inputOpen) closeSync(input) }
 }

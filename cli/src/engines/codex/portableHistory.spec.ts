@@ -83,7 +83,8 @@ describe('preparing a stopped Codex session for resume', () => {
     const result = prepareCodexResume(source())
     expect(result.repairedItems).toBe(1)
     expect(readFileSync(result.backupPath!, 'utf8')).toBe(original)
-    expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600)
+    // Windows has no POSIX permission bits; stat reports 0o666 for any writable file.
+    if (process.platform !== 'win32') expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600)
     expect(readFileSync(file, 'utf8')).toBe(portableCodexHistory(original, SESSION).history)
     // repairedBytes lets a live tailer re-sync its offset to the shrunk file without another stat.
     expect(result.repairedBytes).toBe(statSync(file).size)
@@ -143,6 +144,30 @@ describe('preparing a stopped Codex session for resume', () => {
     expect(result.repairedItems).toBe(1)
     expect(readFileSync(result.backupPath!, 'utf8')).toBe(original)
     expect(readFileSync(file, 'utf8')).toBe(portableCodexHistory(original, SESSION).history)
+  })
+
+  it('closes every handle before replacing the rollout, which Windows requires', () => {
+    // Windows refuses the rename (EPERM) while the input, backup, or output handle is open, and
+    // resume preparation then fails on every repaired session. Assert it on every platform.
+    writeFileSync(file, history(badReasoning()))
+    const open = new Set<number>()
+    const originalOpen = fs.openSync
+    const originalClose = fs.closeSync
+    const originalRename = fs.renameSync
+    vi.spyOn(fs, 'openSync').mockImplementation((...args: Parameters<typeof fs.openSync>) => {
+      const fd = originalOpen(...args)
+      open.add(fd)
+      return fd
+    })
+    vi.spyOn(fs, 'closeSync').mockImplementation((fd: number) => { open.delete(fd); originalClose(fd) })
+    let openAtRename: number[] | undefined
+    vi.spyOn(fs, 'renameSync').mockImplementation((...args: Parameters<typeof fs.renameSync>) => {
+      openAtRename = [...open]
+      originalRename(...args)
+    })
+    expect(prepareCodexResume(source()).repairedItems).toBe(1)
+    expect(openAtRename).toEqual([])
+    expect(open.size).toBe(0)
   })
 
   it('keeps a concurrent writer’s update instead of replacing it with prepared history', () => {
