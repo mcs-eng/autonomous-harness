@@ -657,10 +657,15 @@ describe('tmux process primitives', () => {
       args: String.raw`node /tmp/worker.js "Explain \"foo\" /tmp/cursor-agent/versions/123/index.js"`,
     }
     expect(engineProcessMatchScore(endsInPath, 'cursor', ownership())).toBe(0)
-    // The same package layout as a real executable prefix still scores.
+    // The same package layout as a real executable prefix still scores — both the `--`-separated
+    // shape and a bare positional, which the launcher's `exec -a` rewrite leaves behind.
     expect(engineProcessMatchScore({
       executable: 'agent',
       args: 'agent -- /tmp/cursor-agent/versions/123/index.js',
+    }, 'cursor', ownership())).toBe(3)
+    expect(engineProcessMatchScore({
+      executable: 'agent',
+      args: 'agent /opt/cursor-agent/versions/1.2.3/index.js',
     }, 'cursor', ownership())).toBe(3)
   })
 
