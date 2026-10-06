@@ -84,6 +84,22 @@ own reviewed change.
   real-account compatibility or persistent-state downgrade safety. Preserve the complete
   known-good bundle; binary rollback and state rollback require separate evidence.
 
+## Evidence snapshot: 2026-10-06
+
+The inspected fork main was `786133139dc5ff41388db5899f841e87374cc02c` (PR #40, same tree as
+`sync/upstream-2026-10-04` at `5bbabbdcc`). Upstream main was
+`4d463682a07c9bbd965c266eb1d57368e9682a58`. Their common base is
+`6bcdafb16db6a9790fc9b3b79a0ac55f807878fd`. There were **141 fork-only / 243
+upstream-only commits** and **25 conflicted paths**. No fork PR was open.
+
+The pass continues on `sync/upstream-2026-10-06` (worktree `.worktrees/sync-2026-10-04`),
+cut from the merged sync tip. Upstream's service split is kept. The fork keeps Windows
+path containment (`within` / Codex rollout `..\` rejection), boundary-faithful grid
+assignment, local Grid profiles, and the Jev task-router opt-in. CLI `tsc --noEmit` was
+clean. Focused vitest: portable history, path containment, new-agent model, restart,
+retarget, swap, fleet, and models — 155 tests, then a 90-test rerun after expectation
+fixes, all passing. Full CLI suite, Flutter, packaging, push, and a PR were not run.
+
 ## Evidence snapshot: 2026-10-04
 
 The inspected fork main was `ac2a8a865a6b0f86753e4fd7b4997555d5cf5655`; upstream main

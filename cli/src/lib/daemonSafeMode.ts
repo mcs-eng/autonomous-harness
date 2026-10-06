@@ -27,6 +27,8 @@ export interface SafeModeMarker {
 export interface SafeModeDisposition {
   stay: boolean
   reason: string
+  /** Leave so as to be started again: what stands in the way is leaving too (lib/localSocket.ts). */
+  retry?: true
 }
 
 /** Thrown at the top of start-up when harnessd's master asks for safe mode: the core kept crashing. */
@@ -52,6 +54,15 @@ export function safeModeDisposition(
   if (/EADDRINUSE|address already in use/i.test(message)) {
     return { stay: false, reason: 'the control port belongs to another daemon' }
   }
+  // The data folder's socket refusing us (lib/localSocket.ts): another daemon serves it now, whether or
+  // not it has claimed the pid file yet. Read off the code, which the message does not carry: a second
+  // master's core that lost the race before the winner's claim would otherwise stay up in safe mode, and
+  // its master claim the pid file over the daemon that is serving (e2e/twodaemons.e2e.ts).
+  if ((error as { code?: unknown } | null | undefined)?.code === 'EADDRINUSE') return { stay: false, reason: message }
+  // The core of a master that is gone, still leaving once the wait for it was over: this core goes, and is
+  // started again by its master, which by then finds the folder free. Gone for good instead, its master
+  // went with it, cleanly, and launchd and systemd do not start a clean exit again.
+  if ((error as { code?: unknown } | null | undefined)?.code === 'ORPHAN_STILL_SERVING') return { stay: false, reason: message, retry: true }
   const owner = deps.readPid()
   // Under harnessd the pid file names the master that runs this core: that daemon is this one.
   if (owner !== null && owner !== deps.selfPid && owner !== deps.masterPid && deps.isAlive(owner)) {
@@ -103,8 +114,13 @@ export function clearSafeModeMarker(dataDir: string): void {
 export interface BootHandoffDeps {
   /** The bound control port, if start-up ever got that far. */
   closeServer: () => void
-  removePidFile: () => void
-  spawn: (extraEnv: Record<string, string>) => { pid?: number; unref: () => void }
+  /** Whether the staged bundle's master answers its probe, synchronously: null when it does, why not otherwise. */
+  probeMaster: () => string | null
+  /** Put the build before back (`selfUpdate.restore`), remembering this one as rejected. */
+  rollBack: () => void
+  /** Start harnessd's master on the bundle now on disk, named in the pid file: it starts the core, and
+   *  judges the update. */
+  startMaster: () => void
   exit: (code: number) => never
   log: (message: string) => void
 }
@@ -119,16 +135,23 @@ export interface BootHandoffDeps {
  * would leave this process running alongside the new one for up to a minute, both reconciling tmux
  * and writing the registry.
  *
- * It spawns rather than merely exiting because nothing supervises a daemon: on a machine with no
- * desktop app nothing else would ever start the successor.
+ * It spawns rather than merely exiting because nothing supervises this core: on a machine with no
+ * desktop app nothing else would ever start the successor. What it spawns is harnessd's master, which
+ * judges the update its core starts on; the core it once spawned ran the update unjudged. The staged
+ * bundle's master is probed first, as a master asks before it re-executes on a new bundle, and
+ * synchronously like the rest: one that cannot start would leave nothing running and nothing to judge, so
+ * the build before goes back and its master is started instead.
  */
 export function runBootHandoff(from: string, to: string, deps: BootHandoffDeps): void {
-  deps.log(`[update] ${from} → ${to} staged during start-up — handing off without finishing boot`)
+  deps.log(`[update] ${from} → ${to} staged during start-up — handing off to harnessd's master without finishing boot`)
+  const refused = deps.probeMaster()
+  if (refused !== null) {
+    deps.log(`[update] ${to}'s master did not answer its probe (${refused}) — rolled back; ${from} goes on under a master of its own`)
+    deps.rollBack()
+  }
   deps.closeServer()
-  deps.removePidFile()
-  const child = deps.spawn({ ADAPTER_UPDATED_TO: to })
-  child.unref()
-  deps.log(`[update] boot handoff → pid ${child.pid ?? '?'} · this process is leaving`)
+  deps.startMaster()
+  deps.log('[update] boot handoff · this process is leaving')
   deps.exit(0)
 }
 

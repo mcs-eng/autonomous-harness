@@ -37,8 +37,55 @@ def control_point(words, word, width, height, scale, border):
     return round(x * 32767 / (width - 1)), round(y * 32767 / (height - 1))
 
 
+def check_live_media(vm, result, expected_mode=None):
+    # Archiso reserves 2 GiB beyond the compressed payload before copying it.
+    # A fixed guest RAM size therefore does not determine the boot mode.
+    probe = '''import importlib.util, json
+from pathlib import Path
+s = importlib.util.spec_from_file_location('installer', '/usr/lib/harness-os/install.py')
+i = importlib.util.module_from_spec(s)
+s.loader.exec_module(i)
+payload = i.live_payload()
+ram = Path('/run/archiso/copytoram/airootfs.sfs')
+media = Path('/run/archiso/bootmnt/arch/x86_64/airootfs.sfs')
+bootmnt = Path('/run/archiso/bootmnt')
+assert payload in (ram, media), str(payload)
+mode = 'ram' if payload == ram else 'media'
+if mode == 'ram':
+    assert not bootmnt.exists(), 'RAM boot kept the USB mounted'
+    assert ram.parent.is_mount(), 'RAM payload is not on its own mount'
+    assert i.run('findmnt', '-nro', 'FSTYPE', '--mountpoint', str(ram.parent), capture=True).strip() == 'tmpfs'
+else:
+    assert bootmnt.is_mount(), 'USB payload is not on mounted media'
+    assert not ram.exists(), 'Ambiguous live payload'
+d = next(d for d in i.inventory() if d.get('serial') == 'HN_OS_LIVE')
+assert not d['ro'] and d['size'] >= i.MIN_DISK_BYTES
+try:
+    i.validate_disk(d)
+except ValueError as e:
+    assert ('booted into RAM' if mode == 'ram' else 'mounted filesystems') in str(e), str(e)
+else:
+    raise AssertionError('The writable boot USB was offered as an installation target')
+print('HN_LIVE_MEDIA=' + json.dumps(dict(mode=mode, payload=str(payload), payload_bytes=payload.stat().st_size, boot_usb_rejected=True)))
+'''
+    encoded = base64.b64encode(probe.encode()).decode()
+    output, _ = vm.command('printf %s ' + encoded + ' | base64 -d | python3')
+    match = re.search(r'HN_LIVE_MEDIA=(\{[^\r\n]+\})', output)
+    assert match, 'The guest did not report its actual live media'
+    media = json.loads(match.group(1))
+    result['live_media'] = media
+    if expected_mode and media['mode'] != expected_mode:
+        raise AssertionError(f"Expected {expected_mode} boot, observed {media['mode']}")
+    if media['mode'] == 'ram':
+        result['checks'].append('Real USB boot automatically copies the payload into RAM and unmounts the boot medium')
+        result['checks'].append('The unmounted writable Harness USB is rejected as an installation target in RAM mode')
+    else:
+        result['checks'].append('Real USB boot retains the mounted payload when automatic RAM copying is not selected')
+        result['checks'].append('The mounted writable Harness USB is rejected as an installation target')
+
+
 class VM:
-    def __init__(self, folder, iso, firmware, memory, live_transport='cdrom', cpu=None, video='virtio-vga', audio=False):
+    def __init__(self, folder, iso, firmware, memory, live_transport='cdrom', cpu=None, video='virtio-vga', audio=False, apple_model=None):
         self.folder, self.iso, self.firmware, self.memory = folder, iso, firmware, memory
         self.live_transport = live_transport
         self.cpu = cpu
@@ -46,6 +93,9 @@ class VM:
             raise ValueError('Unsupported test display: ' + video)
         self.video = video
         self.audio = audio
+        if apple_model is not None and not re.fullmatch(r'(?:MacBook(?:Air|Pro)|Macmini|MacPro|iMac|iMacPro)[0-9]+,[0-9]+', apple_model):
+            raise ValueError('Invalid synthetic Apple DMI model.')
+        self.apple_model = apple_model
         self.unlock_count = 0
         self.boot_count = 0
         self.process = None
@@ -87,6 +137,10 @@ class VM:
                 '-device', 'virtio-net-pci,netdev=net,id=hnnet', '-netdev', 'user,id=net',
                 '-serial', f'unix:{self.control_path / "serial.sock"},server=on,wait=off',
                 '-qmp', f'unix:{self.control_path / "qmp.sock"},server=on,wait=off']
+        if self.apple_model:
+            # Explicit synthetic DMI for firmware selection tests. This does
+            # not emulate the T2 bridge, physical input, radios or audio.
+            args += ['-smbios', 'type=1,manufacturer=Apple Inc.,product=' + self.apple_model.replace(',', ',,')]
         if self.audio:
             args += ['-audiodev', f'wav,id=sound,path={self.folder / ("audio-" + str(self.boot_count) + ".wav")}',
                      '-device', 'intel-hda', '-device', 'hda-duplex,audiodev=sound']
@@ -323,12 +377,43 @@ class VM:
         self.serial = self.qmp_file = self.qmp = None
 
 
-def check_graphical_keyboard(vm, name):
+def workspace_text_visible(text, *, allow_welcome=False):
+    compact = re.sub(r'\s+', '', text).lower()
+    return 'me@harness' in compact or (allow_welcome and all(
+        label in compact for label in ('startopencode', 'newterminal', 'connecttowi-fi')))
+
+
+def check_graphical_keyboard(vm, name, *, allow_welcome=False):
     """Prove the installed graphical surface accepts input and renders output."""
     started = time.monotonic()
     vm.command('pgrep -x labwc >/dev/null && pgrep -x foot >/dev/null')
+    # A running renderer or the daemon's discovery endpoint can precede the
+    # first graphical frame. The saved workspace must actually be visible
+    # before sending its shortcut; otherwise early keystrokes can be lost.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        vm.screenshot(name + '-ready')
+        visible = subprocess.check_output(
+            ['tesseract', str(vm.folder / (name + '-ready.png')), 'stdout', '--psm', '11'],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+        if workspace_text_visible(visible, allow_welcome=allow_welcome):
+            break
+        time.sleep(.25)
+    else:
+        raise RuntimeError('The graphical workspace did not render before keyboard input.')
+    previous, _ = vm.command('hn display-message -p "HN_PREVIOUS_PANE=#{pane_id}"')
+    previous_pane = re.search(r'HN_PREVIOUS_PANE=(%\d+)', previous)
+    if not previous_pane:
+        raise RuntimeError('Keyboard probe could not identify the original pane.')
     vm.keys('ctrl', 'b')
     vm.keys('shift', 't')
+    # New terminal is asynchronous. Require both a newly focused pane and its
+    # empty shell prompt before typing, rather than sleeping for a guessed time.
+    vm.command('for n in $(seq 1 60); do '
+               'current=$(hn display-message -p "#{pane_id}"); '
+               'if test "$current" != ' + shlex.quote(previous_pane[1]) +
+               ' && hn capture-pane -p | grep -Eq ' + shlex.quote(r'^\[me@harness [^]]*\]\$$') +
+               '; then exit 0; fi; sleep .25; done; exit 1', timeout=25)
     marker = 'keyboard-' + name + '-ready'
     vm.type_probe('echo ' + marker)
     vm.keys('ret')
@@ -419,11 +504,22 @@ def check_first_use(vm, user, folder, installed=False):
     assert defaults.get('update') == 'disable', 'The packaged agent must remain managed by system updates'
     if installed:
         vm.command('test ! -e /etc/harness-live && test "$(id -un)" = me')
-        vm.command('for n in $(seq 1 40); do hn capture-pane -p | grep -q "Connect to Wi-Fi to get started" && exit 0; sleep .5; done; exit 1', timeout=30)
+        vm.command('for n in $(seq 1 40); do hn capture-pane -p | grep -q "Connect to Wi-Fi" && exit 0; sleep .5; done; exit 1', timeout=30)
         vm.screenshot('installed-network-first')
         vm.command('! pgrep -u 1000 -x opencode')
         vm.keys('esc')
-        vm.command('hn capture-pane -p | grep -q "Connect to Wi-Fi to get started"')
+        vm.command('hn capture-pane -p | grep -q "Connect to Wi-Fi"')
+        # Networking must never trap the owner. Use the compositor shortcut,
+        # then prove real keyboard input reaches a shell while still offline.
+        vm.keys('meta_l', 't')
+        # capture-pane trims trailing cells, including the prompt's last space.
+        vm.command("for n in $(seq 1 30); do hn capture-pane -p | grep -Eq '^\\[me@harness [^]]*\\]\\$$' && exit 0; sleep .25; done; exit 1", timeout=15)
+        vm.type_probe('echo offline-terminal-ready')
+        vm.keys('ret')
+        vm.command('for n in $(seq 1 30); do hn capture-pane -p | grep -qx offline-terminal-ready && exit 0; sleep .5; done; exit 1', timeout=20)
+        vm.screenshot('installed-offline-terminal')
+        vm.keys('ctrl', 'd')
+        vm.command('for n in $(seq 1 30); do hn capture-pane -p | grep -q "Connect to Wi-Fi" && exit 0; sleep .5; done; exit 1', timeout=20)
     else:
         vm.command('test "$(uname -n)" = harness && test "$(id -nu 1000)" = me && test -f /etc/harness-live')
         vm.command('nmcli networking off')
@@ -770,12 +866,14 @@ if status:
         vm.screenshot('install-03-ready')
         # Finishing password entry only focuses Install. No disk has changed yet.
         vm.command('test "$(lsblk -n -o TYPE /dev/vda | wc -l)" -eq 1')
+        install_started = time.monotonic()
         vm.keys('ret')
         if progress_status == 0:
             progress = wait_screen('Preparing the disk|Setting up encryption|Copying Harness|Setting up your account', timeout=30)
             assert 'Keep this computer powered on' not in progress and 'Installing Harness' not in progress
             vm.screenshot('install-04-progress')
         output = wait_screen('Harness is installed', timeout=900)
+        install_seconds = round(time.monotonic() - install_started, 3)
         vm.screenshot('install-05-complete')
         if direct:
             assert 'Back to Harness' not in output
@@ -786,6 +884,8 @@ if status:
         output, _ = vm.command('cat /var/log/harness-install.log 2>/dev/null', check=False)
         (folder / 'installer-commands.log').write_text(output)
         assert config['password'] not in output, 'Installation diagnostics must not contain the password'
+    # This includes input delivery and success-screen observation, not form entry.
+    return install_seconds
 
 
 def check_installer_cleanup(vm, folder):
@@ -822,6 +922,7 @@ def main():
     parser.add_argument('--encrypt', action='store_true')
     parser.add_argument('--memory', type=int, default=2048)
     parser.add_argument('--live-transport', choices=['cdrom', 'usb'], default='cdrom')
+    parser.add_argument('--expect-live-mode', choices=['media', 'ram'], help='Require a specific USB boot path; otherwise validate and record the observed path')
     parser.add_argument('--cpu', help='Optional QEMU CPU model, for an older instruction-set baseline')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--agents', action='store_true', help='Install and start real agent executables after recovery; no accounts/API calls')
@@ -831,6 +932,8 @@ def main():
     parser.add_argument('--workload-repair-game', action='store_true', help='With a seed, explicitly ask the agent to repair game layout before rechecking')
     parser.add_argument('--live-only', action='store_true', help='Development probe: stop after the live-session checks, without installing')
     args = parser.parse_args()
+    if args.expect_live_mode and args.live_transport != 'usb':
+        parser.error('--expect-live-mode requires --live-transport usb')
     if args.workloads and not args.agents:
         parser.error('--workloads requires --agents')
     if args.dsh and not args.agents:
@@ -865,28 +968,8 @@ def main():
         vm.wait(r'root@[^\r\n]*[#] ')
         vm.shell_ready = True
         vm.command('stty -echo')
-        if args.live_transport == 'usb' and args.memory >= 4096:
-            vm.command('test -f /run/archiso/copytoram/airootfs.sfs && test ! -e /run/archiso/bootmnt')
-            result['checks'].append('Real USB boot automatically copies the payload into RAM and unmounts the boot medium')
-            # The unmounted writable boot USB must still be rejected, even
-            # though its size otherwise makes it an eligible target.
-            probe = '''import importlib.util
-s = importlib.util.spec_from_file_location('installer', '/usr/lib/harness-os/install.py')
-i = importlib.util.module_from_spec(s)
-s.loader.exec_module(i)
-d = next(d for d in i.inventory() if d.get('serial') == 'HN_OS_LIVE')
-assert not d['ro'] and d['size'] >= i.MIN_DISK_BYTES
-try:
-    i.validate_disk(d)
-except ValueError as e:
-    assert 'booted into RAM' in str(e), str(e)
-else:
-    raise AssertionError('The unmounted boot USB was offered as a target')
-assert str(i.live_payload()) == '/run/archiso/copytoram/airootfs.sfs'
-'''
-            encoded = base64.b64encode(probe.encode()).decode()
-            vm.command('printf %s ' + encoded + ' | base64 -d | python3')
-            result['checks'].append('The unmounted writable Harness USB is rejected as an installation target in RAM mode')
+        if args.live_transport == 'usb':
+            check_live_media(vm, result, args.expect_live_mode)
         vm.command('foot --check-config --config=/usr/share/harness-os/foot.ini')
         if direct:
             from install_first import check_usb_installer
@@ -966,7 +1049,7 @@ assert str(i.live_payload()) == '/run/archiso/copytoram/airootfs.sfs'
             (folder / 'trial-project.html').write_bytes(vm.read_file(trial_project))
         vm.command(user('sh -c ' + shlex.quote('mkdir -p "$HOME/.config"; printf trial-only > "$HOME/.config/hn-trial-credential"')))
         vm.command('nmcli networking off')
-        install_interactively(vm, config, folder, direct=direct)
+        result['install_action_to_success_seconds'] = install_interactively(vm, config, folder, direct=direct)
         result['checks'].append('Keyboard disk selection, encryption checkbox, masked password entry and a single Install action work on the guest terminal')
         result['checks'].append('Offline installer completed on disposable disk')
         if config['encrypt']:
@@ -1033,6 +1116,11 @@ assert str(i.live_payload()) == '/run/archiso/copytoram/airootfs.sfs'
             vm.command('python3 -c ' + shlex.quote('import json; assert json.load(open('
                        '"/var/lib/harness-os/hardware.json")) == {"drivers": [], "devices": []}'))
             result['checks'].append('Unrelated hardware receives no optional Wi-Fi packages and retains no USB driver cache')
+        if 'nvidia-offline' in manifest.get('capabilities', []):
+            vm.command('test ! -e /usr/share/harness-os/hardware/nvidia && '
+                       'test ! -e /etc/mkinitcpio.conf.d/30-harness-nvidia.conf && '
+                       '! pacman -Q nvidia-open-lts && ! pacman -Q nvidia-utils')
+            result['checks'].append('Unrelated hardware receives no NVIDIA packages, boot configuration or USB GPU cache')
         vm.command('! pgrep -x chromium')
         vm.command('test "$(npm prefix -g)" = "$HOME/.local"')
         vm.command('findmnt -n -o FSTYPE / | grep -qx btrfs')

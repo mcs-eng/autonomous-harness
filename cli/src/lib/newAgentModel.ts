@@ -5,6 +5,9 @@ import { resolveGridTarget } from './gridTarget.js'
 import { localGridSections } from './localGridModels.js'
 import { localGridTargetId, readLocalGridProfiles } from './gridProfiles.js'
 
+/** A model picked for a new agent, and the grid serving it. Where its inference goes is the models
+ * service's to resolve (services/models.ts `launchTarget`), on the machine the agent runs on.
+ * `targetId` names a local profile or a remote grid; absent for a plain remote pick. */
 export interface NewAgentModel { model: string; grid: string; targetId?: string }
 
 /** Model routing is resolved on the agent's machine; the model can live elsewhere.

@@ -1,7 +1,7 @@
 import { CommandBarError, commandBarService, type CommandBarService } from './commandBar.js'
 import type { LocalWsServerOptions } from '../localWsServer.js'
-import { OWNER_COMMAND_TYPES } from './e2ee/applicationFrames.js'
-export { OWNER_COMMAND_TYPES } from './e2ee/applicationFrames.js'
+import { OWNER_COMMAND_TYPES } from './relayFrames.js'
+export { OWNER_COMMAND_TYPES } from './relayFrames.js'
 
 /** The same decisions and task delivery as the desktop, behind the paired-owner boundary.
  * A decision never executes an action. The client still reviews and commits the selected action. */
@@ -27,7 +27,7 @@ export class OwnerCommands {
       const agentId = payload.agentId
       if (typeof agentId !== 'string' || !agentId.length || agentId.length > 160) return { error: 'INVALID_REQUEST' }
       if (!this.onRouteSend) return { error: 'UNSUPPORTED' }
-      return this.onRouteSend(agentId, text)
+      return await this.onRouteSend(agentId, text)
     } catch (error) {
       return error instanceof CommandBarError
         ? { error: error.code, detail: error.message }

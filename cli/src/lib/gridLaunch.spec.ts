@@ -880,24 +880,20 @@ describe('web search status — what the app is told about the launch it got', (
     }
   })
 
-  it('says on exactly when the launch carries the MCP URL — for every engine, both machines', () => {
-    // "The engine wired it" is not taken on trust from the contract that reports it: the launch
-    // either carries the supplied MCP URL (in argv or in a file it writes) or it does not, and the
-    // status must agree with that. A future contract that took a url and forgot to wire it, or
-    // wired it and reported otherwise, fails here.
-    const config = (launch: ReturnType<typeof launchOf>): string =>
-      [...launch.args, ...(launch.configDir?.files.map((f) => f.content) ?? [])].join('\n')
-    // Pi's skill path can contain "harness" without declaring any MCP server.
-    vi.stubEnv('HOME', '/fixture/harness-home')
-    vi.stubEnv('USERPROFILE', 'C:/fixture/harness-home')
+  it.each(['/fixture/qa-home', '/fixture/harness-home'])('says on exactly when the launch it describes names the server — for every engine, both machines, home %s', (fixtureHome) => {
+    // Found by QA on a quiet machine: a home containing "harness" made Pi's skills path look like MCP wiring.
+    // USERPROFILE is what a Windows host reads; pin it to the same fixture so the real profile cannot leak in.
+    vi.stubEnv('HOME', fixtureHome)
+    vi.stubEnv('USERPROFILE', fixtureHome)
     try {
-      expect(config(launchOf('pi', WITH_MCP))).toContain('harness-home')
+      const launchContent = (launch: ReturnType<typeof launchOf>): string =>
+        [...launch.args, ...(launch.configDir?.files.map((f) => f.content) ?? [])].join('\n')
       for (const machine of [PLAIN_MACHINE, { hermesSystemManaged: true }]) {
         for (const engine of gridCapableEngines()) {
           for (const override of [WITH_MCP, WITH_MODEL]) {
             const built = buildGridEngineLaunch(engine, override, machine)
             if (!built.ok) continue // copilot without a model — refused, nothing to describe
-            const wired = config(built.launch).includes(MCP_URL)
+            const wired = launchContent(built.launch).includes(MCP_URL)
             expect(built.launch.webSearch === 'on', `${engine} · mcpUrl ${!!override.mcpUrl} · pinned ${machine.hermesSystemManaged}`)
               .toBe(wired)
           }

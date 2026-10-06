@@ -38,7 +38,13 @@ class PackageIdentity(unittest.TestCase):
             # Validate the real staged package with the same guard that protects
             # installed systems, not only an isolated archive fixture.
             output = base / 'harness-os.pkg.tar.gz'
-            package.archive_package(destination, output, 'pkgname = harness-os\npkgver = 1-1\narch = x86_64\n', 123456)
+            package.archive_package(destination, output, package.package_info('1-1', 123456, 1024), 123456)
+            with tarfile.open(output) as archive:
+                metadata = archive.extractfile('.PKGINFO').read().decode().splitlines()
+            depends = {row.removeprefix('depend = ') for row in metadata if row.startswith('depend = ')}
+            self.assertTrue({'gtklock', 'grim', 'slurp', 'foot', 'tmux', 'nodejs-lts-jod'} <= depends)
+            self.assertNotIn('labwc', depends)
+            self.assertTrue(depends <= set((Path(__file__).parents[1] / 'packages.x86_64').read_text().split()))
             spec = importlib.util.spec_from_file_location('runtime_package_check', Path(__file__).parents[1] / 'runtime_update.py')
             updater = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(updater)
@@ -69,7 +75,8 @@ class PackageIdentity(unittest.TestCase):
                 (root / name).write_text('runtime fixture')
             (root / 'source.json').write_text(json.dumps(good))
             self.assertEqual(package.validate_runtime(root, 'a' * 40), good)
-            for changes in [{'dirty': True}, {'source_commit': 'b' * 40}, {'target': 'aarch64-apple-darwin'}]:
+            for changes in [{'dirty': True}, {'source_commit': 'b' * 40}, {'target': 'aarch64-apple-darwin'},
+                            {'target': 'aarch64-unknown-linux-musl', 'architecture': 'aarch64'}]:
                 (root / 'source.json').write_text(json.dumps(dict(good, **changes)))
                 with self.subTest(changes=changes), self.assertRaises(ValueError):
                     package.validate_runtime(root, 'a' * 40)

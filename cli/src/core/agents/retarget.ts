@@ -234,6 +234,7 @@ export function createAgentRetargeter({
       // The launch the move just BUILT is the one to classify against — `grid`, not the row's old
       // `session.gridLaunch`: a move from the engine's own login to a grid had nothing recorded,
       // and classifying against the old record answered null over a retarget that had just worked.
+      // Only boundary-faithful argv is evidence; flattened `ps` text is not (restartedGridAssignment).
       const [gateway, assignment] = await Promise.all([
         probeGatewayRuntime(outcome.processIdentity),
         restartedGridAssignment(outcome.processIdentity, session.engine, grid ?? undefined),

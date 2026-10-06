@@ -27,7 +27,7 @@ import type { AgentTokenUsage } from './agentTokenUsage.js'
 import type { AgentOutputStats } from './agentOutputStats.js'
 import { gridEndpointMatchesLaunch, type GridAssignment } from './gridAssignment.js'
 import type { GridWebSearchStatus } from './gridLaunch.js'
-import { gridAnnotation, type GridAnnotation } from './gridModels.js'
+import type { AgentGridTarget, GridAnnotation } from './gridAnnotation.js'
 import { projectDisplayName, sessionDisplayTitle, type RegisteredSession } from './registry.js'
 import { engineCanFork } from './forkAgent.js'
 import { resumeMode, type ResumeMode } from './resumeCapability.js'
@@ -145,6 +145,9 @@ export interface AgentFrameContext {
   tokenUsage?: AgentTokenUsage | null
   /** The DSH companions' state for this agent; absent when the caller has none to give. */
   dsh?: AgentDshContext | null
+  /** What the models service says of the grid the agent is on (core/api.ts `ModelsPort.annotation`): from
+   *  memory, never I/O. Absent when the caller has none to give, and then the frame says nothing of it. */
+  gridAnnotation?: (grid: AgentGridTarget) => GridAnnotation | null
 }
 
 /**
@@ -185,7 +188,7 @@ const gitContexts = new SessionGitContextReader()
 
 export async function agentFrame(
   s: RegisteredSession,
-  { selectedModel, terminalAvailable, dsh, tokenUsage, activity: contextActivity }: AgentFrameContext,
+  { selectedModel, terminalAvailable, dsh, tokenUsage, activity: contextActivity, gridAnnotation }: AgentFrameContext,
 ): Promise<AgentFrame> {
   const home = agentProject(s.cwd)
   const context = gitContexts.read(JSON.stringify([s.agentId, s.sessionId, s.engine, s.codexHome, s.registeredAt]), async () => {
@@ -226,10 +229,13 @@ export async function agentFrame(
     // grid has left behind. Read off the live process by discovery; carries no credential. Null is
     // a real answer ("on no grid") and must be sent as one — omitting the key would make every push
     // indistinguishable from a daemon too old to know about grids. The web-search status rides on
-    // the block — decided by the launch, kept on the row — so it is gone the moment the block is.
+    // the block — decided by the launch, kept on the row — so it is gone the moment the block is. So do
+    // that grid's `state` and a `note` when the agent's model will not answer (issue 03), read from what
+    // the model list last showed — no I/O, and absent for a grid this daemon is not tracking. A local
+    // profile keeps the launch's own target and is not relabeled from the remote catalogue.
     grid: s.grid ? {
       ...s.grid,
-      ...(s.gridLaunch?.targetId?.startsWith('local:') ? {} : gridAnnotation(s.grid)),
+      ...(s.gridLaunch?.targetId?.startsWith('local:') ? {} : (gridAnnotation?.(s.grid) ?? {})),
       ...(s.gridLaunch?.targetId && gridEndpointMatchesLaunch(s.engine, s.grid.baseUrl, s.gridLaunch)
         ? { targetId: s.gridLaunch.targetId }
         : {}),

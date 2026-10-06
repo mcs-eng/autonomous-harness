@@ -2493,9 +2493,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
       case 'select':
         if (args['id'] is String) app.selectSwarm(args['id']);
       case 'close':
-        if (args['id'] is String) await app.requestCloseSwarm(args['id']);
+        // Return native keyboard ownership after this frame, including while
+        // a close confirmation or remote stream cleanup is still pending.
+        if (args['id'] is String) unawaited(app.requestCloseSwarm(args['id']));
       case 'closeActive':
-        await app.requestCloseSwarm(app.activeSwarmId);
+        unawaited(app.requestCloseSwarm(app.activeSwarmId));
       case 'rename':
         // Acknowledge after the form opens so the titlebar can hand its native
         // keyboard focus to Flutter while the user edits the name.
@@ -2646,6 +2648,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
         const {
           'select',
           'close',
+          'closeActive',
           'new',
           'rename',
           'renameActive',
@@ -2742,28 +2745,41 @@ class _SwarmScreenState extends State<SwarmScreen> {
       return result;
     }
 
-    Future<bool> inspectFrom(int start) async {
+    Future<bool> closeAfterError(String error) async {
+      if (await choose(error: error) != 'close_view' || !mounted) return false;
+      // This only dismisses the captured views. It neither retries Stop nor
+      // treats a lost reply as proof that the session stopped. A replaced
+      // session must not inherit a choice made for the old one.
+      return targets.every((target) {
+        final current = app.stateOf(target.$1)?.agents
+            .where((agent) => agent.id == target.$2.id)
+            .firstOrNull;
+        return current == null ||
+            (current.createdAt == target.$2.createdAt &&
+                current.sessionId == target.$2.sessionId);
+      });
+    }
+
+    Future<String?> inspectFrom(int start) async {
       for (var i = start; i < requests.length; i++) {
-        if (!mounted) return false;
+        if (!mounted) return null;
         final state = await requests[i]('inspect');
-        if (!mounted) return false;
+        if (!mounted) return null;
         if (state['error'] != null) {
-          await choose(
-            error:
-                state['detail'] as String? ??
-                'Could not check ${targets[i].$2.displayName}. Nothing else will be stopped.',
-          );
-          return false;
+          return state['detail'] as String? ??
+              'Could not check ${targets[i].$2.displayName}. Nothing else will be stopped.';
         }
         activities[i] = state['activity'] as String? ?? 'unknown';
       }
-      return true;
+      return null;
     }
 
     // Inspect the whole captured set before one decision, or any stop. Stop
     // approves every listed session, including idle ones that start work while
     // the prompt is open; an unprompted close keeps the daemon's idle guard.
-    if (!await inspectFrom(0)) return false;
+    final inspectionError = await inspectFrom(0);
+    if (!mounted) return false;
+    if (inspectionError != null) return closeAfterError(inspectionError);
     var stopNow = activities.any((activity) => activity != 'idle');
     if (stopNow && await choose() != 'now') return false;
     for (var i = 0; i < requests.length; i++) {
@@ -2774,7 +2790,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
       // session together, and disclose any sessions that already stopped.
       if (result['error'] == 'SESSION_NOT_IDLE') {
         activities[i] = result['activity'] as String? ?? 'unknown';
-        if (!await inspectFrom(i + 1)) return false;
+        final inspectionError = await inspectFrom(i + 1);
+        if (!mounted) return false;
+        if (inspectionError != null) return closeAfterError(inspectionError);
         if (await choose() != 'now') return false;
         stopNow = true;
         result = await requests[i]('now');
@@ -2782,12 +2800,10 @@ class _SwarmScreenState extends State<SwarmScreen> {
       if (!mounted) return false;
       if (result['closed'] != true && result['deferred'] != true) {
         activities[i] = 'unconfirmed';
-        await choose(
-          error:
-              result['detail'] as String? ??
+        return closeAfterError(
+          result['detail'] as String? ??
               'Could not confirm that ${targets[i].$2.displayName} stopped. Its saved history is kept.',
         );
-        return false;
       }
       activities[i] = result['closed'] == true ? 'stopped' : 'deferred';
     }

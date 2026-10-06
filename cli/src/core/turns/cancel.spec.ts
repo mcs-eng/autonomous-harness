@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RegisteredSession } from '../../lib/registry.js'
-import { createCancel, type CancelDeps } from './cancel.js'
+import { createCancel, createCancelRequest, type CancelDeps } from './cancel.js'
 
 function setup(over: Partial<CancelDeps> = {}) {
   const calls: string[] = []
@@ -14,6 +14,10 @@ function setup(over: Partial<CancelDeps> = {}) {
     stopHeartbeat: vi.fn(),
     questionWatcher: { stop: vi.fn() },
     mirror: { cancel: vi.fn() },
+    turnActivity: { observe: vi.fn(), snapshot: vi.fn(() => ({ state: 'idle' as const, epoch: 'e', revision: 2, validForMs: 0 })) },
+    turnStartedAt: new Map([['s1', 1]]),
+    agentIdFor: (sessionId) => (sessionId === 's1' ? 'a1' : sessionId),
+    clients: { send: vi.fn() },
     ...over,
   }
   return { deps, service, calls, cancelAgent: createCancel(deps) }
@@ -31,6 +35,21 @@ describe('cancelling a turn', () => {
     expect(deps.stopHeartbeat).toHaveBeenCalledWith('s1')
     expect(deps.questionWatcher.stop).toHaveBeenCalledWith('s1')
     expect(deps.mirror.cancel).toHaveBeenCalledWith('s1')
+  })
+
+  it('tells every window the agent is idle now, without a turn_ended that would recap a killed turn', async () => {
+    const { deps, cancelAgent } = setup()
+    await cancelAgent('a1')
+    expect(deps.turnStartedAt.has('s1')).toBe(false)
+    expect(deps.turnActivity.observe).toHaveBeenCalledWith('s1', 'turn_ended')
+    expect(deps.clients.send).toHaveBeenCalledTimes(1)
+    expect(deps.clients.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'agent_activity', agentId: 'a1', payload: expect.objectContaining({ activity: expect.objectContaining({ state: 'idle' }) }),
+    }))
+    // An agent the tracker no longer knows has no activity to report.
+    const unknown = setup({ turnActivity: { observe: vi.fn(), snapshot: vi.fn(() => undefined) } })
+    await unknown.cancelAgent('a1')
+    expect(unknown.deps.clients.send).not.toHaveBeenCalled()
   })
 
   it('waits for input to confirm a cancel a stop depends on, and answers with what it said', async () => {
@@ -51,5 +70,17 @@ describe('cancelling a turn', () => {
     expect(service.turnEnded).toHaveBeenCalledWith('s9', true)
     const none = setup({ device: () => undefined })
     expect(await none.cancelAgent('a1')).toBe(true)
+  })
+})
+
+describe('a cancel frame', () => {
+  it('interrupts the agent it names by agent id, or by session id, and takes a frame naming neither as nothing', () => {
+    const cancel = vi.fn()
+    const request = createCancelRequest(cancel)
+    request({ agentId: 'a1', sessionId: 's1' })
+    request({ sessionId: 's2' })
+    request({ agentId: '' })
+    request({})
+    expect(cancel.mock.calls).toEqual([['a1'], ['s2']])
   })
 })

@@ -1192,12 +1192,18 @@ class GridModel {
   /// for every other row, and always from a daemon that predates it.
   final GridModelUnavailable? unavailable;
 
+  /// A Jev (System One) decision model (`kind: decision`): it answers typed questions at
+  /// `/v1/systemone` and cannot chat, so no harness runs on it — the picker lists it apart and
+  /// shows how to call it instead. False for every chat model, and from a daemon that predates it.
+  final bool decision;
+
   const GridModel({
     required this.id,
     required this.node,
     this.grid,
     this.targetId,
     this.unavailable,
+    this.decision = false,
   });
 }
 
@@ -1433,6 +1439,7 @@ class GridModels {
                 grid: grid,
                 targetId: targetId ?? (m['targetId'] is String ? m['targetId'] as String : null),
                 unavailable: GridModelUnavailable.fromWire(m['unavailable']),
+                decision: m['kind'] == 'decision',
               ),
             )
             .where((m) => m.id.isNotEmpty)
