@@ -7,10 +7,10 @@ import type { DeviceLinkOpts } from '../device/deviceLink.js'
 import type { MachineListCache } from '../device/machineList.js'
 import type { RegisteredSession } from '../lib/registry.js'
 import { routeVoiceTask, type RouteDecision, type RouterAgent } from '../lib/voiceRouter.js'
+import { routeTaskWithJev } from '../lib/jevRouter.js'
 import { fakeCore } from '../testing/fakeCore.js'
 import { FAIL, type CoreApi } from '../core/api.js'
 import { FLEET_FALLBACKS, startFleet, type Fleet, type FleetDeps } from './fleet.js'
-
 // The lane is a cloud socket and the pinned keys a file under the data folder: neither in a test.
 const lane = vi.hoisted(() => ({
   opts: null as DeviceLinkOpts | null,
@@ -41,8 +41,10 @@ vi.mock('../lib/e2ee/machinePeers.js', () => ({
   MachinePeerStore: class { get(machineId: string) { return lane.peers.get(machineId) ?? null } },
 }))
 vi.mock('../lib/voiceRouter.js', () => ({ routeVoiceTask: vi.fn() }))
+vi.mock('../lib/jevRouter.js', () => ({ routeTaskWithJev: vi.fn() }))
 
 const route = vi.mocked(routeVoiceTask)
+const jev = vi.mocked(routeTaskWithJev)
 
 const session = (agentId: string, registeredAt = 1, engine = 'claude') =>
   ({ agentId, registeredAt, engine, sessionId: `s-${agentId}` }) as unknown as RegisteredSession
@@ -95,9 +97,12 @@ afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   route.mockReset()
+  jev.mockReset()
   lane.stop.mockReset()
   lane.rpc.mockReset().mockResolvedValue({})
   lane.sendSealed.mockReset()
+  // env is parsed once at import: restore the routing gate a test may have flipped.
+  env.TASK_ROUTER = 'default'
 })
 
 describe('the machine list', () => {
@@ -300,6 +305,77 @@ describe('⌘K: which agent a typed task belongs to', () => {
       agentId: '', machineId: '', name: '', confidence: 0, reason: 'no agents in machine', weighed: 1, machines: 0, via: 'model',
       candidates: [{ agentId: 'x1', name: 'orphan', machineId: '', machine: '', engine: '', recent: 'y'.repeat(120), confidence: 0 }],
     })
+  })
+})
+
+describe('⌘K with TASK_ROUTER=jev: Jev ranks, the standard ranker owns the fallback', () => {
+  // The service layer's side of the Jev opt-in: the lib's HTTP call is covered in
+  // lib/jevRouter.spec.ts; here the wiring — the env gate, the ordering and dedupe, the
+  // `via: 'jev'` answer, and the fallthrough on a null from the router.
+  function jevCore() {
+    return fakeCore({
+      agents: {
+        advertised: vi.fn(() => [session('a1'), session('a2', 2, 'codex'), session('a3', 3)]),
+        displayName: vi.fn((s: RegisteredSession) => `name-${s.agentId}`),
+      },
+      turns: { asks: vi.fn(async () => []) },
+    })
+  }
+
+  it('lets Jev order the candidates it scored, deduped, winner first, via: jev', async () => {
+    env.TASK_ROUTER = 'jev'
+    const { fleet } = setup({}, jevCore())
+    jev.mockResolvedValue({
+      agentId: 'a2', confidence: 0.6,
+      scores: [{ agentId: 'a3', confidence: 0.3 }, { agentId: 'a1', confidence: 0.1 }, { agentId: 'gone', confidence: 0.0 }],
+    })
+    const answer = await fleet.routeTask('fix the lexer')
+    expect(answer).toEqual({
+      agentId: 'a2', machineId: 'mine', name: 'name-a2', confidence: 0.6, reason: '', weighed: 3, machines: 1, via: 'jev',
+      candidates: [
+        { agentId: 'a2', name: 'name-a2', machineId: 'mine', machine: 'MacbookPro.local', engine: 'codex', recent: '', confidence: 0.6 },
+        { agentId: 'a3', name: 'name-a3', machineId: 'mine', machine: 'MacbookPro.local', engine: 'claude', recent: '', confidence: 0.3 },
+        { agentId: 'a1', name: 'name-a1', machineId: 'mine', machine: 'MacbookPro.local', engine: 'claude', recent: '', confidence: 0.1 },
+      ],
+    })
+    // Opaque by design: Jev sees the task, ids, names and engines — never prompts or paths.
+    const [text, candidates] = jev.mock.calls[0]!
+    expect(text).toBe('fix the lexer')
+    expect(candidates).toEqual([
+      { id: 'a1', name: 'name-a1', engine: 'claude' },
+      { id: 'a2', name: 'name-a2', engine: 'codex' },
+      { id: 'a3', name: 'name-a3', engine: 'claude' },
+    ])
+    // The standard ranker never ran, and the fallthrough log did not fire.
+    expect(route).not.toHaveBeenCalled()
+    expect(log).toHaveBeenCalledWith('[route] Jev answered · candidates=3')
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('falling through'))
+  })
+
+  it('falls through to the standard ranking with a log line when Jev answers null', async () => {
+    env.TASK_ROUTER = 'jev'
+    const { fleet } = setup({}, jevCore())
+    jev.mockResolvedValue(null)
+    route.mockResolvedValue(decision({ agentId: 'a1', confidence: 0.9, reason: 'only one asking', via: 'claude' }))
+    const answer = await fleet.routeTask('anything')
+    expect(log).toHaveBeenCalledWith('[route] Jev unavailable; falling through to the standard ranking · candidates=3')
+    expect(route).toHaveBeenCalled()
+    expect(answer.via).toBe('model')
+    expect(answer.agentId).toBe('a1')
+  })
+
+  it('leaves the route to the standard ranker when the env gate is off', async () => {
+    // env is parsed once at import; the explicit restore matters because the assignments above leak.
+    env.TASK_ROUTER = 'default'
+    try {
+      const { fleet } = setup({}, jevCore())
+      route.mockResolvedValue(decision())
+      await fleet.routeTask('anything')
+      expect(jev).not.toHaveBeenCalled()
+      expect(route).toHaveBeenCalled()
+    } finally {
+      env.TASK_ROUTER = 'default'
+    }
   })
 })
 

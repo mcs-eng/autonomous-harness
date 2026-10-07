@@ -27,6 +27,10 @@ export function parseNewAgentModel(engine: AgentEngine, payload: Record<string, 
     return { state: 'invalid', detail: `${engine} cannot use a model on your machines.` }
   }
   const targetId = payload.gridTarget === undefined ? undefined : payload.gridTarget
+  // The wire shape is deliberately narrow: a daemon-issued `local:` id (label + 16-hex gridHome
+  // fingerprint, capped at 320 chars) or the exact `remote:<gridName>`. Both the cap and the strict
+  // local pattern assume the daemon's id shape stays stable; an upstream change there will start
+  // rejecting frames here — that rejection is the intended canary, so fix the pattern when it fires.
   if (targetId !== undefined && (!valid(targetId) || targetId.length > 320
     || (!/^local:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[a-f0-9]{16}$/.test(targetId)
       && targetId !== `remote:${payload.gridName.trim()}`))) {

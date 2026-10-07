@@ -195,6 +195,9 @@ export function prepareCodexResume(source: CodexResumeSource): { repairedItems: 
     let output: number | undefined
     let backupOpen = false
     let outputOpen = false
+    // The *Open flags track ownership for the finally-close below: each flag flips only on the line
+    // after its openSync succeeds. Keep it that way — a statement that can throw squeezed between an
+    // openSync and its flag-set would leak the descriptor (none today; the flag pair is load-bearing).
     let verifiedBackup = false
     try {
       backup = openSync(backupPath, 'wx', 0o600)

@@ -206,6 +206,9 @@ async function moveTarget(
 ): Promise<{ target: GridLaunchOverride } | { detail: string; error?: string }> {
   const localTarget = request.targetId?.startsWith('local:') ?? false
   if (!localTarget) {
+    // A local profile runs on this machine's own Codex home — it must not wait on, or be blocked by,
+    // cloud Grid readiness. Keep this gate: folding the check back into an unconditional `notReady`
+    // would make every local move depend on a signed-in cloud grid.
     const named = request.gridName
     const unready = await notReady(grid, !named || named === await core.account.privateGridName())
     if (unready) return { detail: unready }
