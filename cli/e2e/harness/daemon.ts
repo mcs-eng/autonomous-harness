@@ -19,6 +19,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { isolatedTmux, type IsolatedTmux } from '../../src/testing/isolatedTmux.js'
 import { artifactLog, artifactsEnabled } from './artifacts.js'
+import { daemonEnvironment } from '../../src/testing/daemonEnvironment.js'
 
 const exec = promisify(execFile)
 const here = dirname(fileURLToPath(import.meta.url))
@@ -31,6 +32,8 @@ export interface EngineConfig {
   claudeProjectsDir: string
   codexHome: string
   claudeModel?: string
+  /** Pause model commands at a disposable file gate for worker failure tests. */
+  modelControlGate?: boolean
   codexModel?: string
   /** The test's throwaway root: the engine runs no hooks from settings outside it. */
   root: string
@@ -39,6 +42,8 @@ export interface EngineConfig {
   version?: string
   without?: string[]
   startDelayMs?: number
+  /** Hold startup before the transcript opens until this disposable path's .release file exists. */
+  startupGate?: string
   firstHookDelayMs?: number
   updateAvailable?: string
   /** Ask whether to trust a folder the engine's own config has no answer for, as the real CLIs do. */
@@ -52,11 +57,15 @@ export interface DaemonOptions {
   heapMiB?: number
   /** Models the fake engines report. */
   claudeModel?: string
+  /** Pause model commands at a disposable file gate for worker failure tests. */
+  modelControlGate?: boolean
   codexModel?: string
   /** Boot the core on its own (`__run`) instead of under harnessd's master (`__harnessd`). */
   noMaster?: boolean
   /** Start as a supervisor does, `harness start -f`: the master in the foreground, the core its child. */
   foreground?: boolean
+  /** Start with these arguments to node instead (a launcher the test provides), in the daemon's environment. */
+  launch?: string[]
   /** Run this bundle (an installed `cli.js`) instead of the checkout's source. */
   scriptPath?: string
   /** Keep the daemon's data folder here instead of under the throwaway root (a test volume). The fake
@@ -205,7 +214,7 @@ export class IsolatedDaemon {
     await writeFile(join(dirs.home, '.zshrc'), '', { flag: 'a' })
     const config: EngineConfig = {
       port, dataDir: dirs.data, claudeProjectsDir: dirs.claudeProjects, codexHome: dirs.codexHome,
-      claudeModel: options.claudeModel, codexModel: options.codexModel,
+      claudeModel: options.claudeModel, codexModel: options.codexModel, modelControlGate: options.modelControlGate,
       root, hookLog: join(own, 'fake-engine-hooks.log'),
       ...(options.trustPrompt ? { trustPrompt: true } : {}),
     }
@@ -215,8 +224,7 @@ export class IsolatedDaemon {
         `#!${process.execPath}\nimport(${JSON.stringify(engine)}).then((m) => m.run(${JSON.stringify(name)}, ${JSON.stringify(config)}))\n`,
         { mode: 0o755 })
     }
-    const env: NodeJS.ProcessEnv = {
-      ...tmux.env,
+    const env = daemonEnvironment(tmux.env, {
       NODE_ENV: 'test',
       HOME: dirs.home,
       // A login shell in a pane must not load anyone's zsh configuration.
@@ -254,7 +262,7 @@ export class IsolatedDaemon {
       TMUX_REAP_INTERVAL_MS: '5000',
       TERMINAL_RECONCILE_INTERVAL_MS: '5000',
       ...options.env,
-    }
+    })
     // A Claude Code home moved in the environment this run was started from is the person's: the daemon
     // would adopt it and install its hooks there (lib/engineHomes.ts). Only a test may move one.
     if (!options.env || !('CLAUDE_CONFIG_DIR' in options.env)) delete env.CLAUDE_CONFIG_DIR
@@ -308,7 +316,7 @@ export class IsolatedDaemon {
     // A test's own bundle (an old release), the run's bundle (`E2E_BUNDLE`, see bundle.ts), or the sources.
     const bundle = this.options.scriptPath ?? process.env.E2E_BUNDLE_PATH
     const script = bundle ? [bundle] : ['--import', 'tsx', 'src/cli.ts']
-    const child = spawn(process.execPath, [...heap, ...script, ...entry], {
+    const child = spawn(process.execPath, this.options.launch ?? [...heap, ...script, ...entry], {
       cwd: CLI_ROOT, env: this.env, stdio: ['ignore', 'pipe', 'pipe'],
     })
     this.child = child

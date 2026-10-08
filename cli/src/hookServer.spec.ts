@@ -3,19 +3,32 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startHookServer, type HookServerHandlers, chooseHookAgent, knownTranscriptFor } from './hookServer.js'
+import { startHookServer, type HookServerHandlers, chooseHookAgent, hookFiredAt, knownTranscriptFor } from './hookServer.js'
 import { registry, type RegisteredSession } from './lib/registry.js'
 import { env } from './config/env.js'
 import { readHookCredential } from './lib/hookAuth.js'
 import { CommandBarService } from './lib/commandBar.js'
+import { routedCommandBar } from './lib/commandBarHttp.js'
+import { COMMAND_BAR_REQUESTS, emptyPorts } from './core/api.js'
+import { createServiceHost } from './core/serviceHost.js'
+import { startCommandBar, type Commands } from './services/commandBar.js'
+import { fakeCore } from './testing/fakeCore.js'
 import { ENGINES } from './engines/types.js'
+import { engineHooks } from './engines/hooks.js'
 
 let server: Server | null = null
 
 describe('native command bar endpoints', () => {
+  /** The command bar in this process, behind the core's door to it, as `HARNESSD_SERVICES=none` runs it. */
+  const commandBar = (commands: Commands) => {
+    const host = createServiceHost(emptyPorts(), { log: () => {} })
+    host.serve('commandBar', (core) => startCommandBar(core, commands), fakeCore(), COMMAND_BAR_REQUESTS)
+    return routedCommandBar({ serviceRouter: host.route, onConnectionClosed: host.closeConnection })
+  }
+
   it('requires a native local header and rejects browser origins before evaluating', async () => {
     const decide = vi.fn()
-    const { base } = await start({ onCommandBar: { status: vi.fn(), decide } })
+    const { base } = await start({ onCommandBar: commandBar({ status: vi.fn(), decide }) })
     const attempts: Record<string, string>[] = [{}, { 'x-adapter-local': '1', origin: 'https://example.com' }]
     for (const headers of attempts) {
       const response = await fetch(`${base}/api/command-bar/resolve`, { method: 'POST', headers, body: '{}' })
@@ -25,7 +38,7 @@ describe('native command bar endpoints', () => {
   })
 
   it('returns configuration without credentials and wraps useful setup errors', async () => {
-    const { base } = await start({ onCommandBar: new CommandBarService({ key: async () => null }) })
+    const { base } = await start({ onCommandBar: commandBar(new CommandBarService({ key: async () => null })) })
     const headers = { 'x-adapter-local': '1', 'content-type': 'application/json' }
     const status = await fetch(`${base}/api/command-bar/status`, { headers })
     expect(await status.json()).toMatchObject({ success: true, data: { configured: false, provider: 'OpenRouter' } })
@@ -63,6 +76,28 @@ async function start(overrides: Partial<HookServerHandlers> = {}) {
 }
 
 describe('process-owned hook server', () => {
+
+  it('honors engine admission before registering or announcing a prompt, including a failed check', async () => {
+    const admit = vi.spyOn(engineHooks.codex, 'admit')
+      .mockReturnValueOnce({ accepted: false, reason: 'codex_subagent' })
+      .mockImplementationOnce(() => { throw new Error('rollout unavailable') })
+    try {
+      const onPromptSubmitted = vi.fn()
+      const { handlers, base, headers } = await start({
+        resolveHookAgent: async () => ({ engine: 'codex', agentId: 'parent' }) as RegisteredSession,
+        onPromptSubmitted,
+      })
+      for (const reason of ['codex_subagent', 'engine_hook_failed']) {
+        const response = await fetch(`${base}/api/hook/session-start`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ engine: 'codex', tmuxPane: '%41', sessionId: 'child', hookEvent: 'UserPromptSubmit' }),
+        })
+        expect(await response.json()).toEqual({ ignored: true, reason })
+      }
+      expect(handlers.onRegistered).not.toHaveBeenCalled()
+      expect(onPromptSubmitted).not.toHaveBeenCalled()
+    } finally { admit.mockRestore() }
+  })
 
   it('runs targeted resolution and rejects a hook without a matching pane engine process', async () => {
     const resolveHookAgent = vi.fn(async () => null)
@@ -243,6 +278,33 @@ describe('process-owned hook server', () => {
     expect(handler).not.toHaveBeenCalled()
   })
 
+  it('hands a Stop on with when its engine ran it, and holds it as long as a test asks', async () => {
+    const onTurnStop = vi.fn()
+    const resolveHookAgent = vi.fn(async () => ({ engine: 'claude', sessionId: 'real-session', agentId: 'agent-1' } as never))
+    const stop = (base: string, headers: Record<string, string>) => fetch(`${base}/api/hook/turn-stop`, {
+      method: 'POST', headers, body: JSON.stringify({ engine: 'claude', sessionId: 'real-session', tmuxPane: '%1', callerPid: 123 }),
+    })
+    const { base, headers } = await start({ onTurnStop, resolveHookAgent })
+    expect((await stop(base, { ...headers, 'x-harness-hook-fired-at': '1700000000000' })).status).toBe(200)
+    expect(onTurnStop).toHaveBeenLastCalledWith({ sessionId: 'real-session', status: undefined, transcriptPath: undefined, firedAt: 1_700_000_000_000 })
+    // A hook client too old to say: as before.
+    expect((await stop(base, headers)).status).toBe(200)
+    expect(onTurnStop).toHaveBeenLastCalledWith({ sessionId: 'real-session', status: undefined, transcriptPath: undefined })
+    server?.close()
+    const held = await start({ onTurnStop, resolveHookAgent, stopHookDelayMs: 50 })
+    onTurnStop.mockClear()
+    expect((await stop(held.base, held.headers)).status).toBe(200)
+    expect(onTurnStop).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(onTurnStop).toHaveBeenCalledOnce())
+  })
+
+  it('reads when a hook was run from its header, and nothing else as that', () => {
+    expect(hookFiredAt({ headers: { 'x-harness-hook-fired-at': '1700000000000' } })).toBe(1_700_000_000_000)
+    for (const value of [undefined, '', 'soon', '-5', '0', '1.5', '1e400']) {
+      expect(hookFiredAt({ headers: { 'x-harness-hook-fired-at': value } })).toBeUndefined()
+    }
+  })
+
   it('answers a proxied control-plane read whose handler throws, instead of hanging it', async () => {
     // The handler is a void-discarded async: a throw used to be an unhandledRejection and a request
     // with no response, which the desktop app reported 30s later as its own receive timeout.
@@ -367,6 +429,16 @@ describe('knownTranscriptFor', () => {
     expect(knownTranscriptFor({ engine: 'claude', sessionId, transcriptPath: known }, { ...row, transcriptPath: join(root, 'other.jsonl') })).toBe(known)
   })
 
+  it('keeps the announcement if the engine lookup fails', () => {
+    const lookup = vi.spyOn(engineHooks.claude, 'transcriptFor')
+      .mockImplementationOnce(() => { throw new Error('lookup failed') })
+      .mockImplementationOnce(() => { throw 'lookup failed again' })
+    try {
+      expect(knownTranscriptFor({ sessionId, transcriptPath: announced }, row)).toBe(announced)
+      expect(knownTranscriptFor({ sessionId, transcriptPath: announced }, row)).toBe(announced)
+    } finally { lookup.mockRestore() }
+  })
+
   it.each<[string, Parameters<typeof knownTranscriptFor>[0], RegisteredSession | undefined]>([
     ['another conversation', { engine: 'claude', sessionId: 'other-conversation', transcriptPath: announced }, row],
     ['another engine', { engine: 'codex', sessionId, transcriptPath: announced }, row],
@@ -374,6 +446,7 @@ describe('knownTranscriptFor', () => {
     ['a row whose file is gone', { engine: 'claude', sessionId, transcriptPath: announced }, { ...row, transcriptPath: join(root, 'gone', `${sessionId}.jsonl`) }],
     ['no row', { engine: 'claude', sessionId, transcriptPath: announced }, undefined],
     ['no announcement', { engine: 'claude', sessionId }, row],
+    ['no conversation id', { engine: 'claude', transcriptPath: announced }, row],
   ])('leaves the announcement alone for %s', (_case, body, agent) => {
     expect(knownTranscriptFor(body, agent)).toBe(body.transcriptPath)
   })
@@ -559,8 +632,8 @@ describe('the daemon socket', () => {
     const dir = mkdtempSync('/tmp/hsock-')
     const socketPath = join(dir, 'daemon.sock')
     const onStatus = vi.fn(() => ({ ok: true }))
-    const commandBar = { status: vi.fn(async () => ({ configured: false })), decide: vi.fn() }
-    const started = await startHookServer(0, { onRegistered: vi.fn(), onSessionEnd: vi.fn(), onStatus, onCommandBar: commandBar as never }, { socketPath })
+    const door = { ask: vi.fn(async () => ({ status: 200, body: { success: true, data: { configured: false } } })), closed: vi.fn() }
+    const started = await startHookServer(0, { onRegistered: vi.fn(), onSessionEnd: vi.fn(), onStatus, onCommandBar: door }, { socketPath })
     server = started.server
     try {
       expect(started.localSocket?.path).toBe(socketPath)

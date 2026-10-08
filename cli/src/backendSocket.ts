@@ -1,6 +1,8 @@
 import type { PurgeAgentService } from './lib/purgeAgentService.js'
-import { SHARE_REQUESTS, TEAMS_REQUESTS, type Asker, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport } from './core/api.js'
+import { SHARE_REQUESTS, TEAMS_REQUESTS, type Asker, type LocalWindows, type WindowSurface, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport } from './core/api.js'
 import { ServiceUnavailableError } from './core/serviceHost.js'
+import { countWindows } from './lib/windowSurfaces.js'
+import type { ViewerStreams } from './core/viewerStreams.js'
 import type { ActivityFrame } from './lib/turnActivity.js'
 import { MonitorCompletions } from './lib/harnessMonitor.js'
 import type { WifiCore } from './core/wifi.js'
@@ -27,15 +29,14 @@ import { GRID_FLEET_PROTOCOL, GRID_FLEET_MAX_TIMEOUT_MS } from './lib/gridFleetP
 import { ApiConnectionError, ApiConnections } from './lib/apiConnections.js'
 import { resolveApiTarget } from './lib/apiModels.js'
 import { isApiLaunch, parseGridLaunchOverride, type GridLaunchOverride } from './lib/gridLaunch.js'
+import type { ScmLaunchRecord } from './scm/types.js'
 import { probeEngines } from './lib/engineProbe.js'
 import { engineInstallRecipe } from './lib/engineInstall.js'
 import { agentFrame, type AgentDshContext, type AgentFrame } from './lib/agentFrame.js'
 import { agentTokenUsage } from './lib/agentTokenUsage.js'
 import { terminalHandoffRequest } from './lib/terminalHandoff.js'
-import { ViewerForwarder } from './lib/viewerForwarder.js'
-import { InteractiveViewers } from './lib/interactiveViewer.js'
-import { OwnerCommands, OWNER_COMMAND_TYPES } from './lib/ownerCommands.js'
-import { VIEWER_DOWN_TYPES } from './lib/viewerWire.js'
+import { OwnerCommands, OWNER_COMMAND_TYPES, ROUTE_COMMAND_TYPES } from './lib/ownerCommands.js'
+import { VIEWER_DOWN_TYPES } from './lib/viewerFrames.js'
 import type { TerminalStreamManager } from './lib/terminalStreamManager.js'
 import { encodeTerminalLocal, type TerminalBinaryClear } from './lib/terminalBinary.js'
 import { BACKEND_ONLY_DOWN_TYPES, GATEWAY_REQUEST_TYPES, isLocalClientId, logSafeType, PAIR_REQUESTS, PLATE_REQUEST, rpcResultType, type DownTransport } from './lib/relayFrames.js'
@@ -96,6 +97,8 @@ export class BackendSocket {
    * this computer — not presence, not a window to push to, and never what wakes the pair brain.
    */
   private readonly toolClients = new Set<string>()
+  /** The windows that are `harness tui`, not the desktop app: each surface is its own presence. */
+  private readonly tuiClients = new Set<string>()
   private terminalStreams: TerminalStreamManager | null = null
   private onStatus: (connected: boolean) => void
   /** Cross-instance commander (device) client count, as the gateway reads it from the backend. */
@@ -160,6 +163,9 @@ export class BackendSocket {
      *  only between turns, `now` whatever it is doing (then tells it to continue), `wait` when its
      *  turn ends. Absent, one open elsewhere is refused and the refusal says whether it is busy. */
     takeOver?: 'idle' | 'now' | 'wait' | null
+    /** What the SCM that prepared `cwd` needs on every relaunch (registry `scmLaunch`). Present only
+     *  when this create prepared a folder, and null when no SCM made it (a new folder, a clone). */
+    scmLaunchRecord?: ScmLaunchRecord | null
   }) =>
     Promise<{ ok: true; session: RegisteredSession } | { ok: false; error: string; detail?: string }>) | null = null
   /** Called on `remote_terminal_handoff` — cli.ts names the agent whose tile is that tmux pane, or null. */
@@ -170,15 +176,13 @@ export class BackendSocket {
   /** What the daemon knows about an agent's DSH companions (viewer URL, verdict); null when nothing. */
   activityFrameProvider: ((session: RegisteredSession) => ActivityFrame | null) | null = null
   dshFrameProvider: ((session: RegisteredSession) => AgentDshContext | null) | null = null
-  viewerTargetProvider: ((agentId: string) => string | null) | null = null
-  readonly interactiveViewers = new InteractiveViewers(agentId => this.viewerTargetProvider?.(agentId) ?? null)
-  readonly viewerForwarder = new ViewerForwarder({
-    target: (agentId) => this.viewerTargetProvider?.(agentId) ?? null,
-    send: (connId, type, payload) => {
-      if (this.localClients.has(connId)) { this.sendTo(connId, { type, payload }); return true }
-      return this.throughGateway('viewer', (gateway) => gateway.target(connId, type, payload), false)
-    },
-  })
+  /** This machine's viewers, served to a client over its connection: the viewers' (core/viewerStreams.ts). */
+  viewerStreams: ViewerStreams | null = null
+  /** A viewer stream's frame to the one connection that opened it: false when it cannot reach it. */
+  sendViewerFrame(connId: string, type: string, payload: Record<string, unknown>): boolean {
+    if (this.localClients.has(connId)) { this.sendTo(connId, { type, payload }); return true }
+    return this.throughGateway('viewer', (gateway) => gateway.target(connId, type, payload), false)
+  }
   /** Injectable for queue-isolation tests; production uses the machine-local probe. */
   engineProbeProvider: typeof probeEngines = probeEngines
   readonly ownerCommands = new OwnerCommands()
@@ -254,11 +258,6 @@ export class BackendSocket {
   /** Answers `sessions_list` with the whole reply: the conversation an agent holds and how many lines it
    *  has (cli.ts binds core/transcripts/history.ts). Null answers UNSUPPORTED. */
   sessionsProvider: ((payload: Record<string, unknown>) => Promise<Record<string, unknown>>) | null = null
-  /** Answers `agent_handoff_prepare` through its last argument, for the owner alone: the structured handoff
-   *  file for an agent whose engine is about to change, written where it says, never text for the next
-   *  engine (cli.ts binds core/agents/handoff.ts over lib/agentHandoff.ts). Null answers UNSUPPORTED. */
-  handoffRequestProvider: ((payload: Record<string, unknown>, asker: { local: boolean; owner: boolean },
-    reply: (result: Record<string, unknown>) => void) => void) | null = null
   /** How each agent's last turn ended, from the turn frames this socket sends: the monitor's activity
    *  once a turn is over (`agents_list`, core/agents/list.ts). */
   readonly monitorCompletions = new MonitorCompletions()
@@ -324,7 +323,7 @@ export class BackendSocket {
     this.gatewayPort = gateway
     if (!this.requestsOpen) gateway.holdRequests()
     if (this.thisComputerOnly) gateway.serveThisComputerOnly()
-    gateway.localClients(this.localClients.size)
+    gateway.localClients(this.localWindows())
   }
 
   get gateway(): GatewayPort | null { return this.gatewayPort }
@@ -341,13 +340,12 @@ export class BackendSocket {
       this.wifi?.session(connId, client)
       if (client) { this.remoteClients.set(connId, client); return }
       if (!this.remoteClients.delete(connId)) return
-      this.viewerForwarder.closeConnection(connId); this.interactiveViewers.closeConnection(connId); this.ownerCommands.closeConnection(connId); this.onConnectionClosed?.(connId)
+      this.viewerStreams?.closed(connId); this.ownerCommands.closeConnection(connId); this.onConnectionClosed?.(connId)
     },
     disconnected: async (connId) => {
       this.wifi?.dropped(connId)
       this.remoteClients.delete(connId)
-      this.viewerForwarder.closeConnection(connId)
-      this.interactiveViewers.closeConnection(connId); this.ownerCommands.closeConnection(connId); this.onConnectionClosed?.(connId)
+      this.viewerStreams?.closed(connId); this.ownerCommands.closeConnection(connId); this.onConnectionClosed?.(connId)
       await this.terminalStreams?.closeConnection(
         connId,
         'client connection closed',
@@ -365,8 +363,7 @@ export class BackendSocket {
     },
     linkDown: () => {
       this.observers?.closeAll()
-      this.viewerForwarder.closeAll()
-      this.interactiveViewers.closeAll(); this.ownerCommands.closeAll(); for (const connId of this.remoteClients.keys()) this.onConnectionClosed?.(connId)
+      this.viewerStreams?.closedAll(); this.ownerCommands.closeAll(); for (const connId of this.remoteClients.keys()) this.onConnectionClosed?.(connId)
       void this.terminalStreams?.closeConnectionsWhere(
         (connId) => !isLocalClientId(connId),
         'backend disconnected',
@@ -459,8 +456,7 @@ export class BackendSocket {
   async stop(): Promise<void> {
     this.closed = true
     this.closeAgentService?.dispose()
-    this.viewerForwarder.closeAll()
-    this.interactiveViewers.closeAll(); this.ownerCommands.closeAll()
+    this.viewerStreams?.closedAll(); this.ownerCommands.closeAll()
     await this.terminalStreams?.stop()
     await this.gatewayPort?.stop()
   }
@@ -603,16 +599,21 @@ export class BackendSocket {
   }
 
   /** Attach one authenticated loopback desktop client to the same RPC and event plane as cloud web. */
-  registerLocalClient(connId: string, sink: LocalClientSink, opts: { tool?: boolean } = {}): boolean {
+  registerLocalClient(connId: string, sink: LocalClientSink, opts: { tool?: boolean; surface?: WindowSurface } = {}): boolean {
     if (!isLocalClientId(connId) || this.localClients.has(connId)) return false
     this.localClients.set(connId, sink)
-    this.gatewayPort?.localClients(this.localClients.size)
-    if (opts.tool) { this.toolClients.add(connId); return true }
+    if (opts.tool) this.toolClients.add(connId)
+    else if (opts.surface === 'tui') this.tuiClients.add(connId)
+    this.gatewayPort?.localClients(this.localWindows())
+    if (opts.tool) return true
     // The window is the person's session: the backend counts it, now or when the link next comes up.
-    this.gatewayPort?.windowOpened()
+    this.gatewayPort?.windowOpened(opts.surface ?? 'desktop')
     this.onLocalClient?.(connId, true)
     return true
   }
+
+  /** The windows attached now, per surface; tools are not windows. */
+  private localWindows(): LocalWindows { return countWindows(this.localClients.size, this.toolClients.size, this.tuiClients.size) }
 
   /** A loopback client that said it is a tool (`harness pair`, the MCP server), not a window. */
   isToolClient(connId: string): boolean { return this.toolClients.has(connId) }
@@ -632,12 +633,12 @@ export class BackendSocket {
   async unregisterLocalClient(connId: string): Promise<void> {
     if (!this.localClients.delete(connId)) return
     if (!this.toolClients.delete(connId)) this.onLocalClient?.(connId, false)
+    this.tuiClients.delete(connId)
     this.rowStateWindows.delete(connId)
-    this.viewerForwarder.closeConnection(connId)
-    this.interactiveViewers.closeConnection(connId); this.ownerCommands.closeConnection(connId); this.onConnectionClosed?.(connId)
+    this.viewerStreams?.closed(connId); this.ownerCommands.closeConnection(connId); this.onConnectionClosed?.(connId)
     // The last one leaving before any link could hear it attach: nothing happened, as far as the backend
     // is concerned, and the gateway does not tell a later link otherwise.
-    this.gatewayPort?.localClients(this.localClients.size)
+    this.gatewayPort?.localClients(this.localWindows())
     this.downChains.delete(connId)
     await this.terminalStreams?.closeConnection(connId, 'local client disconnected', false)
   }
@@ -740,7 +741,7 @@ export class BackendSocket {
   private emitReply(connId: string, type: string, requestId: unknown, payload: Record<string, unknown>): void {
     const resultType = rpcResultType(type)
     // Before the E2EE wrap: an RPC reply is only readable here.
-    if (env.LOG_FRAMES && !TEAM_REQUESTS.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
+    if (env.LOG_FRAMES && !TEAM_REQUESTS.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
     if (this.localClients.has(connId)) {
       this.sendTo(connId, { type: resultType, payload: { requestId, ...payload } })
       return
@@ -799,7 +800,7 @@ export class BackendSocket {
     // actually asked for rather than as an opaque __e2e envelope.
     // Terminal frames contain raw keystrokes, paste text and screen bytes after
     // unwrap. Never pass them to the frame logger, even in diagnostic mode.
-    if (env.LOG_FRAMES && !TEAM_REQUESTS.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
+    if (env.LOG_FRAMES && !TEAM_REQUESTS.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
       logFrame('←', connId ? `conn:${sid(connId)}` : 'backend', frame)
     }
     const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => this.emitReply(connId, t, rid, p)
@@ -817,7 +818,7 @@ export class BackendSocket {
 
     // A paired owner can run the machine's orchestrator; observers and device sessions cannot.
     // Both requests and replies are encrypted, including project artifacts.
-    if (OWNER_COMMAND_TYPES.has(type)) {
+    if (ROUTE_COMMAND_TYPES.has(type)) {
       if (!owner) { reply(type, requestId, { error: 'OWNER_REQUIRED' }); return }
       void this.ownerCommands.request(connId, type, payload).then(result => reply(type, requestId, result))
       return
@@ -835,7 +836,7 @@ export class BackendSocket {
     if (type === 'viewer_surface') {
       if (!owner) return
       // Rendering and input never hold up terminal traffic on the ordered machine queue.
-      void this.interactiveViewers.request(connId, payload)
+      void (this.viewerStreams?.surface(connId, payload) ?? Promise.reject(new Error('no viewers')))
         .then(result => reply(type, requestId, result))
         .catch(() => reply(type, requestId, { error: 'VIEWER_UNAVAILABLE' }))
       return
@@ -849,9 +850,7 @@ export class BackendSocket {
     }
 
     if (type.startsWith('viewer_')) {
-      if (VIEWER_DOWN_TYPES.has(type) && owner) {
-        this.viewerForwarder.handle(connId, type, payload)
-      }
+      if (VIEWER_DOWN_TYPES.has(type) && owner) this.viewerStreams?.frame(connId, type, payload)
       return
     }
 
@@ -968,12 +967,6 @@ export class BackendSocket {
         // An agent's last turn summaries and questions, for a device's tiles (core/turns/recaps.ts, bound by cli.ts).
         case 'agent_recent':
           reply(type, requestId, this.agentRecentProvider ? this.agentRecentProvider(payload) : { error: 'UNSUPPORTED' })
-          return
-
-        // "Change agent": what the old engine did, written for the new one (core/agents/handoff.ts, bound by cli.ts).
-        case 'agent_handoff_prepare':
-          if (this.handoffRequestProvider) this.handoffRequestProvider(payload, asker, answer)
-          else answer({ error: 'UNSUPPORTED' })
           return
 
         // A rename, a model and effort, or an app opening the agent (core/agents/update.ts, bound by cli.ts).

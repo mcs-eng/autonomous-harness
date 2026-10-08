@@ -36,7 +36,7 @@ import type { WindowVoiceReply } from './cable/windowRoute.js'
 
 export interface LocalWsBackend {
   /** `tool`: `harness pair` or the harnessd MCP server — answered like any local client, never presence. */
-  registerLocalClient: (connId: string, sink: LocalClientSink, opts?: { tool?: boolean }) => boolean
+  registerLocalClient: (connId: string, sink: LocalClientSink, opts?: { tool?: boolean; surface?: 'tui' }) => boolean
   unregisterLocalClient: (connId: string) => Promise<void>
   handleLocalFrame: (connId: string, frame: Frame) => void
   handleLocalBinary: (connId: string, frame: TerminalBinaryClear) => Promise<void>
@@ -118,7 +118,7 @@ export interface LocalWsServerOptions {
   /** The core's end of its out-of-process services (core/serviceLinks.ts): a `machine_select` with
    *  `role: "service"` is handed here, and the connection is the service's from then on. */
   services?: {
-    accept(service: string, token: string, sink: LocalClientSink & { buffered(): number }, close: (code: number, reason: string) => void):
+    accept(service: string, token: string, sink: LocalClientSink & { buffered(): number }, close: (code: number, reason: string) => void, accepted: () => void):
       { receive(frame: Frame): void; receiveBinary(bytes: Uint8Array): void; closed(): void } | null
   }
   /**
@@ -197,7 +197,7 @@ function rejectUpgrade(socket: Socket, status: number, reason: string): void {
   )
 }
 
-function jsonFrame(raw: RawData): Frame | null {
+function jsonFrame(raw: RawData, maxBytes = MAX_JSON_BYTES): Frame | null {
   const bytes = Buffer.isBuffer(raw)
     ? raw
     : raw instanceof ArrayBuffer
@@ -205,7 +205,7 @@ function jsonFrame(raw: RawData): Frame | null {
       : Array.isArray(raw)
         ? Buffer.concat(raw)
         : Buffer.alloc(0)
-  if (!bytes.length || bytes.length > MAX_JSON_BYTES) return null
+  if (!bytes.length || bytes.length > maxBytes) return null
   try {
     const value = JSON.parse(bytes.toString('utf8')) as unknown
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -298,6 +298,11 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
   // background terminal attachments on ANY of those connections must not overwrite that selection.
   const explicitFocusClients = new Set<string>()
   const windowSinks = new Map<string, LocalClientSink>()
+  // The desktop reports the same desk on one connection per machine. Losing a
+  // remote relay must not erase the desk while another connection still holds it.
+  // Map order records the latest announcement, including a replacement socket.
+  const paneRosters = new Map<string, { ids: string[]; foreground: boolean }>()
+  const swarmRosters = new Map<string, AppSwarms>()
 
   const onUpgrade = (req: http.IncomingMessage, socket: Socket, head: Buffer): void => {
     const path = (req.url ?? '').split('?')[0]
@@ -397,16 +402,19 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
       // account's machine id while a service names this computer's, and matching them refused every
       // service of every signed-in daemon (found by the release rehearsal, signed in).
       if (payload.role === 'service') {
-        const link = options.services?.accept(String(payload.service ?? ''), String(payload.token ?? ''), { ...sink, buffered: () => ws.bufferedAmount }, close) ?? null
+        const link = options.services?.accept(String(payload.service ?? ''), String(payload.token ?? ''), { ...sink, buffered: () => ws.bufferedAmount }, close, () => {
+          sink.sendFrame({ type: 'connected', payload: { machineId: options.machineId, transport: 'local', localProtocolVersion: LOCAL_WS_PROTOCOL_VERSION, service: payload.service } })
+        }) ?? null
         if (!link) { close(4401, 'service refused'); return }
         serviceLink = link
         selected = true
-        sink.sendFrame({ type: 'connected', payload: { machineId: options.machineId, transport: 'local', localProtocolVersion: LOCAL_WS_PROTOCOL_VERSION, service: payload.service } })
         return
       }
       if (requestedMachineId === options.machineId) {
         tool = payload.tool === true
-        if (!options.backend.registerLocalClient(connId, terminalSink, tool ? { tool: true } : {})) {
+        // `harness tui` says so; every other window is the desktop app. Each is its own presence.
+        const registration = tool ? { tool: true } : payload.client === 'tui' ? { surface: 'tui' as const } : {}
+        if (!options.backend.registerLocalClient(connId, terminalSink, registration)) {
           close(1011, 'local registration failed')
           return
         }
@@ -469,7 +477,10 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
         if (!selected) return selectMachine(raw, isBinary)
         if (serviceLink) {
           if (isBinary) { serviceLink.receiveBinary(binaryBytes(raw)); return }
-          const frame = jsonFrame(raw)
+          // Tropic's agent list exceeded the window's 512 KiB limit and kept
+          // dropping the gateway, taking every remote pane with it. Only a
+          // token-authenticated service may use the existing transport ceiling.
+          const frame = jsonFrame(raw, MAX_WS_MESSAGE_BYTES)
           if (!frame) { close(4400, 'invalid json frame'); return }
           serviceLink.receive(frame)
           return
@@ -524,6 +535,8 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
             // announcing work that is in plain sight.
             const foreground = payload?.foreground !== false
             sentPanes = true
+            paneRosters.delete(connId)
+            paneRosters.set(connId, { ids, foreground })
             options.onAppPanes(ids, foreground)
             return
           }
@@ -578,6 +591,8 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
             const swarms = appSwarmsFrom(parsed.payload)
             if (swarms) {
               sentSwarms = true
+              swarmRosters.delete(connId)
+              swarmRosters.set(connId, swarms)
               options.onAppSwarms(swarms)
               options.onAppTabAgents?.(connId, swarms.swarms.flatMap(s => s.agentIds))
             }
@@ -766,8 +781,10 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
     const heartbeat = watchSocketLiveness(ws, {
       deadlineMs: LOCAL_IDLE_DEADLINE_MS,
       onIdle: (idleMs) => console.log(`[local-ws] ${connId} no traffic for ${Math.round(idleMs / 1000)}s — terminating`),
-      // The app is on this computer and slept with us: a wake re-probes it, it never ends the socket.
-      onWake: (sleptMs) => console.log(`[local-ws] ${connId} woke after ${Math.round(sleptMs / 1000)}s asleep — re-probing`),
+      // The app is on this computer and slept with us, so a wake re-probes it rather than ending the
+      // socket — but only once per answer. Unbounded forgiveness is what let a window that was already
+      // gone keep its tile roster for 912-995s against this 40s deadline (wsLiveness.ts GENUINE_SLEEP_MS).
+      onWake: (sleptMs, givingUp) => console.log(`[local-ws] ${connId} woke after ${Math.round(sleptMs / 1000)}s asleep — ${givingUp ? 'the app has not answered since the last wake, terminating' : 're-probing'}`),
     })
 
     const cleanup = (): void => {
@@ -775,11 +792,22 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
       const wasWindow = windowSinks.delete(connId)
       explicitFocusClients.delete(connId)
       if (wasWindow && boundMachineId) options.onAppDisconnect?.(boundMachineId, connId)
-      // A window that went away has no tiles open. Left standing, the roster
-      // would keep silencing the dial for agents nobody can see any more —
-      // exactly backwards, and permanently.
-      if (sentPanes) options.onAppPanes?.([], false)
-      if (sentSwarms) options.onAppSwarms?.(null)
+      // Only the latest reporter can change the desk on close. If another
+      // socket still reports a window, restore its latest state; the last
+      // window going away is what empties the device's panes and tabs.
+      if (sentPanes) {
+        const latest = [...paneRosters.keys()].at(-1) === connId
+        paneRosters.delete(connId)
+        if (latest) {
+          const remaining = [...paneRosters.values()].at(-1)
+          options.onAppPanes?.(remaining?.ids ?? [], remaining?.foreground ?? false)
+        }
+      }
+      if (sentSwarms) {
+        const latest = [...swarmRosters.keys()].at(-1) === connId
+        swarmRosters.delete(connId)
+        if (latest) options.onAppSwarms?.([...swarmRosters.values()].at(-1) ?? null)
+      }
       if (sentSwarms) options.onAppTabAgents?.(connId, null)
       if (serviceLink) { serviceLink.closed(); serviceLink = null }
       else if (relay) { relay.detach(); relay = null }

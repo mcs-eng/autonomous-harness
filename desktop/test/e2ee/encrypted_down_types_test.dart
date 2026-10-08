@@ -24,42 +24,54 @@ void main() {
     return file.readAsStringSync();
   }
 
-  /// The quoted names in the set literal that follows [start], `//` comments stripped first — the
-  /// CLI's comments quote type names too.
-  Set<String> namesIn(String source, String start) {
-    final from = source.indexOf(start);
-    if (from < 0) throw StateError('could not find $start');
-    final body = source.substring(from, source.indexOf('])', from));
-    final code = body
+  /// Quoted names in a declared set/array literal, including typed declarations.
+  /// Comments also quote frame names, so exclude them from the contract.
+  Set<String> namesIn(String source, String name) {
+    final code = source
         .split('\n')
         .map((line) => line.split('//').first)
         .join('\n');
+    final declaration = RegExp(
+      r'\b' +
+          RegExp.escape(name) +
+          r'(?:\s*:[^=]+)?\s*=\s*(?:new Set(?:<[^>]+>)?\(\s*)?\[([\s\S]*?)\]',
+    ).firstMatch(code);
+    if (declaration == null) throw StateError('could not find $name literal');
     return {
-      for (final match in RegExp(r"'([a-z0-9_]+)'").allMatches(code)) match[1]!,
+      for (final match in RegExp(r"'([a-z0-9_]+)'").allMatches(declaration[1]!))
+        match[1]!,
     };
+  }
+
+  /// `PLATE_REQUEST` is one type, not a set: `encryptDownFrame` compares it with `===`.
+  String plateRequest(String relay) {
+    final match = RegExp(r"export const PLATE_REQUEST = '([a-z0-9_]+)'")
+        .firstMatch(relay);
+    if (match == null) throw StateError('could not find PLATE_REQUEST');
+    return match[1]!;
   }
 
   late Set<String> core, machineRequests, unwrapped;
   setUpAll(() {
-    core = namesIn(
-      cli('lib/e2ee/core.ts'),
-      'ENCRYPTED_DOWN_TYPES = new Set<string>([',
-    );
+    core = namesIn(cli('lib/e2ee/core.ts'), 'ENCRYPTED_DOWN_TYPES');
     final frames = cli('lib/e2ee/applicationFrames.ts');
     final relay = cli('lib/relayFrames.ts');
     // `MACHINE_REQUESTS` also spreads the owner commands in; those are read where they are declared.
     machineRequests = {
-      ...namesIn(frames, 'MACHINE_REQUESTS = new Set(['),
-      ...namesIn(relay, 'OWNER_COMMAND_TYPES = new Set(['),
+      ...namesIn(frames, 'MACHINE_REQUESTS'),
+      ...namesIn(cli('lib/shellProtocol.ts'), 'SHELL_REQUESTS'),
+      ...namesIn(relay, 'OWNER_COMMAND_TYPES'),
+      ...namesIn(relay, 'ROUTE_COMMAND_TYPES'),
     };
     unwrapped = {
       ...core,
       ...machineRequests,
-      ...namesIn(frames, 'FLEET_REQUESTS = new Set(['),
-      ...namesIn(relay, 'PAIR_REQUESTS = new Set(['),
-      ...namesIn(cli('sharing/protocol.ts'), 'SHARE_REQUEST_TYPES = new Set(['),
-      ...namesIn(cli('teams/wire.ts'), 'TEAM_REQUEST_TYPES = new Set(['),
-      ...namesIn(cli('lib/viewerWire.ts'), 'VIEWER_DOWN_TYPES = new Set(['),
+      ...namesIn(frames, 'FLEET_REQUESTS'),
+      ...namesIn(relay, 'PAIR_REQUESTS'),
+      plateRequest(relay),
+      ...namesIn(cli('sharing/protocol.ts'), 'SHARE_REQUEST_TYPES'),
+      ...namesIn(cli('teams/wire.ts'), 'TEAM_REQUEST_TYPES'),
+      ...namesIn(cli('lib/viewerFrames.ts'), 'VIEWER_DOWN_TYPES'),
     };
   });
 
@@ -70,6 +82,27 @@ void main() {
 
   test('nothing is sealed that the machine would not open', () {
     expect(encryptedDownTypes.difference(unwrapped), isEmpty);
+  });
+
+  test('the rule read is the one the machine applies', () {
+    // A new set joined to encryptDownFrame would go unread above: fail until
+    // it is added there too.
+    final rule = cli('lib/e2ee/applicationFrames.ts');
+    final from = rule.indexOf('export const encryptDownFrame');
+    final body = rule.substring(from, rule.indexOf('\nexport ', from + 1));
+    final named = RegExp(r'\b([A-Z][A-Z_]+)\b')
+        .allMatches(body)
+        .map((m) => m[1]);
+    expect(named.toSet(), {
+      'MACHINE_REQUESTS',
+      'FLEET_REQUESTS',
+      'SHARE_REQUEST_TYPES',
+      'VIEWER_DOWN_TYPES',
+      'PAIR_REQUESTS',
+      'PLATE_REQUEST',
+      'TEAM_REQUEST_TYPES',
+    });
+    expect(body, contains('isEncryptedDownType(type)'));
   });
 
   test('a machine request this client sends is sealed', () {

@@ -305,6 +305,9 @@ class WsConn {
             'autonomousEnv': autonomousEnv,
             if (_directObserver)
               (observerLink ? 'link' : 'share'): observerShareId!,
+            // The browser counts its person as on the web today (backend
+            // user_daily_client_presence). Not other viewer builds: they are not the web.
+            if (!_directObserver && kIsWeb) 'client': 'web',
           },
         );
       }
@@ -475,6 +478,10 @@ class WsConn {
         return;
       case 'e2e_welcome':
         if (_directObserver) return;
+        // One per session (see `RelaySessionCrypto.handleWelcome`): another once this one is up
+        // is the relay repeating itself — not the machine failing to prove who it is, which is
+        // what refusing the peer below would take it for.
+        if (_ready) return;
         final verified = await codec.handleWelcome(payload);
         if (_closing || !identical(_codec, codec)) return;
         if (verified) {
@@ -597,6 +604,10 @@ class WsConn {
     'agent_handoff_prepare_result',
     'project_preview',
     'project_preview_result',
+    // A name made from the panes' titles, asked again every few seconds
+    // while the daemon is still writing it.
+    'window_name',
+    'window_name_result',
     'git_project_info',
     'git_project_info_result',
     'terminal_output',

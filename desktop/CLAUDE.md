@@ -141,8 +141,19 @@ origin-local storage; only the OAuth transaction is in session storage.
 Each relay connection also negotiates a WebRTC data channel to the machine
 (`web/p2p/`, the phone's `../mobile/lib/p2p` on the browser's own
 `RTCPeerConnection` — no `flutter_webrtc`, so native builds gain no plugin);
-terminal frames take it when it is up and fall back to the relay. Keep
-`terminal_p2p_{plugin,link,policy}.dart` in step with the phone's copies.
+terminal frames take it when it is up and fall back to the relay. Those files,
+the transport interface and the E2EE session are copies of the phone's (mobile
+stays a standalone package); `test/p2p/mobile_parity_test.dart` fails until a
+change is carried to both. The browser's E2EE is pure Dart on the UI thread,
+and that is fine: sealing plus opening a 4 KiB frame measured 316 µs under
+dart2js `-O4`, 282 µs on the Dart VM and 479 µs as `-O4` WASM (Node 24,
+2026-10-06) — `flutter test --platform chrome` compiles unoptimized and reads
+~40× slower, so do not judge it there. WASM is not worth adopting for speed.
+System notifications in a browser use its Notification API
+(`web/notify/browser_system_notifier.dart`, picked by `notify/browser_notifier.dart`):
+the same Settings switch, one per agent by `tag`, a click focuses the tab and
+opens the agent. A phone's browser cannot construct one (service workers only),
+which reads as unavailable.
 Shared sessions use `ObserverRelayCodec` and `/api/observer-ws`, verifying the
 owner and permitting only observation and authenticated comments. `/s/:id#key=…`
 opens `SharedAgentPage` without restoring the visitor's workspace. Public links
@@ -442,6 +453,11 @@ add a kind there, not at the call site.
 - `macos/Runner/MainFlutterWindow.swift` installs native menu items and calls into Dart over the
   `harness/app_menu` MethodChannel (`checkForUpdates`, `flashFirmware`, `showShortcuts`, terminal font
   size). Keep the menu in Swift; only the handler lives in `RootShell`.
+- `macos/Runner/SurfaceCacheGuard.swift` patches Flutter's private macOS back-buffer cache, which can
+  hand a frame a surface of another size after an A → B → A resize or a display replug; Impeller then
+  dereferences a null color texture in `Canvas::SetupRenderPass` ([flutter#185394](https://github.com/flutter/flutter/issues/185394)).
+  It checks every private class, selector and type encoding and stays inert if they change. On a
+  Flutter bump, check whether `removeSurfaceForSize:` compares each surface's size; delete it if so.
 - **Agent-account usage is what the native Models menu reads** (`lib/usage/`,
   `usage/models_menu_controller.dart`, `SwarmSubscriptionView` in `SwarmTitlebar.swift`): what the
   Claude and Codex accounts on this machine — and on the remote machines that answer `usage_read` —

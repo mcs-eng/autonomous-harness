@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { projectDisplayName, type RegisteredSession } from '../lib/registry.js'
-import { ACCOUNT_BACKEND_OFF, AGENT_ACTIONS_OFF, createCoreApi, DAEMON_UNKNOWN, DELIVERIES_OFF, DEVICES_FALLBACKS, emptyPorts, LANE_OFF, LONG_ANSWERS, MODELS_OFF, MODELS_REQUESTS, MONITOR_OFF, OBSERVER_KEY_OFF, ORCHESTRATOR_FALLBACKS, resolveAgent, SHARING_FALLBACKS, TEAMS_FALLBACKS, TERMINALS_OFF, WIFI_FALLBACKS, WIFI_OFF, type CoreApiDeps } from './api.js'
+import { CONVERSATIONS_OFF, ACCOUNT_BACKEND_OFF, AGENT_ACTIONS_OFF, createCoreApi, DAEMON_UNKNOWN, DELIVERIES_OFF, DEVICES_FALLBACKS, emptyPorts, LANE_OFF, LONG_ANSWERS, MODELS_OFF, MODELS_REQUESTS, MONITOR_OFF, OBSERVER_KEY_OFF, ORCHESTRATOR_FALLBACKS, RECAPS_FALLBACKS, resolveAgent, SHARING_FALLBACKS, TEAMS_FALLBACKS, TERMINALS_OFF, WIFI_FALLBACKS, WIFI_OFF, type CoreApiDeps } from './api.js'
 import { FAIL, readFallback } from './serviceHost.js'
 
 const row = (agentId: string) => ({ agentId, sessionId: `s-${agentId}`, engine: 'claude', cwd: '/work/app' }) as RegisteredSession
@@ -46,6 +46,7 @@ describe('the core API services stand on', () => {
       syncSession: vi.fn(),
       runtimeModels: vi.fn(async () => []),
       viewerChanged: vi.fn(),
+      viewerFrame: vi.fn(() => true),
       gridNamed: vi.fn(),
       gridModelsChanged: vi.fn(),
       dshInstallStatus: vi.fn(),
@@ -78,15 +79,21 @@ describe('the core API services stand on', () => {
       devicesChanged: vi.fn(),
       dialWatching: vi.fn(),
       wifi: WIFI_OFF,
+      lastTurn: vi.fn(async () => null),
+      turnCard: vi.fn(),
+      turnSummary: vi.fn(),
       log: vi.fn(),
     })
 
   it('lists every agent, live then stopped, and names them as the apps do', async () => {
     const deps = coreDeps()
     const core = createCoreApi(deps)
+    expect(core.conversations).toBe(CONVERSATIONS_OFF)
+    const conversations = { ...CONVERSATIONS_OFF }
+    expect(createCoreApi({ ...deps, conversations }).conversations).toBe(conversations)
     expect(core.dataDir).toBe('/data')
     expect(await core.terminals.open({ argv: ['/bin/zsh'], cwd: '/work' })).toEqual({ ok: false, error: 'SERVICE_UNAVAILABLE' })
-    const terminals = { open: vi.fn(async () => ({ ok: true as const, agentId: 'shell' })), watch: TERMINALS_OFF.watch }
+    const terminals = { ...TERMINALS_OFF, open: vi.fn(async () => ({ ok: true as const, agentId: 'shell' })), watch: TERMINALS_OFF.watch }
     expect(createCoreApi({ ...deps, terminals }).terminals).toBe(terminals)
     expect(core.agents.all().map((s) => s.agentId)).toEqual(['live', 'stopped'])
     expect(core.agents.live().map((s) => s.agentId)).toEqual(['live'])
@@ -102,6 +109,11 @@ describe('the core API services stand on', () => {
     expect(core.agents.sync).toBe(deps.syncSession)
     expect(core.agents.runtimeModels).toBe(deps.runtimeModels)
     expect(core.clients.viewerChanged).toBe(deps.viewerChanged)
+    // A viewer stream's frames reach a client; nothing else a viewers process names does.
+    expect(core.clients.viewerFrame('c1', 'viewer_data', { streamId: 's' })).toBe(true)
+    expect(deps.viewerFrame).toHaveBeenCalledWith('c1', 'viewer_data', { streamId: 's' })
+    expect(core.clients.viewerFrame('c1', 'agent_synced', {})).toBe(false)
+    expect(deps.viewerFrame).toHaveBeenCalledTimes(1)
     expect(core.clients.dshInstallStatus).toBe(deps.dshInstallStatus)
     expect(core.agents.advertised().map((s) => s.agentId)).toEqual(['live'])
     expect(core.clients.gridNamed).toBe(deps.gridNamed)
@@ -135,6 +147,41 @@ describe('the core API services stand on', () => {
     expect(core.clients.hasWindow).toBe(deps.hasWindow)
     expect(core.clients.devicesChanged).toBe(deps.devicesChanged)
     expect(core.clients.dialWatching).toBe(deps.dialWatching)
+    expect(core.transcripts.lastTurn).toBe(deps.lastTurn)
+  })
+
+  it('lets the recaps send a turn\'s cards and recaps, and nothing else, down those doors', () => {
+    const log = vi.fn()
+    const turnCard = vi.fn()
+    const turnSummary = vi.fn()
+    const core = createCoreApi({ turnCard, turnSummary, log } as unknown as CoreApiDeps)
+    const card = { type: 'commander_event' as const, agentId: 'a', dbSessionId: 's', payload: { kind: 'done' } }
+    core.clients.turnCard(card)
+    core.clients.turnSummary({ type: 'turn_summary', payload: {} })
+    core.clients.turnSummary({ type: 'turn_summary_pending', payload: {} })
+    expect(turnCard).toHaveBeenCalledWith(card)
+    expect(turnSummary.mock.calls.map(([frame]) => frame.type)).toEqual(['turn_summary', 'turn_summary_pending'])
+    // A frame that is not theirs is refused, and said: a recaps process speaks to the core as a service.
+    core.clients.turnCard({ ...card, type: 'agents_list' } as never)
+    core.clients.turnSummary({ type: 'commander_event' } as never)
+    core.clients.turnSummary(undefined as never)
+    expect(turnCard).toHaveBeenCalledTimes(1)
+    expect(turnSummary).toHaveBeenCalledTimes(2)
+    expect(log.mock.calls.map(([line]) => line)).toEqual([
+      '[services] the recaps sent agents_list, which is not theirs to send',
+      '[services] the recaps sent commander_event, which is not theirs to send',
+      '[services] the recaps sent undefined, which is not theirs to send',
+    ])
+    // Said to the daemon's log unless told otherwise.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    createCoreApi({ turnCard, turnSummary } as unknown as CoreApiDeps).clients.turnCard({ type: 'nope' } as never)
+    expect(warn).toHaveBeenCalledWith('[services] the recaps sent nope, which is not theirs to send')
+    warn.mockRestore()
+  })
+
+  it('tells the recaps nothing, and reads no recap, when they fail', () => {
+    expect(RECAPS_FALLBACKS).toMatchObject({ lifecycle: undefined, recaps: null })
+    expect(readFallback(RECAPS_FALLBACKS.liveCards)).toEqual({ deferred: true, value: [] })
   })
 
   it('lets the devices put their own frames in front of the windows, and no other', () => {
@@ -205,7 +252,7 @@ describe('the core API services stand on', () => {
   })
 
   it('starts with every port empty: a service fills its own when it starts', () => {
-    expect(emptyPorts()).toEqual({ search: null, viewers: null, models: null, workspaces: null, teams: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null })
+    expect(emptyPorts()).toEqual({ search: null, viewers: null, models: null, workspaces: null, teams: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null })
     expect(emptyPorts()).not.toBe(emptyPorts())
   })
 
@@ -242,6 +289,8 @@ describe('the core API services stand on', () => {
   })
 
   it('watches no terminal and signs nothing for a service without the core\'s terminals or key', async () => {
+    await expect(TERMINALS_OFF.describe('missing')).resolves.toBeNull()
+    await expect(TERMINALS_OFF.visitStatus('missing')).resolves.toEqual({ exited: false })
     await expect(TERMINALS_OFF.watch.frame('observer:x', 'terminal_open', {})).resolves.toBeUndefined()
     await expect(TERMINALS_OFF.watch.close('observer:x')).resolves.toBeUndefined()
     expect(TERMINALS_OFF.watch.onOutput(() => {})()).toBeUndefined()

@@ -11,7 +11,7 @@
  */
 import type { BackendSocket } from '../backendSocket.js'
 import { env } from '../config/env.js'
-import { ACCOUNT_BACKEND_OFF, AGENT_ACTIONS_OFF, DELIVERIES_OFF, LANE_OFF, TERMINALS_OFF, type CoreApi, type TurnDelivery } from '../core/api.js'
+import { ACCOUNT_BACKEND_OFF, AGENT_ACTIONS_OFF, CONVERSATIONS_OFF, DELIVERIES_OFF, LANE_OFF, TERMINALS_OFF, type CoreApi, type TurnDelivery } from '../core/api.js'
 import { projectDisplayName, registry } from '../lib/registry.js'
 import type { SessionInputDelivery } from '../lib/sessionInput.js'
 import { startCollaboration, type Teams } from '../services/collaboration.js'
@@ -41,6 +41,7 @@ export function attachTeams<T extends BackendSocket>(socket: T): T & TeamFixture
     dataDir: env.ADAPTER_DATA_DIR,
     terminals: TERMINALS_OFF,
     machine: UNASKED.machine,
+    conversations: CONVERSATIONS_OFF,
     agents: {
       all: () => registry.list(), live: () => registry.list(), displayName: projectDisplayName,
       byAgent: (agentId) => registry.byAgent(agentId), resolve: (id) => registry.resolve(id), advertised: () => registry.advertised(),
@@ -57,7 +58,7 @@ export function attachTeams<T extends BackendSocket>(socket: T): T & TeamFixture
       onDelivery: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     },
     questions: { answer: () => {}, answerReviewed: async () => false },
-    transcripts: { databaseHistory: () => undefined },
+    transcripts: { databaseHistory: () => undefined, lastTurn: async () => null },
     external: { sessions: { list: () => [], scan: async () => [] }, open: { known: () => new Map(), fresh: async () => new Map() } },
     account: {
       mintGridName: async () => null, accessToken: () => Promise.reject(new Error('no credential')), lane: LANE_OFF,
@@ -71,7 +72,7 @@ export function attachTeams<T extends BackendSocket>(socket: T): T & TeamFixture
       },
     },
     clients: {
-      viewerChanged: () => {}, gridNamed: () => {}, gridModelsChanged: () => {}, dshInstallStatus: () => {},
+      viewerChanged: () => {}, viewerFrame: () => false, gridNamed: () => {}, gridModelsChanged: () => {}, dshInstallStatus: () => {},
       windows: (frame) => socket.sendLocal(frame),
       observer: () => false,
       ...UNASKED.clients,

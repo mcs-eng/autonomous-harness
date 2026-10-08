@@ -4,6 +4,7 @@
 #include "../main/ui/habitat/pets.h"
 #include "../main/ui/habitat/focus.h"
 #include "../main/ui/habitat/focus_faces.h"
+#include "../main/pet_store.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -311,6 +312,28 @@ static void only_inter(const ht_scene_t *scene)
         if (r->arc) assert(r->font == &ht_lv_inter_med_26.base);
     }
 }
+/*
+ * THE PET'S GAPS (owner, 2026-10-07: "the name to the pet's head about the pet's feet to the text"): on the drawn
+ * glass, from the name's ink foot over the pet's columns down to the pet's first inked row, and from its last inked row
+ * down to the text's first inked row (anywhere across the glass). Returns their difference (above - below).
+ */
+static int pet_gaps(const ht_scene_t *scene, const ht_run_t *mark)
+{
+    ht_raster(scene, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);
+    int x0 = mark->x, x1 = mark->x + mark->sprite.width, first = -1, last = -1;
+    #define INKED(y_) ({ bool i_ = false; for (int x_ = x0; x_ < x1; x_++) i_ |= full[(y_) * HT_WIDTH + x_] != 0; i_; })
+    for (int y = mark->y; y < mark->y + mark->sprite.height; y++) if (INKED(y)) { if (first < 0) first = y; last = y; }
+    assert(first > 0);
+    int foot = first - 1;
+    while (foot > 0 && !INKED(foot)) foot--;
+    int text = last + 1;
+    x0 = 0; x1 = HT_WIDTH;
+    while (text < HT_HEIGHT && !INKED(text)) text++;
+    #undef INKED
+    int above = first - foot - 1, below = text - last - 1;
+    assert(foot > 0 && above > 0 && below > 0);
+    return above - below;
+}
 static void focus_face(void)
 {
     ht_character_t c = {0};
@@ -450,8 +473,9 @@ static void focus_face(void)
     }
 
     /*
-     * WHERE THEY STAND: the name on the arc. A recap is a "Kindle dark" page, set in Inter (owner, 2026-10-02, K3): no visible card
-     * (its run stays, an invisible placeholder), up to four lines of inter_30 in 0xd6d6d2, each centred on x 233
+     * WHERE THEY STAND: the name on the arc. A recap is a "Kindle dark" page, set in Inter (owner, 2026-10-02, K3), on a
+     * card again (owner, 2026-10-07): #1c1e26 (the LVGL card's #23252f at 80 %) rimmed #3d3f47, the full 384 px column at x 41, from 21 px over the first
+     * line's capitals to 21 px under the last line's baseline (a line's baseline to the next one's capitals), so it grows with the lines; up to four lines of inter_30 in 0xd6d6d2, each centred on x 233
      * in the 364 px column at x 51, 43 px apart, the block centred in y 176..376 with its first baseline 30 px under the block's top. Working or resting
      * there is no recap and the line is centred on the glass. The mark sits halfway between the foot of the arc's cells
      * (y 44) and the recap's first line as drawn (its capitals' top, 22 px over the baseline): the gap above equals the
@@ -459,7 +483,6 @@ static void focus_face(void)
      * line, 1.75x over two, 1.5x over three; over four the 56 px mark's box.
      */
     {
-        enum { TITLE_BOTTOM = HT_ARC_Y + HT_ARC_CELL_HEIGHT };
         ht_character_face_t f = {.recipient = "Payments refactor", .tab = "Harness repo",
             .engine = "claude", .status = "", .hint = "", .detail = "", .mood = HT_CHARACTER_IDLE,
             .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff};
@@ -482,11 +505,23 @@ static void focus_face(void)
             // (assets/pets/claude/rest), at its step 0.
             const ht_pet_t *cp = pet_of("claude");
             assert(cp && cp->cells && !cp->frames && cp->w == 73 && cp->h == 50);
-            const ht_run_t *card = &scene.runs[2];   // no card: the placeholder box draws nothing
-            assert(card->box.h == 1 && card->w == 1 && card->box.fill == scene.background && card->box.border == scene.background);
+            const ht_run_t *card = &scene.runs[2];
             int lines = 0;
             for (int i = 3; i < 7; i++) if (scene.runs[i].text[0]) lines++;
             assert(lines >= 1 && lines <= 4 && (k != 0 || lines == 1));
+            {
+                int cap = scene.runs[3].y + lit->ascent - 22;
+                assert(card->box.fill == ht_rgb(0x1c1e26) && card->box.border == ht_rgb(0x3d3f47) && card->box.radius == 24);
+                assert(card->x == 41 && card->w == 384 && card->y == cap - 21 && card->box.h == 22 + (lines - 1) * 43 + 42);
+                for (int i = 3; i < 3 + lines; i++) assert(scene.runs[i].bg == card->box.fill);   // set on the card
+                // inside the glass at four lines too
+                static uint16_t cpx[HT_WIDTH * HT_HEIGHT];
+                ht_scene_t only; ht_scene_clear(&only, 0);
+                only.runs[only.count++] = *card;
+                ht_raster(&only, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, cpx);
+                for (int y = 0; y < HT_HEIGHT; y++) for (int x = 0; x < HT_WIDTH; x++)
+                    if (cpx[y * HT_WIDTH + x]) assert((x - 233) * (x - 233) + (y - 233) * (y - 233) < 230 * 230);
+            }
             for (int i = 3; i < 3 + lines; i++)
                 assert(scene.runs[i].font == &lit->base && scene.runs[i].fg == ht_rgb(0xd6d6d2));
             for (int i = 3; i < 3 + lines; i++) {   // each line centred on x 233 (+-1), inside its column
@@ -502,23 +537,22 @@ static void focus_face(void)
                 size_t n = strlen(scene.runs[6].text);
                 assert(lines == 4 && n >= 3 && !strcmp(scene.runs[6].text + n - 3, "\xe2\x80\xa6"));
             }
-            // The mark: at step 0, its size by the line count, centred between the name and the first line's capitals.
-            int cap_top = scene.runs[3].y + lit->ascent - 22, frame = cp->loops[HT_PET_IDLE][0].frame, h;
+            // The mark: at step 0, its size by the line count, its ink centred between the name's ink above it and the
+            // first line's capitals.
+            int frame = cp->loops[HT_PET_IDLE][0].frame;
             assert(pet_frame(cp, &mark->sprite) == frame);
             if (lines < 4) {
                 // the same 2x drawing (99 px tall) at 1.5x over one, two or three lines: Claude stays there (owner, 2026-10-06)
                 static const int want_zoom[3] = {6, 6, 6}, want_h[3] = {75, 75, 75};
-                h = mark->sprite.height;
-                assert(mark->sprite.zoom == want_zoom[lines - 1] && h == want_h[lines - 1]);
+                assert(mark->sprite.zoom == want_zoom[lines - 1] && mark->sprite.height == want_h[lines - 1]);
                 assert(mark->x == (466 - mark->sprite.width) / 2);
             } else {
                 assert(mark->sprite.zoom == 4 && mark->sprite.width == cp->w && mark->sprite.height == cp->h &&
                        mark->x == (466 - cp->w) / 2);
-                h = 56;   // the mark's box, the pet centred in it
             }
-            int top_ = lines < 4 ? mark->y : mark->y - (56 - cp->h) / 2;
-            int above = top_ - TITLE_BOTTOM, below = cap_top - (top_ + h);
-            assert(above >= 0 && (below - above == 0 || below - above == 1));
+            // Within 3 px: the pet is placed by the line's capitals, and a tall letter (l, d, h) reaches a little over them.
+            int d = pet_gaps(&scene, mark);
+            assert(d >= -3 && d <= 3);
         }
 
         // The name in Inter on the arc: ink inside r 230 and the canvas for an ASCII, a Vietnamese and a long name, the
@@ -569,9 +603,8 @@ static void focus_face(void)
         assert(scene.runs[7].y == 233 - ht_lv_inter_30.base.height / 2 && scene.runs[7].font == &ht_lv_inter_30.base &&
                !strcmp(scene.runs[7].text, "Simmering\xe2\x80\xa6 34s"));   // the gerund for 30..35 s
         {
-            int top = scene.runs[1].y - (56 - pet_of("claude")->h) / 2;
-            int above = top - TITLE_BOTTOM, below = scene.runs[7].y - (top + 56);
-            assert(above > 0 && (below - above == 0 || below - above == 1));
+            int d = pet_gaps(&scene, &scene.runs[1]);
+            assert(d >= -3 && d <= 3);
         }
 
         // Resting: one of the invitations, centred, holding still while the face stays up (both draws
@@ -601,14 +634,12 @@ static void focus_face(void)
                 }
                 assert(known);
                 assert(l1->y == 233 - ht_lv_inter_30.base.height / 2);
-                // The mark stands where a four-line recap's does (design 2026-10-06, "Rest": same position as Recap):
-                // centred between the name and that recap's first capitals.
-                // (Claude resting is its 1.5x drawing, centred on its own height.)
-                int top = scene.runs[1].y, h = scene.runs[1].sprite.height;
-                assert(scene.runs[1].sprite.zoom == 6 && h == 75);
-                int cap = 176 + (200 - 4 * 43) / 2 + 30 - 22;
-                int above = top - TITLE_BOTTOM, below = cap - (top + h);
-                assert(above > 0 && (below - above == 0 || below - above == 1));
+                // The pet (Claude resting is its 1.5x drawing) is centred over the resting line itself: as far from the
+                // name above it as from the line under it (owner, 2026-10-07).
+                assert(scene.runs[1].sprite.zoom == 6 && scene.runs[1].sprite.height == 75);
+                // Within 4 px: a resting line's tall letters (l, d, b at 36 px) reach over its capitals.
+                int d = pet_gaps(&scene, &scene.runs[1]);
+                assert(d >= -4 && d <= 4);
                 if (!again) snprintf(first, sizeof first, "%s", said);
                 else assert(!strcmp(said, first));   // a redraw never swaps it
             }
@@ -737,9 +768,10 @@ static void focus_face(void)
                 int frame = pet_frame(pet, &mark->sprite);
                 const ht_pet_step_t *want = &pet->loops[state][step];
                 // Over the one-line "Done." recap the pet is shown at 2x, the same frame; its hop grows with it. Claude
-                // stays at 1.5x there and resting (asking, idle: no recap, no status) — owner, 2026-10-06.
-                bool claude = !strcmp(eng, "claude");
-                int z = claude && state != HT_PET_WORKING ? 6 : state == HT_PET_DONE ? 8 : 4;
+                // stays at 1.5x there and resting (asking, idle: no recap, no status) — owner, 2026-10-06. Codex resting
+                // is 2x, as over a one-line recap (owner, 2026-10-07).
+                bool claude = !strcmp(eng, "claude"), codex = !strcmp(eng, "codex");
+                int z = claude && state != HT_PET_WORKING ? 6 : state == HT_PET_DONE || codex ? 8 : 4;
                 const ht_cell_frame_t *fr_ = &pet->cells[want->frame];
                 int ww = (fr_->cols * fr_->cell * z + 7) / 8, hh = (fr_->rows * fr_->cell * z + 7) / 8;
                 assert(frame == want->frame && mark->sprite.width == ww && mark->sprite.height == hh);
@@ -782,16 +814,15 @@ static void focus_face(void)
             assert(fr == pet->loops[HT_PET_IDLE][0].frame && !cm->sprite.pixels && cm->sprite.cells == pet->cells[fr].cells);
             assert((pet->cells[fr].cols * pet->cells[fr].cell * 4 + 7) / 8 == pet->w &&
                    (pet->cells[fr].rows * pet->cells[fr].cell * 4 + 7) / 8 == pet->h && !pet->cells[fr].palette[0]);
-            // Resting, the mark stands where a four-line recap's does: centred between the name's foot (44) and that
-            // recap's first capitals (198) — a 1x pet in the 56 px box, Claude's 1.5x drawing on its own height.
-            int dy0 = pet->loops[HT_PET_IDLE][0].dy;
-            if (!strcmp(eng, "claude")) {
-                assert(cm->sprite.zoom == 6 && cm->sprite.height == (pet->cells[fr].rows * pet->cells[fr].cell * 6 + 7) / 8);
-                assert(cm->x == (466 - cm->sprite.width) / 2 && cm->y == 44 + (198 - 44 - cm->sprite.height) / 2 + dy0 * 6 / 4);
-            } else {
-                assert(cm->sprite.zoom == 4 && cm->sprite.width == pet->w && cm->sprite.height == pet->h);
-                assert(cm->x == (466 - pet->w) / 2 && cm->y == 44 + (198 - 44 - 56) / 2 + (56 - pet->h) / 2 + dy0);
-            }
+            // Resting: a 1x pet, Claude's 1.5x and Codex's 2x drawing, centred across the glass and, by its ink, between the
+            // name above it and the resting line under it (owner, 2026-10-07).
+            if (!strcmp(eng, "claude") || !strcmp(eng, "codex")) {
+                int z = !strcmp(eng, "claude") ? 6 : 8;
+                assert(cm->sprite.zoom == (z == 8 ? 0 : z) && cm->sprite.height == (pet->cells[fr].rows * pet->cells[fr].cell * z + 7) / 8);
+            } else assert(cm->sprite.zoom == 4 && cm->sprite.width == pet->w && cm->sprite.height == pet->h);
+            assert(cm->x == (466 - cm->sprite.width) / 2);
+            int d = pet_gaps(&cs, cm);
+            assert(d >= -4 && d <= 4);
         }
         // The working legs change on the next step: 90 ms later is a different frame.
         // (Muse's Jolly and Claude's Clawd play one rest loop for every state: no legs, no blink at 20.)
@@ -921,7 +952,7 @@ static void focus_face(void)
         }
         assert(distinct == 2);   // two body poses (eyes open, ^ ^ on the flick); a bob moves them
         // "Try again" (a status of its own, after a failed voice turn): the mark as over a one-line recap — 2x, Claude
-        // 1.5x — centred between the name's foot and the line's capitals (owner, 2026-10-06).
+        // 1.5x — its ink centred between the name and the line (owner, 2026-10-06, 2026-10-07).
         for (unsigned pe = 0; pe < ht_pet_count; pe++) {
             const ht_pet_t *pt = &ht_pets[pe];
             ht_character_face_t g = {.recipient = "x", .engine = pt->engine, .activity = "", .status = "Try again",
@@ -932,9 +963,8 @@ static void focus_face(void)
             const ht_cell_frame_t *fr0 = &pt->cells[pt->loops[HT_PET_IDLE][0].frame];
             int h = (fr0->rows * fr0->cell * (claude ? 6 : 8) + 7) / 8;
             assert(m->sprite.cells == fr0->cells && m->sprite.height == h && m->sprite.zoom == (claude ? 6 : 0));
-            int cap = 233 - ht_lv_inter_30.base.height / 2 + ht_lv_inter_30.ascent - 22;
-            int dy0 = pt->loops[HT_PET_IDLE][0].dy * (claude ? 6 : 8) / 4;
-            assert(m->y - dy0 == 44 + (cap - 44 - h) / 2);
+            int d = pet_gaps(&sc, m);
+            assert(d >= -3 && d <= 3);
         }
         // Codex over a four-line recap is 1.25x, not 1x (owner, 2026-10-06: "it looks tiny"; 1.5x "a bit big"), between
         // the name and the recap's first line; Muse stays 1x there.
@@ -1103,8 +1133,9 @@ static void focus_face(void)
         for (int i = 0; i < scene.count; i++) bars += scene.runs[i].font == &ht_wave && scene.runs[i].text[0];
         assert(bars == 7);
 
-        // Codex (the owner's robot pack): the same three scenes, each with an overlay sprite after its own run
-        // (working: the first recap line's slot; voice: the first sparkle's), ink inside r 230, the run count constant.
+        // Codex (the owner's robot pack): the same three scenes, listening and sending with an overlay sprite after its
+        // own run (the first sparkle's slot), working with none (owner, 2026-10-07: the notice bell took its sandbox
+        // bubble's place); ink inside r 230, the run count constant.
         {
             ht_character_face_t base = {.recipient = "Payments refactor", .tab = "", .engine = "codex", .activity = "Coalescing",
                 .elapsed = 34, .status = "", .hint = "", .detail = "", .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff};
@@ -1116,9 +1147,9 @@ static void focus_face(void)
                 const ht_pet_scene_t *sc = kind == 0 ? xp->working_scene : kind == 1 ? xp->listening_scene : xp->sending_scene;
                 const ht_pet_overlay_t *ov = sc->overlay;
                 unsigned levels = kind == 1 ? HT_PET_SCENE_LEVELS : 1;
-                assert(ov && cp->working_scene->overlay && !cp->listening_scene->overlay && cp->sending_scene->overlay);
+                assert((kind == 0) == !ov && cp->working_scene->overlay && !cp->listening_scene->overlay && cp->sending_scene->overlay);
                 assert(sc->steps == steps_[kind] && sc->step_ms == ms_[kind] && sc->w == w_[kind] && sc->h == 170);
-                assert(sc->frames[0].cell == 1 && ov->frames[0].cell == 1 && !sc->frames[0].palette[0] && !ov->frames[0].palette[0]);
+                assert(sc->frames[0].cell == 1 && !sc->frames[0].palette[0] && (!ov || (ov->frames[0].cell == 1 && !ov->frames[0].palette[0])));
                 const int scene_run = kind == 0 ? 1 : 7, overlay_run = kind == 0 ? 3 : kind == 1 ? 1 : 8;   // the bubble sits in the second bar slot
                 for (unsigned level = 0; level < levels; level++)
                     for (unsigned step = 0; step < sc->steps; step++) {
@@ -1133,10 +1164,12 @@ static void focus_face(void)
                         const ht_run_t *sr = &cs_.runs[scene_run], *orun = &cs_.runs[overlay_run];
                         assert(sr->sprite.cells == sc->frames[sc->loop[i]].cells && sr->sprite.width == sc->w && sr->sprite.height == sc->h);
                         assert(sr->x == ox && sr->y == oy);
-                        assert(orun->sprite.cells == ov->frames[ov->loop[i]].cells);
-                        assert(orun->x == ox + ov->at[i][0] && orun->y == oy + ov->at[i][1]);
+                        if (ov) {
+                            assert(orun->sprite.cells == ov->frames[ov->loop[i]].cells);
+                            assert(orun->x == ox + ov->at[i][0] && orun->y == oy + ov->at[i][1]);
+                        }
                         for (int k = 0; k < cs_.count; k++) {
-                            if (k != scene_run && k != overlay_run) assert(!cs_.runs[k].sprite.width);   // no pet, no mark
+                            if (k != scene_run && (!ov || k != overlay_run)) assert(!cs_.runs[k].sprite.width);   // no pet, no mark
                             assert(!(cs_.runs[k].font == &ht_spark && cs_.runs[k].text[0]) && !(cs_.runs[k].font == &ht_wave && cs_.runs[k].text[0]));
                         }
                         if (kind == 0) {        // status on the lower arc, nothing centred
@@ -1173,7 +1206,7 @@ static void focus_face(void)
                         uint32_t want = 0;
                         for (unsigned q = 1; q <= sc->steps && !want; q++) {
                             unsigned j = level * sc->steps + (step + q) % sc->steps;
-                            if (sc->loop[j] != sc->loop[i] || ov->loop[j] != ov->loop[i] || ov->at[j][0] != ov->at[i][0] || ov->at[j][1] != ov->at[i][1])
+                            if (sc->loop[j] != sc->loop[i] || (ov && (ov->loop[j] != ov->loop[i] || ov->at[j][0] != ov->at[i][0] || ov->at[j][1] != ov->at[i][1])))
                                 want = (step + q) * sc->step_ms;
                         }
                         uint32_t got = ht_focus_pet_next_ms(&v, "");
@@ -1181,10 +1214,9 @@ static void focus_face(void)
                         else assert(want && got == want);
                     }
             }
-            // The overlays move: the sandboxes blink and tick over, the bars follow the level, the plane flies off.
+            // The overlays move: the bars follow the level, the plane flies off.
             {
-                const ht_pet_overlay_t *wo = xp->working_scene->overlay, *lo = xp->listening_scene->overlay, *so = xp->sending_scene->overlay;
-                assert(wo->loop[0] != wo->loop[1] && wo->loop[0] != wo->loop[7] && wo->loop[7] != wo->loop[14] && wo->loop[14] != wo->loop[21]);
+                const ht_pet_overlay_t *lo = xp->listening_scene->overlay, *so = xp->sending_scene->overlay;
                 // The listening bubble is stored once (every loop entry the same frame at the same place); the bars are code.
                 for (unsigned i = 0; i < 5 * 15; i++)
                     assert(lo->loop[i] == 0 && lo->at[i][0] == lo->at[0][0] && lo->at[i][1] == lo->at[0][1]);
@@ -1639,11 +1671,230 @@ static void inbox_layout(void)
     puts("Inbox layout: desktop status colors, neutral prose, balanced short/long blocks, fixed gap, circle bounds and exact incremental redraws PASS");
 }
 
-int main(void)
+/*
+ * THE CUSTOM PET (docs/superpowers/plans/2026-10-08-custom-pet.md, Task 7): a pack the daemon sent, mapped as "all",
+ * draws on the Focus face in place of the built-in pet — the same run count and order, the working alert drawn in
+ * code, the ink inside r 230, and a pack dropped mid-frame still readable until the frame is released. The vector is
+ * the daemon's own encoder output (test/vectors/pet_min.hpet): two 8 x 8 frames, a working scene of the second.
+ */
+static uint8_t vec_buf[4096];
+static size_t vec_len;
+static const char *VEC_ID = "0102030405060708";
+static uint32_t crc32_of(const uint8_t *p, size_t n)
 {
+    uint32_t c = 0xffffffffu;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1u)));
+    }
+    return ~c;
+}
+static void put32le(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+// Offer + slice + finish + map as "all", the way the cable does; the bytes as given (a patched copy is resealed here).
+static void pack_load(const uint8_t *b, size_t n)
+{
+    put32le((uint8_t *)b + 14, (uint32_t)n);
+    put32le((uint8_t *)b + 18, crc32_of(b + 22, n - 22));
+    uint32_t crc = (uint32_t)(b[18] | b[19] << 8 | b[20] << 16 | (uint32_t)b[21] << 24);
+    assert(pet_store_offer(VEC_ID, (uint32_t)n, crc));
+    for (size_t at = 0; at < n; at += 50) assert(pet_store_slice(b + at, n - at < 50 ? n - at : 50));
+    assert(pet_store_finish() == 0);
+    pet_store_map(VEC_ID, NULL, NULL, 0);
+    pet_store_release_frame();                                // the next take: the staged pack and mapping go live
+}
+static void pack_unload(void)
+{
+    pet_store_drop(VEC_ID);
+    pet_store_map(NULL, NULL, NULL, 0);
+    pet_store_release_frame();
+}
+// The offset of the working scene's dx in the vector (the walk test_pet_store.c does): palette, size, three loops.
+static size_t working_dx_at(void)
+{
+    size_t pos = 22;
+    pos += 1 + 2u * vec_buf[pos];
+    pos += 4;
+    for (int l = 0; l < 3; l++) pos += 1 + 2u * vec_buf[pos];
+    return pos + 3;
+}
+static ht_character_face_t custom_face(bool working, unsigned notices)
+{
+    ht_character_face_t f = {.recipient = "Payments refactor", .tab = "", .engine = "claude",
+        .activity = working ? "Coalescing" : "", .status = "", .hint = "", .detail = "",
+        .mood = working ? HT_CHARACTER_WORKING : HT_CHARACTER_IDLE, .clock_ms = 1000,
+        .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff};
+    if (notices) { f.notice_ms = 500; f.notices = (uint16_t)notices; }
+    return f;
+}
+static void ink_inside_r230(const ht_scene_t *scene)
+{
+    ht_raster(scene, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);
+    for (int y = 0; y < HT_HEIGHT; y++) for (int x = 0; x < HT_WIDTH; x++)
+        if (full[y * HT_WIDTH + x]) assert((x - 233) * (x - 233) + (y - 233) * (y - 233) < 230 * 230);
+}
+// The code-drawn bubble of a scene: the 68 x 44 box filled 0x006fff; NULL when there is none.
+static const ht_run_t *alert_box(const ht_scene_t *scene)
+{
+    for (int i = 0; i < scene->count; i++)
+        if (scene->runs[i].box.h == 44 && scene->runs[i].w == 68 && scene->runs[i].box.fill == ht_rgb(0x006fff))
+            return &scene->runs[i];
+    return NULL;
+}
+static void focus_custom_pet_resting(void)
+{
+    ht_character_t c = {0};
+    assert(ht_character_select(&c, HT_CHARACTER_FOCUS));
+    ht_character_face_t f = custom_face(false, 0);
+    ht_scene_t builtin; ht_scene_clear(&builtin, 0);
+    ht_character_face(&builtin, &c, &f, 0xffff, "");
+    pack_load(vec_buf, vec_len);
+    ht_scene_t scene; ht_scene_clear(&scene, 0);
+    ht_character_face(&scene, &c, &f, 0xffff, "");
+    assert(scene.count == builtin.count);   // THE RULE: same runs, same order
+    const ht_pet_t *pet = pet_store_lookup("claude");
+    assert(pet && pet->cells && !pet->alert_scene);
+    bool drawn = false;
+    for (int i = 0; i < scene.count; i++)
+        for (unsigned k = 0; k < 2; k++)
+            if (scene.runs[i].sprite.cells && scene.runs[i].sprite.cells == pet->cells[k].cells) drawn = true;
+    assert(drawn);
+    ink_inside_r230(&scene);
+    pet_store_release_frame();
+    pack_unload();
+}
+static void focus_custom_pet_working_alert(void)
+{
+    ht_character_t c = {0};
+    assert(ht_character_select(&c, HT_CHARACTER_FOCUS));
+    pack_load(vec_buf, vec_len);
+    const ht_pet_t *pet = pet_store_lookup("claude");
+    assert(pet && pet->working_scene && !pet->alert_scene);
+    int sw = pet->working_scene->w, sh = pet->working_scene->h;
+    int sx = (HT_WIDTH - sw) / 2 + pet->working_scene->dx, sy = HT_HEIGHT / 2 - sh / 2 + 4 + pet->working_scene->dy;
+    ht_character_face_t quiet = custom_face(true, 0), told = custom_face(true, 3), many = custom_face(true, 12);
+    ht_scene_t a, b, m;
+    ht_scene_clear(&a, 0); ht_character_face(&a, &c, &quiet, 0xffff, "");
+    ht_scene_clear(&b, 0); ht_character_face(&b, &c, &told, 0xffff, "");
+    ht_scene_clear(&m, 0); ht_character_face(&m, &c, &many, 0xffff, "");
+    assert(a.count == b.count && b.count == m.count);   // the alert takes the slots the built-in one does
+    assert(!alert_box(&a));
+    const ht_run_t *box = alert_box(&b);
+    assert(box);
+    // Centred on the scene's top-right corner, inset 8 px: the scene's corner is at (sx + sw, sy).
+    assert(box->x + 34 == sx + sw - 8 && box->y + 22 == sy + 8);
+    ht_rect_t at = {0};
+    assert(ht_focus_alert_shown(&told, "", &at));
+    assert(at.x == box->x && at.y == box->y && at.w == 68 && at.h == 44);   // the tap target covers it
+    assert(!ht_focus_alert_shown(&quiet, "", &at));
+    assert(ht_focus_alert_pop_ms(&told) == 0);
+    // The count: Inter Medium 26 for one digit, Inter 20 for "9+", on the bubble's fill, inside the box.
+    bool one = false, nine = false;
+    for (int i = 0; i < b.count; i++) if (b.runs[i].font == &ht_lv_inter_med_26.base && !strcmp(b.runs[i].text, "3")) one = true;
+    for (int i = 0; i < m.count; i++) if (m.runs[i].font == &ht_lv_inter_20.base && !strcmp(m.runs[i].text, "9+")) nine = true;
+    assert(one && nine);
+    ht_raster(&b, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);
+    const uint16_t blue = (uint16_t)((ht_rgb(0x006fff) >> 8) | (ht_rgb(0x006fff) << 8));   // the raster is in panel order
+    assert(full[(box->y + 22) * HT_WIDTH + box->x + 8] == blue);   // the fill reaches the glass
+    int lit = 0;   // ... and the digit is drawn in it
+    for (int y = box->y + 4; y < box->y + 40; y++) for (int x = box->x + 20; x < box->x + 48; x++)
+        lit += full[y * HT_WIDTH + x] != blue && full[y * HT_WIDTH + x] != 0;
+    assert(lit > 10);
+    ink_inside_r230(&b);
+    ink_inside_r230(&m);
+    // The alert is a notice's, not the pet's: a pack without a working scene leaves the pill to ui_habitat.c.
+    ht_character_face_t idle = custom_face(false, 3);
+    assert(!ht_focus_alert_shown(&idle, "", &at));
+    pet_store_release_frame();
+    pack_unload();
+}
+static void focus_custom_ink_inside_r230(void)
+{
+    ht_character_t c = {0};
+    assert(ht_character_select(&c, HT_CHARACTER_FOCUS));
+    // Moves the working scene to the glass's upper right so the bubble at its corner would leave r 230 unclamped.
+    uint8_t b[4096];
+    memcpy(b, vec_buf, vec_len);
+    size_t dx = working_dx_at();
+    b[dx] = 165; b[dx + 1] = 0;
+    b[dx + 2] = (uint8_t)(-135 & 0xff); b[dx + 3] = (uint8_t)((-135 >> 8) & 0xff);
+    pack_load(b, vec_len);
+    const ht_pet_t *pet = pet_store_lookup("claude");
+    assert(pet && pet->working_scene->dx == 165 && pet->working_scene->dy == -135);
+    ht_character_face_t f = custom_face(true, 12);
+    ht_scene_t scene; ht_scene_clear(&scene, 0);
+    ht_character_face(&scene, &c, &f, 0xffff, "");
+    const ht_run_t *box = alert_box(&scene);
+    assert(box);
+    int sx = (HT_WIDTH - 8) / 2 + 165, sy = HT_HEIGHT / 2 - 4 + 4 - 135;
+    assert(box->x + 34 < sx + 8 - 8 || box->y + 22 > sy + 8);   // pulled inward
+    ink_inside_r230(&scene);
+    ht_rect_t at;
+    assert(ht_focus_alert_shown(&f, "", &at) && at.x == box->x && at.y == box->y);
+    // ... and the same for the other three quarters of the glass.
+    for (int q = 0; q < 4; q++) {
+        int sdx = (q & 1) ? -165 : 165, sdy = (q & 2) ? 135 : -135;
+        pet_store_release_frame();
+        pack_unload();
+        memcpy(b, vec_buf, vec_len);
+        b[dx] = (uint8_t)(sdx & 0xff); b[dx + 1] = (uint8_t)((sdx >> 8) & 0xff);
+        b[dx + 2] = (uint8_t)(sdy & 0xff); b[dx + 3] = (uint8_t)((sdy >> 8) & 0xff);
+        pack_load(b, vec_len);
+        ht_scene_clear(&scene, 0);
+        ht_character_face(&scene, &c, &f, 0xffff, "");
+        assert(alert_box(&scene));
+        ink_inside_r230(&scene);
+    }
+    pet_store_release_frame();
+    pack_unload();
+}
+// Draw, drop the pack under the drawn scene, draw again, release: under the address sanitizer (the --custom-only
+// build) a pointer used after the free is an error.
+static void focus_swap_mid_scene(void)
+{
+    ht_character_t c = {0};
+    assert(ht_character_select(&c, HT_CHARACTER_FOCUS));
+    pack_load(vec_buf, vec_len);
+    ht_character_face_t f = custom_face(true, 2);
+    ht_scene_t first; ht_scene_clear(&first, 0);
+    ht_character_face(&first, &c, &f, 0xffff, "");
+    assert(alert_box(&first));
+    ht_raster(&first, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);
+    pet_store_drop(VEC_ID);                                  // the cable task: the pack is replaced under the frame
+    pet_store_map(NULL, NULL, NULL, 0);
+    assert(pet_store_lookup("claude"));                      // staged only: this frame's snapshot is unchanged
+    ht_raster(&first, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, scratch);   // the scene still reads the pack
+    assert(!memcmp(full, scratch, sizeof full));
+    pet_store_release_frame();                               // the next take: the pack is freed, the mapping is gone
+    ht_scene_t second; ht_scene_clear(&second, 0);
+    ht_character_face(&second, &c, &f, 0xffff, "");          // now the built-in claude
+    assert(!pet_store_lookup("claude"));
+    assert(first.count == second.count);                      // the same runs either way
+    ht_damage_t d; ht_damage(&first, &second, &d);           // compares the frames by pointer, never reads them
+    ht_raster(&second, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);
+    pet_store_release_frame();
+    ht_raster(&second, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);   // the built-in scene needs no pack
+}
+static void custom_pet(void)
+{
+    focus_custom_pet_resting();
+    focus_custom_pet_working_alert();
+    focus_custom_ink_inside_r230();
+    focus_swap_mid_scene();
+    puts("Custom pet: resting, code-drawn working alert, r 230 clamp and a swap mid-scene PASS");
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) { fprintf(stderr, "usage: test_character <pet_min.hpet> [--custom-only]\n"); return 2; }
+    FILE *fp = fopen(argv[1], "rb");
+    assert(fp);
+    vec_len = fread(vec_buf, 1, sizeof vec_buf, fp);
+    fclose(fp);
+    assert(vec_len > 22 && vec_len < sizeof vec_buf);
+    if (argc > 2 && !strcmp(argv[2], "--custom-only")) { custom_pet(); return 0; }
     assert(!strcmp(ht_character_name(HT_CHARACTER_TIM), "Tim"));
     assert(!strcmp(ht_character_name(HT_CHARACTER_TUX), "Tux"));
     clocks(); portraits(); delivery_and_caption(); recap_budget(); focus_face();
-    footer_layout(); inbox_layout();
+    footer_layout(); inbox_layout(); custom_pet();
     printf("Characters: both adapters, eight moods, five sizes, pause/mic/wrap/swap and %u exact incremental redraws PASS\n", redraws);
 }

@@ -32,6 +32,7 @@ import { AgentStopError } from './lib/stopAgentService.js'
 import type { PurgeAgentService } from './lib/purgeAgentService.js'
 import * as mediaPreview from './lib/mediaPreview.js'
 import * as gitProject from './lib/gitProject.js'
+import * as scmProjects from './scm/scmProjects.js'
 import * as machineResources from './lib/machineResources.js'
 import * as projectFolder from './lib/projectFolder.js'
 import * as claudeTrust from './lib/claudeTrust.js'
@@ -398,7 +399,34 @@ describe('agent_update opened: one "last used" for every app', () => {
 })
 
 describe('viewer forwarding authentication', () => {
-  it.each(['command_bar', 'route_task', 'route_send'])('requires a sealed owner session for %s', async type => {
+  it('routes a sealed command_bar to the command bar with its connection, who asked, and nothing in the clear', async () => {
+    const socket = relaySocket('token')
+    const routed: Array<{ type: string; asker: unknown }> = []
+    socket.serviceRouter = (type, _payload, asker, reply) => { routed.push({ type, asker }); reply({ selectedId: null }); return true }
+    const ownerCommands = vi.spyOn(socket.ownerCommands, 'request')
+    vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
+    const role = vi.spyOn(gatewayOf(socket).e2ee, 'sessionRole').mockReturnValue('web')
+    const clear = { type: 'command_bar', payload: { requestId: 'one', request: { prompt: 'fixture', candidates: [] } } }
+    vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue(clear)
+    const sealedReply = vi.spyOn(gatewayOf(socket).e2ee, 'wrapRpcReply').mockReturnValue({ type: 'command_bar_result', payload: { __e2e: 'sealed' } })
+    await dispatchDown(socket, clear, 'remote')
+    expect(routed).toEqual([])
+    const sealed = { type: 'command_bar', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'fixture' } } }
+    // A device's session asks as no owner: the command bar refuses it (services/commandBar.ts).
+    role.mockReturnValue('device')
+    await dispatchDown(socket, sealed, 'remote')
+    role.mockReturnValue('web')
+    await dispatchDown(socket, sealed, 'remote')
+    expect(routed).toEqual([
+      { type: 'command_bar', asker: { local: false, owner: false, connection: 'remote', requestId: 'one' } },
+      { type: 'command_bar', asker: { local: false, owner: true, connection: 'remote', requestId: 'one' } },
+    ])
+    expect(ownerCommands).not.toHaveBeenCalled()
+    expect(sealedReply).toHaveBeenCalledWith('remote', 'command_bar_result', 'one', { selectedId: null })
+    await socket.stop()
+  })
+
+  it.each(['route_task', 'route_send'])('requires a sealed owner session for %s', async type => {
     const socket = relaySocket('token'), internals = socket as any
     const request = vi.spyOn(socket.ownerCommands, 'request').mockResolvedValue({ ok: true })
     vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
@@ -422,7 +450,8 @@ describe('viewer forwarding authentication', () => {
   it('allows interactive viewers only on a sealed owner web connection or trusted loopback', async () => {
     const socket = relaySocket('token')
     const internals = socket as any
-    const request = vi.spyOn(socket.interactiveViewers, 'request').mockResolvedValue({ data: 'jpeg' })
+    const request = vi.fn(async () => ({ data: 'jpeg' }))
+    socket.viewerStreams = { frame: vi.fn(), surface: request, closed: vi.fn(), closedAll: vi.fn() }
     vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
     const role = vi.spyOn(gatewayOf(socket).e2ee, 'sessionRole').mockReturnValue('web')
     const clear = { type: 'viewer_surface', payload: { requestId: 'one', surfaceId: 'surface', agentId: 'a', op: 'frame' } }
@@ -441,14 +470,46 @@ describe('viewer forwarding authentication', () => {
     socket.registerLocalClient('local:viewer', { sendFrame: () => true, sendBinary: () => true })
     await dispatchDown(socket, clear, 'local:viewer')
     expect(request).toHaveBeenCalledWith('local:viewer', clear.payload)
+    // With nothing to render it, the surface is answered unavailable rather than left unanswered.
+    const local = vi.fn(() => true)
+    socket.registerLocalClient('local:none', { sendFrame: local, sendBinary: () => true })
+    socket.viewerStreams = null
+    await dispatchDown(socket, { ...clear, payload: { ...clear.payload, requestId: 'two' } }, 'local:none')
+    await vi.waitFor(() => expect(local).toHaveBeenCalledWith({ type: 'viewer_surface_result', payload: { requestId: 'two', error: 'VIEWER_UNAVAILABLE' } }))
     await socket.unregisterLocalClient('local:viewer')
     await socket.stop()
+  })
+
+  it('hands a viewer stream\'s answers to the one connection that opened it, and ends its streams as connections go', async () => {
+    const socket = relaySocket('token')
+    const streams = { frame: vi.fn(), surface: vi.fn(), closed: vi.fn(), closedAll: vi.fn() }
+    socket.viewerStreams = streams
+    const local = vi.fn(() => true)
+    socket.registerLocalClient('local:viewer', { sendFrame: local, sendBinary: () => true })
+    expect(socket.sendViewerFrame('local:viewer', 'viewer_response', { streamId: 's1', status: 200 })).toBe(true)
+    expect(local).toHaveBeenCalledWith({ type: 'viewer_response', payload: { streamId: 's1', status: 200 } })
+    // A remote connection's go through the gateway, which says whether it could take them.
+    const target = vi.spyOn(gatewayOf(socket), 'target').mockReturnValue(false)
+    expect(socket.sendViewerFrame('remote', 'viewer_data', { streamId: 's1', data: 'AA==' })).toBe(false)
+    expect(target).toHaveBeenCalledWith('remote', 'viewer_data', { streamId: 's1', data: 'AA==' })
+    await socket.unregisterLocalClient('local:viewer')
+    expect(streams.closed).toHaveBeenCalledWith('local:viewer')
+    socket.fromGateway.client('r1', { role: 'web', label: null, identity: 'PUB', direct: false })
+    socket.fromGateway.client('r1', null)
+    expect(streams.closed).toHaveBeenCalledWith('r1')
+    await socket.fromGateway.disconnected('r2')
+    expect(streams.closed).toHaveBeenCalledWith('r2')
+    socket.fromGateway.linkDown()
+    expect(streams.closedAll).toHaveBeenCalledTimes(1)
+    await socket.stop()
+    expect(streams.closedAll).toHaveBeenCalledTimes(2)
   })
 
   it('requires encryption and a web-role session remotely, while permitting trusted local clients', async () => {
     const socket = relaySocket('token')
     const internals = socket as any
-    const handle = vi.spyOn(socket.viewerForwarder, 'handle').mockImplementation(() => {})
+    const handle = vi.fn()
+    socket.viewerStreams = { frame: handle, surface: vi.fn(), closed: vi.fn(), closedAll: vi.fn() }
     const role = vi.spyOn(gatewayOf(socket).e2ee, 'sessionRole').mockReturnValue('web')
     const frame = { type: 'viewer_request', payload: { streamId: 'v', agentId: 'a' } }
     const unwrap = vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue(frame)
@@ -1301,6 +1362,56 @@ describe('BackendSocket outbound queue', () => {
     await socket.stop()
   })
 
+  it.each([false, true])('answers scm_project_info (refresh=%s) through the SCM seam, to the requesting encrypted connection only', async refresh => {
+    const preview = { kind: 'git' as const, git: { isGit: true, root: '/remote/workspace', branch: 'main', branches: [{ ref: 'refs/heads/private-branch', name: 'private-branch', remote: false }] } }
+    const detect = vi.spyOn(scmProjects, 'detectScmProject').mockResolvedValue(preview)
+    const socket = relaySocket('token')
+    serveProjects(socket)
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue({ type: 'scm_project_info', payload: {
+      requestId: 'preview-2', path: '/remote/workspace', refresh,
+    } })
+    vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
+    const wrap = vi.spyOn(gatewayOf(socket).e2ee, 'wrapRpcReply').mockReturnValue({
+      type: 'scm_project_info_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-preview' } },
+    })
+    ws.message({ t: 'down', connId: 'viewer-a', frame: {
+      type: 'scm_project_info', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-request' } },
+    } })
+    await vi.waitFor(() => expect(wrap).toHaveBeenCalledWith('viewer-a', 'scm_project_info_result', 'preview-2', preview))
+    // The same fence git_project_info passes: no registered agents here, so the home folder alone.
+    expect(detect).toHaveBeenCalledWith('/remote/workspace', { refresh, knownRoots: [] })
+    expect(parseSent(ws)).toContainEqual(expect.objectContaining({ targetConnId: 'viewer-a', frame: {
+      type: 'scm_project_info_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-preview' } },
+    } }))
+    expect(JSON.stringify(parseSent(ws))).not.toContain('private-branch')
+    await socket.stop()
+  })
+
+  it('answers scm_project_info for a malformed path as the git probe does, correlated', async () => {
+    const read = vi.spyOn(gitProject, 'readGitProject')
+    const socket = relaySocket('token')
+    serveProjects(socket)
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue({ type: 'scm_project_info', payload: {
+      requestId: 'scm-error', path: 42,
+    } })
+    vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
+    const wrap = vi.spyOn(gatewayOf(socket).e2ee, 'wrapRpcReply').mockReturnValue({
+      type: 'scm_project_info_result', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-error' } },
+    })
+    ws.message({ t: 'down', connId: 'viewer-a', frame: {
+      type: 'scm_project_info', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'encrypted-request' } },
+    } })
+    await vi.waitFor(() => expect(wrap).toHaveBeenCalledWith('viewer-a', 'scm_project_info_result', 'scm-error', { kind: 'none', error: 'INVALID_PATH' }))
+    expect(read).toHaveBeenCalledWith('', { refresh: false, knownRoots: [] })
+    await socket.stop()
+  })
+
   it('returns PR status only to the requesting encrypted connection', async () => {
     const preview = { status: 'found' as const, number: 12, state: 'Merged' as const, url: 'https://github.com/private/repo/pull/12' }
     vi.spyOn(registry, 'resolve').mockReturnValue({ cwd: '/remote/workspace' } as RegisteredSession)
@@ -2066,6 +2177,38 @@ describe('BackendSocket outbound queue', () => {
     }
   })
 
+  it('hands the launch the SCM record the prepared workspace reported, and none for a folder no SCM made', async () => {
+    const socket = relaySocket('token')
+    bindLaunchRequests(socket)
+    const frames: Array<Record<string, unknown>> = []
+    socket.registerLocalClient('local:scm', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
+    const prepare = vi.spyOn(projectFolder, 'prepareProjectFolder').mockImplementation(async (project, options) => {
+      if (project.source === 'worktree') options?.onPrepared?.({ cwd: '/remote/harnesses/worktrees/repo/brave-otter', scmLaunchRecord: { kind: 'git' } })
+      return project.source === 'worktree' ? '/remote/harnesses/worktrees/repo/brave-otter' : '/remote/harnesses/codex-2026-09-24-12-00'
+    })
+    const create = vi.fn(async (_input: Record<string, unknown>) => ({ ok: false as const, error: 'TMUX_UNAVAILABLE' }))
+    socket.onCreateAgent = create
+    const ask = (requestId: string, choices: Record<string, unknown>) =>
+      socket.handleLocalFrame('local:scm', { type: 'agent_create', payload: { requestId, creationId: randomUUID(), engine: 'claude', ...choices } })
+    try {
+      ask('worktree', { projectSource: 'worktree', gitSource: '/remote/repo', branchRef: 'refs/heads/main' })
+      await vi.waitFor(() => expect(frames).toContainEqual(expect.objectContaining({ payload: expect.objectContaining({ requestId: 'worktree', state: 'failed' }) })))
+      expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: '/remote/harnesses/worktrees/repo/brave-otter', scmLaunchRecord: { kind: 'git' } }))
+      ask('new', { projectSource: 'new' })
+      await vi.waitFor(() => expect(frames).toContainEqual(expect.objectContaining({ payload: expect.objectContaining({ requestId: 'new', state: 'failed' }) })))
+      expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: '/remote/harnesses/codex-2026-09-24-12-00', scmLaunchRecord: null }))
+      // A create that names its own folder prepared nothing, and says nothing about an SCM.
+      ask('cwd', { cwd: '/remote/own' })
+      await vi.waitFor(() => expect(frames).toContainEqual(expect.objectContaining({ payload: expect.objectContaining({ requestId: 'cwd' }) })))
+      expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: '/remote/own' }))
+      expect(create.mock.lastCall?.[0]).not.toHaveProperty('scmLaunchRecord')
+      expect(prepare).toHaveBeenCalledTimes(2)
+    } finally {
+      await socket.unregisterLocalClient('local:scm')
+      await socket.stop()
+    }
+  })
+
   it('checks an unknown creation without spawning and rejects malformed creation ids before launch', async () => {
     const socket = relaySocket('token')
     bindLaunchRequests(socket)
@@ -2275,6 +2418,37 @@ describe('BackendSocket outbound queue', () => {
     // Bookkeeping about the person, for the backend alone: never fanned out to a client.
     expect(parseSent(ws).find((m) => (m.frame as { type?: string } | undefined)?.type === 'app_presence'))
       .toMatchObject({ t: 'up', webEligible: false, commanderEligible: false })
+
+    await socket.stop()
+  })
+
+  it('reports the TUI as its own surface, and a tool as no one', async () => {
+    vi.useFakeTimers()
+    const socket = relaySocket('token')
+    const sink = { sendFrame: () => true, sendBinary: () => true }
+    const presence = (ws: InstanceType<typeof wsMock.MockWebSocket>) => parseSent(ws)
+      .filter((m) => (m.frame as { type?: string } | undefined)?.type === 'app_presence')
+      .map((m) => (m.frame as { payload: Record<string, unknown> }).payload)
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+
+    // A tool (`harness pair`, the MCP server) is not a person at a window: nothing, now or on the tick.
+    expect(socket.registerLocalClient('local:tool', sink, { tool: true })).toBe(true)
+    vi.advanceTimersByTime(60_000)
+    expect(presence(ws)).toEqual([])
+
+    // The TUI names its surface; the desktop app's frame stays exactly as it was.
+    expect(socket.registerLocalClient('local:tui', sink, { surface: 'tui' })).toBe(true)
+    expect(socket.registerLocalClient('local:app', sink)).toBe(true)
+    expect(presence(ws)).toEqual([{ kind: 'open', surface: 'tui' }, { kind: 'open' }])
+
+    // Each pings for itself while it stays — and only it, once the other has gone.
+    vi.advanceTimersByTime(60_000)
+    expect(presence(ws).slice(2)).toEqual([{ kind: 'ping' }, { kind: 'ping', surface: 'tui' }])
+    await socket.unregisterLocalClient('local:app')
+    vi.advanceTimersByTime(60_000)
+    expect(presence(ws).slice(4)).toEqual([{ kind: 'ping', surface: 'tui' }])
 
     await socket.stop()
   })

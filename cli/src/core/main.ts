@@ -1,3 +1,9 @@
+import { createModelControls } from './engines/modelControls.js'
+import { masterRunsEngineModelControl } from '../harnessd/services.js'
+import { createScreens } from './engines/screens.js'
+import { createScreenTransport } from './engines/screenTransport.js'
+import { legacyScreen } from '../lib/legacyScreen.js'
+import { masterRunsEngineScreen } from '../harnessd/services.js'
 /**
  * The core's entry: `harness __run`. `runForeground` is the composition root, which builds the core's
  * modules, starts the services through `serviceHost` and wires them to the socket
@@ -9,10 +15,9 @@
  * or `start -f` with `HARNESS_NO_MASTER=1`), calls in here. `start -f` runs harnessd's master, which starts
  * the core with `__run`.
  */
-import { ensureBundledCoreHarnesses } from '../dsh/builtins.js'
 import { readFileSync, writeFileSync, openSync, existsSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
-import { execFile, spawn, spawnSync } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { createServer, type Server } from 'http'
 import { homedir, hostname } from 'os'
 import { env } from '../config/env.js'
@@ -21,19 +26,17 @@ import { sqlitePreflightMessage } from '../lib/sqliteAvailability.js'
 import { warmLoginShellEnvironment } from '../lib/loginShellEnv.js'
 import type { AppSwarms } from '../cable/cableSession.js'
 import type { UnreadNotification } from '../lib/notificationRead.js'
-import { terminalActivity } from '../lib/terminalActivity.js'
-import { MachineListCache, withStaleMarker } from '../device/machineList.js'
 import { registry, projectDisplayName, validTranscriptPath, type RegisteredSession } from '../lib/registry.js'
 import { engineSessionTitle } from '../lib/sessionTitle.js'
 import { machineNames } from '../lib/machineNames.js'
-import { installCodexHooks } from '../lib/hooks.js'
+import { engineHooks as engineHookFacets } from '../engines/hooks.js'
+import type { LiveFor } from '../engines/facets/live.js'
 import { DAEMON_LOG_FILE, PID_FILE, daemonPort, isAlive, readPid, LEGACY_LOG_FILE, MACHINE_NAME_FILE, tildify, computerId, thisDeviceLabel } from '../lib/daemonState.js'
-import { clearSafeModeMarker, runBootHandoff, safeModeDisposition, safeModeStatusBody, SafeModeRequest, writeSafeModeMarker } from '../lib/daemonSafeMode.js'
+import { clearSafeModeMarker, safeModeDisposition, safeModeStatusBody, SafeModeRequest, writeSafeModeMarker } from '../lib/daemonSafeMode.js'
 import { awakeTimeout } from '../lib/sleepAware.js'
 import { removePidFileIf, onError } from '../lib/daemonLaunch.js'
-import { describeSpawnLockOwner, withSpawnLock } from '../lib/daemonSpawnLock.js'
 import { ensureTmuxOnPath } from '../lib/tmuxOnPath.js'
-import { AUTH_DIR, AuthSessionError, AuthSessionManager, clearAuthSession, ensureSignInEpoch, readAuthSession, signInOf, type AuthSession } from '../lib/authSession.js'
+import { AUTH_DIR, AuthSessionManager, clearAuthSession, ensureSignInEpoch, readAuthSession, signInOf, type AuthSession } from '../lib/authSession.js'
 import { ENGINES, enginePathOverride } from '../lib/engineBin.js'
 import { isTerminalEngine } from '../engines/types.js'
 import { engineInstallRecipe } from '../lib/engineInstall.js'
@@ -55,7 +58,6 @@ import { OpenTabProtection } from '../lib/openTabProtection.js'
 import { sessionCheckpoints } from '../lib/sessionCheckpoint.js'
 import { repairClaudeCwd } from '../lib/cwdRepair.js'
 import { stoppedAgents } from '../lib/stoppedAgents.js'
-import { prepareAgentHandoff } from '../lib/agentHandoff.js'
 import { ExternalSessions, OpenSessions } from '../lib/sessionSearch/external.js'
 import { externalProviders } from '../lib/sessionSearch/externals/index.js'
 import { type LaunchOverridesDeps } from '../lib/launchOverrides.js'
@@ -79,7 +81,10 @@ import { Watcher } from '../watcher/watcher.js'
 import { startHookServer } from '../hookServer.js'
 import { connectToMaster } from '../harnessd/coreLink.js'
 import { createTerminalOpener } from './terminals/open.js'
-import { SHELL_REQUESTS, startShell } from '../services/shell.js'
+import { createTerminalSessions } from './terminals/sessions.js'
+import { checkPidRuntime } from '../lib/deleteAgentFallback.js'
+import { SHELL_REQUESTS } from '../lib/shellProtocol.js'
+import { answerShellQuery } from './shellQueries.js'
 import { createTerminalControl } from './terminals/control.js'
 import { createTerminalRequests } from './terminals/requests.js'
 import { createAgentEvents } from './agents/events.js'
@@ -88,8 +93,13 @@ import { createInput } from './input.js'
 import { createQuestions } from './questions.js'
 import { createTurnActivity } from './turns/activity.js'
 import { createLastTurnReader } from './transcripts/lastTurn.js'
+import { createEngineReaders } from './engines/readers.js'
+import { createLiveTransport } from './engines/liveTransport.js'
+import { createLiveWatcher } from './engines/liveWatcher.js'
+import { readerEngine, READER_SERVICES } from '../engines/worker/protocol.js'
 import { createRecaps } from './turns/recaps.js'
-import { createUpdateHandoff, probeStagedMaster, probeVerdict } from './updateHandoff.js'
+import { createUpdateHandoff, handOverOnceReleased, probeStagedMaster, type TeardownStep } from './updateHandoff.js'
+import { needsUpdaterBeside, startUpdaterBeside } from './updaterBeside.js'
 import { createHeartbeats } from './turns/heartbeats.js'
 import { createEventFunnel } from './turns/funnel.js'
 import { createAgyBackstop } from './turns/agyBackstop.js'
@@ -112,22 +122,25 @@ import { createAgentRetargeter } from './agents/retarget.js'
 import { createAgentRestarter } from './agents/restart.js'
 import { createAgentLifecycle, createPurgeRequest, createStopRequest } from './agents/lifecycle.js'
 import { createAgentClosing, createCloseRequests } from './agents/close.js'
-import { createHandoffRequest } from './agents/handoff.js'
+import { answerConversationQuery, conversationReads } from './conversationQueries.js'
 import { createLaunchRequests } from './agents/launches.js'
 import { createAgentList } from './agents/list.js'
 import { createAgentUpdate } from './agents/update.js'
 import { createEngineHooks, installEngineHooks } from './engines/hooks.js'
 import { createCursorTaskHooks } from './engines/cursorTasks.js'
 import { databaseHistory } from './transcripts/databaseHistory.js'
-import { createCoreApi, DEVICES_FALLBACKS, DEVICES_REQUESTS, emptyPorts, EXPERIMENTS, LONG_ANSWERS, MODELS_FALLBACKS, MODELS_OFF, MODELS_REQUESTS, MONITOR_FALLBACKS, MONITOR_OFF, MONITOR_REQUESTS, ORCHESTRATOR_FALLBACKS, ORCHESTRATOR_REQUESTS, SHARE_REQUESTS, SHARING_FALLBACKS, PROJECTS_REQUESTS, SEARCH_FALLBACKS, SEARCH_REQUESTS, STORE_REQUESTS, TEAMS_FALLBACKS, TEAMS_REQUESTS, USAGE_REQUESTS, VIEWERS_FALLBACKS, WIFI_FALLBACKS, WORKSPACES_FALLBACKS, type GatewayAccount, type GatewayOps, type GatewayStatus, type RouteAnswer, type TeamsPort, type WindowFocus } from './api.js'
+import { COMMAND_BAR_REQUESTS, createCoreApi, DEVICES_FALLBACKS, DEVICES_REQUESTS, emptyPorts, HANDOFF_REQUESTS, EXPERIMENTS, LONG_ANSWERS, MODELS_FALLBACKS, MODELS_OFF, MODELS_REQUESTS, MONITOR_FALLBACKS, MONITOR_OFF, MONITOR_REQUESTS, ORCHESTRATOR_FALLBACKS, ORCHESTRATOR_REQUESTS, SHARE_REQUESTS, SHARING_FALLBACKS, PROJECTS_REQUESTS, SEARCH_FALLBACKS, SEARCH_REQUESTS, STORE_REQUESTS, TEAMS_FALLBACKS, TEAMS_REQUESTS, USAGE_REQUESTS, VIEWERS_FALLBACKS, WIFI_FALLBACKS, WINDOW_NAMES_REQUESTS, WORKSPACES_FALLBACKS, type GatewayAccount, type GatewayOps, type GatewayStatus, type RouteAnswer, type TeamsPort, type WindowFocus } from './api.js'
 import { createServiceHost, testFaults } from './serviceHost.js'
 import { startStalls } from './stall.js'
 import { createServiceLinks, type ServiceLinks } from './serviceLinks.js'
+import { createViewerStreams } from './viewerStreams.js'
 import { createViewersLink } from './viewersLink.js'
 import { createWorkspacesLink } from './workspacesLink.js'
 import { createMonitorLink } from './monitorLink.js'
 import { createStoreLink } from './storeLink.js'
 import { createModelsLink } from './modelsLink.js'
+import { createRecapsLink } from './recapsLink.js'
+import { RECAPS_FALLBACKS, TERMINALS_OFF } from './api.js'
 import { answerAgentQuery } from './agentQueries.js'
 import { createDeliveries } from './deliveries.js'
 import { createTerminalWatch } from './terminalWatch.js'
@@ -136,26 +149,28 @@ import { createExperimentHooks, wakeExperiments } from './experiments.js'
 import { answerExperimentQuery, createForExperiment } from './experimentQueries.js'
 import { createOrchestratorLink } from './orchestratorLink.js'
 import { daemonCommand } from '../lib/daemonCommand.js'
-import { KNOWN_SERVICES, servicesTheMasterRuns } from '../harnessd/services.js'
+import { KNOWN_SERVICES, masterRunsEngineRuntime, masterRunsLiveEngines, servicesTheMasterRuns } from '../harnessd/services.js'
 import { createTeamsLink, teamsOutOfProcess } from './teamsLink.js'
 import { createDevicesLink } from './devicesLink.js'
-import { CORE_EXIT_STOP, CORE_EXIT_UPDATE, PROBE_COMMAND, PROBE_TIMEOUT_MS } from '../harnessd/protocol.js'
+import { CORE_EXIT_STOP, CORE_EXIT_UPDATE, PROBE_COMMAND } from '../harnessd/protocol.js'
 import { localSocketPath, refuseServedDataFolder, type LocalSocketServer } from '../lib/localSocket.js'
 import { saveDaemonPort } from '../lib/daemonEndpoint.js'
 import { publishHookRoute } from '../lib/hookRoutes.js'
-import { commandBarService } from '../lib/commandBar.js'
+import { routedCommandBar } from '../lib/commandBarHttp.js'
 import { BackendSocket, isLocalClientId } from '../backendSocket.js'
 import { createGatewayLink, laneOf } from './gatewayLink.js'
-import { createWifiCore } from './wifi.js'
+import { createWifiCore, WIFI_START_MS } from './wifi.js'
+import { createDevicesWake, DEVICES_ON_DEMAND } from './devicesWake.js'
+import { wakeModels } from './modelsWake.js'
+import { wakeGateway } from './gatewayWake.js'
 import { createWifiLink } from './wifiLink.js'
 import { wifiDoors } from './wifiAgents.js'
-import { autonomousDeviceLocalRequest } from '../lib/autonomous-device/localApi.js'
+import { autonomousDeviceLocalRequest } from '../lib/deviceManagementHttp.js'
 import { attachLocalWsServer, LOCAL_WS_PATH, LOCAL_WS_PROTOCOL_VERSION } from '../localWsServer.js'
 import { TERMINAL_BINARY_VERSION } from '../lib/terminalBinary.js'
 import { isLoopbackRequest, loopbackHosts } from '../lib/loopbackRequest.js'
-import { startSelfUpdater, restore as restoreUpdate, DOWNLOAD_LIMITS, type Poller } from '../lib/selfUpdate.js'
+import { isInstalledCopy } from '../lib/installedCopy.js'
 import { managedNodePath } from '../lib/nodeRuntime.js'
-import { startTuiUpdater } from '../tui/update.js'
 import { type ActivityFrame } from '../lib/turnActivity.js'
 import { CursorTranscriptDiscovery } from '../engines/cursor/discovery.js'
 import { cursorDataDir } from '../engines/cursor/home.js'
@@ -167,10 +182,12 @@ import { AgentCreationReceipts } from '../lib/agentCreationReceipt.js'
 import { agentFrame, lastActivityAt, type AgentFrame } from '../lib/agentFrame.js'
 import { forgetAgentProject } from '../lib/agentProject.js'
 import { agentTokenUsage } from '../lib/agentTokenUsage.js'
-import { RuntimeProfileManager, type RuntimeModelOption } from '../lib/runtimeProfile.js'
-import { RuntimeProfileController } from '../lib/runtimeProfileController.js'
+import { LegacyRuntimeProfileManager, type RuntimeModelOption } from '../lib/runtimeProfileManager.js'
+import { createRuntimeProfiles } from './engines/runtimeProfiles.js'
+import { createRuntimeTransport } from './engines/runtimeTransport.js'
+import { RuntimeProfileController } from '../lib/runtimeControl.js'
 import { installTimestampedConsole, sid, prepareLogFile, trimLogFile, LOG_CHECK_INTERVAL_MS } from '../lib/log.js'
-import { PROXY_BACKEND_TIMEOUT_MS, GRID_MINT_TIMEOUT_MS, backendHttpBase, postJson, controlPlaneAuth } from '../lib/controlPlane.js'
+import { backendHttpBase } from '../lib/controlPlane.js'
 
 // Daemon stdout/stderr. Capped at LOG_MAX_BYTES — see prepareLogFile/trimLogFile in lib/log.ts.
 const LOG_FILE = DAEMON_LOG_FILE
@@ -268,20 +285,23 @@ function startMasterHere(): void {
  * What a staged update does while the daemon is still starting up — and the little the boot needs to
  * know about itself to do it.
  *
- * The self-updater is started in `runForeground`'s prologue, before anything that can throw or hang,
- * because a daemon that cannot finish booting is a daemon that can never be fixed: there is no
- * supervisor, and the desktop app only re-runs `harness start` on the same broken bytes, once a
- * minute, for ever. Its `onStaged` therefore has to mean something LONG before `restartForUpdate`
- * exists — hence the indirection: `applyStagedUpdate` is `bootHandoff` until the body has built
- * everything `restartForUpdate` tears down, and is swapped for it at that one line.
+ * The master's updater (services/updaterProcess.ts) can stage a build at any moment, and the master then
+ * asks this core to hand over (`harnessd:update`), which `runForeground`'s prologue listens for before
+ * anything that can throw or hang: a daemon that cannot finish booting must still leave for its fix. That
+ * request therefore has to mean something LONG before `restartForUpdate` exists — hence the indirection:
+ * `applyStagedUpdate` is `bootHandoff` until the body has built everything `restartForUpdate` tears down,
+ * and is swapped for it at that one line.
  */
 /** This process's channel to a harnessd master, when one started it (see harnessd/coreLink.ts).
- *  Inert otherwise: a daemon run on its own claims its pid file and hands off updates itself. */
+ *  Inert otherwise: a daemon run on its own claims its pid file, and gets no updates. */
 const coreLink = connectToMaster()
+/** When the devices' process starts: once there is a device, a dial's port, a Wi-Fi device or a request for one
+ *  (core/devicesWake.ts). Asked of the master through the channel above. */
+const devicesWake = createDevicesWake({ want: (service) => coreLink.want(service), dataDir: env.ADAPTER_DATA_DIR, cableDisabled: env.CABLE_DISABLE, testDialPort: process.env.HARNESSD_TEST_DIAL_PORT })
 
 const daemonBoot: {
-  updater: Poller | null
-  tuiUpdater: Poller | null
+  /** Stops the updater this core runs beside itself under a master too old to run it (core/updaterBeside.ts). */
+  updaterBeside: (() => void) | null
   /** The hook server, once bound — the only thing a mid-boot handoff has to release. */
   hookServer: Server | null
   /** Its Unix-socket twin (lib/localSocket.ts), when one could be opened. Read by `/api/status`. */
@@ -294,52 +314,24 @@ const daemonBoot: {
   applyStagedUpdate: (version: string) => void | Promise<void>
   /** Opens the request gate of a start-up that did not finish, so its clients are answered (safe mode). */
   openRequests: (() => void) | null
-} = { updater: null, tuiUpdater: null, hookServer: null, localSocket: null, markNotReady: null, safeMode: null, handingOff: false, applyStagedUpdate: bootHandoff, openRequests: null }
+} = { updaterBeside: null, hookServer: null, localSocket: null, markNotReady: null, safeMode: null, handingOff: false, applyStagedUpdate: bootHandoff, openRequests: null }
 
 /**
- * Hand the machine to a newer build without finishing start-up.
+ * Hand the machine to a newer build without finishing start-up: the master asked (its updater staged one),
+ * and starts the new bundle the moment this exits, and judges it.
  *
  * SYNCHRONOUS END TO END, and that is the whole safety argument: never awaiting means the half-built
- * `runForeground` body cannot interleave between the port closing and the exit, so it can never
- * reach the code that would bind the port the successor is about to take, and two daemons are
- * impossible by construction. That is also why it does not wait for the master to claim the pid file the
- * way `restartForUpdate` does — waiting would leave this process running alongside the new core, both
- * reconciling tmux and writing the registry.
- *
- * Without a master it spawns one rather than merely exiting, because on a machine with no desktop app
- * nothing else would ever start the successor, and even with one the next spawn window is up to ~70s
- * away. The master judges the update it starts on (core/updateHandoff.ts); the core this once spawned
- * instead ran it unjudged.
+ * `runForeground` body cannot interleave between the port closing and the exit, so it can never reach the
+ * code that would bind the port the successor is about to take. Only a master asks; a core without one
+ * gets no updates.
  */
 function bootHandoff(version: string): void {
   if (daemonBoot.handingOff) return
   daemonBoot.handingOff = true
-  daemonBoot.tuiUpdater?.stop()
-  if (coreLink.supervised) {
-    // The master starts the new bundle the moment this exits, and rolls it back if it does not stay
-    // up; a successor spawned from here would be a daemon outside its supervision.
-    console.log(`[update] ${VERSION} → ${version} staged during start-up — handing back to harnessd`)
-    try { daemonBoot.hookServer?.close() } catch { /* already gone */ }
-    try { daemonBoot.localSocket?.closeSync() } catch { /* already gone */ }
-    process.exit(CORE_EXIT_UPDATE)
-  }
-  runBootHandoff(VERSION, version, {
-    // The hook port has no fallback: a successor that cannot bind it is a daemon that does not come up.
-    closeServer: () => {
-      try { (daemonBoot.hookServer as unknown as { closeAllConnections?: () => void } | null)?.closeAllConnections?.() } catch { /* already gone */ }
-      try { daemonBoot.hookServer?.close() } catch { /* already gone */ }
-      try { daemonBoot.localSocket?.closeSync() } catch { /* already gone */ }
-    },
-    // Synchronous, as all of this is: start-up has not finished, and has nothing to serve meanwhile.
-    probeMaster: () => {
-      const probe = spawnSync(managedNodePath(), [SCRIPT_PATH, PROBE_COMMAND], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS })
-      return probeVerdict(probe.error ?? (probe.status === 0 ? null : new Error(probe.signal ? `signal ${probe.signal}` : `exit ${probe.status}`)), probe.stdout ?? '')
-    },
-    rollBack: () => restoreUpdate(env.ADAPTER_CLI_DIR),
-    startMaster: startMasterHere,
-    exit: (code) => process.exit(code),
-    log: (message) => console.log(message),
-  })
+  console.log(`[update] ${VERSION} → ${version} staged during start-up — handing back to harnessd`)
+  try { daemonBoot.hookServer?.close() } catch { /* already gone */ }
+  try { daemonBoot.localSocket?.closeSync() } catch { /* already gone */ }
+  process.exit(CORE_EXIT_UPDATE)
 }
 
 /** Set by runForeground once the DSH companions exist; a frame projected before that carries none. */
@@ -394,75 +386,50 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     console.error('[fatal-guard] uncaughtException:', err instanceof Error ? (err.stack ?? err.message) : err)
   })
 
-  // ── THE UPDATER GOES FIRST. Everything below this point can throw, hang, or wait on a vendor file,
-  // a port, or tmux — and a daemon that never finishes starting is a daemon that can never be fixed:
-  // there is no supervisor, and the desktop app only re-runs `harness start` on the same broken bytes.
-  // Started here, a published fix lands on its own however badly the rest of the boot goes.
+  // ── THE MASTER'S UPDATE IS HEARD FIRST. Everything below this point can throw, hang, or wait on a vendor
+  // file, a port, or tmux — and a daemon that never finishes starting must still leave for its fix. The
+  // updater is the master's, in a process of its own (services/updaterProcess.ts): the core never
+  // downloads a build. When it stages one, the master asks this core to hand over, and the request is
+  // listened for here, before anything that can fail.
   //
-  // `onStaged` is one indirection on purpose: the handoff's teardown does not exist yet and must not move
-  // (it tears down two dozen subsystems declared further down). Until it is ready, a staged update is
+  // `applyStagedUpdate` is one indirection on purpose: the handoff's teardown does not exist yet and must not
+  // move (it tears down two dozen subsystems declared further down). Until it is ready, a staged update is
   // applied by `bootHandoff`, which hands the machine over without finishing start-up.
-
-  // Self-update ONLY manages the INSTALLED copy (`~/.harness/cli/cli.js`). A dev/repo run — `tsx`
-  // (`npm run dev`) OR `node dist/cli.js` from the checkout — must NEVER self-update: it would swap
-  // the published bundle into ~/.harness/cli and restart, hijacking the version you're developing.
-  // Match by inode so symlinks/realpath don't fool it; fall back to a path compare.
-  const installedCli = join(env.ADAPTER_CLI_DIR, 'cli.js')
-  let isInstalledCopy = SCRIPT_PATH === installedCli
-  try { isInstalledCopy = statSync(SCRIPT_PATH).ino === statSync(installedCli).ino } catch { /* keep path compare */ }
-  if (isInstalledCopy && !env.ADAPTER_UPDATE_DISABLE) {
-    daemonBoot.updater = startSelfUpdater({
-      currentVersion: VERSION,
-      url: env.ADAPTER_UPDATE_URL,
-      key: env.ADAPTER_UPDATE_KEY,
-      dir: env.ADAPTER_CLI_DIR,
-      intervalMs: env.ADAPTER_UPDATE_CHECK_MS,
-      slotSecond: env.ADAPTER_UPDATE_SLOT_SEC,
-      // The lock spans the byte swap AND the handoff it triggers, as one critical section: a
-      // `harness start` that lands between the two would otherwise stage over our .prev, and one
-      // that lands during the handoff would spawn a second daemon.
-      withLock: (fn) => withSpawnLock('handoff', fn, {
-        onWaiting: (owner) => console.log(`[update] waiting — the daemon is ${describeSpawnLockOwner(owner)}`),
-      }),
-      onStaged: (v) => daemonBoot.applyStagedUpdate(v),
-      limits: { idleMs: env.ADAPTER_UPDATE_IDLE_MS, deadlineMs: env.ADAPTER_UPDATE_DEADLINE_MS, floorBytesPerSecond: DOWNLOAD_LIMITS.floorBytesPerSecond },
-      stageWhileJudged: !coreLink.supervised || process.env.HARNESSD_JUDGES_SUPERSEDED === '1',
+  coreLink.onUpdate((version) => { void daemonBoot.applyStagedUpdate(version) })
+  wakeGateway({ outOfProcess: servicesTheMasterRuns(process.env, KNOWN_SERVICES), signedIn: !!session, dataDir: env.ADAPTER_DATA_DIR, want: (service) => coreLink.want(service) })
+  // …or, under a master too old to run the updater, from the updater this core runs beside itself
+  // (core/updaterBeside.ts), in a process of its own: the core downloads no build either way.
+  if (needsUpdaterBeside(process.env, coreLink.supervised, isInstalledCopy(SCRIPT_PATH, env.ADAPTER_CLI_DIR), env.ADAPTER_UPDATE_DISABLE)) {
+    daemonBoot.updaterBeside = startUpdaterBeside({
+      spawn: () => {
+        const updater = spawn(managedNodePath(), [SCRIPT_PATH, '__service', 'updater'], {
+          env: { ...process.env, HARNESSD_SERVICE: 'updater', HARNESSD_UPDATER_BESIDE_CORE: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+        })
+        updater.on('error', (e) => console.error('[update] the updater could not start:', e instanceof Error ? e.message : e))
+        return { onMessage: (listener) => { updater.on('message', listener) }, onExit: (listener) => { updater.on('exit', listener) }, kill: () => { updater.kill() } }
+      },
+      staged: (version) => { void daemonBoot.applyStagedUpdate(version) },
+      log: (line) => console.log(line),
     })
-    const slotted = env.ADAPTER_UPDATE_SLOT_SEC >= 0 && 60_000 % env.ADAPTER_UPDATE_CHECK_MS === 0
-    console.log(`[update] self-update on · v${VERSION} · every ${Math.round(env.ADAPTER_UPDATE_CHECK_MS / 1000)}s`
-      + (slotted ? ` at :${String(env.ADAPTER_UPDATE_SLOT_SEC % 60).padStart(2, '0')}` : ''))
-  } else if (!env.ADAPTER_UPDATE_DISABLE) {
-    console.log(`[update] self-update off · running a dev/repo build (v${VERSION}), not the installed copy`)
   }
-
-  // Keep the CLI's recovery updater armed first. hn is an independent, optional download.
-  daemonBoot.tuiUpdater = startTuiUpdater({
-    currentVersion: VERSION,
-    isInstalledCopy,
-    disabled: env.ADAPTER_UPDATE_DISABLE,
-    intervalMs: env.ADAPTER_UPDATE_CHECK_MS,
-    slotSecond: env.ADAPTER_UPDATE_SLOT_SEC,
-  })
-  // The update handoff (core/updateHandoff.ts): after the updaters, never above them (startupOrder.spec.ts),
-  // and ahead of the /api/status handler that reads whether it is under way and of shutdown(), which takes
-  // a successor it is judging down with us.
+  // The update handoff (core/updateHandoff.ts): after the update is listened for, never above it
+  // (startupOrder.spec.ts), and ahead of the /api/status handler that reads whether it is under way.
   const updateHandoff = createUpdateHandoff({
     version: VERSION, supervised: coreLink.supervised, exitForUpdate: () => process.exit(CORE_EXIT_UPDATE),
-    // A core on its own: the staged bundle's master must answer its probe, as a master asks before it
-    // re-executes on one; then a master takes the machine, and judges the update.
+    // A core on its own that an older release started: its master must answer its probe, as a master asks
+    // before it re-executes on a bundle; then the master takes the machine, and runs the updater.
     probeMaster: () => probeStagedMaster((done) => execFile(managedNodePath(), [SCRIPT_PATH, PROBE_COMMAND], { encoding: 'utf8' }, (error, stdout) => done(error, stdout))),
-    rollBack: () => restoreUpdate(env.ADAPTER_CLI_DIR),
     handOff: () => { startMasterHere(); process.exit(0) },
     log: (line) => console.log(line), error: (line) => console.error(line),
   })
 
   // Another daemon serves this data folder: leave before reading or writing anything of its — its
-  // registry, its viewers, its panes. Just after the updaters, never before them (startupOrder.spec.ts);
-  // their first check is a slot away, and a daemon that leaves here is gone long before it.
+  // registry, its viewers, its panes. Just after the update is listened for, never before it
+  // (startupOrder.spec.ts).
   await refuseServedDataFolder(localSocketPath(env.ADAPTER_DATA_DIR, env.PORT))
 
   // harnessd's master saw this core crash again and again: start nothing that could do it again. The
-  // updaters above keep running, so a published fix still lands (`enterSafeMode`).
+  // master's updater runs on, and a published fix still lands (`enterSafeMode`).
   if (process.env.HARNESSD_SAFE_MODE) throw new SafeModeRequest(process.env.HARNESSD_SAFE_MODE)
 
   const savedApis = new ApiConnections(env.ADAPTER_DATA_DIR)
@@ -499,7 +466,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // Missing tmux is a STATE, not a reason to refuse to start. The daemon already models a machine
   // without it — `tmuxBackend` is null whenever the config omits tmux, every caller tests it, and the
   // create/restart/resume paths answer `TMUX_UNAVAILABLE` — so it can still serve its status, the
-  // local socket, the backend link and its updater, and say what is missing. Refusing instead left a
+  // local socket and the backend link, leave for an update, and say what is missing. Refusing instead left a
   // machine whose PATH lost tmux with a daemon that could not start and therefore could not be fixed.
   let tmuxUnavailable: string | null = null
   if (tmuxPathPromise) {
@@ -574,7 +541,40 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const syncRecapPool = (): void => {
     ports.devices?.engines(registry.active().map((session) => session.engine))
   }
-  const runtimeProfiles = new RuntimeProfileManager()
+  const outOfProcess = servicesTheMasterRuns(process.env, KNOWN_SERVICES)
+  const liveHosted = masterRunsLiveEngines(process.env, process.ppid)
+  const runtimeHosted = liveHosted && masterRunsEngineRuntime(process.env, process.ppid)
+  // An older master's explicit capability report selects compatibility. A failed worker never does.
+  const isolatedLive = (engine: string): boolean => liveHosted
+    && readerEngine(engine) && outOfProcess.has(READER_SERVICES[engine])
+  const modelControlHosted = masterRunsEngineModelControl(process.env, process.ppid)
+  const isolatedModelControl = (engine: string): boolean => modelControlHosted && isolatedLive(engine)
+  const screenHosted = masterRunsEngineScreen(process.env, process.ppid)
+  const isolatedScreen = (engine: string): boolean => screenHosted && isolatedLive(engine)
+  const isolatedRuntime = (engine: string): boolean => runtimeHosted && isolatedLive(engine)
+  const inline = KNOWN_SERVICES.some((name) => !outOfProcess.has(name)) || !runtimeHosted || !screenHosted || !modelControlHosted
+    ? await import('../services/inline.js') : null
+  let serviceLinksRef: ServiceLinks | null = null
+  const runtimeTransport = createRuntimeTransport({
+    call: (service, type, payload, waitMs) => serviceLinksRef?.call(service, type, payload, waitMs) ?? Promise.resolve({ error: 'SERVICE_UNAVAILABLE' }),
+  })
+  const screenTransport = createScreenTransport({
+    call: (service, type, payload, waitMs) => serviceLinksRef?.call(service, type, payload, waitMs) ?? Promise.resolve({ error: 'SERVICE_UNAVAILABLE' }),
+  })
+  const screens = createScreens({ handles: isolatedScreen, transport: screenTransport, resolve: id => registry.resolve(id),
+    inline: (engine, capture) => readerEngine(engine) ? capture === null ? undefined : inline?.screenFor(engine).inspect(capture) : legacyScreen(engine, capture) })
+  const runtimeProfiles = createRuntimeProfiles({
+    legacy: new LegacyRuntimeProfileManager(engine => isolatedRuntime(engine) ? undefined : inline?.runtimeFor(engine)),
+    handles: isolatedRuntime,
+    resolve: id => registry.resolve(id), transport: runtimeTransport })
+  const modelControls = createModelControls({
+    handles: isolatedModelControl, inline: engine => inline?.modelControlFor(engine), resolve: id => registry.resolve(id),
+    call: (service, method, payload, waitMs) => serviceLinksRef?.call(service, method, payload, waitMs) ?? Promise.resolve({ error: 'SERVICE_UNAVAILABLE' }),
+    catalog: session => runtimeProfiles.codexCatalog(session), capture: captureTerminal,
+    text: (target, text, allowed) => submitTerminal(target, text, { allowed }), key: keyTerminal,
+    waitForModel: (id, ms) => runtimeProfiles.waitForModel(id, ms), waitForProfile: (id, ms) => runtimeProfiles.waitForProfile(id, ms),
+    confirmEffort: (id, effort) => runtimeProfiles.confirmEffort(id, effort),
+  })
   // An agent's Model/Effort choices, or every live agent's: what `models_list` answers (services/models.ts)
   // and the dial's picker reads, so neither can show a catalog the machine would not honour.
   const runtimeModels = (agentId?: string): Promise<RuntimeModelOption[]> => {
@@ -645,6 +645,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // Its direct links are the gateway's, started only once it serves: a device they connected to a service
     // that could not be built would be answered by nothing.
     ready: () => gatewayOps.wifiService(true),
+    want: () => devicesWake.ask('wifi', 'a Wi-Fi device'),
     doors: wifiDoors({
       registry, machineId: machineIdNow, displayName: projectDisplayName, running: (sessionId) => turnStartedAt.has(sessionId),
       socket: () => backendRef ?? null, deviceInput: () => deviceInput, answer: (request) => questions.answer(request),
@@ -653,7 +654,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   })
   const coreApi = createCoreApi({
     // Agents' terminals: a literal-argv launch, and a read-only view for Share's observers (core/terminalWatch.ts).
-    terminals: { ...createTerminalOpener({ tmuxBackend, registry, announceSession, blocksFolder: (cwd) => !!backendRef?.purgeAgentService?.blocksFolder(cwd) }), watch: terminalWatch.watch },
+    terminals: { ...TERMINALS_OFF, ...createTerminalOpener({ tmuxBackend, registry, announceSession, blocksFolder: (cwd) => !!backendRef?.purgeAgentService?.blocksFolder(cwd) }), watch: terminalWatch.watch },
     dataDir: env.ADAPTER_DATA_DIR,
     registry,
     stoppedAgents,
@@ -662,10 +663,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     openSessions,
     syncSession,
     runtimeModels,
-    viewerChanged: (agentId) => {
-      backendRef?.viewerForwarder.refresh(agentId)
-      backendRef?.interactiveViewers.refresh(agentId)
-    },
+    viewerChanged: () => {}, // nothing in the core forwards to a viewer: the viewers follow their own (services/viewers.ts)
+    viewerFrame: (connId, type, payload) => backendRef?.sendViewerFrame(connId, type, payload) ?? false,
     gridNamed: (name) => backendRef?.setHarnessGridName(name),
     gridModelsChanged: () => { void backendRef?.pushGridModels() },
     privateGridName: async () => backendRef?.gridName() ?? null,
@@ -674,13 +673,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     backend: (method, path, body) => proxyBackend(method, path, body),
     onNotice: (listener) => experimentHooks.onNotice(listener),
     dshInstallStatus: (status) => backendRef?.send({ type: 'dsh_install_status', payload: status }),
+    // The recaps' cards and recaps (services/recaps.ts) down the doors they took from here, and a turn's final answer.
+    turnCard: (frame) => backendRef?.sendCommander(frame), turnSummary: (frame) => backendRef?.send(frame), lastTurn: (sessionId) => readLastTurn(sessionId),
     // The backend mints and remembers the account's grid name; this CLI holds neither the account's
     // email nor its id. An older backend (no route) answers nothing, which the grid reconcile treats as
     // "no grid yet". Bounded so a stalled control-plane connection cannot hold the attempt open.
-    mintGridName: async () => {
-      const { headers } = await controlPlaneAuth()
-      return (await postJson<{ gridName?: string }>('/api/grid/name', {}, headers, AbortSignal.timeout(GRID_MINT_TIMEOUT_MS))).gridName ?? null
-    },
+    mintGridName: () => gatewayOps.mintGridName(),
     accessToken: (options) => auth.accessToken(options),
     // The fleet's lane's sessions are the gateway's, which holds this machine's E2EE identity; it starts
     // below, before the devices whose fleet seals through it.
@@ -688,7 +686,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     signedIn: () => readAuthSession() !== null,
     environment: () => readAuthSession()?.autonomousEnv ?? env.AUTONOMOUS_ENV,
     // Built further down, with the account proxies: read when the devices ask, never now.
-    machines: () => machinesNow(),
+    machines: () => gatewayOps.machines(),
     machine: {
       id: () => backendRef?.machineId ?? '',
       computerId: () => computerId(),
@@ -700,7 +698,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       const session = registry.resolve(agentId)
       if (!session || (session.engine !== 'claude' && session.engine !== 'codex')) return null
       const screen = await terminals.capture(session, { mode: 'visible', ansi: false })
-      return terminalActivity(session.engine, screen.state === 'succeeded' ? screen.value : null)
+      return (await screens.read(session, screen.state === 'succeeded' ? screen.value : null))?.activity?.label ?? null
     },
     // The devices' frames for the windows on this computer, never the cloud (createCoreApi checks their types).
     sendLocal: (frame) => {
@@ -717,7 +715,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // A dial attaching is shown what is still being asked and what is still working, as a device joining
       // through the backend is (onCommanderJoin): one whose devices' process restarted comes back to tiles
       // mid-turn, and to a question nobody has answered yet.
-      if (attached) for (const frame of [...openQuestions.values(), ...mirror.liveCards()]) ports.devices?.card(frame)
+      // The working tiles are the recaps' to say: asked, and sent to the dial when they answer.
+      if (attached) for (const frame of openQuestions.values()) ports.devices?.card(frame)
+      if (attached) void mirror.liveCards().then((cards) => { for (const frame of cards) ports.devices?.card(frame) })
     },
     // What a device or another machine asks of an agent here: the SAME handlers the backend socket
     // drives, called directly — the slash-command adaptation and the turn and question plumbing live there.
@@ -818,27 +818,31 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // only under a master, which is what gives this core the token they connect with. Their requests are
   // routed to them, and answered SERVICE_UNAVAILABLE while they are down (core/serviceLinks.ts).
   const serviceToken = process.env.HARNESSD_SUPERVISED === '1' ? process.env.HARNESSD_SERVICE_TOKEN : undefined
-  const outOfProcess = servicesTheMasterRuns(process.env, KNOWN_SERVICES)
-  // The services' own code, for those that run in this process (services/inline.ts): loaded only then, so
-  // one in its own process, as each is by default, is never loaded here.
-  const inline = KNOWN_SERVICES.some((name) => !outOfProcess.has(name)) ? await import('../services/inline.js') : null
+  const liveFor: LiveFor = (engine) => isolatedLive(engine) ? undefined : inline?.liveFor(engine)
   // The relay and its E2EE (gateway/): the backend link, the sessions and the keys, which every remote
   // client's frames go through, held at the same gate. In its own process by default (core/gatewayLink.ts),
   // or here (gateway/start.ts); the socket hears it through `fromGateway` and speaks to it in the clear.
-  const account = (): GatewayAccount => ({ machineId: readAuthSession()?.machineId ?? null, signIn: signInOf(readAuthSession()?.signInEpoch) })
-  let serviceLinksRef: ServiceLinks | null = null
+  Object.assign(coreApi.terminals, createTerminalSessions({ agents: coreApi.agents, paneState: tmuxPaneState, processState: checkPidRuntime }))
+  const account = (s = readAuthSession()): GatewayAccount => ({ machineId: s?.machineId ?? null, signIn: signInOf(s?.signInEpoch, s?.signInAcct), autonomousEnv: s?.autonomousEnv ?? env.AUTONOMOUS_ENV })
+  const engineReaders = createEngineReaders({ isolated: outOfProcess, inline: inline?.engineTranscriptFor,
+    call: (service, type, payload, waitMs) => serviceLinksRef?.call(service, type, payload, waitMs) ?? Promise.resolve({ error: 'SERVICE_UNAVAILABLE' }) })
+  const liveTransport = createLiveTransport({
+    call: (service, type, payload, waitMs) => serviceLinksRef?.call(service, type, payload, waitMs) ?? Promise.resolve({ error: 'SERVICE_UNAVAILABLE' }),
+  })
   const gatewayLink = outOfProcess.has('gateway') ? createGatewayLink({
     events: backend.fromGateway,
     notify: (frame) => serviceLinksRef?.notify('gateway', frame) ?? false,
     notifyBinary: (bytes) => serviceLinksRef?.notifyBinary('gateway', bytes) ?? false,
     buffered: () => serviceLinksRef?.buffered('gateway') ?? 0,
     call: (type, payload, waitMs) => serviceLinksRef?.call('gateway', type, payload, waitMs) ?? Promise.resolve({ error: 'SERVICE_UNAVAILABLE' }),
-    start: () => ({ machineId: backend.machineId, computerId: computerId(), autonomousEnv, signedIn: !!session?.machineId, account: account() }),
-    tokens: auth, backend: (method, path) => proxyBackend(method, path),
+    start: () => ({ machineId: backend.machineId, computerId: computerId(), autonomousEnv, signedIn: !!session?.machineId, account: account(), machineName: terminalHintMachineName(), hostname: hostname() }),
+    tokens: auth, backend: (method, path) => proxyBackend(method, path), want: () => coreLink.want('gateway'),
+    machines: ({ body }) => ports.models?.machines(body, computerId()),
   }) : null
   const gateway = gatewayLink ?? inline!.startGateway({
     events: backend.fromGateway, machineId: backend.machineId, computerId: computerId(), autonomousEnv,
-    signedIn: !!session?.machineId, tokens: auth, backend: (method, path) => proxyBackend(method, path), account: account(),
+    signedIn: !!session?.machineId, tokens: auth, account: account(), machineName: terminalHintMachineName(), hostname: hostname(),
+    machines: ({ body }) => ports.models?.machines(body, computerId()),
   })
   backend.useGateway(gateway.port)
   backend.useWifi(wifiCore.fromGateway)
@@ -851,13 +855,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     forget: (agentId) => ports.teams?.forget(agentId),
     canWrite: (deliveryId) => ports.teams?.canWrite(deliveryId) ?? false,
   }
-  backend.viewerTargetProvider = (agentId) => ports.viewers?.forwardingUrl(agentId) ?? null
-
-  // The harnesses the release bundles (the Model Manager, Devices, the Harness Monitor), before restore
-  // relaunches an agent on one. Here and not in the Store's process: its lean bundle would carry a second
-  // copy of their files (571 KB more cli.js) and the viewers' process held 12 MiB more at idle (measured
-  // 2026-10-06), while cli.js, which the core runs, carries them anyway.
-  ensureBundledCoreHarnesses()
+  // This machine's viewers, served to a client over its connection by the viewers (core/viewerStreams.ts).
+  backend.viewerStreams = createViewerStreams(() => ports.viewers, (connId, type, payload) => backend.sendViewerFrame(connId, type, payload))
 
   /**
    * Is ANY device surface watching this machine?
@@ -942,9 +941,17 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const commandcodeNormalizers = normalizers.commandcodeNormalizers
   const sessionTurnState = normalizers.sessionTurnState
   const sessionTurnOpen = normalizers.sessionTurnOpen
-  const watcher = new Watcher()
+  const { watcher, live: engineLive } = createLiveWatcher(new Watcher(), {
+    handles: isolatedLive,
+    transport: liveTransport,
+    bySession: (id) => registry.bySession(id),
+    prepareFrames: (session, frames) => runtimeProfiles.prepareFrames(session, frames),
+    frame: (session, frame) => ingest.acceptFrame(session.sessionId, session.engine, frame, runtimeProfiles.handles(session.engine)),
+    reattach: (session) => attachSession(session, true),
+  })
   // Whether a turn is really working, beyond its transcript (core/turns/activity.ts).
   const activity = createTurnActivity({
+    readScreen: screens.read,
     terminals,
     bySession: (sessionId) => registry.bySession(sessionId),
     sessionTurnOpen,
@@ -998,6 +1005,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // Following a session: its history read into its engine's normalizer, then its tail
   // (core/transcripts/attach.ts).
   const attach = createAttach({
+    liveFor,
+    remoteLive: engineLive,
     terminalGone: terminalControl.terminalGone,
     normalizers,
     watcher,
@@ -1015,19 +1024,22 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     hermesDb: (s) => hermesDbForSession(s),
     concurrency: ATTACH_CONCURRENCY,
     relaunchMarks,
+    // Built further down: told when an attach finds its last turn already over, never now.
+    settled: (sessionId) => mirror.settled(sessionId),
   })
   const attaches = attach.attaches
   const attachSession = attach.attachSession
   const neverFoldedHistory = attach.neverFoldedHistory
   const replayedFirstTurn = attach.replayedFirstTurn
   // A conversation's history, a page at a time, and how long it is (core/transcripts/history.ts).
-  const history = createHistory({ resolve: (id) => registry.resolve(id), stopped: () => stoppedAgents.list(),
+  const history = createHistory({ readerFor: engineReaders.forEngine, resolve: (id) => registry.resolve(id), stopped: () => stoppedAgents.list(),
     pages: new TranscriptPager(), dbs: { opencode: OPENCODE_DB, kilo: KILO_DB, devin: DEVIN_DB },
     hermesDb: (s) => hermesDbForSession(s) })
   backend.historyProvider = history.sessionGet
   backend.sessionsProvider = history.sessionsList
   // Everything the core writes into a pane, and the device's pane lock (core/input.ts).
   const inputs = createInput({
+    readScreen: screens.read,
     resolve: (id) => registry.resolve(id),
     byAgent: (agentId) => registry.byAgent(agentId),
     terminal: terminalControl,
@@ -1045,6 +1057,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     commandcode: (sessionId) => commandcodeNormalizers.get(sessionId),
     // Reassigned further down (the funnel): always the current one.
     emit: (sessionId, events) => emitSessionEvents(sessionId, events),
+    // Declared further down: read as a prompt is typed, never now.
+    promptTyped: (session, capture, screen) => { if (session.sessionId) questionWatcher.notePrompt(session.sessionId, capture, screen.question) },
   })
   const input = inputs.input
   const deviceInput = inputs.deviceInput
@@ -1064,6 +1078,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // Questions an agent asks the person: shown on the dial and the window, answered from anywhere
   // (core/questions.ts).
   const asking = createQuestions({
+    readQuestion: screens.question,
     resolve: (id) => registry.resolve(id),
     terminal: terminalControl,
     acquireTerminalControl,
@@ -1084,32 +1099,24 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // The monitor's readings, through its port (services/monitor.ts): none while it is off.
     harnessResourcesReader: () => (ports.monitor ?? MONITOR_OFF).resources(), harnessStorageReader: (agents, invalidate) => (ports.monitor ?? MONITOR_OFF).storage(agents, invalidate),
   }).agentsList
-  const agentNotifications = asking.agentNotifications
   const questionWatcher = asking.questionWatcher
 
 
   // The turn's last text, for its recap, whatever the engine (core/transcripts/lastTurn.ts).
   const readLastTurn = createLastTurnReader({
+    readerFor: engineReaders.forEngine,
     bySession: (sessionId) => registry.bySession(sessionId),
     dbs: { opencode: OPENCODE_DB, kilo: KILO_DB, devin: DEVIN_DB },
     hermesDb: (s) => hermesDbForSession(s),
   })
-  // Recaps: turn cards on the dial and the window, notifications on the phone (core/turns/recaps.ts).
+  // Recaps: turn cards, notifications, cut by the recaps (services/recaps.ts) from the lifecycle the core tells (core/turns/recaps.ts).
   const recaps = createRecaps({
-    notifications: agentNotifications,
-    turnActivity,
-    clients: backend,
-    deviceIsWatching,
-    cableWatchingLocal,
-    bySession: (sessionId) => registry.bySession(sessionId),
-    resolve: (id) => registry.resolve(id),
+    port: () => ports.recaps, turnActivity, clients: backend, deviceIsWatching, cableWatchingLocal, sessionTurnOpen,
+    bySession: (sessionId) => registry.bySession(sessionId), resolve: (id) => registry.resolve(id), live: () => registry.list(),
     stopped: (agentId) => stoppedAgents.get(agentId),
     orchestratorRoleOf: (agentId) => ports.orchestrator?.roleOf(agentId) ?? null,
-    readLastTurn,
-    dataDir: env.ADAPTER_DATA_DIR,
-    recapForce: env.RECAP_FORCE,
-    recapWithoutDevice: () => env.RECAP_WITHOUT_DEVICE,
   })
+  asking.hearQuestions(recaps.question) // a turn waiting on the person is not announced as done
   const isSubagentSession = recaps.isSubagentSession
   const mirror = recaps.mirror
   // Recaps are STORED under the engine session id — that is what lets `--resume` bring the last recap
@@ -1117,10 +1124,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // and the voice router know. Resolve across the two, or every tile restores empty.
   backend.agentRecentProvider = recaps.agentRecent
 
-  // "Change agent": the desktop asks for the structured handoff file (lib/agentHandoff.ts) before it
-  // closes the old engine; the new one is then told to read it.
-  // Built ONCE: its discovery keeps "one search per agent" across requests.
-  const handoffDeps = handoffProviderDeps({
+  // Quiet-machine QA: the edge host renders Change agent's handoff from these conversation reads.
+  // Build discovery once to keep "one search per agent" across requests.
+  coreApi.conversations = conversationReads(handoffProviderDeps({
     registry,
     stopped: {
       get: (id) => stoppedAgents.get(id),
@@ -1134,13 +1140,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     isRecentlyDeleted,
     findResumedTranscript,
     validTranscriptPath,
-  })
-  backend.handoffRequestProvider = createHandoffRequest({ prepare: (req) => prepareAgentHandoff(handoffDeps, req) })
+  }))
 
   // The requests each service that can run in its own process answers, as core/api.ts declares them.
   const requestsOf: Record<string, readonly string[]> = {
-    search: SEARCH_REQUESTS, store: STORE_REQUESTS, usage: USAGE_REQUESTS, monitor: MONITOR_REQUESTS, projects: PROJECTS_REQUESTS, models: MODELS_REQUESTS,
-    devices: DEVICES_REQUESTS,
+    search: SEARCH_REQUESTS, store: STORE_REQUESTS, usage: USAGE_REQUESTS, monitor: MONITOR_REQUESTS, projects: PROJECTS_REQUESTS, models: MODELS_REQUESTS, handoff: HANDOFF_REQUESTS,
+    devices: DEVICES_REQUESTS, windowNames: WINDOW_NAMES_REQUESTS, shell: SHELL_REQUESTS,
     ...Object.fromEntries(Object.entries(EXPERIMENTS).map(([name, experiment]) => [name, experiment.requests])),
   }
   // The experiments (core/api.ts `EXPERIMENTS`): each may act on the core through the hooks an experiment has.
@@ -1149,7 +1154,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // Directors' (core/orchestratorLink.ts).
   const orchestratorLink = createOrchestratorLink((frame) => serviceLinks.notify('orchestrator', frame))
   // What the core keeps of the viewers in their own process, for the frames it builds (core/viewersLink.ts).
-  const viewersLink = createViewersLink(coreApi, (frame, opts) => serviceLinks.notify('viewers', frame, opts))
+  const viewersLink = createViewersLink(coreApi, (frame, opts) => serviceLinks.notify('viewers', frame, opts),
+    { call: (type, payload, waitMs) => serviceLinks.call('viewers', type, payload, waitMs), buffered: () => serviceLinks.buffered('viewers') })
   // How the core tells workspaces in their own process what to do, and answers them (core/workspacesLink.ts).
   const workspacesLink = createWorkspacesLink(coreApi, (frame) => serviceLinks.notify('workspaces', frame), forgetAgentProject)
   // Tab collaboration and teams, an experiment: the prompt scopes and the teams beside them, both in its process
@@ -1183,14 +1189,20 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // Its port from the start: its process connects as soon as the socket answers, before the rest of the
   // core is wired, and is resumed through this port then (core/wifi.ts `started`).
   if (outOfProcess.has('wifi')) ports.wifi = wifiLink.port
+  // What the core tells the recaps in their own process, and reads back from what they said (core/recapsLink.ts).
+  const recapsLink = createRecapsLink({ notify: (frame, opts) => serviceLinks.notify('recaps', frame, opts), buffered: () => serviceLinks.buffered('recaps'),
+    call: (type, payload) => serviceLinks.call('recaps', type, payload), clients: coreApi.clients, lastTurn: coreApi.transcripts.lastTurn })
   const serviceLinks = createServiceLinks({
     token: serviceToken,
     owned: Object.fromEntries([...outOfProcess].map((name) => [name, requestsOf[name] ?? []])),
     waits: LONG_ANSWERS,
-    // An experiment's process runs only once it is on: a request for one that is off asks the master for it.
-    onDemand: experiments,
+    // An experiment's process runs once on, the devices' once there is one, models' and the gateway's once needed: a request asks.
+    // Shell is in the always-running edge host, but its first request can beat that host's connection.
+    // Hold it through the same bounded startup gate; after any disconnect, fail promptly as before.
+    onDemand: new Set([...experiments, ...DEVICES_ON_DEMAND, ...Object.values(READER_SERVICES), 'models', 'gateway', 'shell']),
     want: (service) => experimentHooks.want(service),
-    answer: async (service, query, payload) => deliveries.answer(service, query, payload)
+    // The gateway's first: its `backend` reads (the device key log) were refused below as NOT_AN_EXPERIMENT.
+    answer: async (service, query, payload) => await modelControls.answer(service, query, payload) ?? engineReaders.answer(service) ?? (service === 'gateway' && gatewayLink ? gatewayLink.answer(query, payload) : null) ?? deliveries.answer(service, query, payload)
       ?? await answerExperimentQuery(coreApi, experiments, service, query, payload)
       ?? await terminalWatch.answer(service, query, payload)
       ?? (service === 'orchestrator' ? orchestratorLink.answer(query, payload) : null)
@@ -1201,21 +1213,35 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       : service === 'teams' || service === 'collaboration' ? teamsLink.answer(query, payload)
       : service === 'devices' ? devicesLink.answer(query, payload)
       : service === 'wifi' ? wifiLink.answer(query, payload)
-      : service === 'gateway' && gatewayLink ? gatewayLink.answer(query, payload) : answerAgentQuery(coreApi, query)),
+      : service === 'handoff' ? answerConversationQuery(coreApi, query, payload)
+      : service === 'shell' ? answerShellQuery(coreApi, query, payload)
+      : service === 'recaps' ? recapsLink.answer(query, payload) : answerAgentQuery(coreApi, query)),
     // The gateway's own traffic: its remote clients and what they sent, and its comings and goings; and what
-    // the devices tell the core (a turn, a frame for the windows, a dial on the wire).
-    notice: (service, payload) => { if (service === 'gateway') gatewayLink?.notice(payload); else if (service === 'devices') devicesLink.notice(payload); else if (service === 'wifi') wifiLink.notice(payload) },
+    // the devices tell the core (a turn, a frame for the windows, a dial on the wire); a viewer stream's answers.
+    notice: (service, payload) => { if (service === 'gateway') gatewayLink?.notice(payload); else if (service === 'devices') devicesLink.notice(payload); else if (service === 'wifi') wifiLink.notice(payload); else if (service === 'viewers') viewersLink.notice(payload); else if (service === 'recaps') recapsLink.notice(payload) },
     binary: (service, bytes) => { if (service === 'gateway') gatewayLink?.binary(bytes) },
     connected: (service) => {
+      engineReaders.connected(service)
+      liveTransport.connected(service)
+      runtimeTransport.connected(service)
+      screenTransport.connected(service)
+      modelControls.connected(service)
       if (service === 'gateway') gatewayLink?.connected()
       if (service === 'teams') teamsLink.on()
       if (service === 'devices') devicesLink.connected()
       if (service === 'wifi') wifiCore.started(appVoiceFocus ?? null)
+      devicesWake.connected(service)
     },
     disconnected: (service) => {
+      engineReaders.disconnected(service)
+      liveTransport.disconnected(service)
+      runtimeTransport.disconnected(service)
+      screenTransport.disconnected(service)
+      modelControls.disconnected(service)
       if (service === 'gateway') gatewayLink?.disconnected()
       if (service === 'devices') devicesLink.disconnected()
       if (service === 'wifi') wifiCore.stopped()
+      if (service === 'recaps') recapsLink.disconnected()
       void terminalWatch.gone(service)
     },
   })
@@ -1270,9 +1296,15 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   if (outOfProcess.has('monitor')) ports.monitor = createMonitorLink((type, payload) => serviceLinks.call('monitor', type, payload))
   else serviceHost.start('monitor', inline!.startMonitor, coreApi, MONITOR_FALLBACKS, MONITOR_REQUESTS)
   // An agent's branch and pull request, a project's repository and preview, a folder's subfolders and a
-  // media file from an agent's project (services/projects.ts): in this process, or in the edge host.
+  // media file from an agent's project (services/projects.ts), and a window's name (services/windowNames.ts):
+  // in this process, or in the edge host.
   if (!outOfProcess.has('projects')) serviceHost.serve('projects', inline!.startProjects, coreApi, PROJECTS_REQUESTS)
-  serviceHost.serve('shell', startShell, coreApi, SHELL_REQUESTS)
+  if (!outOfProcess.has('windowNames')) serviceHost.serve('windowNames', inline!.startWindowNames, coreApi, WINDOW_NAMES_REQUESTS)
+  if (!outOfProcess.has('commandBar')) serviceHost.serve('commandBar', inline!.startCommandBar, coreApi, COMMAND_BAR_REQUESTS)
+  if (!outOfProcess.has('handoff')) serviceHost.serve('handoff', inline!.startHandoff, coreApi, HANDOFF_REQUESTS)
+  // The recaps: in this process, or in the edge host (services/recapsProcess.ts), told each turn's lifecycle.
+  if (outOfProcess.has('recaps')) ports.recaps = recapsLink.port; else serviceHost.start('recaps', inline!.startRecaps, coreApi, RECAPS_FALLBACKS)
+  if (!outOfProcess.has('shell')) serviceHost.serve('shell', inline!.startShell, coreApi, SHELL_REQUESTS)
   // Models: grid access and its pin, the model pictures on agents' frames, the keystroke prewarm, where an
   // agent on a grid model sends its inference, and the models requests the apps send (services/models.ts):
   // in this process, or in its own (services/modelsProcess.ts), reached through core/modelsLink.ts.
@@ -1282,6 +1314,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   backend.models = () => ports.models ?? MODELS_OFF
 
   const runtimeController = new RuntimeProfileController({
+    modelControlFor: modelControls.forSession,
+    readScreen: screens.read,
     manager: runtimeProfiles,
     getSession: (id) => registry.resolve(id),
     validateRuntime: validateTerminal,
@@ -1460,157 +1494,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     },
   })
 
-  /** Proxy a control-plane call to backend using THIS daemon's own SSO session — the local caller
-   *  (e.g. the desktop app) never needs a bearer token of its own, loopback trust does the
-   *  authenticating. Forwards backend's response status/body verbatim, success or error alike, so a
-   *  local client's model layer needs zero special-casing versus talking to backend directly. */
-  //
-  //  A backend that cannot be reached, or does not answer in time, is reported in the SAME shape
-  //  (`{success:false, error:{code,message}}`, 502/504) rather than thrown: the hook server runs each
-  //  request as a void-discarded async, so a throw here was an unhandledRejection and a local request
-  //  that NEVER got a response — the desktop app then sat on its 30s receive timeout and printed a
-  //  DioException where "the backend is down" belonged. Same for a backend that accepts the request
-  //  and hangs (a Redis presence lookup, say): `fetch` waits forever by default, and the app's
-  //  timeout fired first. The bound is shorter than that timeout on purpose, so the daemon is the one
-  //  that answers, with a sentence.
-  async function proxyBackend(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
-    const failure = (status: number, code: string, message: string): { status: number; body: Record<string, unknown> } =>
-      ({ status, body: { success: false, error: { code, message } } })
-    let accessToken: string
-    try {
-      accessToken = await auth.accessToken()
-    } catch (err) {
-      // No session, or one the SSO service will never renew, is the caller's 401 — the answer the
-      // backend itself would give — not a backend fault; a refresh the service could not serve right
-      // now is. Telling them apart is what lets a local client say "sign in again" only when true.
-      const signedOut = err instanceof AuthSessionError && err.code !== 'UNAVAILABLE'
-      return failure(signedOut ? 401 : 502, signedOut ? 'NOT_SIGNED_IN' : 'AUTH_UNAVAILABLE', err instanceof Error ? err.message : String(err))
-    }
-    const latest = readAuthSession()
-    let res: Response
-    try {
-      res = await fetch(`${backendHttpBase()}${path}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${accessToken}`,
-          'x-autonomous-env': latest?.autonomousEnv ?? env.AUTONOMOUS_ENV,
-          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-        },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-        signal: AbortSignal.timeout(PROXY_BACKEND_TIMEOUT_MS),
-      })
-    } catch (err) {
-      const e = err as Error & { cause?: { message?: string } }
-      if (e.name === 'TimeoutError' || e.name === 'AbortError') {
-        return failure(504, 'BACKEND_TIMEOUT', `The Harness backend did not answer ${method} ${path} within ${PROXY_BACKEND_TIMEOUT_MS / 1000}s. Try again in a moment.`)
-      }
-      // undici wraps the socket error as `TypeError: fetch failed` with the real one in `cause`.
-      const why = e.cause?.message ?? e.message
-      return failure(502, 'BACKEND_UNREACHABLE', `Could not reach the Harness backend (${why}). Check the connection and try again.`)
-    }
-    const json = await res.json().catch(() => ({})) as Record<string, unknown>
-    const result = { status: res.status, body: json }
-    return result
+  // Account HTTP and the persistent machine cache belong to the gateway. The core routes the request
+  // and keeps only state reported by that service, so a backend outage cannot stall an agent's loop.
+  function proxyBackend(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+    return gatewayOps.backend(method, path, body)
   }
-
-  /**
-   * The machine list a signed-out daemon answers with: this computer, alone.
-   *
-   * Null when there is a session — then the backend's own list is the answer, and this must not shadow
-   * it. `authMode: 'remote'` is what a computer-backed machine is once it has an account, said now so
-   * nothing downstream has to special-case a guest row.
-   */
-  function guestMachinesBody(): Record<string, unknown> | null {
-    if (readAuthSession()) return null
-    const id = computerId()
-    return {
-      success: true,
-      data: {
-        machines: [{
-          machineId: id,
-          computerId: id,
-          name: terminalHintMachineName(),
-          hostname: hostname(),
-          status: 'online',
-          authMode: 'remote',
-        }],
-        stale: false,
-        guest: true,
-      },
-    }
-  }
-
-  const machineListCache = new MachineListCache(
-    () => proxyBackend('GET', '/api/machines'),
-    computerId,
-    (line) => console.log(`[cable] ${line}`),
-    undefined,
-    // A machine row is per (user, computer): the one local fact that distinguishes two ACCOUNTS here.
-    // Read fresh each time — a re-login swaps it under a daemon that never restarted.
-    () => readAuthSession()?.machineId ?? null,
-  )
-  // Which of the owner's other computers have been reading offline — a label on the models only they
-  // serve on a sleeping grid, never a removal (grid-reads-without-waking issue 03).
-  machineListCache.listen((body) => ports.models?.machines(body, computerId()))
-  // The trust group swaps rosters only with the members the backend last said were online (gateway/start.ts).
-  machineListCache.listen(() => {
-    const { machines, source } = machineListCache.list()
-    gatewayOps.reachable(source !== 'backend' ? null : machines.filter((m) => m.state !== 'offline').map((m) => m.machineId))
-  })
-
-  /**
-   * The owner's machines as the devices read them (`CoreApi.account.machines`): this computer alone when
-   * signed out, else the backend's answer now. The core's own list takes it first, as its own refresh would,
-   * so the windows' fallback and the trust group stay as fresh as the dial's wheel.
-   */
-  async function machinesNow(): Promise<{ status: number; body: Record<string, unknown> }> {
-    const guest = guestMachinesBody()
-    if (guest) {
-      machineListCache.adopt(guest)
-      return { status: 200, body: guest }
-    }
-    return (await machineListCache.refresh()) ?? { status: 502, body: { error: { code: 'BACKEND_UNREACHABLE' } } }
-  }
-
-  /**
-   * `GET /api/machines` for local clients, answered from the last known-good list when the backend leg
-   * is down.
-   *
-   * The daemon already keeps that list: it re-reads it every 60s for the dial's wheel and persists it to
-   * `machines.json`, with the explicit policy that an outage keeps the rows and stops claiming they are
-   * live. The desktop app was the one consumer that got none of that — a bare pass-through handed it the
-   * 502 and it had nothing to draw, so a ten-second network blip emptied the machine list and left every
-   * pane spinning. Stale rows are not wrong rows; the marker below says which they are.
-   */
-  async function machinesListWithFallback(): Promise<{ status: number; body: Record<string, unknown> }> {
-    // ⚠️ SIGNED OUT, THE LIST IS THIS COMPUTER — never the backend's 401.
-    //
-    // 401 is the one status the desktop app reads as "the session ended": it tears its connections
-    // down and puts a sign-in wall in front of agents that were running fine a moment ago. Nothing
-    // here needs the backend to say what this computer is. The row is the shape the backend would
-    // send, keyed by the durable computer id this daemon is already serving under, so the app
-    // classifies it exactly as it will after a sign-in — local by computerId — with no guest-only
-    // branch for anyone to forget.
-    const guest = guestMachinesBody()
-    if (guest) {
-      // Into the same cache the dial's wheel reads, so the two surfaces cannot disagree about a
-      // machine list one of them was handed directly.
-      machineListCache.adopt(guest)
-      return { status: 200, body: guest }
-    }
-    const res = await proxyBackend('GET', '/api/machines')
-    if (res.status === 200) {
-      // Feed the cache the answer we already have rather than making it fetch the same thing again.
-      machineListCache.adopt(res.body)
-      return res
-    }
-    // A real end of session is the caller's answer, not an outage: never serve a list from behind it.
-    if (res.status === 401 || res.status === 403) return res
-    const cached = machineListCache.lastResponse()
-    if (!cached) return res
-    return { status: 200, body: withStaleMarker(cached.body, cached.fetchedAt) }
-  }
-
 
   // The daemon's status (GET /api/status, read by `harness status`, the desktop's discovery and scripts):
   // health, the computer's fingerprint and its local pairings. It deliberately does NOT expose chat or
@@ -1657,8 +1545,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       restarting: updateHandoff.restarting(),
       discoveryReady,
       discoveryError: discoveryError ?? (tmuxUnavailable ? `tmux unavailable: ${tmuxUnavailable}` : null),
-      // Present only when start-up failed and this daemon is holding the machine open for its
-      // updater. Clients key on `discoveryReady`; this says WHY, in one word, for a person reading it.
+      // Present only when start-up failed and this daemon is holding the machine open until a fix
+      // arrives. Clients key on `discoveryReady`; this says WHY, in one word, for a person reading it.
       ...(daemonBoot.safeMode ? { safeMode: true } : {}),
       // Agents whose history is being read right now, and how many wait their turn. Normally empty or
       // gone in a second; one that stays here names the store that is slow, which no other field does.
@@ -1708,7 +1596,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // Which agent a hook belongs to, and what a SessionEnd means (core/engines/hooks.ts).
   const engineHooks = createEngineHooks({ tmuxBackend, agentReconciler, registry })
   const { server: hookServer, port: hookPort, localSocket } = await startHookServer(daemonPort(), {
-    onCommandBar: commandBarService,
+    onCommandBar: routedCommandBar(backend),
     onAutonomousDeviceRequest: async (method, target, body) => {
       // Until the pieces below are built; after, a piece that could not be is refused by the requests
       // that need it, and the rest (list, status, revoke) answer from the pairings.
@@ -1721,8 +1609,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         return answer.result
       }
       return autonomousDeviceLocalRequest({
-        discover: () => viaGateway({ op: 'discover' }),
-        pairStart: ({ code, device }) => viaGateway({ op: 'pair', code, device }),
+        discover: async () => { await wifiCore.serving(WIFI_START_MS); return viaGateway({ op: 'discover' }) },
+        pairStart: async ({ code, device }) => { await wifiCore.serving(WIFI_START_MS); return viaGateway({ op: 'pair', code, device }) },
         pairStatus: () => viaGateway({ op: 'pairStatus' }),
         list: () => viaGateway({ op: 'list' }),
         status: async () => ({ transport: 'direct', connected: wifiCore.directSessions() > 0,
@@ -1743,6 +1631,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onTurnStart: turnHooks.onTurnStart,
     onToolStart: turnHooks.onToolStart,
     onTurnStop: turnHooks.onTurnStop,
+    onPromptHook: turnHooks.onPromptHook,
+    stopHookDelayMs: Number(process.env.HARNESSD_TEST_STOP_HOOK_DELAY_MS) || 0,
     // `harness pair`, `unpair`, `remote-password`, `link connect`, `group` and `devices`: the keys are the
     // gateway's, and so are these answers (gateway/start.ts).
     onPair: (code) => gatewayOps.pair(code),
@@ -1762,7 +1652,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onDevicesDismiss: (body) => gatewayOps.devicesDismiss(body),
     onDevicesRebaseline: (confirm, head) => gatewayOps.devicesRebaseline(confirm, head),
     onStatus: async () => statusBody(await gatewayOps.status()),
-    onMachinesList: () => machinesListWithFallback(),
+    onMachinesList: () => gatewayOps.machines(true),
     onMachineRename: (machineId, name) => proxyBackend('PATCH', `/api/machines/${encodeURIComponent(machineId)}`, { name }),
     onMachineDelete: (machineId) => proxyBackend('DELETE', `/api/machines/${encodeURIComponent(machineId)}`),
     onAuthMe: () => proxyBackend('GET', '/api/auth/me'),
@@ -1800,6 +1690,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // The experiments with saved state are on: their processes are asked for now, the master heeding a
     // bound core alone (core/experiments.ts). The others wait for their first request.
     wakeExperiments({ dataDir: env.ADAPTER_DATA_DIR, experiments: EXPERIMENTS, outOfProcess, want: (service) => experimentHooks.want(service) })
+    devicesWake.start(outOfProcess)
+    wakeModels({ outOfProcess, dataDir: env.ADAPTER_DATA_DIR, runtimeDir: env.ADAPTER_RUNTIME_DIR, want: (service) => coreLink.want(service) })
   } else {
     try { writeFileSync(PID_FILE, String(process.pid) + '\n') } catch { /* best effort */ }
   }
@@ -1923,6 +1815,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
 
   // Each transcript line, through its engine's normalizer, into the funnel (core/transcripts/ingest.ts).
   const ingest = createIngest({
+    liveFor,
     has: (sessionId) => registry.has(sessionId),
     bySession: (sessionId) => registry.bySession(sessionId),
     tokenUsage: agentTokenUsage,
@@ -1968,7 +1861,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     machine: gridLaunchMachine,
     writeGridConfigDir,
     tmuxSupportsSessionEnv,
-    installCodexHooks: (codexHome) => { if (!env.DISABLE_HOOK_INSTALL) installCodexHooks(hookPort, codexHome) },
+    installCodexHooks: (codexHome) => { if (!env.DISABLE_HOOK_INSTALL) engineHookFacets.codex.installIn(hookPort, codexHome) },
     dshLaunch: (id, workspace, engine, runtimeKey) => {
       const installed = installedDsh(id)
       if (!installed) {
@@ -2003,6 +1896,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   } catch (error) {
     console.warn(`[repair] cwd repair skipped · ${error instanceof Error ? error.message : error}`)
   }
+  // Bundled harness installation is the Store's. Wait for its first preparation before restore reads
+  // the index, with a deadline so a broken Store never prevents ordinary agents from coming back.
+  if (outOfProcess.has('store') && !await storeLink.ready()) console.warn('[store] preparation unavailable · restoring with the installed harnesses')
   watcher.start()
   await cursorDiscovery.start()
   // What a restored agent's engine writes from here on is live: the first attach of each folds its
@@ -2139,7 +2035,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         await watcher.pollAll()
         await Promise.all(registry.advertised().map(async (session) => {
           const capture = await captureTerminal(session.agentId, 120)
-          if (capture) runtimeProfiles.ingestPane(session, capture, true)
+          if (capture) await runtimeProfiles.ingestPane(session, capture, true)
         }))
       })
       await syncTerminalTitles()
@@ -2186,7 +2082,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     for (const session of registry.list()) {
       if (!PANE_POLLED_ENGINES.has(session.engine)) continue
       void captureTerminal(session.agentId, 60)
-        .then((capture) => { if (capture) runtimeProfiles.ingestPane(session, capture) })
+        .then((capture) => capture ? runtimeProfiles.ingestPane(session, capture) : undefined)
         .catch(() => undefined)
     }
   }, PANE_POLL_MS)
@@ -2315,6 +2211,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
 
   // Moving a running agent onto a grid, or back to its own login (core/agents/retarget.ts).
   backend.onRetargetAgent = createAgentRetargeter({
+    readScreen: screens.read,
     purgeBusy: (agentId) => backend.purgeAgentService?.busy(agentId),
     tmuxBackend,
     registry,
@@ -2365,6 +2262,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   backend.purgeProvider = createPurgeRequest({ purgeAgentService: () => lifecycle.purgeAgentService, invalidateStorage: () => { void (ports.monitor ?? MONITOR_OFF).storage([], true) } })
   // Closing agents no window shows, and the cleanup preview (core/agents/close.ts).
   const closing = createAgentClosing({
+    readScreen: screens.read,
     registry,
     cleanupTabs,
     watcher,
@@ -2441,18 +2339,18 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     console.log(`[cli] not signed in — serving this computer only · watching registered sessions for ${ENGINES.length} engines`)
   }
 
-  // ── self-update: a staged bundle restarts the daemon IMMEDIATELY (core/updateHandoff.ts, and
-  // handOffToMaster for a core run on its own). The handler stops being `bootHandoff` HERE, and not a
-  // line earlier: everything the teardown releases exists by now. A straight-line assignment, never a
-  // wait: if the body never reaches this line the handler stays `bootHandoff`, and the fix still lands.
-  daemonBoot.applyStagedUpdate = (v) => updateHandoff.restartForUpdate(v, [
-    ['the registry', () => registry.flush()], ['the updaters', () => { daemonBoot.updater?.stop(); daemonBoot.tuiUpdater?.stop() }],
+  // ── self-update: a staged bundle restarts the daemon IMMEDIATELY (core/updateHandoff.ts). The handler
+  // stops being `bootHandoff` HERE, and not a line earlier: everything the teardown releases exists by now.
+  // A straight-line assignment, never a wait: if the body never reaches this line the handler stays
+  // `bootHandoff`, and the fix still lands.
+  const updateTeardown = (): TeardownStep[] => [
+    ['the registry', () => registry.flush()], ['the updater', () => daemonBoot.updaterBeside?.()],
     ['the reconciler', () => agentReconciler.stop()],
     ['the timers', () => { clearInterval(logTrimTimer); clearInterval(runtimeReconcileTimer); clearInterval(paneTitleSyncTimer) }],
     ['the question watchers', () => questionWatcher.stopAll()],
     ['the turn heartbeats', () => { for (const t of heartbeats.values()) clearInterval(t); heartbeats.clear() }],
     ['the Cursor sub-agents', () => cursorSubagents.stop()], ['the normalizers', () => normalizers.stopPollers()],
-    ['Cursor discovery', () => cursorDiscovery.stop()], ['the transcript watcher', () => watcher.stop()],
+    ['Cursor discovery', () => cursorDiscovery.stop()], ['the runtime profiles', () => runtimeProfiles.stop()], ['the transcript watcher', () => watcher.stop()],
     // The FIXED hook port, released before the successor binds it (no fallback → EADDRINUSE otherwise).
     // Process-owned agents stay in the persisted registry and are revalidated by its first discovery passes.
     ['the hook connections', () => (hookServer as unknown as { closeAllConnections?: () => void }).closeAllConnections?.()],
@@ -2466,7 +2364,15 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     ['the viewers', () => ports.viewers?.stop()], ['the gateway', () => gateway.stop()],
     // A graceful close releases the backend's one-machine claim, given a moment before the reclaim.
     ['the backend', () => backend.stop()], ['a grace', () => new Promise((r) => setTimeout(r, 1000))],
-  ])
+  ]
+  daemonBoot.applyStagedUpdate = (v) => updateHandoff.restartForUpdate(v, updateTeardown())
+  // A core an older release's own handoff started (it spawned this `cli.js __run` and judged it) has no
+  // master, and so no updater: it would run this build until its next start. Once that release has gone,
+  // it hands the machine to a master on this build (core/updateHandoff.ts). Not a core HARNESS_NO_MASTER=1
+  // asked for, and not a dev or repo run.
+  if (!coreLink.supervised && process.env.ADAPTER_UPDATED_TO && process.env.HARNESS_NO_MASTER !== '1' && isInstalledCopy(SCRIPT_PATH, env.ADAPTER_CLI_DIR)) {
+    handOverOnceReleased({ startedBy: process.ppid, parent: () => process.ppid, alive: isAlive, handOver: () => { void updateHandoff.handOver(updateTeardown()) } })
+  }
 
   /** Stopping for good — removed from the account, or connected from elsewhere: tell harnessd's master,
    *  which restarts any other exit (harnessd/protocol.ts). */
@@ -2482,8 +2388,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // Release the serial port first. It is exclusive, and a daemon that exits still holding it makes
     // esptool fail in a way that reads exactly like dead hardware.
     void ports.devices?.stop()
-    daemonBoot.updater?.stop()
-    daemonBoot.tuiUpdater?.stop()
+    daemonBoot.updaterBeside?.()
     agentReconciler.stop()
     clearInterval(logTrimTimer)
     clearInterval(runtimeReconcileTimer)
@@ -2495,6 +2400,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     normalizers.stopPollers()
     await cursorDiscovery.stop()
     await watcher.stop()
+    runtimeProfiles.stop()
     await ports.sharing?.stop()
     // The data folder's socket first: a successor waiting for this core to leave (lib/localSocket.ts) can
     // start as soon as it is gone, whatever the clients below take to close.
@@ -2596,14 +2502,14 @@ async function runForeground(session: AuthSession | null): Promise<void> {
 }
 
 /**
- * The daemon's start-up threw. STAY UP anyway, running nothing but the updater.
+ * The daemon's start-up threw. STAY UP anyway, waiting for a fix.
  *
- * Exiting here is what made one bad build unrecoverable: nothing supervises this process, the desktop
- * app answers a dead port by running `harness start` again — the same bytes, about once a minute, for
- * ever — and the updater that could have fixed it lives most of the way down a body that never
- * finished. The updater is started in the prologue now (see `runForeground`), so by the time this
- * runs it is already polling; all this has to do is keep the process alive long enough for a
- * published fix to land, and tell everyone what state the machine is in.
+ * Exiting here is what made one bad build unrecoverable: the desktop app answers a dead port by running
+ * `harness start` again — the same bytes, about once a minute, for ever. The updater is the master's, in a
+ * process of its own (services/updaterProcess.ts), and the request to hand over for its fix is listened for
+ * in the prologue (see `runForeground`); all this has to do is keep the process alive long enough for a
+ * published fix to land, and tell everyone what state the machine is in. A core with no master gets no fix
+ * here: its safe mode runs out (`ADAPTER_SAFE_MODE_MS`) and a clean start tries again.
  *
  * Three ways it earns its keep, in order: the bound control port answers `discoveryReady: false`, so
  * the app reads the machine as not-ready instead of dead and STOPS respawning; the pid file stays
@@ -2621,8 +2527,8 @@ const enterSafeMode = (err: unknown): void => {
   }
   const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
   console.error('Failed to start adapter:', err)
-  console.error(`[safe-mode] staying up on v${VERSION} with the updater only — a published fix will be`
-    + ' applied on its own. Nothing else on this machine works until then.')
+  console.error(`[safe-mode] staying up on v${VERSION} — a published fix will be applied on its own.`
+    + ' Nothing else on this machine works until then.')
   writeSafeModeMarker(env.ADAPTER_DATA_DIR, { pid: process.pid, version: VERSION, at: Date.now(), error: detail })
   daemonBoot.safeMode = disposition.reason
   daemonBoot.markNotReady?.(disposition.reason)
@@ -2637,8 +2543,8 @@ const enterSafeMode = (err: unknown): void => {
   }
   process.on('SIGINT', () => leave('SIGINT — leaving safe mode', 0))
   process.on('SIGTERM', () => leave('SIGTERM — leaving safe mode', 0))
-  // Up, though not ready: the master must neither give up waiting for a bind nor take it for hung,
-  // or the updater that can fix this build would never get its chance. It hears why, and rolls back an
+  // Up, though not ready: the master must neither give up waiting for a bind nor take it for hung, or the
+  // fix its updater stages would find no core to hand over. It hears why, and rolls back an
   // update whose first core ends up here.
   coreLink.bound(daemonPort())
   coreLink.ready(disposition.reason)
@@ -2662,7 +2568,7 @@ const enterSafeMode = (err: unknown): void => {
     })
     status.on('error', (e) => {
       console.error(`[safe-mode] could not serve status on ${port}: ${e instanceof Error ? e.message : e}`)
-      // A ref'd timer, unlike the updater's: something has to hold the event loop open.
+      // A ref'd timer: something has to hold the event loop open.
       setInterval(() => console.log(`[safe-mode] still waiting for a fixed build · v${VERSION}`), 10 * 60_000)
     })
     status.listen(port, '127.0.0.1')

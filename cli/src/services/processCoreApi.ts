@@ -13,7 +13,7 @@
  * each asked of the core over its link (`ask`). The agents it reads come as the apps are shown them (`service_query shown`): each with its
  * name, whether its terminal is there and its harness's viewer.
  */
-import { DAEMON_UNKNOWN, DELIVERIES_OFF, LANE_OFF, OBSERVER_KEY_OFF, resolveAgent, TERMINALS_OFF, WIFI_OFF, type CoreApi, type DaemonAddress, type TerminalWatch } from '../core/api.js'
+import { CONVERSATIONS_OFF, DAEMON_UNKNOWN, DELIVERIES_OFF, LANE_OFF, OBSERVER_KEY_OFF, resolveAgent, TERMINALS_OFF, WIFI_OFF, type CoreApi, type DaemonAddress, type TerminalWatch } from '../core/api.js'
 import type { AgentDshContext } from '../lib/agentFrame.js'
 import type { RegisteredSession } from '../lib/registry.js'
 import type { turnsLink } from './turnsLink.js'
@@ -70,14 +70,17 @@ export const UNASKED = {
   machine: { id: () => '', computerId: () => '', name: () => '' },
   activityText: async (): Promise<string | null> => null,
   account: { signedIn: () => false, environment: () => '', machines: async () => ({ status: 503, body: {} }) },
-  clients: { sendLocal: () => {}, sendToWindow: () => false, hasWindow: () => false, devicesChanged: () => {}, dialWatching: () => {} },
+  clients: { sendLocal: () => {}, sendToWindow: () => false, hasWindow: () => false, devicesChanged: () => {}, dialWatching: () => {}, turnCard: () => {}, turnSummary: () => {} },
   wifi: WIFI_OFF,
+  /** What only the recaps ask (services/recapsProcess.ts): a turn's final answer. */
+  lastTurn: async () => null,
 } satisfies {
   machine: CoreApi['machine']
   activityText: CoreApi['agents']['activityText']
   account: Pick<CoreApi['account'], 'signedIn' | 'environment' | 'machines'>
-  clients: Pick<CoreApi['clients'], 'sendLocal' | 'sendToWindow' | 'hasWindow' | 'devicesChanged' | 'dialWatching'>
+  clients: Pick<CoreApi['clients'], 'sendLocal' | 'sendToWindow' | 'hasWindow' | 'devicesChanged' | 'dialWatching' | 'turnCard' | 'turnSummary'>
   wifi: CoreApi['wifi']
+  lastTurn: CoreApi['transcripts']['lastTurn']
 }
 
 export function processCoreApi(dataDir: string, service: string, view: AgentsView = {}): CoreApi {
@@ -86,9 +89,10 @@ export function processCoreApi(dataDir: string, service: string, view: AgentsVie
   const daemon = (): DaemonAddress => view.daemon?.() ?? DAEMON_UNKNOWN
   return {
     dataDir,
+    conversations: CONVERSATIONS_OFF,
     // Terminals are launched by the core alone (the shell service, #893): a service in its own process
     // is refused, never handed a way to start a process outside the core.
-    terminals: { open: TERMINALS_OFF.open, watch: view.watch ?? TERMINALS_OFF.watch },
+    terminals: { ...TERMINALS_OFF, watch: view.watch ?? TERMINALS_OFF.watch },
     machine: UNASKED.machine,
     agents: {
       // The stopped agents are never sent to these services: none of them reads one.
@@ -121,7 +125,7 @@ export function processCoreApi(dataDir: string, service: string, view: AgentsVie
       ...(view.deliveries?.turns ?? DELIVERIES_OFF),
     },
     questions: { answer: () => {}, answerReviewed: async () => false },
-    transcripts: { databaseHistory: () => undefined },
+    transcripts: { databaseHistory: () => undefined, lastTurn: UNASKED.lastTurn },
     external: {
       sessions: { list: () => [], scan: async () => [] },
       open: { known: () => new Map(), fresh: async () => new Map() },
@@ -148,7 +152,7 @@ export function processCoreApi(dataDir: string, service: string, view: AgentsVie
       ...UNASKED.account,
     },
     clients: {
-      viewerChanged: () => {}, gridNamed: () => {}, gridModelsChanged: () => {}, dshInstallStatus: () => {},
+      viewerChanged: () => {}, viewerFrame: () => false, gridNamed: () => {}, gridModelsChanged: () => {}, dshInstallStatus: () => {},
       windows: (frame) => { void ask?.('windows', { frame }).catch(() => {}) },
       // Handed to the core in order; whether the relay took it is the core's to know, and a lost observer's
       // close follows.

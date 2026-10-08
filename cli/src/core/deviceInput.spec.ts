@@ -1,3 +1,4 @@
+import { readInlineScreen } from '../testing/inlineScreen.js'
 import { CodexNormalizer } from '../engines/codex/normalizer.js'
 import { lineToEvents, newTurnState, type LiveEvent } from '../lib/normalize.js'
 import { randomUUID } from 'node:crypto'
@@ -29,7 +30,7 @@ function fixture(engine: 'claude' | 'codex' | 'commandcode' = 'codex') {
     submit: (id, text, delivery) => controller.submit(id, text, delivery), cancelDelivery: id => controller.cancelDelivery(id),
     stop: async () => true, answer: async () => true, recent: () => [], emit: frame => events.push(frame),
   })
-  const legacy: SessionInputController = new SessionInputController({
+  const legacy: SessionInputController = new SessionInputController({ readScreen: readInlineScreen,
     getSession: () => available ? session : undefined, validateRuntime: async () => available,
     inject: (id, text) => controller.legacyWrite(id, () => inject(id, text)),
     sendKey: (id, key) => controller.legacyWrite(id, () => sendKey(id, key)), capture, onError: vi.fn(),
@@ -409,13 +410,17 @@ it('says why a write the pane refused was not typed, when a dialog opened after 
   device.forget('agent')
 })
 
+// "Later" on a fake clock: past every retry the device could schedule (VERIFY_MS, 1.5 s) several times over,
+// at no cost in real time. It waited 2 s of real time, which with the wait before it took the case past
+// vitest's 5 s in a full run under load.
 it('refuses with the reason a message typed but not sent, its Enter withheld as a dialog opened, and presses no Enter later', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
   const onDelivery = vi.fn(), sendKey = vi.fn(async () => true)
   const device = makeDevice({ inject: async () => ({ state: 'unknown', dispatch: 'possibly_executed', reason: 'enter_withheld:question_open' }),
     isAwaitingUser: async () => false, onDelivery, sendKey, capture: async () => '› A' })
   device.submit('agent', 'A', 'delivery-A')
   await vi.waitFor(() => expect(onDelivery).toHaveBeenCalledWith(expect.objectContaining({ deliveryId: 'delivery-A', state: 'rejected', reason: 'enter_withheld' })))
-  await new Promise((resolve) => setTimeout(resolve, 2_000))
+  await vi.advanceTimersByTimeAsync(10_000)
   expect(sendKey).not.toHaveBeenCalled()
   device.forget('agent')
 })

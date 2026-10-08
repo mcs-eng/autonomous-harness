@@ -19,6 +19,7 @@ import '../shared/theme/appearance_prefs_store.dart';
 // `hide TerminalKey`: this file's own shortcut-label class, unused here, collides with xterm's
 // `TerminalKey` (needed for the local image-drop Ctrl+V nudge — see `_dropImage`).
 import '../shortcuts/app_shortcuts.dart' hide TerminalKey;
+import '../state/account_devices.dart' show registerRefusalSentence;
 import '../state/app_state.dart';
 import '../state/pane_preset.dart';
 import '../state/pane_arrangement.dart';
@@ -1579,14 +1580,21 @@ class _PaneContent extends StatelessWidget {
               : 'Waiting for this machine. Retained output is read only.',
         );
       } else if (needsLink) {
-        // A frozen device list may be why it asks: the band says so, beside
-        // the password.
-        final review = notifier.deviceListNeedsReview;
+        // A frozen device list — or an account with no room for this device —
+        // may be why it asks: the band says so, beside the password.
+        final review =
+            notifier.deviceListNeedsReview || notifier.deviceListTooMany;
         notice = terminalNotice(
           label: 'Link required',
           icon: AppIcons.unlink,
           detail: review
-              ? '${machine.machine.displayName} needs linking. Your device list needs a review.'
+              ? [
+                  '${machine.machine.displayName} needs linking.',
+                  if (notifier.deviceListNeedsReview)
+                    'Your device list needs a review.',
+                  if (notifier.deviceListTooMany)
+                    registerRefusalSentence('TOO_MANY'),
+                ].join(' ')
               : '${machine.machine.displayName} needs linking. Retained output is read only.',
           // A tile still showing its last screen gets the same way out as an
           // empty one — the band's button asks for the remote password.
@@ -1608,6 +1616,19 @@ class _PaneContent extends StatelessWidget {
           icon: AppIcons.cloudOff,
           detail:
               '${machine.machine.displayName} is offline. Retained output is read only.',
+        );
+      } else if (agent?.isStopped == true) {
+        final opening = notifier.pendingAgentRestart(
+          pane.machineId,
+          wantedAgentId!,
+        );
+        notice = terminalNotice(
+          label: opening?.busy == true ? 'Opening' : 'Stopped',
+          icon: AppIcons.terminal,
+          detail: opening?.result?.error ?? 'Open to continue your saved conversation. Retained output is read only.',
+          actionLabel: opening?.busy == true ? null : 'Open',
+          onAction: () => notifier.openSavedPane(pane.id).ignore(),
+          banner: true,
         );
       } else if (agent == null || !agent.terminalAvailable) {
         notice = terminalNotice(
@@ -1811,6 +1832,24 @@ class _PaneContent extends StatelessWidget {
         icon: AppIcons.circleHelp,
         message: 'This harness is no longer on ${machine.machine.displayName}.',
         onClose: close,
+      );
+    }
+    if (agent?.isStopped == true) {
+      final opening = notifier.pendingAgentRestart(
+        pane.machineId,
+        wantedAgentId,
+      );
+      return _PaneStatus(
+        activity: activityMark,
+        title: agentName,
+        icon: AppIcons.terminal,
+        message: opening?.busy == true
+            ? 'Opening saved conversation…'
+            : opening?.result?.error ?? 'This harness is stopped. Open it to continue your saved conversation.',
+        onClose: close,
+        busy: opening?.busy == true,
+        actionLabel: opening?.busy == true ? null : 'Open',
+        onAction: () => notifier.openSavedPane(pane.id).ignore(),
       );
     }
     if (agent != null && !agent.terminalAvailable) {

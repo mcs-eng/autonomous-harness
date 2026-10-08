@@ -103,7 +103,7 @@ class SessionVM(VM):
         self.monitor('input-send-event', events=events)
         time.sleep(.12)
 
-    def frame(self, name, text, seconds=60, absent=()):
+    def frame(self, name, text, seconds=60, absent=(), fatal=()):
         from PIL import Image, ImageOps
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
@@ -118,7 +118,17 @@ class SessionVM(VM):
                 ImageOps.expand(readable, border=24, fill=255).save(ocr_frame)
             output = subprocess.check_output(['tesseract', str(ocr_frame), 'stdout', '--psm', '11'],
                                              text=True, stderr=subprocess.DEVNULL, timeout=15)
+            if not frame_contains(output, text, absent):
+                # Sparse-text segmentation can omit a reverse-video button on
+                # the Linux console. Also read the same real frame as a block;
+                # retain both readings, including all forbidden-text checks.
+                output += '\n' + subprocess.check_output(
+                    ['tesseract', str(ocr_frame), 'stdout', '--psm', '6'],
+                    text=True, stderr=subprocess.DEVNULL, timeout=15)
             (self.folder / (name + '.txt')).write_text(output)
+            for error in fatal:
+                if frame_contains(output, error):
+                    raise RuntimeError('Visible failure screen: ' + error)
             if frame_contains(output, text, absent):
                 return
             time.sleep(1)
@@ -141,7 +151,7 @@ class SessionVM(VM):
         self.frame(name, marker)
         self.keys('ctrl', 'd')
 
-    def poweroff(self, timeout=60):
+    def poweroff(self, timeout=60, *, request=True):
         started = time.monotonic()
         report = {'status': 'waiting', 'events': []}
         streams = {self.serial: 'serial', self.qmp: 'qmp'}
@@ -149,7 +159,8 @@ class SessionVM(VM):
         try:
             # The test console may terminate before printing a command result.
             # Require the guest's actual shutdown event and clean QEMU exit.
-            self.send('sync; systemctl poweroff --no-block\n')
+            if request:
+                self.send('sync; systemctl poweroff --no-block\n')
             while True:
                 remaining = timeout - (time.monotonic() - started)
                 exited = self.process.poll() is not None

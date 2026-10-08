@@ -168,6 +168,24 @@ describe('the pane-process swap', () => {
     expect(await swap.liveBypassPermission(session({ processIdentity: { pid: 43, startMarker: 'm1' } } as Partial<RegisteredSession>))).toBe(false)
   })
 
+  it('matches restart evidence by start ticks across clock steps, not a reused pid', async () => {
+    const { swap } = setup()
+    const identity = { pid: 42, startMarker: 'before-clock-step', startTicks: 123, executable: '/bin/codex' }
+    const argv = 'codex --dangerously-bypass-approvals-and-sandbox'
+    const grid = { gridName: 'team-grid' } as never
+    const row = { ...identity, startMarker: 'after-clock-step', args: argv }
+    vi.mocked(processRows).mockResolvedValue([row] as never)
+    expect(await swap.liveBypassPermission(session({ engine: 'codex', processIdentity: identity }))).toBe(true)
+    await swap.restartedGridAssignment(identity as never, 'codex', grid)
+    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'codex', argv, grid)
+
+    // A reused pid with another start tick is not the process, even if its wall-clock marker agrees.
+    vi.mocked(processRows).mockResolvedValue([{ ...row, startMarker: identity.startMarker, startTicks: 124 }] as never)
+    expect(await swap.liveBypassPermission(session({ engine: 'codex', processIdentity: identity }))).toBe(false)
+    await swap.restartedGridAssignment(identity as never, 'codex', grid)
+    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'codex', identity.executable, grid)
+  })
+
   it('restartedGridAssignment reads faithful argv and falls back to the executable', async () => {
     const { swap } = setup()
     const identity = { pid: 42, startMarker: 'm1', executable: '/bin/claude' }

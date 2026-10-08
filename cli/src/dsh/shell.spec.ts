@@ -19,7 +19,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const { managedNodePath } = await import('../lib/nodeRuntime.js')
-const { DSH_STOP_TRAP, dshNodeFallback, dshShellArgv, isShellNoise, killProcessGroup, runDshCommand, spawnDshCommand } = await import('./shell.js')
+const { DSH_STOP_TRAP, dshNodeFallback, dshShellArgv, isKilledJobReport, isShellNoise, killProcessGroup, runDshCommand, spawnDshCommand } = await import('./shell.js')
 
 describe('dshShellArgv', () => {
   const original = process.env.SHELL
@@ -50,13 +50,13 @@ describe('dshNodeFallback', () => {
   beforeEach(() => { seams.sh = true; dir = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-node-'))) })
   afterEach(() => { seams.sh = false; rmSync(dir, { recursive: true, force: true }) })
 
-  it('puts the Node this daemon runs on at the END of a PATH that has no node', async () => {
+  it.skipIf(process.platform === 'win32')('puts the Node this daemon runs on at the END of a PATH that has no node', async () => {
     const result = await runDshCommand('echo "$PATH"; command -v node', { cwd: dir, env: { PATH: '/usr/bin:/bin' } })
     const runtimeBin = dirname(managedNodePath())
     expect(result.lines).toEqual([`/usr/bin:/bin:${runtimeBin}`, join(runtimeBin, 'node')])
   })
 
-  it('leaves a PATH that already has a node alone', async () => {
+  it.skipIf(process.platform === 'win32')('leaves a PATH that already has a node alone', async () => {
     const own = join(dir, 'bin')
     mkdirSync(own)
     writeFileSync(join(own, 'node'), '#!/bin/sh\n', { mode: 0o755 })
@@ -114,19 +114,19 @@ describe('runDshCommand in an interactive login bash with no terminal', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it.runIf(existsSync('/bin/bash'))('reports the script\'s lines and exit, and nothing the shell says about itself', async () => {
+  it.runIf(process.platform !== 'win32' && existsSync('/bin/bash'))('reports the script\'s lines and exit, and nothing the shell says about itself', async () => {
     const result = await runDshCommand('echo one; echo two >&2; exit 3', { cwd: dir })
     expect(result).toMatchObject({ code: 3, signal: null, timedOut: false })
     expect(result.lines.toSorted()).toEqual(['one', 'two'])
   })
 
-  it.runIf(existsSync('/bin/bash'))('keeps a doctor\'s own stdout `exit` while dropping the shell\'s stderr echo of it', async () => {
+  it.runIf(process.platform !== 'win32' && existsSync('/bin/bash'))('keeps a doctor\'s own stdout `exit` while dropping the shell\'s stderr echo of it', async () => {
     const result = await runDshCommand('echo exit; echo logout; exit 1', { cwd: dir })
     expect(result).toMatchObject({ code: 1, signal: null, timedOut: false })
     expect(result.lines).toEqual(['exit', 'logout'])
   })
 
-  it.runIf(existsSync('/bin/bash'))('a timeout ends the script, not only the command that was running', async () => {
+  it.runIf(process.platform !== 'win32' && existsSync('/bin/bash'))('a timeout ends the script, not only the command that was running', async () => {
     // Before the trap, SIGTERM ended the sleep and the shell went on to print `after`. When the TERM
     // lands while bash is still in its rc files it is ignored and the SIGKILL after the grace period
     // ends the shell instead — later, but with the same result.
@@ -151,7 +151,8 @@ describe('runDshCommand', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('collects both streams line by line, in the cwd and env it was given, CRLF and partial lines included', async () => {
+  // Native Windows cannot exec /bin/sh or signal POSIX process groups; mocked children still run here.
+  it.skipIf(process.platform === 'win32')('collects both streams line by line, in the cwd and env it was given, CRLF and partial lines included', async () => {
     const seen: string[] = []
     const result = await runDshCommand(
       `printf 'one\\r\\ntwo\\n'; echo "where $(basename "$PWD") $HARNESS_DSH" >&2; echo "zsh: can't change option: zle"; printf 'tail'`,
@@ -169,18 +170,39 @@ describe('runDshCommand', () => {
     expect((await runDshCommand('exit 4', { cwd: dir })).code).toBe(4)
   })
 
-  it('says how a command ended: its exit code, or the signal that ended it', async () => {
+  it.skipIf(process.platform === 'win32')('says how a command ended: its exit code, or the signal that ended it', async () => {
     expect(await runDshCommand('echo bye; exit 3', { cwd: dir })).toEqual({ code: 3, signal: null, lines: ['bye'], timedOut: false })
     const killed = await runDshCommand('kill -KILL $$', { cwd: dir })
     expect(killed).toMatchObject({ code: null, signal: 'SIGKILL', timedOut: false })
   })
 
-  it('stops a command that outlives its timeout, and everything it started', async () => {
+  it.skipIf(process.platform === 'win32')('stops a command that outlives its timeout, and everything it started', async () => {
     const started = Date.now()
     const result = await runDshCommand('sleep 30 & echo started; wait', { cwd: dir, timeoutMs: 300 })
     expect(result.timedOut).toBe(true)
     expect(result.lines).toEqual(['started'])
     expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  it.skipIf(process.platform === 'win32')('does not take the shell\'s report of the job its stop ended for the command\'s output', async () => {
+    // The shell outlives its job here on purpose: it ignores SIGTERM, so it is in `wait` when the job the stop
+    // ended dies, and reports it, as it did under load when the job's death reached it first.
+    const report = '/bin/sh: line 1: 31849 Terminated: 15          sleep 30'
+    const result = await runDshCommand(`echo started; trap 'echo "${report}" >&2; printf "${report}" >&2; exit 0' TERM; sleep 30 & wait`, { cwd: dir, timeoutMs: 300 })
+    expect(result.timedOut).toBe(true)
+    expect(result.lines).toEqual(['started'])
+    // Before a stop, the same words are the command's own.
+    expect((await runDshCommand(`echo "${report}"`, { cwd: dir })).lines).toEqual([report])
+  })
+
+  it('knows the shell\'s report of a job a signal ended, as bash words it on macOS and Linux', () => {
+    expect(isKilledJobReport('/bin/sh: line 1: 31849 Terminated: 15          sleep 30')).toBe(true)
+    expect(isKilledJobReport('bash: line 1: 10678 Terminated: 15          ( sleep 0.2; kill -TERM $$ )')).toBe(true)
+    expect(isKilledJobReport('bash: line 1:  4242 Terminated              sleep 30')).toBe(true)
+    expect(isKilledJobReport('bash: line 3: 86178 Killed: 9               sleep 30')).toBe(true)
+    expect(isKilledJobReport('Terminated: 15')).toBe(false)
+    expect(isKilledJobReport('sh: line 1: 12 Segmentation fault: 11  ./tool')).toBe(false)
+    expect(isKilledJobReport('started')).toBe(false)
   })
 
   it('a command that cannot start is exit 127 with the reason as its one line, never a rejection', async () => {
@@ -194,7 +216,7 @@ describe('runDshCommand', () => {
     expect(seen).toEqual(invalid.lines)
   })
 
-  it.runIf(existsSync('/bin/bash'))('does not begin the body when the deadline expires inside shell startup', async () => {
+  it.runIf(process.platform !== 'win32' && existsSync('/bin/bash'))('does not begin the body when the deadline expires inside shell startup', async () => {
     const cancellationRoot = join(dir, "cancel ' quoted & space")
     mkdirSync(cancellationRoot)
     vi.stubEnv('TMPDIR', cancellationRoot)
@@ -250,9 +272,26 @@ describe('runDshCommand', () => {
     expect(result).toEqual({ code: 127, signal: null, lines: ['could not start: spawn EACCES', 'partial'], timedOut: false })
     expect(seen).toEqual(['could not start: spawn EACCES', 'partial'])
   })
+
+  it('keeps stdout exit words while dropping complete and partial killed-job reports after a timeout', async () => {
+    vi.useFakeTimers()
+    const child = Object.assign(new EventEmitter(), { pid: undefined, stdout: new EventEmitter(), stderr: new EventEmitter() }) as unknown as ChildProcess
+    seams.fakeChild = () => child
+    const seen: string[] = []
+    const report = '/bin/sh: line 1: 31849 Terminated: 15          sleep 30'
+    const pending = runDshCommand('anything', { cwd: dir, timeoutMs: 100, onLine: line => seen.push(line) })
+    child.stderr!.emit('data', Buffer.from(`${report}\n`))
+    await vi.advanceTimersByTimeAsync(100)
+    child.stdout!.emit('data', Buffer.from('exit\nlogout\n'))
+    child.stderr!.emit('data', Buffer.from(`exit\nlogout\n${report}\n${report}`))
+    child.emit('exit', 143, null)
+    const result = await pending
+    expect(result).toEqual({ code: 143, signal: null, lines: [report, 'exit', 'logout'], timedOut: true })
+    expect(seen).toEqual(result.lines)
+  })
 })
 
-describe('spawnDshCommand and killProcessGroup', () => {
+describe.skipIf(process.platform === 'win32')('spawnDshCommand and killProcessGroup', () => {
   let dir: string
   beforeEach(() => {
     seams.sh = true

@@ -16,6 +16,7 @@ import { AgentRestartCoordinator, type RestartAgentDeps } from '../../lib/restar
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
 import { bypassPermissionActive, processArgvIsBoundaryFaithful, resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 
 export interface PaneSwapDeps {
@@ -98,7 +99,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
           await new Promise((resolve) => setTimeout(resolve, SWAP_SETTLE_MS))
           waited += SWAP_SETTLE_MS
           const still = await resolvePaneEngineProcess(runtime.paneId, session.engine)
-          if (still && still.pid === found.pid && still.startMarker === found.startMarker) return found
+          if (sameProcessIdentity(still, found)) return found
         }
         delayMs = Math.min(delayMs * 2, 750)
       }
@@ -136,8 +137,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
     const identity = session.processIdentity
     if (!identity) return false
     const rows = await processRows()
-    const row = rows?.find((candidate) =>
-      candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
+    const row = rows?.find((candidate) => sameProcessIdentity(candidate, identity))
     if (!row || !processArgvIsBoundaryFaithful(row)) return false
     return bypassPermissionActive(session.engine, row.args)
   }
@@ -149,8 +149,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
     grid: GridLaunchOverride | undefined,
   ) => {
     const rows = await processRows()
-    const row = rows?.find((candidate) =>
-      candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
+    const row = rows?.find((candidate) => sameProcessIdentity(candidate, identity))
     // Keep the existing environment/config probe on hosts without faithful argv; never interpret
     // flattened ps text as flags. Linux/WSL can additionally recover the argv-backed assignment.
     const args = row && processArgvIsBoundaryFaithful(row) ? row.args : identity.executable

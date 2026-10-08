@@ -32,6 +32,7 @@ import type { WindowRoute } from './windowRoute.js'
 import type { SelectionCommand, SelectionResult } from './windowSelection.js'
 import type { VisitCommand, VisitResult } from './windowVisit.js'
 import type { FormCommand, FormResult } from './windowForm.js'
+import type { PetStore } from './pets/store.js'
 import type { MachineFleet } from './machineFleet.js'
 import type { ReviewedAnswer, AnswerReceipt } from './questionInbox.js'
 
@@ -101,6 +102,7 @@ export interface CableHostWiring {
   scrolled?: (phase: 'down' | 'move' | 'up', dy: number, velocity: number) => void
   /** The dial came, went, or started taking an update — see CableSession's onDialStatus. */
   dialStatus?: (status: DialStatus) => void
+  appFocus?: CableHost['appFocus']
   /** Offer a spoken task to the desktop window's palette. Omitted when there is no window plumbing. */
   routeInWindow?: (text: string, cmd?: string) => Promise<WindowRoute>
   selectPassage?: (command: SelectionCommand) => Promise<SelectionResult>
@@ -116,6 +118,8 @@ export interface CableHostWiring {
    * fleet is off. Absent, this host routes by itself.
    */
   fleet?: () => FleetRouting | null
+  /** The custom pets kept on this computer; the dial's session reads the mapping and packs from it. */
+  pets?: () => PetStore | null
 }
 
 /** Whether an id is the router's placeholder for a machine with no id yet (`cable:` and the computer id;
@@ -293,6 +297,10 @@ export class DaemonCableHost implements CableHost {
     this.wiring.dialStatus?.(status)
   }
 
+  pets(): PetStore | null {
+    return this.wiring.pets?.() ?? null
+  }
+
   currentDialStatus(): DialStatus {
     return this.dialStatusNow
   }
@@ -314,6 +322,10 @@ export class DaemonCableHost implements CableHost {
     // the person holding it may well speak something other than this laptop is set to.
     const locale = process.env.LANG ?? ''
     return locale.startsWith('vi') ? 'vi' : 'en'
+  }
+
+  appFocus(): { machineId: string; agentId: string } | undefined {
+    return this.wiring.appFocus?.()
   }
 
   /**
@@ -852,13 +864,15 @@ export function multipart(file: Buffer, filename: string, mimeType: string, boun
  * kind reaches the cable the day it reaches the socket.
  */
 export function cableEventFor(
-  frame: { type?: string; agentId?: string; payload?: { kind?: string; text?: string; recap?: string; subagent?: unknown } },
+  frame: { type?: string; agentId?: string; payload?: { kind?: string; text?: string; recap?: string; subagent?: unknown; restored?: unknown } },
 ): { kind: 'processing' | 'done' | 'summary' | 'error'; agentId: string; text: string; recap: string; subagent: boolean } | null {
   if (frame.type !== 'commander_event' || !frame.agentId) return null
   const kind = frame.payload?.kind
   if (kind !== 'processing' && kind !== 'done' && kind !== 'summary' && kind !== 'error') return null
-  // `subagent`: a sub-agent's turn end — the tile redraws, nobody is told (CommanderMirrorOpts.isSubagent).
-  return { kind, agentId: frame.agentId, text: frame.payload?.text ?? '', recap: frame.payload?.recap ?? '', subagent: frame.payload?.subagent === true }
+  // `subagent`: a sub-agent's turn end — the tile redraws, nobody is told (CommanderMirrorOpts.isSubagent). A
+  // `restored` recap (a turn that ended unseen, CommanderMirror.catchUp) is drawn the same way: history, not news.
+  const silent = frame.payload?.subagent === true || frame.payload?.restored === true
+  return { kind, agentId: frame.agentId, text: frame.payload?.text ?? '', recap: frame.payload?.recap ?? '', subagent: silent }
 }
 
 /**

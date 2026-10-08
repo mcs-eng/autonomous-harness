@@ -807,6 +807,41 @@ void main() {
     },
   );
 
+  testWidgets(
+    'decision-only local profiles keep their empty state without a synthetic private grid',
+    (tester) async {
+      build(
+        grids: const [
+          {
+            'name': 'local-fleet',
+            'source': 'local',
+            'own': false,
+            'label': 'My fleet',
+            'profileId': 'local-a',
+            'targetId': 'local:local-a:fixture',
+            'engines': ['codex'],
+            'models': [
+              {'id': 'decision-only', 'node': 'My fleet', 'kind': 'decision'},
+            ],
+          },
+          {
+            'name': 'shared-decisions',
+            'own': false,
+            'models': [
+              {'id': 'shared-decision', 'node': 'Remote', 'kind': 'decision'},
+            ],
+          },
+        ],
+      );
+      await open(tester, engine: 'codex');
+      expect(find.text('Local · My fleet · local-a'), findsOneWidget);
+      expect(find.text('No models are available from My fleet.'), findsOneWidget);
+      expect(find.text('decision-only'), findsNothing);
+      expect(find.text('shared-decision'), findsNothing);
+      expect(find.text('Shared · shared-decisions'), findsNothing);
+      expect(find.text('On your machines'), findsNothing);
+    },
+  );
   testWidgets('a short menu is not as wide as the widest menu could be', (
     tester,
   ) async {

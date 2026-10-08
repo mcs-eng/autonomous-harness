@@ -22,6 +22,7 @@ import {
   type TmuxRuntimeRef,
   type RuntimeValidation,
 } from './terminalTypes.js'
+import { inTmuxRoom } from './tmuxControlGate.js'
 import { TmuxControlStream } from './tmuxStream.js'
 import {
   captureTmuxPane,
@@ -43,7 +44,7 @@ import { tmuxFeatures, type TmuxFeatures } from './tmuxVersion.js'
 import { DEFAULT_HOST_THEME, windowStyleOf, type HostTheme } from './hostTheme.js'
 import { machineNames } from './machineNames.js'
 import { isNoTmuxServerError, listTmuxPanes } from './tmuxAgentDiscovery.js'
-import { terminalRouteKey } from './terminalRuntime.js'
+import { sameProcessIdentity, terminalRouteKey } from './terminalRuntime.js'
 
 // Every tmux call here: a held event loop must not turn a timeout into a failure, or into an empty
 // answer that reads as a pane that was never made (patientExec.ts).
@@ -178,13 +179,15 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
     args.push(';', 'set-option', scope, HARNESS_OWNER_OPTION, owner)
     // `killed`/`signal` come from execFile's own error shape, which ErrnoException alone does not declare.
     type ExecError = NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null }
-    const result = await new Promise<{ error: ExecError | null; stdout: string; stderr: string }>((resolve) => {
+    // A new session is a notification to every control client: on a tmux before 3.7, not while one
+    // attaches (tmuxControlGate.ts).
+    const result = await inTmuxRoom('notify', () => new Promise<{ error: ExecError | null; stdout: string; stderr: string }>((resolve) => {
       run('tmux', args, { timeout: 5_000 }, (error, stdout, stderr) => resolve({
         error: error as ExecError | null,
         stdout,
         stderr,
       }))
-    })
+    }), features)
     if (result.error) {
       if (result.error.code === 'ENOENT') return terminalActionNotStarted('tmux is unavailable')
       // tmux says exactly why it refused — "duplicate session", "protocol version mismatch",
@@ -270,9 +273,11 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
     if (!/^%\d+$/.test(runtime.paneId)) return terminalActionNotStarted('invalid tmux pane identity')
     // Discovered harnesses can share a tmux session with unrelated work. The
     // canonical pane id is the entire target; never widen this to kill-session.
-    const ok = await new Promise<boolean>((resolve) => {
+    // The last pane gone closes its session, a notification to every control client: on a tmux before
+    // 3.7, not while one attaches (tmuxControlGate.ts).
+    const ok = await inTmuxRoom('notify', () => new Promise<boolean>((resolve) => {
       run('tmux', ['kill-pane', '-t', runtime.paneId], { timeout: 5_000 }, (error) => resolve(!error))
-    })
+    }))
     if (ok) return TERMINAL_ACTION_SUCCEEDED
     // The engine may have exited and removed its pane before the parallel PID
     // check completed. Only authoritative inventory makes that an idempotent success.
@@ -409,8 +414,7 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
       if (expected.processIdentity && !LSTART_MARKER_RE.test(expected.processIdentity.startMarker)) {
         return { state: 'alive' }
       }
-      if (expected.processIdentity
-        && (expected.processIdentity.pid !== live.pid || expected.processIdentity.startMarker !== live.startMarker)) {
+      if (expected.processIdentity && !sameProcessIdentity(expected.processIdentity, live)) {
         return { state: 'gone', reason: 'process changed under tmux pane', replaced: true }
       }
       return { state: 'alive' }
@@ -434,7 +438,7 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
   }
 
   async submitText(runtime: TmuxRuntimeRef, text: string, options?: SubmitOptions): Promise<TerminalActionResult> {
-    const sent = await sendToTmux(runtime.paneId, text, options?.beforeEnter)
+    const sent = await sendToTmux(runtime.paneId, text, options?.beforeEnter, options?.allowed)
     return typeof sent === 'boolean' ? legacyActionResult(sent, 'tmux submission') : terminalEnterWithheld(sent.withheld)
   }
 
