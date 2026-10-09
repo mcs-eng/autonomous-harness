@@ -6,6 +6,8 @@ import 'package:harness/core/harness_file_store.dart';
 import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/core/wsl_runtime.dart';
 
+import 'support/wsl_smoke.dart';
+
 class _MemoryStore implements LocalKeyValueStore {
   final values = <String, String>{};
   bool failRead = false;
@@ -148,6 +150,7 @@ void main() {
         expect(store.loadError, isNotNull);
         var calls = 0;
         final runtime = WslRuntime(
+          smokeEnvironment: noSmokeContract,
           preferencesStore: store,
           runProcess: (_, _, {environment}) async {
             calls++;
@@ -233,6 +236,7 @@ void main() {
     () async {
       final seen = <List<String>>[];
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         selection: root,
         runProcess: (_, args, {environment}) async {
           seen.add(args);
@@ -257,6 +261,7 @@ void main() {
   test('identity, tool checks, managed CLI and bundled paths share the selected account', () async {
     final seen = <List<String>>[];
     final runtime = WslRuntime(
+      smokeEnvironment: noSmokeContract,
       selection: root,
       runProcess: (_, args, {environment}) async {
         seen.add(args);

@@ -549,6 +549,11 @@ The live WSL argv test is opt-in: it additionally requires
 Without that explicit fixture contract it reports a skip, so the ordinary desktop
 suite never probes the default account's login shell. Missing WSL or an unavailable
 selected distro also reports a skip rather than a pass that exercised nothing.
+The unit tests that pin the ordinary `bash -lc` command line pass an empty
+contract, so the rest of the desktop suite gives the same result whether or not
+the four smoke variables are exported in the shell that runs it. The live test
+still covers only the wrapped command line; nothing runs the ordinary one
+against a real distro.
 
 ## Saved API changes before a model launch
 

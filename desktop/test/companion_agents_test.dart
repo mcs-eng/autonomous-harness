@@ -7,6 +7,8 @@ import 'package:harness/core/companion_agents.dart';
 import 'package:harness/core/wsl_runtime.dart';
 import 'package:harness/core/wsl_preferences.dart';
 
+import 'support/wsl_smoke.dart';
+
 class FakeCompanionProcess implements Process {
   final output = StreamController<List<int>>();
   final errors = StreamController<List<int>>();
@@ -54,6 +56,7 @@ Future<void> tick() => Future<void>.delayed(Duration.zero);
 void main() {
   test('browser companion uses the selected Linux account and refuses another distro', () {
     final runtime = WslRuntime(
+      smokeEnvironment: noSmokeContract,
       selection: const WslSelection(distro: 'Ubuntu', username: 'developer'),
     );
     final args = deepSeekCompanionArguments(
@@ -81,6 +84,7 @@ void main() {
       final args = deepSeekCompanionArguments(
         distro: 'Ubuntu personal',
         folder: folder,
+        runtime: WslRuntime(smokeEnvironment: noSmokeContract),
       );
       expect(args.take(7), [
         '-d',
@@ -142,6 +146,7 @@ void main() {
     final process = FakeCompanionProcess();
     var starts = 0;
     final companion = DeepSeekCompanion(
+      wslRuntime: WslRuntime(smokeEnvironment: noSmokeContract),
       startProcess: (executable, args) async {
         expect(executable, 'wsl.exe');
         starts++;
@@ -176,6 +181,7 @@ void main() {
     () async {
       final process = FakeCompanionProcess();
       final companion = DeepSeekCompanion(
+        wslRuntime: WslRuntime(smokeEnvironment: noSmokeContract),
         startProcess: (_, _) async => process,
       );
       addTearDown(companion.dispose);
@@ -194,6 +200,7 @@ void main() {
   test('bounds startup and cleans up an unready child', () async {
     final process = FakeCompanionProcess();
     final companion = DeepSeekCompanion(
+      wslRuntime: WslRuntime(smokeEnvironment: noSmokeContract),
       startProcess: (_, _) async => process,
       startupTimeout: const Duration(milliseconds: 10),
     );
@@ -212,7 +219,10 @@ void main() {
     () async {
       final process = FakeCompanionProcess();
       final spawn = Completer<Process>();
-      final companion = DeepSeekCompanion(startProcess: (_, _) => spawn.future);
+      final companion = DeepSeekCompanion(
+        wslRuntime: WslRuntime(smokeEnvironment: noSmokeContract),
+        startProcess: (_, _) => spawn.future,
+      );
       addTearDown(companion.dispose);
       final operation = companion.start(distro: 'Ubuntu', folder: '/tmp');
       await companion.stop();
@@ -226,7 +236,10 @@ void main() {
 
   test('unexpected exit clears stale authenticated URL', () async {
     final process = FakeCompanionProcess();
-    final companion = DeepSeekCompanion(startProcess: (_, _) async => process);
+    final companion = DeepSeekCompanion(
+      wslRuntime: WslRuntime(smokeEnvironment: noSmokeContract),
+      startProcess: (_, _) async => process,
+    );
     addTearDown(companion.dispose);
     final operation = companion.start(distro: 'Ubuntu', folder: '/tmp');
     await tick();

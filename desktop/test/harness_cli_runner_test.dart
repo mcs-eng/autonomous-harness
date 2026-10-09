@@ -6,6 +6,8 @@ import 'package:harness/auth/cli_link.dart';
 import 'package:harness/core/harness_cli_runner.dart';
 import 'package:harness/core/wsl_runtime.dart';
 
+import 'support/wsl_smoke.dart';
+
 void main() {
   late Directory scratch;
 
@@ -179,6 +181,7 @@ void main() {
     File('${bundle.path}/cli.js').writeAsStringSync('cli');
     File('${bundle.path}/notify.mjs').writeAsStringSync('notify');
     final runtime = WslRuntime(
+      smokeEnvironment: noSmokeContract,
       runProcess: (executable, arguments, {environment}) async {
         final joined = arguments.join(' ');
         if (joined.contains('--status')) return ProcessResult(0, 0, 'ok', '');
@@ -237,6 +240,7 @@ void main() {
         requiresWindowsBundle: true,
         windowsBundleDirectory: bundle,
         wslRuntime: WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: (executable, arguments, {environment}) async =>
               ProcessResult(0, 1, '', ''),
         ),
@@ -259,6 +263,7 @@ void main() {
     'unmarked Windows development runner preserves installed WSL CLI behavior',
     () async {
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: (executable, arguments, {environment}) async {
           final joined = arguments.join(' ');
           if (joined.contains('--status')) return ProcessResult(0, 0, 'ok', '');
