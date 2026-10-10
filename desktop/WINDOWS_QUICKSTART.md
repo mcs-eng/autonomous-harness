@@ -513,6 +513,17 @@ The local-daemon transport tests also use Windows' temporary directory on that
 platform instead of assuming `/tmp`. All nine socket and TCP assertions still
 run; no test is skipped and no production transport behavior changes.
 
+## October 10 upstream sync seams
+
+Upstream now fills in a restarted or moved agent's grid in the models service
+(`core/agents/gridAssignments.ts`) instead of in the core. The fork's local Grid
+profiles ride that path: a `local:` launch carries `trustedBaseUrl`, which the
+wire accepts only as an http(s) address of at most 2,048 characters, so the
+assignment is recognised without asking the cloud grid. Upstream's golden
+fixtures that walk every engine read `cli/src/testing/upstreamEngines.ts`,
+which leaves out Cline, so those fixtures stay identical to upstream's. Cline
+itself is unchanged.
+
 ## October 10 CI flake fixes
 
 The website check's Install-link lookup reads upstream's releases from the GitHub
