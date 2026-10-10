@@ -11,7 +11,7 @@ function release(version: string) {
   };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("latest OS release", () => {
   it("orders numeric previews independently of repository release order and other products", () => {
@@ -59,5 +59,28 @@ describe("latest OS release", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify([release("0.1.0-preview.9")]), { headers: { link: '<ignored>; rel="next"' } }))
       .mockResolvedValueOnce(new Response("rate limited", { status: 403 })));
     await expect(fetchLatestOSRelease()).rejects.toThrow("Release lookup failed");
+  });
+
+  it("authenticates every page only when the lookup token is set, keeping the API headers", async () => {
+    const pages = () => vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("[]", { headers: { link: '<ignored>; rel="next"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([release("0.1.0-preview.13")])));
+    const headersOf = (request: ReturnType<typeof pages>, call: number) => new Headers(request.mock.calls[call][1]?.headers);
+    vi.stubEnv("GITHUB_TOKEN", "a-developer-token");
+    vi.stubEnv("OS_RELEASE_LOOKUP_TOKEN", "");
+    const plain = pages();
+    vi.stubGlobal("fetch", plain);
+    await fetchLatestOSRelease();
+    for (const call of [0, 1]) expect(headersOf(plain, call).has("authorization")).toBe(false);
+    vi.stubEnv("OS_RELEASE_LOOKUP_TOKEN", "ci-token");
+    const signed = pages();
+    vi.stubGlobal("fetch", signed);
+    await fetchLatestOSRelease();
+    for (const call of [0, 1]) {
+      const headers = headersOf(signed, call);
+      expect(headers.get("authorization")).toBe("Bearer ci-token");
+      expect(headers.get("accept")).toBe("application/vnd.github+json");
+      expect(headers.get("x-github-api-version")).toBe("2022-11-28");
+    }
   });
 });

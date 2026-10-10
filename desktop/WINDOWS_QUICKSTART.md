@@ -513,6 +513,17 @@ The local-daemon transport tests also use Windows' temporary directory on that
 platform instead of assuming `/tmp`. All nine socket and TCP assertions still
 run; no test is skipped and no production transport behavior changes.
 
+## October 10 CI flake fixes
+
+The website check's Install-link lookup reads upstream's releases from the GitHub
+API. Unauthenticated, shared CI runners hit its rate limit and the check failed
+with 503. The check now passes its job token as `OS_RELEASE_LOOKUP_TOKEN`, a
+dedicated name, so a token in a developer's shell is never picked up. A failed
+lookup is logged, and the step prints the server log when it fails. The CI gate
+job also receives the plan without its per-path lists, so a sync-sized pull
+request no longer stops it with "Argument list too long". Product behavior and
+the Windows preview are unchanged.
+
 ## Disposable WSL smoke admission
 
 A smoke supervisor can opt in to an explicit fixture contract by setting all four
