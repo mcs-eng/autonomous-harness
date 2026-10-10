@@ -693,7 +693,7 @@ export function engineFallbackPrelude(engine: AgentEngine, shellPath: string, tm
     // (a spec exercising the script, a wrapper piped somewhere) the engine's own status is the answer.
     + '  if ! [ -t 0 ]; then exit "$harness_status"; fi\n'
     + ENGINE_INPUT_DRAIN_SH
-    + `  printf '\\n%s\\n' ${shellSingleQuote(`harness: ${command} exited ($harness_status). This pane is a shell now — run ${command} again, or stop the pane.`).replace('($harness_status)', `('"$harness_status"')`)}\n`
+    + `  printf '\\n%s\\n' ${shellSingleQuote(`${engineLabel(engine)} stopped ($harness_status). Type ${command} to start it again, or close this pane.`).replace('($harness_status)', `('"$harness_status"')`)}\n`
     + `  exec ${shellSingleQuote(shellPath)}${loginArgs}\n`
     + '}\n'
     + (engine === 'codex' ? codexOwnedLaunchPrelude() : '')
@@ -1187,7 +1187,7 @@ function installIfMissingScript(recipe: EngineInstallRecipe, runtimeNode: string
     '    */*) resolved="$candidate" ;;',
     '    *) resolved="$(command -v "$candidate" 2>/dev/null)" || true ;;',
     '  esac',
-    '  [ -n "$resolved" ] && [ -f "$resolved" ] && [ -x "$resolved" ]',
+    '  [ -n "$resolved" ] && [ -f "$resolved" ] && [ -x "$resolved" ] && probe_engine "$resolved"',
     '}',
     // The first of these that is there becomes `harness_engine_bin`. Loops are fine here: nothing in
     // them can stop the way the engine can.

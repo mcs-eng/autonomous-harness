@@ -3188,7 +3188,7 @@ describe('agent_retarget onto a Local model resolves web tools', () => {
     const { localGridTargetId } = await import('./lib/gridProfiles.js')
     const targetId = localGridTargetId({ id: profileId, label: 'Retarget fleet', gridHome, gridName: GRID_NAME })
     const seen: Array<{ agentId: string; grid: unknown }> = []
-    const socket = new BackendSocket('token')
+    const socket = relaySocket('token')
     socket.onRetargetAgent = async (input) => { seen.push(input); return { ok: true } }
     // Cloud setup fails outright. A local target must not ask for it.
     const ensure = vi.fn(async () => ({ detail: 'Not signed in.' }))
@@ -3205,6 +3205,7 @@ describe('agent_retarget onto a Local model resolves web tools', () => {
     socket.connect()
     const ws = wsMock.instances[0]
     ws.open()
+    withSession(socket, 'web-1')
     ws.message(sealedDown(socket, 'web-1', 'agent_retarget', {
       requestId: 'r', agentId: 'a1', gridModel: 'Qwen-Test', gridName: GRID_NAME, gridTarget: targetId,
     }))

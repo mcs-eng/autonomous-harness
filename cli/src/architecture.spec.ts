@@ -9,11 +9,14 @@
  * When this fails, the message says where the code belongs. Move it there; do not widen the rule.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 const SRC = __dirname
+
+/** Rules use repository ids, not the host filesystem's path separators. */
+const sourceId = (path: string): string => relative(SRC, path).split(sep).join('/')
 
 interface Import {
   file: string
@@ -40,7 +43,7 @@ function importsIn(folder: string): Import[] {
           } else {
             typeOnly = statement.isTypeOnly
           }
-          found.push({ file: relative(SRC, path), from: statement.moduleSpecifier.text, typeOnly })
+          found.push({ file: sourceId(path), from: statement.moduleSpecifier.text, typeOnly })
         }
       }
     }
@@ -51,9 +54,10 @@ function importsIn(folder: string): Import[] {
 
 /** The lines `runForeground` spans in core/main.ts. */
 function runForegroundLines(): number {
-  const lines = readFileSync(join(SRC, 'core', 'main.ts'), 'utf8').split('\n')
+  const lines = readFileSync(join(SRC, 'core', 'main.ts'), 'utf8').split(/\r?\n/)
   const start = lines.findIndex((line) => line.startsWith('async function runForeground('))
   const end = lines.findIndex((line, index) => index > start && line === '}')
+  if (start < 0 || end < 0) throw new Error('runForeground source boundaries were not found')
   return end - start
 }
 
@@ -103,7 +107,7 @@ function closureOf(entry: string): Map<string, number> {
   const pending = [join(SRC, entry)]
   while (pending.length > 0) {
     const path = pending.pop()!
-    const file = relative(SRC, path)
+    const file = sourceId(path)
     if (lines.has(file)) continue
     const parsed = parsedFile(path)
     lines.set(file, parsed.lines)
@@ -123,8 +127,10 @@ function parsedFile(path: string): { lines: number; imports: string[] } {
   for (const { from, dynamic } of importsFor(path, text)) {
     const base = resolve(dirname(path), from)
     const target = [base.replace(/\.js$/, '.ts'), base, `${base}.ts`, join(base, 'index.ts')].find(isFile)
-    if (!target || !target.startsWith(SRC + '/') || !target.endsWith('.ts') || /\.(spec|test|e2e)\.ts$/.test(target)) continue
-    if (dynamic && relative(SRC, target) === IN_PROCESS_ONLY) continue
+    if (!target || !target.endsWith('.ts') || /\.(spec|test|e2e)\.ts$/.test(target)) continue
+    const local = relative(SRC, target)
+    if (isAbsolute(local) || local === '..' || local.startsWith(`..${sep}`)) continue
+    if (dynamic && sourceId(target) === IN_PROCESS_ONLY) continue
     imports.push(target)
   }
   const result = { lines: text.split('\n').length, imports }
@@ -217,6 +223,11 @@ describe('the daemon\'s shape', () => {
       expect([...closureOf(entry).keys()].filter(file => /^engines\/(claude|codex)\//.test(file)), entry).toEqual([])
       expect(closureOf(entry).has('lib/runtimeProfile.ts'), entry).toBe(false)
     }
+  })
+
+  it('new-agent model parsing loads contracts, never model discovery or routing services', () => {
+    const parser = closureOf('lib/newAgentModel.ts')
+    expect([...parser.keys()].filter((file) => EDGE.some((pattern) => pattern.test(file)))).toEqual([])
   })
 
   it('screen transport and input authority do not load native screen implementations', () => {

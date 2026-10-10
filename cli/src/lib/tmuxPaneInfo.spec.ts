@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { tmuxPaneInfo } from './tmux.js'
 
 // A tmux server of its own, named outright on every call (-S) — the test's and the code's under
@@ -32,7 +32,11 @@ describe.skipIf(!hasTmux)('tmuxPaneInfo', () => {
   })
 
   it("reads the pane's command, folder, pid and tty as tmux knows them", async () => {
-    const info = await tmuxPaneInfo(pane, socket)
+    // new-session returns before its child execs sleep; wait for fixture readiness, not an arbitrary delay.
+    const info = await vi.waitUntil(async () => {
+      const current = await tmuxPaneInfo(pane, socket)
+      return current?.command === 'sleep' ? current : false
+    }, { timeout: 3_000 })
     expect(info?.command).toBe('sleep')
     expect(info?.path.endsWith(dir.split('/').pop()!)).toBe(true)
     expect(info?.pid).toBeGreaterThan(0)

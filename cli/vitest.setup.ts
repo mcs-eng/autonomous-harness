@@ -11,7 +11,7 @@
  * under `~/.harness/runtime` would send a spec's calls to this machine's managed binary instead of the
  * fake the spec put on PATH. `src/config/envIsolation.spec.ts` pins both.
  */
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -34,6 +34,8 @@ for (const name of Object.keys(process.env)) if (name.startsWith('HARNESSD_')) d
 // (serviceProcess) and ~/.harness/runtime/current-node (hooks). CI's runner has an empty home, so nothing
 // there showed it. A spec that wants a home of its own still sets one.
 process.env.HOME = mkdtempSync(join(tmpdir(), 'adapter-test-home-'))
+// Ubuntu's first login shell prints its daily MOTD even in an empty home. Silence it only in this fixture.
+writeFileSync(join(process.env.HOME, '.hushlogin'), '', { mode: 0o600 })
 // And no engine's or desktop's folder handed down from the shell that ran the suite (a Codex or Claude Code
 // session sets some of these for its own children), which would outrank that home.
 for (const name of [

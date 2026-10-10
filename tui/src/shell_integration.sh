@@ -232,6 +232,7 @@ if [ -n "${ZSH_VERSION-}" ]; then
     (( $+aliases[grok] || $+functions[grok] )) || function grok { _hn_agent grok "$@"; }
     (( $+aliases[agy] || $+functions[agy] )) || function agy { _hn_agent agy "$@"; }
     (( $+aliases[copilot] || $+functions[copilot] )) || function copilot { _hn_agent copilot "$@"; }
+    (( $+aliases[cline] || $+functions[cline] )) || function cline { _hn_agent cline "$@"; }
 elif [ -n "${BASH_VERSION-}" ]; then
     alias codex >/dev/null 2>&1 || declare -F codex >/dev/null || function codex { _hn_agent codex "$@"; }
     alias claude >/dev/null 2>&1 || declare -F claude >/dev/null || function claude { _hn_agent claude "$@"; }
@@ -247,6 +248,7 @@ elif [ -n "${BASH_VERSION-}" ]; then
     alias grok >/dev/null 2>&1 || declare -F grok >/dev/null || function grok { _hn_agent grok "$@"; }
     alias agy >/dev/null 2>&1 || declare -F agy >/dev/null || function agy { _hn_agent agy "$@"; }
     alias copilot >/dev/null 2>&1 || declare -F copilot >/dev/null || function copilot { _hn_agent copilot "$@"; }
+    alias cline >/dev/null 2>&1 || declare -F cline >/dev/null || function cline { _hn_agent cline "$@"; }
 fi
 function hn {
     case "${1-}" in

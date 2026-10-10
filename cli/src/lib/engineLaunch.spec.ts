@@ -1621,7 +1621,7 @@ if [ "$1" = prefix ]; then exit 0; fi
     )
 
     expect(result).toMatchObject({ code: 0, ranEngine: true })
-    expect(result.stdout).toContain('installing for this user')
+    expect(result.stdout).not.toContain('installing for this user')
   })
 
   it('does not add the npm bootstrap to non-npm installers', () => {
