@@ -743,6 +743,25 @@ describe('binding a running process to its session', () => {
       )
     })
 
+    it('holds the binding when the store cannot be read to corroborate a flattened resume id, and asks nothing without a start time', async () => {
+      const run = setup()
+      vi.mocked(run.deps.registry.byProcess).mockReturnValue(agent({ sessionId: '' }))
+      const flattened = observed({ resumeSessionId: 'prompt-r', argsBoundaryFaithful: false } as Partial<DiscoveredTerminalAgent>)
+      // An unreadable store is not evidence the hint is false: the agent is held, never bound or repaired past it.
+      vi.mocked(findCorroboratedResumeSession).mockRejectedValueOnce(new Error('store unreadable'))
+      await run.binding.bindObservedAgent(flattened)
+      expect(run.deps.registry.setIdentityHold).toHaveBeenCalledWith('a1', 'store unreadable')
+      expect(run.deps.registry.register).not.toHaveBeenCalled()
+      expect(findLiveSession).not.toHaveBeenCalled()
+      // A process whose start cannot be read cannot be matched to a store row, so nothing is asked.
+      vi.mocked(findCorroboratedResumeSession).mockClear()
+      await run.binding.bindObservedAgent(observed({
+        resumeSessionId: 'prompt-r', argsBoundaryFaithful: false, processIdentity: { pid: 42, startMarker: 'unknown' },
+      } as Partial<DiscoveredTerminalAgent>))
+      expect(findCorroboratedResumeSession).not.toHaveBeenCalled()
+      expect(run.deps.registry.register).not.toHaveBeenCalled()
+    })
+
     it('moves a session from the agent that had it, telling everything that held it for that agent', async () => {
       const run = setup()
       vi.mocked(run.deps.registry.byProcess).mockReturnValue(agent({ sessionId: '' }))
