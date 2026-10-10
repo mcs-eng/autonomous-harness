@@ -192,7 +192,7 @@ The functional milestone above was executed end to end on the Windows 11 host wi
 | Setup / distro selection | `Ubuntu` selected (Docker distributions excluded per scope); CLI installed to `/root/.local/bin/harness` |
 | Sign in | `harness login --force --json` → loopback callback caught from the browser SSO flow (2m24s, attended) |
 | Daemon | `harness start` → connected (self-updated v0.2.43 → v0.2.55 mid-flight; later replaced by the patched local build below); `/api/status` reachable from Windows loopback; machine/computer IDs bound |
-| Project + agent creation | New Agent dialog → engine probe against "Arya · This machine" → backend folder `/root/harnesses/codex-2026-09-17-08-20` created, tmux session `harness-codex-1789647626896` registered |
+| Project + agent creation | New Agent dialog → engine probe against "<machine name> · This machine" → backend folder `/root/harnesses/codex-2026-09-17-08-20` created, tmux session `harness-codex-1789647626896` registered |
 | Terminal output | xterm renders the live Codex TUI (v0.154.0) streamed by the daemon over the local WS; keyframe/output flow verified by wire capture |
 | Terminal input | Keystrokes delivered, executed, and answered by the agent ("harness wsl input works" turn completed; session auto-titled "Verify WSL terminal input"); model switched astra→luna via the `/model` TUI over the same path |
 | Reconnect | `harness stop` + `harness start` with the app open → app returned to home without crashing; agent reopened, session state intact (Take control → controlling) |

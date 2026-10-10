@@ -34,7 +34,7 @@ describe('isolated local Grid profiles', () => {
   function profile() {
     const root = mkdtempSync(join(tmpdir(), 'local-grid-profile-')); directories.push(root)
     const gridHome = join(root, 'grid-home'); mkdirSync(gridHome)
-    return { id: 'bran-local', label: 'Bran local fleet', gridHome, gridName: GRID }
+    return { id: 'node1-local', label: 'Node1 local fleet', gridHome, gridName: GRID }
   }
 
   it('lists exact hub model ids under a distinct opaque target', async () => {
@@ -47,7 +47,7 @@ describe('isolated local Grid profiles', () => {
     const configured = profile()
     const sections = await listAllGridModels(null, { profiles: [configured] })
     expect(sections[0]).toMatchObject({
-      source: 'local', label: 'Bran local fleet', profileId: 'bran-local',
+      source: 'local', label: 'Node1 local fleet', profileId: 'node1-local',
       targetId: localGridTargetId(configured),
     })
     expect(sections[0]?.engines).toContain('codex')
@@ -74,7 +74,7 @@ describe('isolated local Grid profiles', () => {
     const target = await resolveGridTarget(GRID, 'same-name', targetId, [configured])
     expect(target).toMatchObject({
       networkId,
-      networkName: 'Bran local fleet',
+      networkName: 'Node1 local fleet',
       baseUrl: BASE_URL,
       apiKey: TOKEN,
       model: 'same-name',

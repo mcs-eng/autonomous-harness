@@ -59,11 +59,11 @@ describe('agentFrame', () => {
   it('carries only a matching opaque target and normalizes Claude v1', async () => {
     const row = session({ baseUrl: 'http://127.0.0.1:8090', model: 'qwen' })
     row.gridLaunch = {
-      networkId: 'local-grid', networkName: 'Bran', baseUrl: 'http://127.0.0.1:8090/v1',
-      apiKey: 'local-secret', model: 'qwen', targetId: 'local:bran:abc',
+      networkId: 'local-grid', networkName: 'Node1', baseUrl: 'http://127.0.0.1:8090/v1',
+      apiKey: 'local-secret', model: 'qwen', targetId: 'local:node1:abc',
     }
     expect(await agentFrame(row, { selectedModel: null, terminalAvailable: true }))
-      .toMatchObject({ grid: { targetId: 'local:bran:abc' } })
+      .toMatchObject({ grid: { targetId: 'local:node1:abc' } })
     row.gridLaunch.baseUrl = 'http://127.0.0.1:9090/v1'
     const moved = await agentFrame(row, { selectedModel: null, terminalAvailable: true })
     expect(moved.grid).not.toHaveProperty('targetId')

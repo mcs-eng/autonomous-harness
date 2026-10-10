@@ -29,20 +29,20 @@ test('device inventory reads the GPU memory and utilization fields emitted by Gr
   assert.deepEqual(host.gpus[0],{name:'GPU',memoryGb:24,memoryUsedGb:1,utilizationPct:0,temperatureC:31,powerW:20});
 });
 test('an exact endpoint receives shared host GPU readings without claiming engine ownership',()=>{
-  const sensor={id:'bran-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://bran:11434/v1',host:'hermes@bran'};
-  const input={...reads,engines:{ok:true,value:[{name:'Bran Ollama',where:'http://bran:11434/v1',models:['gemma4:12b'],memory_gb:99,gpu_temp_c:99}]}};
-  const reading={ok:true,value:{name:'RTX 2000 Ada',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:94,temperatureC:68,powerW:67.54,powerLimitW:70}};
-  const data=assemble({...config,mode:'local',sensors:[sensor]},input,null,'2026-09-19T12:00:00Z',null,{'bran-gpu':reading});
+  const sensor={id:'node1-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://node1:11434/v1',host:'agent@node1'};
+  const input={...reads,engines:{ok:true,value:[{name:'Node1 Ollama',where:'http://node1:11434/v1',models:['gemma4:12b'],memory_gb:99,gpu_temp_c:99}]}};
+  const reading={ok:true,value:{name:'Example GPU',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:94,temperatureC:68,powerW:67.54,powerLimitW:70}};
+  const data=assemble({...config,mode:'local',sensors:[sensor]},input,null,'2026-09-19T12:00:00Z',null,{'node1-gpu':reading});
   assert.equal(data.status,'live');assert.equal(data.nodes[0].temperatureC,68);assert.equal(data.nodes[0].memoryUsedGb,9859/1024);
-  assert.deepEqual(data.nodes[0].gpuTelemetry,{scope:'shared-host',source:'bran-gpu',name:'RTX 2000 Ada',observedAt:'2026-09-19T12:00:00Z',checkedAt:'2026-09-19T12:00:00Z',error:null});
+  assert.deepEqual(data.nodes[0].gpuTelemetry,{scope:'shared-host',source:'node1-gpu',name:'Example GPU',observedAt:'2026-09-19T12:00:00Z',checkedAt:'2026-09-19T12:00:00Z',error:null});
 });
 test('sensor failure and duplicate endpoint mapping clear attributed values and report partial telemetry',()=>{
-  const sensor={id:'bran-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://bran:11434/v1',host:'hermes@bran'};
-  const engine={name:'Bran Ollama',where:'http://bran:11434/v1',models:['gemma4:12b'],vram_used_mb:9000,gpu_temp_c:68};
-  const failed=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine]}},null,'now',null,{'bran-gpu':{ok:false,error:'NVIDIA SSH sensor timed out.'}});
+  const sensor={id:'node1-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://node1:11434/v1',host:'agent@node1'};
+  const engine={name:'Node1 Ollama',where:'http://node1:11434/v1',models:['gemma4:12b'],vram_used_mb:9000,gpu_temp_c:68};
+  const failed=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine]}},null,'now',null,{'node1-gpu':{ok:false,error:'NVIDIA SSH sensor timed out.'}});
   assert.equal(failed.status,'partial');assert.equal(failed.nodes[0].memoryUsedGb,null);assert.equal(failed.nodes[0].temperatureC,null);assert.equal(failed.nodes[0].gpuTelemetry.observedAt,null);assert.equal(failed.nodes[0].gpuTelemetry.checkedAt,'now');assert.match(failed.nodes[0].gpuTelemetry.error,/timed out/);
-  const duplicate=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine,{...engine,name:'Duplicate'}]}},null,'now',null,{'bran-gpu':{ok:true,value:{name:'GPU',memoryTotalMb:10,memoryUsedMb:1,memoryFreeMb:9,utilizationPct:1,temperatureC:1,powerW:1,powerLimitW:2}}});
-  assert.equal(duplicate.status,'partial');assert.ok(duplicate.nodes.every(node=>node.temperatureC===null));assert.match(duplicate.sources['sensor:bran-gpu'].error,/more than one/);
+  const duplicate=assemble({...config,mode:'local',sensors:[sensor]},{...reads,engines:{ok:true,value:[engine,{...engine,name:'Duplicate'}]}},null,'now',null,{'node1-gpu':{ok:true,value:{name:'GPU',memoryTotalMb:10,memoryUsedMb:1,memoryFreeMb:9,utilizationPct:1,temperatureC:1,powerW:1,powerLimitW:2}}});
+  assert.equal(duplicate.status,'partial');assert.ok(duplicate.nodes.every(node=>node.temperatureC===null));assert.match(duplicate.sources['sensor:node1-gpu'].error,/more than one/);
 });
 test('engine re-registration maps host sensors to the current engine and clears historical readings',()=>{
   const sensor={id:'gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://host:11434/v1',host:'host'};
@@ -101,13 +101,13 @@ test('collector coalesces concurrent refreshes, caches hardware and writes a tru
 });
 test('collector reads an opted-in sensor and stamps the completed source observation',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'grid-sensor-'));t.after(()=>rm(dir,{recursive:true,force:true}));
-  const sensor={id:'bran-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://bran:11434/v1',host:'hermes@bran',gpuIndex:0};
+  const sensor={id:'node1-gpu',type:'nvidia-smi-ssh',engineEndpoint:'http://node1:11434/v1',host:'agent@node1',gpuIndex:0};
   await atomicJson(join(dir,'grid-fleet.json'),{...config,mode:'local',sensors:[sensor]});
   let sensorCalls=0;
-  const runJson=async(_machine,_mode,args)=>args[0]==='engines'?{ok:true,value:[{name:'Bran',where:'http://bran:11434/v1',models:['gemma4:12b']}]}:args[0]==='models'?{ok:true,value:[{model:'gemma4:12b'}]}:args[0]==='device-info'?{ok:true,value:device}:args[0]==='ls'?{ok:true,value:[]}:{ok:true,value:{grid:'home'}};
-  const readSensor=async()=>{sensorCalls++;return {ok:true,observedAt:'2026-09-19T12:00:08Z',value:{name:'RTX 2000 Ada',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:94,temperatureC:68,powerW:67.54,powerLimitW:70}};};
+  const runJson=async(_machine,_mode,args)=>args[0]==='engines'?{ok:true,value:[{name:'Node1',where:'http://node1:11434/v1',models:['gemma4:12b']}]}:args[0]==='models'?{ok:true,value:[{model:'gemma4:12b'}]}:args[0]==='device-info'?{ok:true,value:device}:args[0]==='ls'?{ok:true,value:[]}:{ok:true,value:{grid:'home'}};
+  const readSensor=async()=>{sensorCalls++;return {ok:true,observedAt:'2026-09-19T12:00:08Z',value:{name:'Example GPU',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:94,temperatureC:68,powerW:67.54,powerLimitW:70}};};
   const snapshot=await createCollector(dir,{runJson,readSensor})();
-  assert.equal(sensorCalls,1);assert.equal(snapshot.nodes[0].temperatureC,68);assert.equal(snapshot.nodes[0].gpuTelemetry.observedAt,'2026-09-19T12:00:08Z');assert.equal(snapshot.sources['sensor:bran-gpu'].observedAt,'2026-09-19T12:00:08Z');
+  assert.equal(sensorCalls,1);assert.equal(snapshot.nodes[0].temperatureC,68);assert.equal(snapshot.nodes[0].gpuTelemetry.observedAt,'2026-09-19T12:00:08Z');assert.equal(snapshot.sources['sensor:node1-gpu'].observedAt,'2026-09-19T12:00:08Z');
 });
 
 

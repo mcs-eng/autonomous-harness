@@ -4,18 +4,18 @@ import { DEFAULT_CONFIG, validateConfig } from '../lib/fleet.mjs';
 import { nvidiaSmiInvocation, parseNvidiaSmi } from '../lib/sensors.mjs';
 
 const source = {
-  id: 'bran-gpu', type: 'nvidia-smi-ssh', engineEndpoint: 'http://bran:11434/v1/', host: 'hermes@bran',
+  id: 'node1-gpu', type: 'nvidia-smi-ssh', engineEndpoint: 'http://node1:11434/v1/', host: 'agent@node1',
   sshBinary: '/mnt/c/Windows/System32/OpenSSH/ssh.exe', identityFile: 'C:\\Users\\operator\\.ssh\\id_ed25519', gpuIndex: 0,
 };
 
 test('sensor configuration accepts Windows SSH custody and rejects ambiguous or ignored settings',()=>{
   const config=validateConfig({...DEFAULT_CONFIG,grid:'home',sensors:[source]});
-  assert.equal(config.sensors[0].engineEndpoint,'http://bran:11434/v1');
+  assert.equal(config.sensors[0].engineEndpoint,'http://node1:11434/v1');
   assert.equal(config.sensors[0].identityFile,'C:\\Users\\operator\\.ssh\\id_ed25519');
   for(const bad of [
     {...source,type:'shell'}, {...source,sshBinary:'ssh.exe'}, {...source,identityFile:'id_ed25519'},
-    {...source,engineEndpoint:'http://user:secret@bran:11434/v1'}, {...source,engineEndpoint:'http://bran:11434/v1?token=secret'},
-    {...source,host:'-proxy@bran'}, {...source,command:'nvidia-smi'},
+    {...source,engineEndpoint:'http://user:secret@node1:11434/v1'}, {...source,engineEndpoint:'http://node1:11434/v1?token=secret'},
+    {...source,host:'-proxy@node1'}, {...source,command:'nvidia-smi'},
   ]) assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[bad]}));
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[source,{...source}]}),/unique/);
   assert.throws(()=>validateConfig({...DEFAULT_CONFIG,sensors:[source,{...source,id:'other'}]}),/Only one sensor/);
@@ -46,8 +46,8 @@ test('sensor invocation is a fixed nvidia-smi query with strict noninteractive S
 });
 
 test('sensor parser preserves zeroes and refuses implicit multi-GPU attribution',()=>{
-  const row='NVIDIA RTX 2000 Ada Generation, 16380, 9859, 6083, 0, 31, 20.50, 70.00\n';
-  assert.deepEqual(parseNvidiaSmi(source,row),{name:'NVIDIA RTX 2000 Ada Generation',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:0,temperatureC:31,powerW:20.5,powerLimitW:70});
+  const row='NVIDIA Example GPU, 16380, 9859, 6083, 0, 31, 20.50, 70.00\n';
+  assert.deepEqual(parseNvidiaSmi(source,row),{name:'NVIDIA Example GPU',memoryTotalMb:16380,memoryUsedMb:9859,memoryFreeMb:6083,utilizationPct:0,temperatureC:31,powerW:20.5,powerLimitW:70});
   assert.throws(()=>parseNvidiaSmi({...source,gpuIndex:undefined},row+row),/multiple GPUs/);
   assert.throws(()=>parseNvidiaSmi(source,'GPU, , 0, 0, 0, 30, N/A, N/A'),/missing/);
   assert.throws(()=>parseNvidiaSmi(source,'GPU, 10, 1, 9, 101, 30, N/A, N/A'),/above 100/);

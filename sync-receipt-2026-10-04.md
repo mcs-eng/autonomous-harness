@@ -1,6 +1,6 @@
 # Upstream sync pass receipt — 2026-10-04
 
-Pass owner: Kimi Work session (source-inspection + integration pass, no publish authorization).
+Pass owner: an agent session (source-inspection + integration pass, no publish authorization).
 
 ## Immutable revisions
 
