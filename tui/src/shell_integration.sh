@@ -171,7 +171,7 @@ _hn_agent() {
     local _hn_engine="$1" _hn_route _hn_grid _hn_model _hn_arg
     shift
     case "$_hn_engine" in
-        codex|claude|cursor|opencode|pi|hermes|commandcode|devin|muse|amp|kilo|grok|agy|copilot) ;;
+        codex|claude|cursor|opencode|pi|hermes|commandcode|devin|muse|amp|kilo|grok|agy|copilot|cline) ;;
         cursor-agent) _hn_engine=cursor ;;
         cmd) _hn_engine=commandcode ;;
         *) printf '%s\n' 'Use hn run with a supported agent, such as codex, claude, or pi.' >&2; return 2 ;;

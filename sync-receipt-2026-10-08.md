@@ -8,7 +8,7 @@ No merge of a pull request, installation, release, daemon restart, host linking,
 - Fork parent / PR #42: `036afbab00fdd15c350c2d1b843c5bdbe7b0580e`.
 - Upstream parent: `9afa898d78a32ee6cfda88ee4671b7b5a16e205e`.
 - Previous upstream integration / common ancestor: `4d463682a07c9bbd965c266eb1d57368e9682a58`.
-- Branch: `hermes/sync-upstream-2026-10-08`, isolated worktree.
+- Branch: the PR #43 head branch, isolated worktree.
 - Reviewed integration tree: `9d1328b217a3c102e4a411de1e75a666429bbacf`.
 - Post-review application tree is unchanged. The only subsequent integration change removes duplicate/trailing blank lines in root `AGENTS.md`; tree before adding this receipt: `53fd2d56c61f4602e6e6e9bb93cd9abe7e23abfc`.
 
@@ -83,7 +83,7 @@ Programmatic comparison found **no candidate failing test name absent from both 
 
 ## Independent review and remaining gates
 
-Claude Fable (`claude-fable-5-1`, subscription-direct SDK provider) returned fail-closed JSON with `passed: true`, empty `security_concerns` and `logic_errors`, for integration correctness of the scoped Windows/local Grid/DSH seams at the reviewed tree. The reviewer compared both parents and checked preserved fork deltas. It did not execute tests or review every imported upstream file.
+An independent agent review returned fail-closed JSON with `passed: true`, empty `security_concerns` and `logic_errors`, for integration correctness of the scoped Windows/local Grid/DSH seams at the reviewed tree. The reviewer compared both parents and checked preserved fork deltas. It did not execute tests or review every imported upstream file.
 
 The desktop discovery rewrite raised in review has now been exercised by the passing focused Flutter run. The following are still open:
 

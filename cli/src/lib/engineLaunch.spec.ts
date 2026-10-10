@@ -244,8 +244,8 @@ describe('buildEngineLaunchArgv', () => {
       const result = run(script)
       expect(result.out).toContain('args:a b --flag')
       expect(result.status).toBe(3)
-      // No shell was handed over and no "Claude stopped … start it again" line was printed: no tty.
-      expect(result.out).not.toContain('Type claude to start it again')
+      // No shell was handed over and no "this pane is a shell now" line was printed: no tty.
+      expect(result.out).not.toContain('This pane is a shell now')
     })
     it('a take-over that waits says so, and starts the engine only once the other process is gone', () => {
       const folder = mkdtempSync(join(tmpdir(), 'harness-wait-engine-'))
@@ -307,9 +307,6 @@ describe('buildEngineLaunchArgv', () => {
       expect(prelude.indexOf('set-option')).toBeLessThan(prelude.indexOf(ENGINE_INPUT_DRAIN_SH))
       expect(prelude.indexOf(ENGINE_INPUT_DRAIN_SH)).toBeLessThan(prelude.indexOf("exec '/bin/bash'"))
       expect(prelude).toContain('if [ "$harness_status" -eq 127 ]; then exit 127; fi')
-      expect(prelude).toContain(
-        `Codex stopped ('"\$harness_status"'). Type codex to start it again, or close this pane.`,
-      )
       // zsh is a login shell; bash keeps its interactive rc (same rule as a terminal).
       expect(engineFallbackPrelude('codex', '/bin/zsh', null)).toContain("exec '/bin/zsh' -l\n")
       expect(engineFallbackPrelude('codex', '/bin/bash', null)).toContain("exec '/bin/bash'\n")

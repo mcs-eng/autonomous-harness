@@ -34,7 +34,7 @@ describe('local Grid profiles', () => {
     ] }), { mode: 0o600 })
     expect(readLocalGridProfiles(data).map((row) => row.id)).toEqual(['gone', 'node1'])
     setLocalGridProfile({ id: 'other', label: 'Other', gridHome: home, gridName: 'other-grid' }, data)
-    expect(readLocalGridProfiles(data).map((row) => row.id).sort()).toEqual(['node1', 'gone', 'other'])
+    expect(readLocalGridProfiles(data).map((row) => row.id).sort()).toEqual(['gone', 'node1', 'other'])
   })
 
   it('refuses a group-writable profile store', () => {
