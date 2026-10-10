@@ -130,7 +130,9 @@ export class NativeFiles {
     }
     const after = this.directoryRoute(location.path)
     if (route.size !== after.size || [...route].some(([part, version]) => after.get(part) !== version)) {
-      return nativeUnavailable('a binding directory or ancestor changed during enumeration')
+      const changed = [...new Set([...route.keys(), ...after.keys()])].filter((part) => route.get(part) !== after.get(part))
+        .map((part) => `${part} [${route.get(part)} -> ${after.get(part)}]`).join('; ')
+      return nativeUnavailable(`a binding directory or ancestor changed during enumeration: ${changed}`)
     }
     this.directories.set(location.path, stamp(before))
     return names

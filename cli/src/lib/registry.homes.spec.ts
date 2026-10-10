@@ -20,7 +20,7 @@ vi.mock('./processLiveness.js', async original => ({ ...await original<object>()
 let root: string | undefined
 afterEach(() => { fault.beforeVerify = undefined; fault.captures = 0; vi.doUnmock('./engineHomes.js'); vi.unstubAllEnvs(); vi.resetModules(); if (root) rmSync(root, { recursive: true, force: true }) })
 
-it('repairs a child-overwritten parent from an adopted Codex home before the login shell is read', async () => {
+it.each(Array.from({ length: 30 }, (_, i) => i))('repairs a child-overwritten parent from an adopted Codex home before the login shell is read #%i', async () => {
   // Found by QA on a quiet machine: restart searched only the default home and discarded this parent binding.
   root = mkdtempSync(join(tmpdir(), 'registry-homes-'))
   vi.stubEnv('ADAPTER_DATA_DIR', root)
