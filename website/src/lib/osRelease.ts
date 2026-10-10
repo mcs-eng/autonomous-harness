@@ -35,17 +35,33 @@ export function latestOSRelease(releases: unknown[]): string {
   return candidates[0].url;
 }
 
+// Unauthenticated, the API allows 60 requests an hour per address. A CI runner shares its address with
+// other jobs, and the website check then saw the Install link answer 503 instead of redirecting (fork
+// PR #44, 2026-10-10). The website check sets OS_RELEASE_LOOKUP_TOKEN to its job token, which lifts that
+// limit. It is a dedicated name, not GITHUB_TOKEN, so a stale personal token in a developer's shell cannot
+// turn a working lookup into a 401; without it the request is exactly what it was.
+function releaseHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+  const token = process.env.OS_RELEASE_LOOKUP_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
 export async function fetchLatestOSRelease(): Promise<string> {
   const releases: unknown[] = [];
   const signal = AbortSignal.timeout(15_000);
+  const headers = releaseHeaders();
   // The monorepo publishes several products. Read every page so frequent app
   // releases cannot push the OS out of the result, with a bounded failure path.
   for (let page = 1; page <= 20; page++) {
     const response = await fetch(`${api}?per_page=100&page=${page}`, {
-      headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+      headers,
       cache: "no-store", signal,
     });
-    if (!response.ok) throw new Error(`Release lookup failed (${response.status})`);
+    if (!response.ok) {
+      const remaining = response.headers.get("x-ratelimit-remaining");
+      throw new Error(`Release lookup failed (${response.status}${remaining === null ? "" : `, rate limit remaining ${remaining}`})`);
+    }
     const data: unknown = await response.json();
     if (!Array.isArray(data)) throw new Error("Invalid release response");
     releases.push(...data);

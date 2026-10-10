@@ -199,6 +199,14 @@ class GateTests(unittest.TestCase):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 planner.verify(dict(self.plan, **patch), self.needs, self.head)
 
+    def test_gate_plan_drops_path_lists_and_still_verifies(self):
+        plan = dict(self.plan, paths=[f"cli/src/{index:05}-" + "x" * 80 + ".ts" for index in range(5000)],
+                    reasons={f"cli/src/{index:05}.ts": ["cli"] for index in range(5000)})
+        gated = planner.gate_plan(plan)
+        self.assertNotIn("paths", gated)
+        self.assertNotIn("reasons", gated)
+        self.assertLess(len(json.dumps(gated)), 4096)
+        self.assertEqual(planner.verify(gated, self.needs, self.head)["status"], "passed")
 
 if __name__ == "__main__":
     unittest.main()

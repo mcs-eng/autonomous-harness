@@ -94,6 +94,16 @@ def make_plan(root, event_name, event, scope="full", source=None):
                 manual_acceptance="Review still selects relevant native, real-engine, hardware and visual acceptance.")
 
 
+def gate_plan(plan):
+    """The plan as the gate job receives it: everything verify() reads, without the per-path lists.
+
+    The required job gets the plan twice through its environment, once as CI_PLAN and again inside
+    toJSON(needs). A sync PR changes over a thousand paths, and the two copies together passed the
+    per-argument limit: the step never started ("Argument list too long", fork PR #44, 2026-10-10).
+    The full plan, paths and reasons included, is still uploaded as the ci-plan artifact."""
+    return {key: value for key, value in plan.items() if key not in ("paths", "reasons")}
+
+
 def verify(plan, needs, source):
     if plan.get("schema") != 1 or plan.get("kind") != "ci-plan" or plan.get("head") != sha(source):
         raise ValueError("CI plan identity does not match this source")
@@ -136,7 +146,7 @@ def main():
         record = make_plan(Path.cwd(), os.environ["GITHUB_EVENT_NAME"],
                            json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()), args.scope, os.environ["CI_SOURCE_SHA"])
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-            output.write("plan=" + json.dumps(record, separators=(",", ":")) + "\n")
+            output.write("plan=" + json.dumps(gate_plan(record), separators=(",", ":")) + "\n")
             output.write(f"ready={'false' if record['draft'] else 'true'}\n")
             for suite in sorted(SUITES):
                 output.write(f"{suite}={'true' if suite in record['suites'] else 'false'}\n")
