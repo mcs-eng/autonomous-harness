@@ -10,7 +10,8 @@ import { statSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { BackendSocket } from '../../backendSocket.js'
-import { MODEL_MANAGER_ID } from '../../dsh/builtins.js'
+import type { ModelsPort } from '../api.js'
+import { MODEL_MANAGER_ID } from '../../dsh/builtinIds.js'
 import { installedDsh } from '../../dsh/installed.js'
 import { harnessEnvToClear, type DshAccount } from '../../dsh/launch.js'
 import { dshPinnedPermissionMode } from '../../dsh/manifest.js'
@@ -27,12 +28,13 @@ import {
   buildEngineCommandArgv, buildEngineLaunchArgv, namedAgentArgs, permissionModeApproves, permissionModeFlags,
   refusePermissionFlagIfUnsupported, supportsFirstPrompt,
 } from '../../lib/engineLaunch.js'
-import { setUpWithin } from '../../lib/gridAttach.js'
+import { setUpWithin } from '../../lib/setUpWithin.js'
 import { writeGridConfigDir } from '../../lib/gridConfigDir.js'
 import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, type GridLaunchMachine, type GridWebSearchStatus } from '../../lib/gridLaunch.js'
 import { DEFAULT_HARNESS_PERMISSION, freshHarnessEnvironment } from '../../lib/harnessDefaults.js'
 import { buildHarnessSessionLabel } from '../../lib/harnessSessionLabel.js'
-import { installCodexHooks, installOpencodePlugin } from '../../lib/hooks.js'
+import { engineHooks } from '../../engines/hooks.js'
+import { installOpencodePlugin } from '../../lib/hooks.js'
 import { sid } from '../../lib/log.js'
 import type { registry, RegisteredSession } from '../../lib/registry.js'
 import { stopSessionOwner, type SessionOwner } from '../../lib/sessionSearch/external.js'
@@ -40,6 +42,7 @@ import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 import { TMUX_SESSION_ENV_MIN, tmuxSupportsSessionEnv } from '../../lib/tmuxVersion.js'
 import type { Adoption } from './adopt.js'
+import { prepareInstructionWrites, scmLaunchEnv } from '../../scm/scmProjects.js'
 import { mergedLaunchEnv } from './launchEnv.js'
 import type { createPaneWatcher } from './newPane.js'
 
@@ -69,8 +72,9 @@ export interface CreateAgentDeps {
   terminalHintMachineName: () => string
   /** Whether a folder is being purged (PurgeAgentService.blocksFolder). */
   blocksFolder: (cwd: string) => boolean | undefined
-  /** Grid set-up, when this daemon can do it (BackendSocket.ensureGrid). */
-  gridSetup: () => BackendSocket['ensureGrid']
+  /** Grid set-up, when this daemon can do it: the models service's (core/api.ts `ModelsPort.ensure`), null
+   *  while it is off. */
+  gridSetup: () => ModelsPort['ensure'] | null
   privateGridName: () => Promise<string | null>
 }
 
@@ -79,7 +83,7 @@ export function createAgentCreator({
   prepareApiTools, hookPort, hooksDisabled, gridLaunchMachine, terminalHintMachineName, blocksFolder, gridSetup,
   privateGridName,
 }: CreateAgentDeps) {
-  const createAgent: CreateAgent = async ({ engine, cwd, bypassPermission, permissionMode, grid, codexHome, dsh, prompt, name, agent, resumeSessionId, takeOver }) => {
+  const createAgent: CreateAgent = async ({ engine, cwd, bypassPermission, permissionMode, grid, codexHome, dsh, prompt, name, agent, resumeSessionId, takeOver, scmLaunchRecord }) => {
     if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
     // A conversation Harness did not start opens in its own folder, under its own title — taken over
     // from the terminal that has it, when asked to.
@@ -124,9 +128,11 @@ export function createAgentCreator({
     // Harness-created sessions are easy to distinguish from a user's organic tmux sessions while
     // retaining the engine and a collision-resistant creation suffix for diagnostics. Computed
     // before the grid block because a file-configured engine keys its config directory on it.
-    // The `harness-` prefix is also discovery's whitelist (see `isHarnessSession` /
-    // `TmuxBackend.inventory()`) — every pane outside it is invisible to the daemon.
+    // The `harness-` prefix is also discovery's whitelist for a pane nobody tagged (see `ownedHere` /
+    // `TmuxBackend.inventory()`): the panes this daemon creates carry its tag, which goes with them into
+    // any session the person moves them to.
     const label = buildHarnessSessionLabel(engine)
+    await prepareInstructionWrites(cwd)
     // Prepare the harness workspace, then bind its session context to the selected engine.
     // Missing packages or invalid runtimes refuse the launch before the agent is started.
     let dshEnv: Record<string, string> | undefined
@@ -172,7 +178,8 @@ export function createAgentCreator({
         if (emptyBefore && materialized.created.some((item) => item.startsWith('template'))) {
           try {
             if (engine === 'claude') preTrustClaudeProject(cwd)
-            if (engine === 'codex') preTrustCodexProject(cwd)
+            // In the agent's own profile when it has one: that config.toml is the one it reads.
+            if (engine === 'codex') preTrustCodexProject(cwd, codexHome)
           } catch (error) { console.warn(`[dsh] pre-trust ${cwd} · ${error instanceof Error ? error.message : error}`) }
         }
       } catch (error) {
@@ -227,7 +234,7 @@ export function createAgentCreator({
     // THAT folder, not the one `harness login` already installed into — without this, such an agent
     // fires no hook at all (no SessionStart/UserPromptSubmit/Stop) and never streams a single event.
     // Idempotent, so paying this on every create against an already-set-up profile is free.
-    if (codexHome && !hooksDisabled) installCodexHooks(hookPort, codexHome)
+    if (codexHome && !hooksDisabled) engineHooks.codex.installIn(hookPort, codexHome)
     // OpenCode may have upgraded from 1.x to 2.x while this daemon was running. Its new TUI must
     // not discover our old server plugin; the cached version probe changes with the executable.
     if (engine === 'opencode' && !hooksDisabled) installOpencodePlugin(hookPort)
@@ -285,10 +292,12 @@ export function createAgentCreator({
       cwd,
       sessionLabel: label,
       argv,
-      env: freshHarnessEnvironment(engine, mergedLaunchEnv(gridLaunch?.env ?? (codexHome ? { CODEX_HOME: codexHome } : undefined), dshEnv), !!grid || !!resumeSessionId,
+      env: freshHarnessEnvironment(engine, mergedLaunchEnv(mergedLaunchEnv(gridLaunch?.env ?? (codexHome ? { CODEX_HOME: codexHome } : undefined), dshEnv),
+        scmLaunchEnv(scmLaunchRecord)), !!grid || !!resumeSessionId,
         permissionMode ?? (bypassPermission ? DEFAULT_HARNESS_PERMISSION : 'ask')),
       grid: grid ? { baseUrl: grid.baseUrl, model: grid.model ?? null } : null,
       gridLaunchRecord: grid && gridLaunch ? { override: grid, webSearch: gridLaunch.webSearch } : null,
+      scmLaunchRecord: scmLaunchRecord ?? null,
       codexHome,
       dsh,
       dshRuntime: dsh ? label : null,

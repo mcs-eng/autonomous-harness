@@ -105,13 +105,13 @@ pub fn defaults() -> &'static BTreeMap<String, String> {
         // One cell at each outer edge aligns status text with the pane surfaces.
         // Two spaces separate the window list from the information on the right.
         m.insert("status-left".into(), " #{?client_prefix,#[bold]›#[nobold] ,}".into());
-        m.insert("status-right".into(), "  #{?daemon_down,#[bold]daemon down#[nobold]  ,}#{?model_progress,#{model_progress}  ,}#{?usage_remaining,#{usage_remaining_mark}  ,}#{?fleet,#{s/ /  /:fleet}  ,}#{?pane_watching,[watching]  ,}\"#{=/21/…:local_machine}\"  %H:%M ".into());
+        m.insert("status-right".into(), "  #{?hn_controls,#{hn_controls}  ,}#{?daemon_down,#[bold]daemon down#[nobold]  ,}#{?model_progress,#{model_progress}  ,}#{?usage_remaining,#{usage_remaining_mark}  ,}#{?fleet,#{s/ /  /:fleet}  ,}#{?pane_watching,[watching]  ,}#{?shell_context,#{=/36/…:shell_context},\"#{=/21/…:local_machine}\"}  %H:%M ".into());
         // Each window's most urgent harness at a glance (the symbol its pane titles show) and its
         // name in a few whole words (#{window_short_name}): a harness is named for its task.
         // Keep tmux's familiar current/previous markers beside the name, then any other
         // flags, then the harness state. The selected tab needs no filled badge.
         for name in ["window-status-format", "window-status-current-format"] {
-            m.insert(name.into(), "#I:#{window_short_name}#{?window_active,*,#{?window_last_flag,-,}}#{s/[*-]//:window_flags}#{?#{==:#{window_agent_state},idle},,#{?window_agent_icon, #{window_agent_icon},}}".into());
+            m.insert(name.into(), status_window_format(DEFAULT_TAB_NAME, true));
         }
         // Unread activity and bells already carry #/! markers. Keep a continuous status
         // background and emphasize text instead of introducing inverted tab badges.
@@ -142,6 +142,56 @@ pub fn defaults() -> &'static BTreeMap<String, String> {
     })
 }
 
+/// What a tab shows unless `@hn-window-name` says otherwise (Appearance › Tab names): its name cut
+/// to [TAB_NAME_COLS] columns with `…` (`short`), or whole (`full`). (`pane`, an older tui.toml's
+/// word, reads as `short`; `tmux` from a tmux.conf shows the window's own short name.)
+pub const DEFAULT_TAB_NAME: &str = "short";
+
+/// The columns a `short` tab name keeps (as tmux's window names are short).
+pub const TAB_NAME_COLS: usize = 20;
+
+/// The status bar's per-window text. [name] is how the tab's name is shown (`short` | `full` |
+/// `tmux`); [star] is whether the window you are on is marked `*` (`false` for a filled tab, which
+/// needs no `*` beside its name). No `-` for the window used before: tmux's last-window flag says
+/// nothing hn's tabs need.
+pub fn status_window_format(name: &str, star: bool) -> String {
+    // The active pane's own title (a harness's task), or the name auto rename gave the window (its
+    // repo and its work); `tmux` the window's own name.
+    let cut = |var: &str| if name == "full" { format!("#{{{var}}}") } else { format!("#{{=/{TAB_NAME_COLS}/…:{var}}}") };
+    let name_part = if name == "tmux" { "#{?window_auto_named,#{window_name},#{window_short_name}}".to_string() }
+        else { format!("#{{?window_auto_named,{},{}}}", cut("window_name"), cut("pane_title")) };
+    let mark = if star { "#{?window_active,*,}" } else { "" };
+    // (Two closing braces: the idle test's and the icon's. With one, the icon never showed.)
+    format!("#I:{name_part}{mark}#{{s/[*-]//:window_flags}}#{{?#{{==:#{{window_agent_state}},idle}},,#{{?window_agent_icon, #{{window_agent_icon}},}}}}")
+}
+
+/// Whether [format] is one [status_window_format] derived, by this build or an older one (whose
+/// name part or closing braces may differ), as opposed to one somebody wrote in tmux.conf.
+pub fn derived_window_status(format: &str) -> bool {
+    format.starts_with("#I:") && format.contains("#{s/[*-]//:window_flags}#{?#{==:#{window_agent_state},idle},,#{?window_agent_icon, #{window_agent_icon},}")
+}
+
+/// The status bar's `window-status-*` overrides for a tab name source [name] (`tmux`|`pane`) and a
+/// current-tab [active] (`star`|`filled`). Empty when they match the defaults ([DEFAULT_TAB_NAME] +
+/// star), so a caller can leave the defaults in place. Shared by boot (from `[look]`) and a live pick.
+pub fn window_status_overrides(name: &str, active: &str) -> Vec<(String, String)> {
+    let default_win = status_window_format(DEFAULT_TAB_NAME, true);
+    let mut out = Vec::new();
+    let normal = status_window_format(name, true);
+    let current = status_window_format(name, active == "star");
+    if normal != default_win { out.push(("window-status-format".into(), normal)) }
+    if current != default_win { out.push(("window-status-current-format".into(), current)) }
+    if active == "filled" {
+        // The current tab filled: the status line's own colours swapped — its background becomes a
+        // solid block (the theme's background) with the theme's foreground as the lettering — so it
+        // reads exactly like the Appearance preview, not tmux's stock green.
+        let (bg, fg, _) = crate::theme::palette();
+        let pair = |fg, bg| format!("fg={},bg={}", crate::tmuxconf::colour_name(fg), crate::tmuxconf::colour_name(bg));
+        out.push(("window-status-current-style".into(), format!("{},bold", pair(fg, bg))));
+    }
+    out
+}
+
 /// tmux 3.5a's own defaults, as `tmux show -g` prints them (mode-keys and status-keys following
 /// $VISUAL or $EDITOR in hn's).
 pub fn tmux_defaults() -> &'static BTreeMap<String, String> {
@@ -153,11 +203,22 @@ pub fn tmux_defaults() -> &'static BTreeMap<String, String> {
             let (_, name, value) = (it.next(), it.next().unwrap_or(""), it.next().unwrap_or(""));
             if !name.is_empty() { m.insert(name.to_string(), unescape(value)); }
         }
+        // tmux computes this one when it starts (options-table.c, then server's $SHELL): the
+        // fixture's `/bin/zsh` is the Mac it was captured on. A command window runs as
+        // `default-shell -c`, and on a Linux without zsh (Harness OS) the OS welcome died at once
+        // (`Pane is dead (status 1)`) instead of showing Wi-Fi.
+        m.insert("default-shell".into(), default_shell(std::env::var("SHELL").ok().as_deref()));
         m
     })
 }
 
-/// Explicit user styles win; default surfaces follow the terminal's current theme.
+/// tmux's default-shell: $SHELL when it is a suitable shell, else /bin/sh (_PATH_BSHELL).
+fn default_shell(env: Option<&str>) -> String {
+    env.filter(|s| suitable_shell(s)).unwrap_or("/bin/sh").to_string()
+}
+
+/// Explicit user styles win; default surfaces follow the terminal's current theme. Only the
+/// panes' own colours: the status bar is the same whichever focus style (blurred or border).
 fn pane_default(name: &str) -> Option<String> {
     let p = crate::theme::pane_palette();
     let pair = |fg, bg| format!("fg={},bg={}", crate::tmuxconf::colour_name(fg), crate::tmuxconf::colour_name(bg));
@@ -166,14 +227,11 @@ fn pane_default(name: &str) -> Option<String> {
         "window-active-style" => pair(p.foreground, p.surface),
         "pane-border-style" => pair(p.border, p.inactive_surface),
         "pane-active-border-style" => pair(p.active_border, p.surface),
-        "status-style" | "window-status-style" => pair(p.status_foreground, p.status),
-        "window-status-current-style" => format!("{},bold", pair(p.status_foreground, p.status)),
-        "window-status-separator" => "  ".into(),
         _ => return None,
     })
 }
 
-const PANE_LOOK: [&str; 8] = ["window-style", "window-active-style", "pane-border-style", "pane-active-border-style", "status-style", "window-status-current-style", "window-status-style", "window-status-separator"];
+const PANE_LOOK: [&str; 4] = ["window-style", "window-active-style", "pane-border-style", "pane-active-border-style"];
 
 /// hn's look, where its defaults differ from tmux's: what `set -g @hn-look tmux` puts back.
 pub const LOOK: [&str; 14] = ["pane-border-status", "pane-border-format", "status-left", "status-right", "status-left-length", "status-right-length", "window-status-format", "window-status-current-format", "set-titles", "set-titles-string", "allow-set-title", "window-status-activity-style", "window-status-bell-style", "status-format[1]"];
@@ -290,6 +348,10 @@ impl Store {
     /// `@hn-dim on` (tui.toml `dim`): the panes you are not in, a little quieter — with borders or
     /// blurred surfaces alike. Off unless chosen.
     pub fn dim_others(&self) -> bool { self.get("@hn-dim", "", None).as_deref() == Some("on") }
+
+    /// `@hn-auto-rename on` (tui.toml `auto_rename`): a window with a repo is named for it and its
+    /// work (`autoname.rs`). Off unless chosen.
+    pub fn auto_rename(&self) -> bool { self.get("@hn-auto-rename", "", None).as_deref() == Some("on") }
 
     /// `@hn-border` as chosen — `box` unless it says `line`. (`@hn-look classic` is not a choice
     /// of lines: hn wrote it into every `[look]` it saved, a theme picked or a status bar moved.)
@@ -625,6 +687,29 @@ pub fn unescape(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The default shell is this computer's, as tmux's is, never the fixture's Mac `/bin/zsh`.
+    #[test]
+    fn the_default_shell_is_the_users_or_sh() {
+        assert_eq!(default_shell(Some("/bin/sh")), "/bin/sh");
+        assert_eq!(default_shell(Some("/nonexistent/zsh")), "/bin/sh");
+        assert_eq!(default_shell(Some("zsh")), "/bin/sh", "not a full path");
+        assert_eq!(default_shell(None), "/bin/sh");
+        let expected = default_shell(std::env::var("SHELL").ok().as_deref());
+        assert_eq!(tmux_defaults()["default-shell"], expected);
+    }
+
+    /// Every `#{` of a tab's status text is closed: one short, and the harness icon after a tab's
+    /// name (working, waiting on you) was never drawn.
+    #[test]
+    fn a_tabs_status_text_closes_every_brace() {
+        for name in ["tmux", "pane"] {
+            for star in [true, false] {
+                let format = status_window_format(name, star);
+                assert_eq!(format.matches("#{").count(), format.matches('}').count(), "{format}");
+            }
+        }
+    }
+
     #[test]
     fn quoting_as_tmux_prints_it() {
         assert_eq!(escape("a$b\"c\\d"), r#""a\$b\"c\\d""#);
@@ -682,7 +767,8 @@ mod tests {
             s.set("@hn-look", Some(look), &g, "", 0).unwrap();
             assert_eq!(s.pane_look(), look == "panes");
             assert_eq!(s.get("window-style", "", None).as_deref(), Some("bg=blue"));
-            if look != "panes" { assert_eq!(s.get("status-style", "", None), defaults().get("status-style").cloned()); }
+            // The status bar is the same whichever focus style — blurred panes do not recolour it.
+            if look != "tmux" { for n in ["status-style", "window-status-style", "window-status-current-style", "window-status-separator"] { assert_eq!(s.get(n, "", None), defaults().get(n).cloned(), "{look}: {n}"); } }
         }
         s.set("window-style", None, &SetFlags { unset: true, ..gw }, "", 0).unwrap();
         assert!(s.get("window-style", "", None).unwrap().starts_with("fg=#"));

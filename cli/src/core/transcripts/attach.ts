@@ -10,8 +10,7 @@
 import { AgyNormalizer } from '../../engines/agy/normalizer.js'
 import { agyPaneIdle } from '../../engines/agy/runtimeProfile.js'
 import { AmpNormalizer } from '../../engines/amp/normalizer.js'
-import { CodexNormalizer } from '../../engines/codex/normalizer.js'
-import { codexSubagentResolverFor } from '../../engines/codex/subagent.js'
+import type { LiveFor } from '../../engines/facets/live.js'
 import { CommandCodeNormalizer } from '../../engines/commandcode/normalizer.js'
 import { CopilotNormalizer, copilotHistoryTurnOpen } from '../../engines/copilot/normalizer.js'
 import type { CursorTranscriptDiscovery } from '../../engines/cursor/discovery.js'
@@ -24,26 +23,37 @@ import { MuseNormalizer } from '../../engines/muse/normalizer.js'
 import { OpencodeReader } from '../../engines/opencode/reader.js'
 import { PiNormalizer } from '../../engines/pi/normalizer.js'
 import type { AgentEngine } from '../../engines/types.js'
-import { pollsQuestions, type QuestionWatcher } from '../../lib/askQuestion.js'
-import { attachTranscript, claudeAttachRules, codexAttachRules, type AttachRead } from '../../lib/attachTranscript.js'
+import { pollsQuestions, type QuestionWatcher } from '../../lib/questionController.js'
+import { attachTranscript, type AttachRead } from '../../lib/attachTranscript.js'
 import { AttachTracker } from '../../lib/attachTracker.js'
-import type { AutonomousDeviceService } from '../../lib/autonomous-device/service.js'
+import type { WifiFeed } from '../wifi.js'
 import { sid } from '../../lib/log.js'
-import { foldTranscript, lineToEvents, newTurnState, TranscriptFold, type LiveEvent } from '../../lib/normalize.js'
+import { foldTranscript, TranscriptFold } from '../../engines/kit/transcriptFold.js'
+import type { LiveEvent } from '../../engines/kit/events.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import type { RuntimeField, RuntimeProfileManager } from '../../lib/runtimeProfile.js'
-import { tailFile } from '../../lib/transcriptTail.js'
+import type { ProfileHydration } from '../engines/runtimeProfiles.js'
+import { tailFileCapped, WHOLE_READ_CAP_BYTES } from '../../lib/transcriptTail.js'
 import type { TailHold, Watcher } from '../../watcher/watcher.js'
 import type { SessionNormalizers } from './normalizers.js'
+import type { RelaunchMarks } from './relaunch.js'
+import { createSideReads } from './sideReads.js'
+import type { LiveSessions, PreparedLive } from '../engines/liveSessions.js'
 
 export interface AttachDeps {
-  validateTerminal: (session: RegisteredSession) => Promise<boolean>
+  liveFor: LiveFor
+  remoteLive?: Pick<LiveSessions, 'handles' | 'current' | 'prepare' | 'install' | 'discard' | 'retry'>
+  /** Whether the session's terminal is known to be gone (core/terminals/control.ts `terminalGone`). */
+  terminalGone: (session: RegisteredSession) => Promise<boolean>
   normalizers: SessionNormalizers
   watcher: Pick<Watcher, 'addSession' | 'hold' | 'tails'>
   cursorDiscovery: Pick<CursorTranscriptDiscovery, 'add'>
-  /** The Harness device service, once it exists: some subscriptions read the raw transcript. */
-  device: () => Pick<AutonomousDeviceService, 'needsTranscript' | 'observeTranscript'> | undefined
-  runtimeProfiles: Pick<RuntimeProfileManager, 'transcriptFields' | 'beginHydrate' | 'hydrate' | 'ingestConfig' | 'ingestPane'>
+  /** The Wi-Fi device's service, wherever it runs (core/wifi.ts): it proves its turns by the raw transcript. */
+  device: () => Pick<WifiFeed, 'needsTranscript' | 'observeTranscript'> | undefined
+  runtimeProfiles: Pick<RuntimeProfileManager, 'transcriptFields' | 'hydrate' | 'ingestConfig'> & {
+    beginHydrate(session: RegisteredSession): ProfileHydration
+    ingestPane(session: RegisteredSession, text: string, silent?: boolean): boolean | Promise<boolean>
+  }
   captureTerminal: (target: string, historyLines?: number) => Promise<string | null>
   emit: (sessionId: string, events: LiveEvent[], opts?: { resumed?: boolean }) => void
   announceTurnAborted: (sessionId: string, engine: string, message: string) => void
@@ -57,16 +67,24 @@ export interface AttachDeps {
   hermesDb: (session: RegisteredSession) => Promise<string>
   /** How many sessions attach at once. */
   concurrency: number
+  /** Where an engine's writing became live again after a relaunch (core/transcripts/relaunch.ts): the fold stops there. */
+  relaunchMarks?: Pick<RelaunchMarks, 'take'>
+  /** The most of a transcript an engine without its own reader from the end folds, from its end. */
+  wholeReadCapBytes?: number
+  /** The session attached with its last turn already over (core/turns/recaps.ts `settled`). */
+  settled?: (sessionId: string) => void
 }
 
 export function createAttach({
-  validateTerminal, normalizers, watcher, cursorDiscovery, device, runtimeProfiles, captureTerminal, emit,
-  announceTurnAborted, questionWatcher, terminalLabel, dbs, devinHome, hermesDb, concurrency,
+  liveFor, remoteLive, terminalGone, normalizers, watcher, cursorDiscovery, device, runtimeProfiles, captureTerminal, emit,
+  announceTurnAborted, questionWatcher, terminalLabel, dbs, devinHome, hermesDb, concurrency, relaunchMarks,
+  wholeReadCapBytes = WHOLE_READ_CAP_BYTES, settled,
 }: AttachDeps) {
   const {
-    turnStates, codexNormalizers, cursorNormalizers, opencodeReaders, kiloReaders, museNormalizers, ampNormalizers,
+    liveParsers, cursorNormalizers, opencodeReaders, kiloReaders, museNormalizers, ampNormalizers,
     grokNormalizers, agyNormalizers, copilotNormalizers, piNormalizers, hermesReaders, devinReaders, commandcodeNormalizers,
   } = normalizers
+  const sideRead = createSideReads()
   /**
    * Sessions that attached before their transcript existed, so nothing was folded and nothing has ever
    * been streamed for them.
@@ -110,8 +128,17 @@ export function createAttach({
      *  its normalizer stopped — the byte the tail resumes from. */
     handover: { hold: TailHold | null; next: number | null } = { hold: null, next: null },
   ): Promise<boolean> => {
-    if (!await validateTerminal(session)) return false
-    if (!reset && normalizers.hasState(session.sessionId)) {
+    // Only a terminal known to be gone refuses an attach, never a probe that could not answer. A failed
+    // attach costs the agent its binding (agents/bind.ts) or its place among the active (discovery.ts),
+    // and a probe in flight when the machine slept times out at the wake before its answer is read: the
+    // session of an agent still at work was unbound that way two seconds after a laptop woke (round 29,
+    // e2e/clockjump.e2e.ts). A terminal that really is gone is retired by the reconciler's confirmed scans.
+    if (await terminalGone(session)) return false
+    // Taken whichever way this attach goes: a mark is for the next attach of the conversation only.
+    const relaunch = relaunchMarks?.take(session.sessionId)
+    const relaunchedAt = relaunch?.offset
+    const remote = remoteLive?.handles(session.engine) ? remoteLive : undefined
+    if (!reset && normalizers.hasState(session.sessionId) && (!remote || remote.current(session))) {
       if (session.transcriptPath) {
         const unseen = neverFoldedHistory.delete(session.sessionId)
         await watcher.addSession(
@@ -126,19 +153,28 @@ export function createAttach({
     const initialEvents: LiveEvent[] = []
     // Folding the transcript in below is deliberately silent — old turns must never replay live. But
     // when the history ENDS mid-turn the turn is still running, and dropping its `turn_started` costs
-    // the whole turn: CommanderMirror.onTurnEnded returns early while turnOpen is false, so the close
+    // the whole turn: the recaps' mirror (lib/commander.ts onTurnEnded) returns early while turnOpen is false, so the close
     // that follows produces no recap and no `done`. Keep the last start and replay exactly that one.
     //
     // The exception is a transcript BORN AFTER its agent — the file is then the live first turn rather
     // than history, and swallowing it loses the whole thing without a trace. `replayLive` routes the same
     // fold to `initialEvents`, which is emitted below. Cursor has always done this for its own discovery
     // path; the flag simply makes it available to every engine.
-    const replayLive = (replayFromStart && !replayedFirstTurn.has(session.sessionId))
-      || (session.engine === 'cursor' && replayCursorFromStart)
+    //
+    // Never for a conversation its engine was just relaunched on (a resume, a restart, a restore after
+    // the machine came back): everything before its relaunch mark existed before this launch, and is
+    // history. A restore is not a resume to `bind.ts`, so a transcript under ten minutes old
+    // (lib/firstTurnReplay.ts) went out live again after a daemon restart: its turns, and their recaps
+    // and notifications, a second time (found end to end, e2e/machine.e2e.ts).
+    const replayLive = relaunchedAt === undefined && (
+      (replayFromStart && !replayedFirstTurn.has(session.sessionId))
+      || (session.engine === 'cursor' && replayCursorFromStart))
     const historyEvents: LiveEvent[] = []
     let historyTurnOpen = false
-    const observe = device()?.needsTranscript(session.agentId, session.sessionId, session.engine)
-      ? (line: string): void => device()?.observeTranscript(session.agentId, session.sessionId, session.engine, line)
+    let observed = false
+    sideRead('device', session.sessionId, () => { observed = !!device()?.needsTranscript(session.agentId, session.sessionId, session.engine) })
+    const observe = observed
+      ? (line: string): void => sideRead('device', session.sessionId, () => device()?.observeTranscript(session.agentId, session.sessionId, session.engine, line))
       : undefined
     // Returns `turnOpen` rather than assigning it: every engine folds exactly once, and a second call
     // quietly overwriting the first is the kind of mistake a returned value makes impossible to write.
@@ -155,17 +191,16 @@ export function createAttach({
     // the chips and a continuing /goal still need — never the whole conversation, which on a long session
     // cost the daemon more memory than it has (lib/attachTranscript.ts). Their normalizers exist before
     // the read because they fold as the records stream in. The other engines still fold everything.
-    const codexNormalizer = session.engine === 'codex'
-      ? new CodexNormalizer('live', codexSubagentResolverFor(session.codexHome))
-      : null
-    const claudeState = session.engine === 'claude' ? newTurnState() : null
+    const adapter = remote ? undefined : liveFor(session.engine)
+    const parser = adapter?.create(session)
     const fields = (line: string): readonly RuntimeField[] => runtimeProfiles.transcriptFields(session, line)
-    const fromEndFold = codexNormalizer
-      ? { rules: codexAttachRules(fields), ingest: (line: string) => codexNormalizer.ingest(line), turnOpen: () => codexNormalizer.turnOpen }
-      : claudeState
-        ? { rules: claudeAttachRules(fields), ingest: (line: string) => lineToEvents(line, claudeState), turnOpen: () => claudeState.turnOpen }
-        : null
+    const rules = adapter?.attachRules?.(fields)
+    const fromEndFold = parser && rules
+      ? { rules, ingest: (line: string) => parser.ingest(line).events, turnOpen: () => parser.turnOpen }
+      : null
     let fromEnd: AttachRead | null = null
+    let prepared: PreparedLive | null = null
+    let profileHydration: ProfileHydration | null = null
     // A reset keeps the normalizer it meant to replace when its read failed, or outlasted the hold on the
     // tail — which then let go, and delivery went back to that normalizer: it has seen every record since,
     // this one has not.
@@ -175,7 +210,29 @@ export function createAttach({
       handover.next = null
       return true
     }
-    if (session.transcriptPath && fromEndFold) {
+    if (remote) {
+      if (session.transcriptPath) handover.hold = await watcher.hold(session.sessionId, session.transcriptPath)
+      const live = replayLive && handover.hold === null
+      const profile = runtimeProfiles.beginHydrate(session)
+      profileHydration = profile
+      try {
+        prepared = await remote.prepare(session, { live, end: handover.hold?.offset ?? relaunchedAt }, frame => {
+          if (frame.profile && !profile.ingestFrames) sideRead('runtime profile', session.sessionId, () => profile.ingest(frame.raw))
+          if (frame.observe && observe) observe(frame.raw)
+        }, profile.ingestFrames)
+        if (profile.config) await profile.config()
+      } catch {
+        if (prepared) remote.discard(prepared)
+        remote.retry(session)
+        return handover.hold ? keepLiveNormalizer('could not reach its engine worker') : true
+      }
+      if (handover.hold?.expired) { remote.discard(prepared); return keepLiveNormalizer('outlasted its hold on the tail') }
+      if (!profile.commitWith) profile.commit()
+      fromEnd = { next: prepared.page.cursor.offset, records: prepared.records, content: prepared.content }
+      handover.next = fromEnd.next
+      historyTurnOpen = !live && prepared.state.handle.turnOpen
+      if (prepared.page.lastStarted) historyEvents.push(prepared.page.lastStarted)
+    } else if (session.transcriptPath && fromEndFold) {
       // A session already being tailed — a reset — is re-read while its old normalizer is still the one
       // being fed: hold its tail, so the read stops exactly where delivery stopped and delivery resumes,
       // into the new normalizer, from where the read stopped (released by `attachSession`).
@@ -186,15 +243,11 @@ export function createAttach({
       const profile = runtimeProfiles.beginHydrate(session)
       const read = await attachTranscript(session.transcriptPath, fromEndFold.rules, {
         // Ids named for this window cannot repeat ones another fold of the session sent.
-        start: (span) => {
-          const prefix = `${span.turnFrom.toString(36)}-`
-          if (codexNormalizer) codexNormalizer.thinkingPrefix = `thinking-codex-${prefix}`
-          if (claudeState) claudeState.thinkingPrefix = `thinking-live-${prefix}`
-        },
+        start: (span) => parser!.windowStart(span.turnFrom),
         profile: (line) => profile.ingest(line),
         fold: (line) => stream.push(line),
         observe,
-      }, { fromStart: live, end: handover.hold?.offset })
+      }, { fromStart: live, end: handover.hold?.offset ?? relaunchedAt })
       if (handover.hold && (read.failed || handover.hold.expired)) {
         return keepLiveNormalizer(read.failed ? 'could not read the transcript' : 'outlasted its hold on the tail')
       }
@@ -204,26 +257,44 @@ export function createAttach({
       historyTurnOpen = take(stream.finish())
       console.log(`[agent] ${sid(session.agentId)} read the transcript from its end · turn @${read.turnFrom} · profile @${read.profileFrom} · ${read.end} bytes${handover.hold ? ' · took over its tail' : ''}`)
     }
-    const lines = session.transcriptPath && !fromEnd ? await tailFile(session.transcriptPath, Infinity) : []
+    // An engine without a reader from the end folds its transcript from the start, bounded: one huge
+    // transcript read whole would take every agent's daemon down (the October 3 crash, on Codex). Its
+    // oldest history past the cap is not folded; its last turns, which say whether it is working, are.
+    let lines: string[] = []
+    if (session.transcriptPath && !fromEnd) {
+      const read = await tailFileCapped(session.transcriptPath, wholeReadCapBytes)
+      if (read.truncated) console.warn(`[agent] ${sid(session.agentId)} transcript over ${Math.round(wholeReadCapBytes / 1024 / 1024)} MB · folded from its newest ${Math.round(wholeReadCapBytes / 1024 / 1024)} MB`)
+      lines = read.lines
+    }
     if (!fromEnd) {
       if (observe) for (const line of lines) observe(line)
-      runtimeProfiles.hydrate(session, lines)
+      sideRead('runtime profile', session.sessionId, () => runtimeProfiles.hydrate(session, lines))
     }
-    await runtimeProfiles.ingestConfig(session, true)
+    if (!profileHydration?.config) await runtimeProfiles.ingestConfig(session, true)
     // From here to the release in `attachSession` nothing is awaited for a held tail, so the hold cannot
     // expire between installing the new normalizer and handing it the tail.
-    if (handover.hold?.expired) return keepLiveNormalizer('outlasted its hold on the tail')
+    if (handover.hold?.expired) {
+      if (prepared) remote!.discard(prepared)
+      return keepLiveNormalizer('outlasted its hold on the tail')
+    }
     const fold = (ingest: (line: string) => LiveEvent[], turnOpenAfter: () => boolean): boolean =>
       take(foldTranscript(ingest, lines, turnOpenAfter, { live: replayLive }))
-    if (codexNormalizer) {
-      // Folded above, from the end, when there is a rollout; without one there is nothing to fold.
-      codexNormalizers.set(session.sessionId, codexNormalizer)
+    if (prepared) {
+      const install = () => remote!.install(prepared!)
+      if (!(profileHydration?.commitWith ? profileHydration.commitWith(install) : install())) {
+        remote!.discard(prepared); remote!.retry(session)
+        return keepLiveNormalizer('was superseded while reading')
+      }
+      liveParsers.set(session.sessionId, prepared.state.handle)
+    } else if (parser) {
+      if (!fromEnd) historyTurnOpen = fold((line) => parser.ingest(line).events, () => parser.turnOpen)
+      liveParsers.set(session.sessionId, parser)
     } else if (session.engine === 'cursor') {
       const normalizer = new CursorNormalizer('live', session.sessionId)
       historyTurnOpen = fold((line) => normalizer.ingest(line), () => normalizer.turnOpen)
       cursorNormalizers.set(session.sessionId, normalizer)
       const capture = await captureTerminal(session.agentId, 100)
-      if (capture) runtimeProfiles.ingestPane(session, capture, true)
+      if (capture) await runtimeProfiles.ingestPane(session, capture, true)
     } else if (session.engine === 'opencode') {
       // OpenCode has no transcript file — poll its SQLite DB. The reader hydrates silently, then
       // streams new activity into the funnel (the same one the file engines use).
@@ -239,7 +310,7 @@ export function createAttach({
       // without this a freshly opened agent showed empty chips until the five-minute reconcile came
       // round — which is exactly how long it looked broken for.
       const ocPane = await captureTerminal(session.agentId, 100)
-      if (ocPane) runtimeProfiles.ingestPane(session, ocPane, true)
+      if (ocPane) await runtimeProfiles.ingestPane(session, ocPane, true)
     } else if (session.engine === 'kilo') {
       // Kilo is opencode's fork and keeps the same store shape, so it is polled the same way — but from
       // its OWN db and through its own reader, so the two can diverge without one breaking the other.
@@ -267,7 +338,7 @@ export function createAttach({
       historyTurnOpen = fold((line) => normalizer.ingest(line), () => normalizer.turnOpen)
       grokNormalizers.set(session.sessionId, normalizer)
       const capture = await captureTerminal(session.agentId, 60)
-      if (capture) runtimeProfiles.ingestPane(session, capture, true)
+      if (capture) await runtimeProfiles.ingestPane(session, capture, true)
     } else if (session.engine === 'agy') {
       // A JSONL tail like claude/grok. agy announces its model only in the hook payload and its pane
       // footer, so the pane is read once on attach to fill the chip before the first turn.
@@ -275,7 +346,7 @@ export function createAttach({
       historyTurnOpen = fold((line) => normalizer.ingest(line), () => normalizer.turnOpen)
       agyNormalizers.set(session.sessionId, normalizer)
       const capture = await captureTerminal(session.agentId, 60)
-      if (capture) runtimeProfiles.ingestPane(session, capture, true)
+      if (capture) await runtimeProfiles.ingestPane(session, capture, true)
       // agy's transcript has no end-of-turn record - only its Stop hook does - so a fold of a FINISHED
       // conversation still reports the last turn as open, and after a daemon restart nothing is ever
       // coming to close it. The pane is the one place the answer exists; ask it.
@@ -331,16 +402,12 @@ export function createAttach({
       // Devin's model/effort exist ONLY in its pane footer, so read it now. Without this the chip stayed
       // on Auto until the 5-minute reconcile happened to run — the attach itself said nothing about it.
       const devinPane = await captureTerminal(session.agentId, 60)
-      if (devinPane) runtimeProfiles.ingestPane(session, devinPane, true)
+      if (devinPane) await runtimeProfiles.ingestPane(session, devinPane, true)
     } else if (session.engine === 'commandcode') {
       const normalizer = new CommandCodeNormalizer('live')
       // Hydrate state silently; never replay history live — except a turn left open, below.
       historyTurnOpen = fold((line) => normalizer.ingest(line), () => normalizer.turnOpen)
       commandcodeNormalizers.set(session.sessionId, normalizer)
-    } else {
-      const state = claudeState ?? newTurnState()
-      if (!fromEnd) historyTurnOpen = fold((line) => lineToEvents(line, state), () => state.turnOpen)
-      turnStates.set(session.sessionId, state)
     }
     if (session.transcriptPath) {
       neverFoldedHistory.delete(session.sessionId)
@@ -376,7 +443,23 @@ export function createAttach({
     // A first prompt that lands while this attach is running is already in the transcript we just
     // folded, so its turn_started was consumed as history and the live turn would end up untracked.
     // Replay that one event, after the attach log, so the recovery is visible in order.
-    if (historyTurnOpen) {
+    // Not for a tail this attach took over: everything before the hold was delivered live, the turn's
+    // start included. Claude Code announces its session again when it compacts, often in the middle of
+    // a long turn, and replaying the start showed every window that turn starting twice
+    // (e2e/compaction.e2e.ts).
+    // Nor for a turn left open before a new engine was started on the conversation (a resume, or a restore
+    // that rebuilt the pane): that turn died with the engine before, and announcing it showed the
+    // interrupted message starting anew (core/transcripts/relaunch.ts).
+    if (historyTurnOpen && !handover.hold && relaunch?.engineStarted) {
+      console.log(`[agent] ${sid(session.agentId)} left the turn open at attach as history · it began before its engine was started again`)
+      // Closed in the normalizer too, and as silently. Left open, the next message's start ended it first:
+      // a turn_ended for a turn no client saw start (a "done" and its notification), a team's or the
+      // orchestrator's delivery read as ended before it started, and the agent working until then.
+      const folds: Array<Map<string, { closeTurn(): unknown }>> = [cursorNormalizers, museNormalizers, ampNormalizers,
+        grokNormalizers, agyNormalizers, copilotNormalizers, piNormalizers, commandcodeNormalizers]
+      for (const fold of folds) fold.get(session.sessionId)?.closeTurn()
+      liveParsers.get(session.sessionId)?.closeTurn('abandoned')
+    } else if (historyTurnOpen && !handover.hold) {
       const opened = historyEvents.findLast((event) => event.type === 'turn_started')
       if (opened) {
         console.log(`[agent] ${sid(session.agentId)} resumed the turn already open at attach`)
@@ -392,6 +475,14 @@ export function createAttach({
     // asking AFTER the turn ends. The watcher is idempotent, no-ops without a device, and dies with the
     // session, so starting it early costs nothing.
     if (pollsQuestions(session.engine)) questionWatcher.start(session.sessionId)
+    // The last turn was over before this attach read it (it ended while the daemon was stopped: an update, a
+    // restart, a dial being flashed): its end went into history, and nothing recapped it. On 2026-10-07 a
+    // Codex answer landed nine seconds into a restart and the dial showed the agent blank. The recaps recap
+    // such a turn as history, once; one they already hold is left alone.
+    // A fold from the end keeps only the last turn's start as history (lib/normalize.ts TranscriptFold), so a turn
+    // that is no longer open is one that ended; a fold from the start keeps its end too, and says if it was killed.
+    const last = historyEvents.findLast((event) => event.type === 'turn_started' || event.type === 'turn_ended')
+    if (!historyTurnOpen && last && !(last.type === 'turn_ended' && last.payload.aborted)) settled?.(session.sessionId)
     return true
   }
 

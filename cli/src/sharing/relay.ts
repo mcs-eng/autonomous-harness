@@ -2,7 +2,8 @@ import { WebSocket } from 'ws'
 import { b64e, newEphemeral } from '../lib/e2ee/core.js'
 import type { AuthSessionManager } from '../lib/authSession.js'
 import type { Frame, LocalClientSink } from '../backendSocket.js'
-import { DAEMON_LOCAL_ONLY_TYPES, type RelaySession } from '../lib/remoteRelay.js'
+import type { RelaySession } from '../lib/remoteRelay.js'
+import { DAEMON_LOCAL_ONLY_TYPES } from '../lib/relayFrames.js'
 import { recipientHandshake, type ObserverCipher } from './crypto.js'
 import { BACKEND_IDLE_DEADLINE_MS, watchSocketLiveness } from '../lib/wsLiveness.js'
 
@@ -18,7 +19,7 @@ export class SharingEndedError extends Error {}
 /** One invitation per connection. Never promoted into a full machine link or a shared connection pool. */
 export class HarnessShareRelay {
   private sessions = new Set<() => void>()
-  constructor(private readonly auth: AuthSessionManager, private readonly backendWsBase: string,
+  constructor(private readonly auth: Pick<AuthSessionManager, 'accessToken'>, private readonly backendWsBase: string,
     private readonly environment: string, private readonly discover: () => Promise<SharedMachineReference[]>) {}
   async acquire(machineId: string, shareId: string, sink: LocalClientSink,
     onClosed: (code: number, reason: string) => void): Promise<RelaySession> {
@@ -48,7 +49,13 @@ export class HarnessShareRelay {
           if (!settled) reject(new Error(reason.toString() || 'The owner’s machine is offline.'))
           if (!detached) onClosed(code === 4403 ? 4403 : 1012, reason.toString() || 'Owner disconnected')
         })
-        ws.on('open', () => { heartbeat = watchSocketLiveness(ws, { peerGivesUpAfterMs: BACKEND_IDLE_DEADLINE_MS }) })
+        // Without onIdle this closed the shared harness as a bare `1012 Owner disconnected` with
+        // nothing in the log to say the watcher was the one that gave up.
+        ws.on('open', () => { heartbeat = watchSocketLiveness(ws, {
+          onIdle: (idleMs) => console.log(`[sharing] ${machineId.slice(0, 8)} no traffic for ${Math.round(idleMs / 1000)}s — terminating`),
+          onWake: (sleptMs, givingUp) => console.log(`[sharing] ${machineId.slice(0, 8)} woke after ${Math.round(sleptMs / 1000)}s asleep — ${givingUp ? 'giving up on the link' : 're-probing'}`),
+          peerGivesUpAfterMs: BACKEND_IDLE_DEADLINE_MS,
+        }) })
         ws.on('message', raw => {
           try {
             const frame = JSON.parse(raw.toString()) as { type: string; payload: Record<string, unknown> }

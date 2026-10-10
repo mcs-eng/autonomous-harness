@@ -5,7 +5,7 @@ import { binaryOnPath } from '../../lib/binaryOnPath.js'
 import { validateLaunchOverrides } from '../../lib/launchOverrides.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
-import { parseRuntimeProfile } from '../../lib/runtimeProfile.js'
+import { parseRuntimeProfile } from '../../lib/runtimeProfileWire.js'
 import { inspectRuntimePane } from '../../lib/runtimeProfileController.js'
 import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
@@ -27,9 +27,12 @@ vi.mock('../../lib/restartAgent.js', async (real) => ({
   bypassPermissionFor: vi.fn(async (_s: unknown, live: () => Promise<boolean>) => live()),
   restartAgent: vi.fn(async () => ({ ok: true, resumed: true, processIdentity: { pid: 2, startMarker: 'new', executable: '/bin/claude' } })),
 }))
-vi.mock('../../lib/runtimeProfile.js', async (real) => ({ ...await real<object>(), parseRuntimeProfile: vi.fn(() => ({ engine: 'claude', model: 'opus' })) }))
+vi.mock('../../lib/runtimeProfileWire.js', async (real) => ({ ...await real<object>(), parseRuntimeProfile: vi.fn(() => ({ engine: 'claude', model: 'opus' })) }))
 vi.mock('../../lib/runtimeProfileController.js', async (real) => ({ ...await real<object>(), inspectRuntimePane: vi.fn(() => ({ idle: true })) }))
-vi.mock('../../lib/tmux.js', async (real) => ({ ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}) }))
+vi.mock('../../lib/tmux.js', async (real) => ({
+  ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}),
+  processArgs: vi.fn(async () => 'codex -c model_providers.grid.base_url=http://grid.local/v1'),
+}))
 vi.mock('../../lib/workspaceCheck.js', () => ({ workspaceMissing: vi.fn(() => null) }))
 
 const pane = { backend: 'tmux', paneId: '%4' }
@@ -41,6 +44,7 @@ const agent = (over: Partial<RegisteredSession> = {}): RegisteredSession => ({
 function setup(row: RegisteredSession | null = agent(), over: Partial<RetargetDeps> = {}) {
   const release = vi.fn()
   const deps: RetargetDeps = {
+    readScreen: async (session, capture) => ({ pane: inspectRuntimePane(session.engine, capture ?? ''), question: null, messageHold: null, teamHold: null, activity: null, busy: false, stoppedGoal: false }),
     purgeBusy: vi.fn(() => false),
     tmuxBackend: { clearEnv: vi.fn(async () => ({ state: 'succeeded' })) } as unknown as RetargetDeps['tmuxBackend'],
     registry: {
@@ -117,11 +121,9 @@ describe('retargeting an agent', () => {
       expect(await run.retarget({ agentId: 'a1', grid })).toEqual({ ok: true })
       expect(run.deps.agentReconciler.holdRoute).toHaveBeenCalled()
       expect(restartAgent).toHaveBeenCalledWith({ engine: 'claude', sessionId: 's1' }, true, {})
-      expect(run.deps.registry.updateProcessIdentity).toHaveBeenCalledWith('a1', expect.objectContaining({ pid: 2 }), 'none', undefined)
-      // The assignment is classified against the launch this move BUILT, not the row's old one:
-      // a row that came from the engine's own login has nothing recorded, and classifying
-      // against the stale record answered null over a retarget that had just worked.
+      // Classified against the launch this move built, and only from boundary-faithful argv.
       expect(run.deps.restartedGridAssignment).toHaveBeenCalledWith(expect.anything(), 'claude', grid)
+      expect(run.deps.registry.updateProcessIdentity).toHaveBeenCalledWith('a1', expect.objectContaining({ pid: 2 }), 'none', undefined)
       expect(run.deps.registry.setGridLaunch).toHaveBeenCalledWith('a1', { override: grid, webSearch: 'off' })
       expect(run.deps.registry.setSubscriptionModel).toHaveBeenCalledWith('a1', 'opus')
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)

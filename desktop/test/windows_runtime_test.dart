@@ -7,6 +7,8 @@ import 'package:harness/core/wsl_runtime.dart';
 import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 
+import 'support/wsl_smoke.dart';
+
 /// The Windows port's own decisions, pinned where they can be pinned without a
 /// WSL2 distribution or a Harness account: the argv handed to `wsl.exe`, which
 /// distributions may be used, what counts as ready, and how each first-run
@@ -25,6 +27,7 @@ void main() {
   group('WslRuntime', () {
     test('reads distro names out of wsl.exe UTF-16 output', () async {
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake((executable, arguments) {
           // `wsl.exe -l -q` writes UTF-16LE; a UTF-8 decode leaves the ASCII
           // characters separated by NULs, which is what this must survive.
@@ -62,6 +65,7 @@ void main() {
 
     test('only usable distros are offered', () async {
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake(
           (executable, arguments) => ProcessResult(
             0,
@@ -82,6 +86,7 @@ void main() {
     test('running in a Docker distro is refused outright', () async {
       var spawned = 0;
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake((executable, arguments) {
           spawned++;
           return ProcessResult(0, 0, 'cli launcher\ntmux yes\n', '');
@@ -105,7 +110,7 @@ void main() {
     });
 
     test('passes CLI arguments after \$0 so nothing needs shell quoting', () {
-      final runtime = WslRuntime();
+      final runtime = WslRuntime(smokeEnvironment: noSmokeContract);
       final arguments = runtime.buildArguments(
         distro: 'Ubuntu',
         script: 'exec harness "\$@"',
@@ -131,7 +136,7 @@ void main() {
       // The script must carry a REAL "$@" expansion: the cycle-3 shape emitted
       // an escaped dollar, bash received ONE literal '$@' argument, and every
       // CLI call (version checks, daemon startup) ran argument-less.
-      final runtime = WslRuntime();
+      final runtime = WslRuntime(smokeEnvironment: noSmokeContract);
       const probe = WslHarnessProbe(
         distro: 'Ubuntu',
         viaPath: false,
@@ -155,7 +160,8 @@ void main() {
       // Never `wsl -- …`: on a Docker-heavy machine the implicit default can BE
       // docker-desktop, and an unnamed call is a call into a distro the app may
       // not use.
-      expect(WslRuntime().buildArguments(distro: 'Ubuntu', script: 'true'), [
+      final runtime = WslRuntime(smokeEnvironment: noSmokeContract);
+      expect(runtime.buildArguments(distro: 'Ubuntu', script: 'true'), [
         '-d',
         'Ubuntu',
         '-e',
@@ -169,6 +175,7 @@ void main() {
     test('findHarness never probes a Docker distro, even when asked', () async {
       final probed = <String>[];
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake((executable, arguments) {
           final joined = arguments.join(' ');
           if (joined.contains('harness-probe')) {
@@ -187,6 +194,7 @@ void main() {
 
     test('findHarness prefers a later fully ready distro', () async {
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake((executable, arguments) {
           final distro = arguments[1];
           return ProcessResult(
@@ -210,6 +218,7 @@ void main() {
       'findHarness retains the first CLI distro when none is ready',
       () async {
         final runtime = WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake((executable, arguments) {
             final distro = arguments[1];
             return ProcessResult(
@@ -234,6 +243,7 @@ void main() {
 
     test('the probe reports the CLI and tmux separately', () async {
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake(
           (executable, arguments) =>
               ProcessResult(0, 0, 'cli launcher\ntmux no\n', ''),
@@ -255,6 +265,7 @@ void main() {
       'a distro without the CLI keeps its independent tmux result',
       () async {
         final runtime = WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake(
             (executable, arguments) =>
                 ProcessResult(0, 0, 'cli missing\ntmux yes\n', ''),
@@ -270,6 +281,7 @@ void main() {
 
     test('a distro that cannot answer is not a CLI', () async {
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake(
           (executable, arguments) => ProcessResult(0, 1, '', 'no distro'),
         ),
@@ -292,6 +304,7 @@ void main() {
         'an incomplete or ambiguous probe is inconclusive: $answer',
         () async {
           final runtime = WslRuntime(
+            smokeEnvironment: noSmokeContract,
             runProcess: fake((_, _) => ProcessResult(0, 0, answer, '')),
           );
           final probe = await runtime.probeHarness(distro: 'Ubuntu');
@@ -303,6 +316,7 @@ void main() {
 
     test('a login banner does not invalidate complete marker lines', () async {
       final runtime = WslRuntime(
+        smokeEnvironment: noSmokeContract,
         runProcess: fake(
           (_, _) =>
               ProcessResult(0, 0, 'Welcome\r\ncli path\r\ntmux yes\r\n', ''),
@@ -318,6 +332,7 @@ void main() {
       'failed discovery is retained unless another distro is usable',
       () async {
         final runtime = WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake(
             (_, arguments) => switch (arguments[1]) {
               'Stalled' => ProcessResult(0, 124, '', 'synthetic timeout'),
@@ -378,6 +393,7 @@ void main() {
             tmuxReady: true,
           ),
           wslRuntime: WslRuntime(
+            smokeEnvironment: noSmokeContract,
             runProcess: fake(
               (_, _) => throw StateError('Unexpected WSL probe'),
             ),
@@ -414,6 +430,7 @@ void main() {
           (executable, arguments) => ProcessResult(0, 1, '', 'nope'),
         ),
         wslRuntime: WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake(
             (executable, arguments) => ProcessResult(0, 1, '', ''),
           ),
@@ -468,6 +485,7 @@ void main() {
           (executable, arguments) => ProcessResult(0, 1, '', ''),
         ),
         wslRuntime: WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake((executable, arguments) {
             final joined = arguments.join(' ');
             if (joined.contains('--status')) {
@@ -521,6 +539,7 @@ void main() {
           (executable, arguments) => ProcessResult(0, 1, '', ''),
         ),
         wslRuntime: WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake((executable, arguments) {
             final joined = arguments.join(' ');
             if (joined.contains('--status')) {
@@ -553,6 +572,7 @@ void main() {
           (executable, arguments) => ProcessResult(0, 1, '', ''),
         ),
         wslRuntime: WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake((executable, arguments) {
             final joined = arguments.join(' ');
             if (joined.contains('--status')) {
@@ -582,6 +602,7 @@ void main() {
           (executable, arguments) => ProcessResult(0, 1, '', ''),
         ),
         wslRuntime: WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake((executable, arguments) {
             final joined = arguments.join(' ');
             if (joined.contains('--status')) {
@@ -614,6 +635,7 @@ void main() {
           (executable, arguments) => ProcessResult(0, 1, '', ''),
         ),
         wslRuntime: WslRuntime(
+          smokeEnvironment: noSmokeContract,
           runProcess: fake((executable, arguments) {
             final joined = arguments.join(' ');
             if (joined.contains('--status')) {
@@ -1319,6 +1341,7 @@ Future<EnvironmentReadiness> verify({
     run: (executable, arguments, {environment}) async =>
         respond(executable, arguments),
     wslRuntime: WslRuntime(
+      smokeEnvironment: noSmokeContract,
       selection: selection,
       runProcess: (executable, arguments, {environment}) async =>
           respond(executable, arguments),

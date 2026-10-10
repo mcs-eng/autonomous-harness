@@ -11,6 +11,10 @@ import type { AddressInfo } from 'net'
 // above exists to keep out until ADAPTER_DATA_DIR is set.
 import { PW_SCRYPT_TEST_TIMEOUT_MS } from './passwordPake.js'
 
+/** How long a joiner waits for its claim: its own scrypt and the manager's both run inside it. No case is
+ *  about this deadline; at 5 s the two scrypts ran past it under load. Inside each case's budget. */
+const CLAIM_TIMEOUT_MS = 20_000
+
 // Same reason as manager.test.ts: ADAPTER_DATA_DIR must be set before any transitive import of
 // config/env.js, so every module under test is dynamically imported after the temp dir is set.
 type Frame = Record<string, unknown>
@@ -56,7 +60,10 @@ describe('MachinePeerStore', () => {
   })
 })
 
-describe('remote-password link + relay session crypto (interop with the real E2eeManager)', () => {
+// Every password case runs at least two real scrypts, the manager's (`setRemotePassword`) and the joiner's
+// (`connectWithPassword`): PW_SCRYPT_TEST_TIMEOUT_MS for all of them, as manager.test.ts gives its own.
+// The ones without it timed out at vitest's 5 s under load (the full unit suite at load 36 and 100).
+describe('remote-password link + relay session crypto (interop with the real E2eeManager)', { timeout: PW_SCRYPT_TEST_TIMEOUT_MS }, () => {
   it('connectWithPassword pins the correct adapter pubkey, then hello/welcome + frame/terminal round-trip succeed', async () => {
     const inbox: Frame[] = []
     // Fakes just enough of backend's `/api/web-ws` (machine_select -> connected, then generic e2e_*
@@ -102,7 +109,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
         accessToken: 'unused-in-this-fake',
         backendWsBase: wsBase,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
       })
 
       expect(result.ok).toBe(true)
@@ -289,7 +296,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
         accessToken: 'unused',
         backendWsBase: await wsBase,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
         self: { kind: 'machine', machineId: JOINER_ID, label: 'studio-mac' },
       })
       expect(result.ok).toBe(true)
@@ -316,7 +323,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
         accessToken: 'unused',
         backendWsBase: await wsBase,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(result.ok).toBe(true)
       expect(linked).toEqual([{ pub: C.b64e(joiner.pub), kind: undefined, machineId: undefined, label: 'harness link' }])
@@ -340,7 +347,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
         accessToken: 'unused',
         backendWsBase: await wsBase,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
         self: { kind: 'machine', machineId: '../../etc/passwd' },
       })
       expect(result.ok).toBe(true)
@@ -365,6 +372,31 @@ describe('remote-password link + relay session crypto (interop with the real E2e
     expect(manager.untrustPeer(C.b64e(other.pub))).toBe(false)
   })
 
+  it('replies the daemon now seals to the requester open on the relay client as it has always shipped', async () => {
+    // The relay client opens a sealed payload of any type with its session key, and has since it was
+    // written: a reply type the daemon starts sealing reaches every CLI relaying for a desktop or hn.
+    const frames: Frame[] = []
+    const manager = new E2eeManagerCtor({ machineId: MACHINE_ID, sendTo: (_c, f) => frames.push(f), isConnected: () => true })
+    const client = C.newIdentity()
+    manager.trustPeer({ pub: C.b64e(client.pub), machineId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90', kind: 'machine', label: 'relay' })
+    const { peekIdentityPub } = await import('./store.js')
+    const crypto = new RelaySessionCrypto({ machineId: MACHINE_ID, selfIdentity: client, peerPub: C.b64d(peekIdentityPub()!) })
+    expect(manager.handleFrame('session-conn', crypto.helloFrame())).toBe(true)
+    expect(crypto.handleWelcome(frames.at(-1)!.payload as Record<string, unknown>)).toBe(true)
+    const replies: Array<[string, string, Record<string, unknown>]> = [
+      ['terminal_info_result', '/private/work/app', { requestId: 'info-1', command: 'node', path: '/private/work/app', pid: 4242, tty: '/dev/ttys001' }],
+      ['voice_route_result', 'the login page', { requestId: 'route-1', agentId: 'a1', agentName: 'api', reason: 'asked to fix the login page', confidence: 0.9, needNewAgent: false }],
+    ]
+    for (const type of ['dsh_list', 'dsh_install', 'dsh_update', 'dsh_remove', 'engines_probe', 'grid_models_list', 'claude_login_status', 'agent_retarget', 'remote_terminal_handoff']) {
+      replies.push([`${type}_result`, 'what-the-machine-said', { requestId: `${type}-1`, detail: 'what-the-machine-said' }])
+    }
+    for (const [type, secret, answer] of replies) {
+      const sealed = manager.wrapRpcReply('session-conn', type, answer.requestId, answer)!
+      expect(JSON.stringify(sealed)).not.toContain(secret)
+      expect(crypto.unwrapIncoming(sealed)).toEqual({ type, payload: answer })
+    }
+  })
+
   it('NO_REMOTE_PASSWORD when the target machine never set one', async () => {
     const { manager, wsBase, close } = fakeMachine()
     try {
@@ -375,7 +407,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
         accessToken: 'unused',
         backendWsBase: await wsBase,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(result).toEqual({ ok: false, error: 'NO_REMOTE_PASSWORD' })
       expect(manager.remotePasswordStatus().hasPassword).toBe(false)
@@ -395,7 +427,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
         accessToken: 'unused',
         backendWsBase: await wsBase,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(result.ok).toBe(false)
       if (result.ok) return
@@ -419,7 +451,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
           accessToken: 'unused',
           backendWsBase: base,
           autonomousEnv: 'prod',
-          timeoutMs: 5_000,
+          timeoutMs: CLAIM_TIMEOUT_MS,
         })
         expect(attempt.ok).toBe(false)
       }
@@ -432,7 +464,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
         accessToken: 'unused',
         backendWsBase: base,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(locked.ok).toBe(false)
       expect((locked as { error: string }).error).toBe('RATE_LIMITED')
@@ -456,12 +488,12 @@ describe('remote-password link + relay session crypto (interop with the real E2e
           accessToken: 'unused',
           backendWsBase: base,
           autonomousEnv: 'prod',
-          timeoutMs: 5_000,
+          timeoutMs: CLAIM_TIMEOUT_MS,
         })
       }
       const stillLocked = await connectWithPassword({
         targetMachineId: MACHINE_ID, password: REMOTE_PASSWORD, selfIdentity: C.newIdentity(),
-        accessToken: 'unused', backendWsBase: base, autonomousEnv: 'prod', timeoutMs: 5_000,
+        accessToken: 'unused', backendWsBase: base, autonomousEnv: 'prod', timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(stillLocked.ok).toBe(false)
       expect((stillLocked as { error: string }).error).toBe('RATE_LIMITED')
@@ -470,7 +502,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
       await manager.setRemotePassword(NEW_PASSWORD)
       const result = await connectWithPassword({
         targetMachineId: MACHINE_ID, password: NEW_PASSWORD, selfIdentity: C.newIdentity(),
-        accessToken: 'unused', backendWsBase: base, autonomousEnv: 'prod', timeoutMs: 5_000,
+        accessToken: 'unused', backendWsBase: base, autonomousEnv: 'prod', timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(result.ok).toBe(true)
     } finally {
@@ -480,7 +512,7 @@ describe('remote-password link + relay session crypto (interop with the real E2e
   }, PW_SCRYPT_TEST_TIMEOUT_MS)
 })
 
-describe('RemoteRelayPool drops a peer the responder no longer trusts', () => {
+describe('RemoteRelayPool drops a peer the responder no longer trusts', { timeout: PW_SCRYPT_TEST_TIMEOUT_MS }, () => {
   // A fake AuthSessionManager — RemoteRelayPool only ever calls .accessToken({force}).
   const fakeAuth = { accessToken: async () => 'unused-in-this-fake' } as unknown as import('../authSession.js').AuthSessionManager
 
@@ -509,7 +541,7 @@ describe('RemoteRelayPool drops a peer the responder no longer trusts', () => {
     const base = `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`
     const identity = C.newIdentity()
     await manager.setRemotePassword(REMOTE_PASSWORD)
-    const claim = await connectWithPassword({ targetMachineId: MACHINE_ID, password: REMOTE_PASSWORD, selfIdentity: identity, accessToken: 'unused', backendWsBase: base, autonomousEnv: 'prod', timeoutMs: 5000 })
+    const claim = await connectWithPassword({ targetMachineId: MACHINE_ID, password: REMOTE_PASSWORD, selfIdentity: identity, accessToken: 'unused', backendWsBase: base, autonomousEnv: 'prod', timeoutMs: CLAIM_TIMEOUT_MS })
     expect(claim.ok).toBe(true)
     if (!claim.ok) throw new Error('pairing failed')
     const peers = new MachinePeerStore(); peers.pin(MACHINE_ID, C.b64e(claim.peerPub), 'test')
@@ -642,7 +674,7 @@ describe('RemoteRelayPool drops a peer the responder no longer trusts', () => {
         accessToken: 'unused-in-this-fake',
         backendWsBase: `ws://127.0.0.1:${port}`,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(claim.ok).toBe(true)
       if (!claim.ok) return
@@ -714,7 +746,7 @@ describe('RemoteRelayPool drops a peer the responder no longer trusts', () => {
         accessToken: 'unused-in-this-fake',
         backendWsBase: `ws://127.0.0.1:${port}`,
         autonomousEnv: 'prod',
-        timeoutMs: 5_000,
+        timeoutMs: CLAIM_TIMEOUT_MS,
       })
       expect(claim.ok).toBe(true)
       if (!claim.ok) return
@@ -829,4 +861,152 @@ describe('RemoteRelayPool closes the upstream socket when the handshake fails', 
     expect((rejection as Error).message).toBe('E2EE_WELCOME_INVALID')
     expect(closeCode).toBe(1000)
   })
+})
+
+describe('a client\'s sessions with one machine never open the same broadcast twice', () => {
+  let E2eeStore: typeof import('./store.js')['E2eeStore']
+  let GROUP_EPOCHS_KEPT: number
+  const fakeAuth = { accessToken: async () => 'unused-in-this-fake' } as unknown as import('../authSession.js').AuthSessionManager
+  beforeAll(async () => {
+    E2eeStore = (await import('./store.js')).E2eeStore
+    GROUP_EPOCHS_KEPT = (await import('./relayClient.js')).GROUP_EPOCHS_KEPT
+  })
+
+  /** A machine process: its own group key and epoch, trusting `client` as a web client. */
+  const machine = (client: import('./core.js').Identity) => {
+    const inbox: Frame[] = []
+    const manager = new E2eeManagerCtor({ machineId: MACHINE_ID, sendTo: (_connId, frame) => inbox.push(frame), isConnected: () => true })
+    manager.trustPeer({ pub: C.b64e(client.pub), label: 'phone' })
+    return { manager, inbox }
+  }
+  /** One session of `client` with that machine, on `connId`, carrying `groupSeen` over when given. */
+  const session = (m: ReturnType<typeof machine>, client: import('./core.js').Identity, connId: string, groupSeen?: Map<string, number>) => {
+    const crypto = new RelaySessionCrypto({ machineId: MACHINE_ID, selfIdentity: client, peerPub: new E2eeStore().getIdentity().pub, ...(groupSeen ? { groupSeen } : {}) })
+    m.manager.handleFrame(connId, crypto.helloFrame())
+    expect(crypto.handleWelcome(m.inbox.at(-1)!.payload as Record<string, unknown>)).toBe(true)
+    return crypto
+  }
+
+  it('a broadcast the relay replays into the next session is not opened again, and a new one is', () => {
+    const client = C.newIdentity()
+    const m = machine(client)
+    const groupSeen = new Map<string, number>()
+    const first = session(m, client, 'conn-1', groupSeen)
+    const started = m.manager.wrapUp({ type: 'turn_started', agentId: 'a', payload: { userMessage: 'once' } })
+    expect(first.unwrapIncoming(started)?.payload).toEqual({ userMessage: 'once' })
+    const second = session(m, client, 'conn-2', groupSeen)
+    expect(second.unwrapIncoming(started)).toBeNull()
+    const ended = m.manager.wrapUp({ type: 'turn_ended', agentId: 'a', payload: {} })
+    expect(second.unwrapIncoming(ended)?.payload).toEqual({})
+    // A session with no record carried over opens whatever this process has sealed since it started:
+    // why the relay pool carries one from each of its sessions to the next.
+    expect(session(m, client, 'conn-3').unwrapIncoming(started)?.payload).toEqual({ userMessage: 'once' })
+  })
+
+  it('remembers a bounded number of the machine\'s epochs, the first seen let go first', () => {
+    const client = C.newIdentity()
+    const groupSeen = new Map<string, number>()
+    const epochs: string[] = []
+    for (let n = 0; n <= GROUP_EPOCHS_KEPT; n++) {
+      // A new process of the machine each time: a new group key and epoch.
+      const m = machine(client)
+      const sealed = m.manager.wrapUp({ type: 'turn_ended', agentId: 'a', payload: {} })
+      epochs.push((sealed.payload as { __e2e: { epoch: string } }).__e2e.epoch)
+      expect(session(m, client, `conn-${n}`, groupSeen).unwrapIncoming(sealed)).not.toBeNull()
+    }
+    expect(groupSeen.size).toBe(GROUP_EPOCHS_KEPT)
+    expect(groupSeen.has(epochs[0])).toBe(false)
+    expect(groupSeen.has(epochs.at(-1)!)).toBe(true)
+  })
+
+  it('RemoteRelayPool carries the record from a session to its next: a replayed broadcast is not forwarded', async () => {
+    const wss = new WebSocketServer({ port: 0 })
+    const sockets = new Map<string, import('ws').WebSocket>()
+    const client = C.newIdentity()
+    const manager = new E2eeManagerCtor({ machineId: MACHINE_ID, isConnected: () => true, sendTo: (id, frame) => sockets.get(id)?.send(JSON.stringify(frame)) })
+    manager.trustPeer({ pub: C.b64e(client.pub), label: 'desktop' })
+    let connections = 0
+    wss.on('connection', (ws) => {
+      const id = `conn-${++connections}`
+      sockets.set(id, ws)
+      ws.on('message', (raw) => {
+        const frame = JSON.parse(raw.toString()) as Frame
+        if (frame.type === 'machine_select') ws.send(JSON.stringify({ type: 'connected', payload: { machineId: MACHINE_ID } }))
+        else if (String(frame.type).startsWith('e2e_')) manager.handleFrame(id, frame)
+      })
+    })
+    const base = `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`
+    const peers = new MachinePeerStore()
+    peers.pin(MACHINE_ID, C.b64e(new E2eeStore().getIdentity().pub), 'test')
+    const pool = new RemoteRelayPool(fakeAuth, base, client, peers, { p2p: false })
+    const inbox: Frame[] = []
+    const sink = { sendFrame: (frame: Frame) => { inbox.push(frame); return true }, sendBinary: () => true }
+    const select = { type: 'machine_select', payload: { machineId: MACHINE_ID } }
+    // Until it is there, however long the machine takes: a count of 100 waits of 20 ms is a clock, and ran out
+    // under load in this file's other session test.
+    const arrived = (type: string, count: number) =>
+      vi.waitFor(() => expect(inbox.filter((frame) => frame.type === type).length).toBeGreaterThanOrEqual(count), { timeout: 20_000, interval: 20 })
+    try {
+      await pool.acquire(MACHINE_ID, 'prod', select, sink, () => {})
+      const started = manager.wrapUp({ type: 'turn_started', agentId: 'a', payload: { userMessage: 'once' } })
+      sockets.get('conn-1')!.send(JSON.stringify(started))
+      await arrived('turn_started', 1)
+      pool.invalidate(MACHINE_ID)
+      await pool.acquire(MACHINE_ID, 'prod', select, sink, () => {})
+      // The relay replays the old broadcast into the new session, then the machine says something new.
+      sockets.get('conn-2')!.send(JSON.stringify(started))
+      sockets.get('conn-2')!.send(JSON.stringify(manager.wrapUp({ type: 'turn_ended', agentId: 'a', payload: {} })))
+      await arrived('turn_ended', 1)
+      expect(inbox.filter((frame) => frame.type === 'turn_started')).toHaveLength(1)
+      expect(inbox.filter((frame) => frame.type === 'turn_ended')).toHaveLength(1)
+    } finally {
+      pool.invalidate(MACHINE_ID)
+      for (const ws of wss.clients) ws.terminate()
+      await new Promise<void>((resolve) => wss.close(() => resolve()))
+    }
+  }, 30_000)
+})
+
+describe('RemoteRelayPool retires a session the machine no longer has', () => {
+  const fakeAuth = { accessToken: async () => 'unused-in-this-fake' } as unknown as import('../authSession.js').AuthSessionManager
+
+  it('e2e_session_unknown closes the local connection as for node_status offline, keeps the pin, and the next acquire dials a new session', async () => {
+    const E2eeStore = (await import('./store.js')).E2eeStore
+    const wss = new WebSocketServer({ port: 0 })
+    const sockets = new Map<string, import('ws').WebSocket>()
+    const client = C.newIdentity()
+    const manager = new E2eeManagerCtor({ machineId: MACHINE_ID, isConnected: () => true, sendTo: (id, frame) => sockets.get(id)?.send(JSON.stringify(frame)) })
+    manager.trustPeer({ pub: C.b64e(client.pub), label: 'desktop' })
+    let connections = 0
+    wss.on('connection', (ws) => {
+      const id = `conn-${++connections}`
+      sockets.set(id, ws)
+      ws.on('message', (raw) => {
+        const frame = JSON.parse(raw.toString()) as Frame
+        if (frame.type === 'machine_select') ws.send(JSON.stringify({ type: 'connected', payload: { machineId: MACHINE_ID } }))
+        else if (String(frame.type).startsWith('e2e_')) manager.handleFrame(id, frame)
+      })
+    })
+    const peers = new MachinePeerStore()
+    peers.pin(MACHINE_ID, C.b64e(new E2eeStore().getIdentity().pub), 'test')
+    const pool = new RemoteRelayPool(fakeAuth, `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`, client, peers, { p2p: false })
+    const select = { type: 'machine_select', payload: { machineId: MACHINE_ID } }
+    const sink = { sendFrame: () => true, sendBinary: () => true }
+    try {
+      const closed = new Promise<number>((resolve) => { void pool.acquire(MACHINE_ID, 'prod', select, sink, (code) => resolve(code)) })
+      // Until the session is there, however long the machine takes: 100 waits of 20 ms ran out under load (the
+      // six-file run at load 95), and the send below found no socket.
+      await vi.waitFor(() => expect(manager.hasSession('conn-1')).toBe(true), { timeout: 20_000, interval: 20 })
+      sockets.get('conn-1')!.send(JSON.stringify({ type: 'e2e_session_unknown', payload: { refused: { type: 'message', n: 4 } } }))
+      expect(await closed).toBe(1012)
+      expect(peers.get(MACHINE_ID)).toBeDefined()
+      await pool.acquire(MACHINE_ID, 'prod', select, sink, () => {})
+      expect(connections).toBe(2)
+      expect(manager.hasSession('conn-2')).toBe(true)
+    } finally {
+      pool.invalidate(MACHINE_ID)
+      for (const ws of wss.clients) ws.terminate()
+      await new Promise<void>((resolve) => wss.close(() => resolve()))
+    }
+  }, 30_000)
 })

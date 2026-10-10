@@ -10,10 +10,11 @@ import { preTrustClaudeProject, preTrustCodexProject } from '../../lib/claudeTru
 import { createAndRegisterPane } from '../../lib/createAgentPane.js'
 import { enginePathOverride } from '../../lib/engineBin.js'
 import { buildEngineLaunchArgv, permissionModeFlags, refusePermissionFlagIfUnsupported, supportsFirstPrompt } from '../../lib/engineLaunch.js'
-import { setUpWithin } from '../../lib/gridAttach.js'
+import { setUpWithin } from '../../lib/setUpWithin.js'
 import { writeGridConfigDir } from '../../lib/gridConfigDir.js'
 import { buildGridEngineLaunch } from '../../lib/gridLaunch.js'
-import { installCodexHooks, installOpencodePlugin } from '../../lib/hooks.js'
+import { engineHooks } from '../../engines/hooks.js'
+import { installOpencodePlugin } from '../../lib/hooks.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { stopSessionOwner, type SessionOwner } from '../../lib/sessionSearch/external.js'
 import { clearPaneRemainOnExit } from '../../lib/tmux.js'
@@ -45,7 +46,7 @@ vi.mock('../../lib/engineLaunch.js', async (real) => ({
   refusePermissionFlagIfUnsupported: vi.fn(async () => null),
   supportsFirstPrompt: vi.fn(() => true),
 }))
-vi.mock('../../lib/gridAttach.js', async (real) => ({ ...await real<object>(), setUpWithin: vi.fn(async (run: () => Promise<unknown>) => { await run(); return 'done' }) }))
+vi.mock('../../lib/setUpWithin.js', async (real) => ({ ...await real<object>(), setUpWithin: vi.fn(async (run: () => Promise<unknown>) => { await run(); return 'done' }) }))
 vi.mock('../../lib/gridConfigDir.js', () => ({ writeGridConfigDir: vi.fn(async () => '/config/harness-claude') }))
 vi.mock('../../lib/gridLaunch.js', async (real) => ({
   ...await real<object>(),
@@ -53,7 +54,11 @@ vi.mock('../../lib/gridLaunch.js', async (real) => ({
   describeGridLaunch: vi.fn(() => '[grid] claude on Home'),
   gridConflictingEnvToClear: vi.fn(() => ['ANTHROPIC_API_KEY']),
 }))
-vi.mock('../../lib/hooks.js', async (real) => ({ ...await real<object>(), installCodexHooks: vi.fn(), installOpencodePlugin: vi.fn() }))
+vi.mock('../../engines/hooks.js', async (real) => {
+  const actual = await real<typeof import('../../engines/hooks.js')>()
+  return { ...actual, engineHooks: { ...actual.engineHooks, codex: { ...actual.engineHooks.codex, installIn: vi.fn() } } }
+})
+vi.mock('../../lib/hooks.js', async (real) => ({ ...await real<object>(), installOpencodePlugin: vi.fn() }))
 vi.mock('../../lib/sessionSearch/external.js', async (real) => ({ ...await real<object>(), stopSessionOwner: vi.fn(async () => true) }))
 vi.mock('../../lib/tmux.js', async (real) => ({ ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}) }))
 vi.mock('../../lib/tmuxVersion.js', async (real) => ({ ...await real<object>(), tmuxSupportsSessionEnv: vi.fn(async () => true) }))
@@ -220,7 +225,10 @@ describe('creating an agent', () => {
       const pane = vi.mocked(createAndRegisterPane).mock.calls[0][0]
       expect(pane).toMatchObject({ dsh: 'blender', dshRuntime: expect.any(String), label: 'Blender', env: expect.objectContaining({ HARNESS_DSH: 'blender' }) })
       await create(request({ dsh: 'blender', engine: 'codex' }))
-      expect(preTrustCodexProject).toHaveBeenCalled()
+      expect(preTrustCodexProject).toHaveBeenLastCalledWith(expect.any(String), null)
+      // A Codex agent on its own profile is trusted in that profile's config.toml, which it reads.
+      await create(request({ dsh: 'blender', engine: 'codex', codexHome: '/profiles/work' }))
+      expect(preTrustCodexProject).toHaveBeenLastCalledWith(expect.any(String), '/profiles/work')
       // A folder that already held something, or could not be read: trust stays the person's call.
       await create(request({ dsh: 'blender', cwd: folder(['README.md']) }))
       await create(request({ dsh: 'blender', engine: 'pi' }))
@@ -291,13 +299,13 @@ describe('creating an agent', () => {
       const on = setup()
       await on.create(request({ engine: 'codex', codexHome: '/codex-work' }))
       await on.create(request({ engine: 'opencode' }))
-      expect(installCodexHooks).toHaveBeenCalledWith(4242, '/codex-work')
+      expect(engineHooks.codex.installIn).toHaveBeenCalledWith(4242, '/codex-work')
       expect(installOpencodePlugin).toHaveBeenCalledWith(4242)
       expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).toMatchObject({ env: { CODEX_HOME: '/codex-work' }, codexHome: '/codex-work' })
       const off = setup({ hooksDisabled: true })
       await off.create(request({ engine: 'codex', codexHome: '/codex-work' }))
       await off.create(request({ engine: 'opencode' }))
-      expect(installCodexHooks).toHaveBeenCalledTimes(1)
+      expect(engineHooks.codex.installIn).toHaveBeenCalledTimes(1)
       expect(installOpencodePlugin).toHaveBeenCalledTimes(1)
     })
 

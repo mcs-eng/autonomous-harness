@@ -24,12 +24,28 @@ class PackageIdentity(unittest.TestCase):
             with patch.object(package, 'validate_runtime', return_value={'source_commit': 'a' * 40}):
                 identity = package.stage(Path(__file__).resolve().parents[2], runtime, destination, 'a' * 40)
             config = destination / 'etc/skel/.config/opencode'
+            self.assertTrue((destination / 'usr/lib/harness-os/connections/connections.py').is_file())
+            self.assertTrue((destination / 'usr/share/harness-os/browser-home/home.crx').is_file())
+            self.assertEqual((destination / 'usr/lib/harness-os/browser_home.py').stat().st_mode & 0o777, 0o755)
+            self.assertTrue((destination / 'etc/chromium/native-messaging-hosts/ai.autonomous.harness_home.json').is_file())
+            self.assertTrue((destination / 'usr/lib/harness-os/connections/web/index.html').is_file())
+            for name in ('bridge.py', 'catalog.json', 'oauth.py', 'gateway.py', 'agents.py', 'renew.py'):
+                self.assertTrue((destination / 'usr/lib/harness-os/connections' / name).is_file(), name)
+            socket = (destination / 'usr/lib/systemd/user/harness-connections.socket').read_text()
+            self.assertIn('ListenStream=127.0.0.1:51793', socket)
+            self.assertIn('harness-connections.socket', (destination / 'usr/lib/systemd/user/harness-os.target').read_text())
+            self.assertTrue((destination / 'usr/share/licenses/harness-os-connections/LICENSE').is_file())
+            self.assertIn('harness connections', (destination / 'usr/share/harness-os/connections.md').read_text())
+            self.assertIn('/usr/lib/harness-os/connections/connections.py', (destination / 'usr/bin/harness').read_text())
             self.assertFalse((config / 'AGENTS.md').is_symlink())
             self.assertIn('/usr/share/harness-os/guide.md', (config / 'AGENTS.md').read_text())
             self.assertIn('Super+n', (destination / 'usr/share/harness-os/guide.md').read_text())
             settings = json.loads((config / 'opencode.json').read_text())
             self.assertEqual(settings['update'], 'disable')
-            self.assertFalse(set(settings) & {'model', 'provider', 'providers', 'instructions'})
+            # One free Zen model that answers with tools (upstream's Exo Free default fails every
+            # tool call with "Endpoint is unavailable"); providers and instructions stay upstream's.
+            self.assertEqual(settings['model'], 'opencode/muse-spark-1.3-contributor-free')
+            self.assertFalse(set(settings) & {'provider', 'providers', 'instructions'})
             self.assertEqual(settings['permissions'], [
                 {'action': 'external_directory', 'resource': '/usr/share/harness-os/*', 'effect': 'allow'},
                 {'action': 'read', 'resource': '/usr/share/harness-os/*', 'effect': 'allow'},
@@ -38,7 +54,13 @@ class PackageIdentity(unittest.TestCase):
             # Validate the real staged package with the same guard that protects
             # installed systems, not only an isolated archive fixture.
             output = base / 'harness-os.pkg.tar.gz'
-            package.archive_package(destination, output, 'pkgname = harness-os\npkgver = 1-1\narch = x86_64\n', 123456)
+            package.archive_package(destination, output, package.package_info('1-1', 123456, 1024), 123456)
+            with tarfile.open(output) as archive:
+                metadata = archive.extractfile('.PKGINFO').read().decode().splitlines()
+            depends = {row.removeprefix('depend = ') for row in metadata if row.startswith('depend = ')}
+            self.assertTrue({'gtklock', 'grim', 'slurp', 'foot', 'tmux', 'nodejs-lts-jod'} <= depends)
+            self.assertNotIn('labwc', depends)
+            self.assertTrue(depends <= set((Path(__file__).parents[1] / 'packages.x86_64').read_text().split()))
             spec = importlib.util.spec_from_file_location('runtime_package_check', Path(__file__).parents[1] / 'runtime_update.py')
             updater = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(updater)
@@ -69,7 +91,8 @@ class PackageIdentity(unittest.TestCase):
                 (root / name).write_text('runtime fixture')
             (root / 'source.json').write_text(json.dumps(good))
             self.assertEqual(package.validate_runtime(root, 'a' * 40), good)
-            for changes in [{'dirty': True}, {'source_commit': 'b' * 40}, {'target': 'aarch64-apple-darwin'}]:
+            for changes in [{'dirty': True}, {'source_commit': 'b' * 40}, {'target': 'aarch64-apple-darwin'},
+                            {'target': 'aarch64-unknown-linux-musl', 'architecture': 'aarch64'}]:
                 (root / 'source.json').write_text(json.dumps(dict(good, **changes)))
                 with self.subTest(changes=changes), self.assertRaises(ValueError):
                     package.validate_runtime(root, 'a' * 40)

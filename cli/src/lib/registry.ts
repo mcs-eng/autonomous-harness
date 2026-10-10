@@ -13,7 +13,7 @@
  * Module singleton (like the ws `clients` set) — imported by routes + reaper.
  */
 
-import { DSH_ID_RE } from '../dsh/manifest.js'
+import { DSH_ID_RE } from '../dsh/id.js'
 import { AGENT_NAME_RE } from './engineLaunch.js'
 import { resumesConversation } from './resumeCapability.js'
 import { namingTitle } from './sessionTitle.js'
@@ -37,20 +37,23 @@ import {
 } from 'fs'
 import { randomUUID } from 'crypto'
 import { join, basename, dirname, isAbsolute } from 'path'
-import { within } from './pathContainment.js'
-import { hostname, uptime } from 'os'
+import { within as pathWithin } from './pathContainment.js'
+import { machineNames } from './machineNames.js'
 import { cursorDataDir } from '../engines/cursor/home.js'
 import { env } from '../config/env.js'
+import { claudeProjectsRoots, codexHomeRoots, sessionCodexHome } from './engineHomes.js'
 import { readCodexRolloutMeta, resolveCodexRollout } from '../engines/codex/rollout.js'
 import { ENGINES, isTerminalEngine, type AgentEngine } from '../engines/types.js'
 import type { GridAssignment } from './gridAssignment.js'
 import { parseGridLaunchOverride, type GridLaunchOverride, type GridLaunchRecord, type GridWebSearchStatus } from './gridLaunch.js'
+import { parseScmLaunchRecord, type ScmLaunchRecord } from '../scm/types.js'
 import { commandcodeTranscriptPath } from '../engines/commandcode/transcript.js'
 import { agyTranscriptPath } from '../engines/agy/session.js'
 import { copilotTranscriptPath } from '../engines/copilot/session.js'
+import { bootChanged, currentBootId } from './bootId.js'
 import { lockOwnerAlive, lockStartMarker, processLockIdentity } from './processLiveness.js'
 import { hardenPrivateStateFileIfPresent, readPrivateStateFile, secureStateDirectory } from './secureState.js'
-import { mergeTerminalRuntimes, processIdentityKey, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
+import { mergeTerminalRuntimes, processIdentityKey, sameProcessIdentity, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
 import type { HookTerminalHint, ProcessIdentity, TerminalRuntimeRef } from './terminalTypes.js'
 
 export type { ProcessIdentity } from './terminalTypes.js'
@@ -131,6 +134,14 @@ export interface RegisteredSession {
    * built, so there is nothing to say); absent on a row written before this field existed.
    */
   gridWebSearch?: GridWebSearchStatus | null
+  /**
+   * What the workspace's SCM needs re-applied to the pane on every relaunch (scm/types.ts) — the
+   * SCM's half of `gridLaunch`. A git worktree's record only says it is one and asks for nothing.
+   * Written by `agent_create` from what `prepareProjectFolder` made, carried forward like
+   * `gridLaunch`, never re-derived. Absent on a row from before the seam and on a folder no SCM
+   * prepared — absent, not null, so a row that never had one is written exactly as before.
+   */
+  scmLaunch?: ScmLaunchRecord | null
   /**
    * The engine's OWN model this agent was on immediately before it moved to a grid.
    *
@@ -438,8 +449,12 @@ function rowId(row: unknown): string {
     : typeof candidate.launcherId === 'string' ? candidate.launcherId : ''
 }
 
+// Key order carries no meaning but differs between load()'s literal, register(), strictPersistedRow and
+// setters that add keys (`launch`); compared as JSON text it rewrote registry.json (lock, 3 fsyncs, rename)
+// every 5 s on an unchanged row, ~720 writes/hour measured 2026-10-06. Array order still counts.
 function rowFingerprint(row: unknown): string {
-  return JSON.stringify(row)
+  return JSON.stringify(row, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value)
 }
 
 export function atomicWriteJson(file: string, value: unknown, exclusive = false): void {
@@ -559,10 +574,13 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   // Taken out of the spread and put back only when it is a real moment: the spread would otherwise
   // carry a hand-edited string or a negative number straight into the frame's `toISOString()`.
   // `forkedFrom` is out too, so an invalid one is dropped rather than spread back in as-is.
-  const { lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, forkedFrom: rawForkedFrom, ...rest } = row
+  const { lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, forkedFrom: rawForkedFrom, scmLaunch: rawScmLaunch, ...rest } = row
   const lastOpenedAt = normalizedOpenedAt(rawOpenedAt)
+  // Out of the spread for the same reason: a half-formed record is dropped, never relaunched with.
+  const scmLaunch = parseScmLaunchRecord(rawScmLaunch)
   return {
     ...rest,
+    ...(scmLaunch ? { scmLaunch } : {}),
     ...(normalizedClosePlan(rawClosePlan) ? { closePlan: normalizedClosePlan(rawClosePlan)! } : {}),
     schemaVersion: 2,
     active,
@@ -714,9 +732,23 @@ function threeWayRow(
     if (!(key in current)) delete merged[key]
   }
   for (const [key, value] of Object.entries(current)) {
-    if (JSON.stringify(value) !== JSON.stringify(baseline[key])) merged[key] = value
+    if (rowFingerprint(value) !== rowFingerprint(baseline[key])) merged[key] = value
   }
   return merged
+}
+
+/** `candidate` with each intended field as `current` has it: set, or removed when `current` has none. */
+function withIntended(
+  candidate: Record<string, unknown>,
+  current: Record<string, unknown>,
+  intended: ReadonlySet<string>,
+): Record<string, unknown> {
+  const row = { ...candidate }
+  for (const key of intended) {
+    if (Object.hasOwn(current, key)) row[key] = current[key]
+    else delete row[key]
+  }
+  return row
 }
 
 function selectedRuntimeKey(runtimes: readonly TerminalRuntimeRef[], requested: unknown): string {
@@ -765,15 +797,26 @@ export function engineKeepsTranscriptFile(engine: AgentEngine): boolean {
   return TRANSCRIPT_ROOT[engine] !== null
 }
 
+/**
+ * The folders an engine's transcripts may be in: its own, and for Claude Code and Codex each home the
+ * person moved in their shell profile (lib/engineHomes.ts). An agent's own CODEX_HOME profile is its
+ * only one.
+ */
+function transcriptRoots(engine: AgentEngine, rootFor: (codexHome?: string) => string, codexHome?: string): string[] {
+  if (engine === 'claude') return claudeProjectsRoots(rootFor())
+  if (engine === 'codex' && !codexHome) return codexHomeRoots(env.CODEX_HOME).map((home) => join(home, 'sessions'))
+  return [rootFor(codexHome)]
+}
+
 export function validTranscriptPath(engine: AgentEngine, filePath: string, codexHome?: string, allowMissing = false): boolean {
   const rootFor = TRANSCRIPT_ROOT[engine]
   if (!rootFor) return false
   try {
     const missing = allowMissing && !existsSync(filePath)
     const actual = missing ? join(realpathSync(dirname(filePath)), basename(filePath)) : realpathSync(filePath)
-    const root = realpathSync(rootFor(codexHome))
+    const inside = (root: string): boolean => { try { return pathWithin(realpathSync(root), actual) } catch { return false } }
     const st = statSync(missing ? dirname(actual) : actual)
-    if (!(missing ? st.isDirectory() : st.isFile()) || !within(root, actual)) return false
+    if (!(missing ? st.isDirectory() : st.isFile()) || !transcriptRoots(engine, rootFor, codexHome).some(inside)) return false
     if (engine === 'cursor') {
       const id = basename(actual).replace(/\.jsonl$/, '')
       if (!id || basename(dirname(actual)) !== id || basename(dirname(dirname(actual))) !== 'agent-transcripts') return false
@@ -785,18 +828,7 @@ export function validTranscriptPath(engine: AgentEngine, filePath: string, codex
   }
 }
 
-/** Prefer the kernel boot UUID; retain numeric marker compatibility for one migration. */
-const BOOT_TOLERANCE_SEC = 120 // clock/NTP drift is seconds; a reboot shifts boot time by the whole uptime
-function bootTimeSec(): number {
-  return Math.round(Date.now() / 1000 - uptime())
-}
-function currentBootId(): string {
-  try {
-    const value = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
-    if (/^[0-9a-f-]{36}$/i.test(value)) return `linux:${value}`
-  } catch { /* non-Linux fallback below */ }
-  return `time:${bootTimeSec()}`
-}
+/** The boot the registry was last loaded in (lib/bootId.ts says how a boot is named). */
 function readSavedBoot(): string | null {
   try {
     const raw = readPrivateStateFile(BOOT_FILE, 256).trim()
@@ -806,13 +838,6 @@ function readSavedBoot(): string | null {
       return typeof parsed === 'string' ? parsed : raw
     } catch { return raw }
   } catch { return null }
-}
-function bootChanged(saved: string | null, current: string): boolean {
-  if (!saved) return false
-  if (saved.startsWith('linux:')) return saved !== current
-  const savedNumber = Number(saved.replace(/^time:/, ''))
-  const currentNumber = current.startsWith('time:') ? Number(current.slice(5)) : bootTimeSec()
-  return !Number.isFinite(savedNumber) || Math.abs(currentNumber - savedNumber) > BOOT_TOLERANCE_SEC
 }
 function writeBoot(bootId: string): void {
   try {
@@ -846,6 +871,14 @@ class Registry {
   private persistedBaseline = new Map<string, string>()
   /** Exact bytes of our last durable save; checked against the file, never just its mtime. */
   private persistedContents: string | null = null
+  /**
+   * Fields a caller set on purpose since the last save, by agent: written as they are now, whatever the
+   * file says. The merge alone keeps the file's value wherever this view matches what it last saved, so
+   * a view that had never seen another process's close plan matched while cancelling it: the cancel was
+   * dropped and the plan stayed (CI's registry-observation contract, 2026-10-05). A close retried over
+   * another process's cancel was dropped the same way.
+   */
+  private intended = new Map<string, Set<string>>()
   private rebooted = false
 
   /** True when the last `load()` found the machine had rebooted since the previous daemon run. */
@@ -901,6 +934,7 @@ class Registry {
     this.rebooted = false
     this.persistedBaseline.clear()
     this.persistedContents = null
+    this.intended.clear()
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
     } catch (error) {
@@ -968,12 +1002,13 @@ class Registry {
         // see RegisteredSession.codexHome.
         const rawCodexHome = raw?.codexHome ?? undefined
         const rawGridLaunch = normalizedGridLaunch(raw?.gridLaunch)
+        const rawScmLaunch = parseScmLaunchRecord((raw as { scmLaunch?: unknown })?.scmLaunch)
         let repairedCodexTranscript = false
         if (engine === 'codex' && transcriptPath) {
           const meta = readCodexRolloutMeta(transcriptPath)
           if (meta?.isSubagent) {
             const repaired = meta.parentThreadId === rawSessionId
-              ? resolveCodexRollout(rawSessionId, join(rawCodexHome || env.CODEX_HOME, 'sessions'))
+              ? resolveCodexRollout(rawSessionId, join(sessionCodexHome({ codexHome: rawCodexHome, transcriptPath }), 'sessions'))
               : null
             if (!repaired || !validTranscriptPath('codex', repaired, rawCodexHome) || readCodexRolloutMeta(repaired)?.isSubagent) {
               changed = true
@@ -1029,6 +1064,7 @@ class Registry {
           agent: normalizedAgentName((raw as { agent?: unknown }).agent),
           ...(rawGridLaunch !== undefined ? { gridLaunch: rawGridLaunch } : {}),
           ...(rawGridLaunch ? { gridWebSearch: normalizedGridWebSearch(raw?.gridWebSearch) } : {}),
+          ...(rawScmLaunch ? { scmLaunch: rawScmLaunch } : {}),
           // ⚠️ Rehydrated EXPLICITLY, like every field above it. A row is rebuilt from this list on
           // load, so a field added to the type and the setter but not to this list is written to
           // disk and then silently dropped by the next load — which is exactly what happened, and
@@ -1115,6 +1151,7 @@ class Registry {
     this.processIndex.clear()
     this.persistedBaseline.clear()
     this.persistedContents = null
+    this.intended.clear()
     const aside = `${FILE}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
     try {
       renameSync(FILE, aside)
@@ -1186,10 +1223,7 @@ class Registry {
         // place instead of deleting/recreating its tile. Once bound, process identity remains strict.
         !agent.sessionId
         || !agent.processIdentity
-        || (
-          agent.processIdentity.pid === processIdentity.pid
-          && agent.processIdentity.startMarker === processIdentity.startMarker
-        )
+        || sameProcessIdentity(agent.processIdentity, processIdentity)
       ))
     const existing = processAgent ?? routeAgent
     if (existing) {
@@ -1299,6 +1333,8 @@ class Registry {
     grid?: GridAssignment | null
     /** The grid launch this pane was opened with and what it decided — the pair `setGridLaunch` keeps. */
     gridLaunchRecord?: GridLaunchRecord | null
+    /** What the prepared workspace's SCM needs on every relaunch — see RegisteredSession.scmLaunch. */
+    scmLaunchRecord?: ScmLaunchRecord | null
     codexHome?: string | null
     dsh?: string | null
     dshRuntime?: string | null
@@ -1332,6 +1368,7 @@ class Registry {
       grid: input.grid ?? null,
       gridLaunch: input.gridLaunchRecord?.override ?? null,
       gridWebSearch: input.gridLaunchRecord?.webSearch ?? null,
+      ...(input.scmLaunchRecord ? { scmLaunch: input.scmLaunchRecord } : {}),
       codexHome: input.codexHome ?? null,
       // A pane Harness opens starts in the default home; `hermes -p` is the person's own doing, and
       // the row learns it from the session that lands in it. See RegisteredSession.hermesHome.
@@ -1577,6 +1614,9 @@ class Registry {
       gridLaunch: existing?.gridLaunch ?? null,
       // What that launch decided — it travels with the launch, or it is lost at the first hook.
       gridWebSearch: existing?.gridWebSearch ?? null,
+      // The workspace's SCM record, for the same reason: a bind rebuilds the row, and a relaunch
+      // without it would come back without the environment the workspace was created with.
+      ...(existing?.scmLaunch ? { scmLaunch: existing.scmLaunch } : {}),
       // ⚠️ Carried forward for the same reason, and it was missed once: a bind REBUILDS the row from
       // named fields, so a field the rebuild does not name survives on disk and vanishes from
       // memory the moment the engine reports in. The symptom is a move back to the engine's own
@@ -1727,16 +1767,16 @@ class Registry {
    * The engine in this pane has exited and the pane is a shell now: the row is a terminal.
    *
    * For every agent, not only one that began as a terminal — an engine the app launched runs
-   * inside its pane's shell too (engineLaunch.ts `harness_engine`), and `/exit` or Ctrl-C leaves
+   * inside its pane's shell too (engineLaunch.ts `engineRunScript`), and `/exit` or Ctrl-C leaves
    * that shell at its prompt with the engine's last screen above it.
    *
    * What goes is what described the PROCESS and its session — session id, transcript, pid,
    * gateway, grid assignment, model, title — because the next thing typed into this shell may be a
-   * different engine, and `unboundRouteOwner` only claims a route for a row with no session. What
-   * stays is what describes the PANE's launch — `gridLaunch`, `codexHome`, `dsh`, `agent`, the
-   * permission choice: the tmux session's environment still carries the grid endpoint and the
-   * Codex profile, the workspace is still that harness's, and a restart or a relaunch after a
-   * reboot puts the same engine back with the same shape. Dropping `gridLaunch` in particular made
+   * different engine, and the reconciler hands a pane's engine to a row by its route only when the row
+   * lacks a session or a process (`unboundRouteObservation`). What stays is what describes the PANE's
+   * launch — `gridLaunch`, `codexHome`, `dsh`, `agent`, the permission choice: the tmux session's
+   * environment still carries the grid endpoint and the Codex profile, the workspace is still that
+   * harness's, and a restart or a relaunch after a reboot puts the same engine back with the same shape. Dropping `gridLaunch` in particular made
    * a released grid agent unrestorable ("credential not persisted"). The row itself, its id, its
    * pane and its name stay: this is the opposite of dormant, the terminal is live. `terminalHost`
    * is set from here on, since that is what the pane now is.
@@ -1829,9 +1869,14 @@ class Registry {
     const previous = entry.closePlan
     if (plan) entry.closePlan = normalizedClosePlan(plan)
     else delete entry.closePlan
+    const intended = this.intended.get(agentId) ?? new Set<string>()
+    intended.add('closePlan')
+    this.intended.set(agentId, intended)
     try { this.save(true) } catch (error) {
       if (previous) entry.closePlan = previous
       else delete entry.closePlan
+      intended.delete('closePlan')
+      if (!intended.size) this.intended.delete(agentId)
       throw error
     }
     return entry
@@ -1997,8 +2042,8 @@ class Registry {
    * the caller — a phone and a laptop whose clocks disagree would otherwise order the same agents
    * differently, which is the one thing this field exists to prevent.
    *
-   * `updatedAt` is left alone on purpose. That is the row's bookkeeping (the webui's "when" column,
-   * `session_get`'s timestamp), and looking at an agent changes nothing about the agent. The save
+   * `updatedAt` is left alone on purpose. That is the row's bookkeeping (`session_get`'s timestamp),
+   * and looking at an agent changes nothing about the agent. The save
    * still happens: a row is written whenever its bytes differ from the last write, whichever field
    * moved.
    */
@@ -2084,16 +2129,35 @@ class Registry {
     return this.list().filter((entry) => this.terminalAvailableAgents.has(entry.agentId))
   }
 
-  async transaction<T>(apply: () => T | Promise<T>): Promise<T> {
+  /**
+   * Saves are held back while [apply] runs, and made once when it is done. [holdSavesMs] bounds the
+   * hold: a transaction whose apply has not finished by then stops holding saves back — what it has
+   * changed so far is saved, and what it changes after is saved as it changes — instead of the
+   * registry going unsaved for as long as it runs. A reconcile pass stuck on an engine's files did
+   * that (RECONCILE_PASS_DEADLINE_MS).
+   */
+  async transaction<T>(apply: () => T | Promise<T>, options: { holdSavesMs?: number } = {}): Promise<T> {
     this.transactionDepth++
-    try {
-      return await apply()
-    } finally {
+    let holding = true
+    const release = (): void => {
+      if (!holding) return
+      holding = false
       this.transactionDepth--
       if (this.transactionDepth === 0 && this.savePending) {
         this.savePending = false
         this.save()
       }
+    }
+    const timer = options.holdSavesMs === undefined ? undefined : setTimeout(() => {
+      console.warn(`[registry] a transaction has held saves back for ${options.holdSavesMs} ms; saving without waiting for it`)
+      release()
+    }, options.holdSavesMs)
+    timer?.unref?.()
+    try {
+      return await apply()
+    } finally {
+      clearTimeout(timer)
+      release()
     }
   }
 
@@ -2113,6 +2177,7 @@ class Registry {
       console.error('[registry] save skipped because the loaded registry requires operator repair')
       return
     }
+    if (this.namesUnsaved) this.saveNames()
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
       const currentRows = new Map(this.list().map((entry) => {
@@ -2158,10 +2223,14 @@ class Registry {
         }
         for (const [agentId, current] of currentRows) {
           const baseline = this.persistedBaseline.get(agentId)
-          if (baseline === rowFingerprint(current)) continue
+          const intended = this.intended.get(agentId)
+          // An intent on a row this view otherwise left alone never brings back a row another process
+          // removed: that agent is gone, and its close plan with it.
+          if (baseline === rowFingerprint(current) && (!intended || !latest.has(agentId))) continue
           let candidate = latest.has(agentId)
             ? threeWayRow(baseline, current, latest.get(agentId)!)
             : current
+          if (intended) candidate = withIntended(candidate, current, intended)
           const process = strictPersistedRow(candidate)?.processIdentity
           const engine = candidate.engine
           const sessionId = typeof candidate.sessionId === 'string' ? candidate.sessionId : ''
@@ -2170,9 +2239,7 @@ class Registry {
             if (otherId === agentId) continue
             const otherRow = strictPersistedRow(other)
             if (!otherRow) continue
-            const sameProcess = !!process && !!otherRow.processIdentity && otherRow.engine === engine
-              && process.pid === otherRow.processIdentity.pid
-              && process.startMarker === otherRow.processIdentity.startMarker
+            const sameProcess = otherRow.engine === engine && sameProcessIdentity(process, otherRow.processIdentity)
             const sameSession = !!sessionId && otherRow.sessionId === sessionId
             const sameRoute = otherRow.runtimes.some((runtime) => routes.has(terminalRouteKey(runtime)))
             if (!sameProcess && !sameSession && !sameRoute) continue
@@ -2198,6 +2265,7 @@ class Registry {
         const serialized = rows.map(persistedRow)
         atomicWriteJson(FILE, serialized)
         this.persistedContents = JSON.stringify(serialized, null, 2)
+        this.intended.clear()
 
         // Refresh external daemon-down writes into the in-memory revision without replacing object
         // identities already held by controllers.
@@ -2226,6 +2294,14 @@ class Registry {
     }
   }
 
+  /**
+   * A names write that failed, tried again on every save until it lands. The rows heal on their own,
+   * because the next save sees them differ from what is on disk; names are written only on a rename,
+   * so a rename the daemon answered while the disk was full was lost to a restart that came before the
+   * next rename (found end to end, e2e/diskfull.e2e.ts).
+   */
+  private namesUnsaved = false
+
   private saveNames(): void {
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
@@ -2237,7 +2313,9 @@ class Registry {
         // no file yet / unreadable — write the in-memory overrides
       }
       atomicWriteJson(NAMES_FILE, { ...existing, ...Object.fromEntries(NAME_OVERRIDES) })
+      this.namesUnsaved = false
     } catch (err) {
+      this.namesUnsaved = true
       console.error('[registry] save names failed:', err)
     }
   }
@@ -2251,29 +2329,6 @@ function defaultProjectDisplayName(s: RegisteredSession): string {
 }
 
 /**
- * The machine's own name, in the forms a terminal title is likely to carry it.
- *
- * Computed once: a rename mid-run would at worst let one title through, and reading it per title
- * would run a syscall for every agent on every title sweep.
- */
-const SELF_NAMES: ReadonlySet<string> = (() => {
-  const names = new Set<string>()
-  try {
-    const host = hostname().trim().toLowerCase()
-    if (host) {
-      names.add(host)
-      // `MacBookPro2021.local` and `MacBookPro2021` are the same machine wearing two names, and an
-      // engine may print either.
-      const short = host.split('.')[0]
-      if (short) names.add(short)
-    }
-  } catch {
-    // No hostname is not a reason to reject nothing else; the set simply stays empty.
-  }
-  return names
-})()
-
-/**
  * A pane title, as an agent NAME — or null when the title says nothing about this agent.
  *
  * Two rejections, and the second is the interesting one.
@@ -2284,7 +2339,10 @@ const SELF_NAMES: ReadonlySet<string> = (() => {
  * identically for every one of them. A name that is the same for every agent on a machine is worse
  * than no name: `defaultProjectDisplayName` at least says which folder and which session. This is
  * about the machine, not the engine, so it is refused by what it SAYS rather than by who sent it —
- * any engine that adopts the same convention is covered without a table to keep in step.
+ * any engine that adopts the same convention is covered without a table to keep in step. tmux titles
+ * a new pane with the machine's name too, kept by any engine that sets no title of its own. Every
+ * name the machine has had while the daemon ran counts (lib/machineNames.ts): a laptop's name follows
+ * its network, and a pane keeps the name it was made under.
  */
 export function titleDisplayName(title: string | null | undefined): string | null {
   const cleaned = title
@@ -2293,7 +2351,7 @@ export function titleDisplayName(title: string | null | undefined): string | nul
     .trim()
     .slice(0, 80)
   if (!cleaned) return null
-  return SELF_NAMES.has(cleaned.toLowerCase()) ? null : cleaned
+  return machineNames.owns(cleaned) ? null : cleaned
 }
 
 function validProcessIdentity(value: unknown): value is ProcessIdentity {

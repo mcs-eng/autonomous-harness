@@ -3,19 +3,32 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startHookServer, type HookServerHandlers, chooseHookAgent, knownTranscriptFor } from './hookServer.js'
+import { startHookServer, type HookServerHandlers, chooseHookAgent, hookFiredAt, knownTranscriptFor } from './hookServer.js'
 import { registry, type RegisteredSession } from './lib/registry.js'
 import { env } from './config/env.js'
 import { readHookCredential } from './lib/hookAuth.js'
 import { CommandBarService } from './lib/commandBar.js'
+import { routedCommandBar } from './lib/commandBarHttp.js'
+import { COMMAND_BAR_REQUESTS, emptyPorts } from './core/api.js'
+import { createServiceHost } from './core/serviceHost.js'
+import { startCommandBar, type Commands } from './services/commandBar.js'
+import { fakeCore } from './testing/fakeCore.js'
 import { ENGINES } from './engines/types.js'
+import { engineHooks } from './engines/hooks.js'
 
 let server: Server | null = null
 
 describe('native command bar endpoints', () => {
+  /** The command bar in this process, behind the core's door to it, as `HARNESSD_SERVICES=none` runs it. */
+  const commandBar = (commands: Commands) => {
+    const host = createServiceHost(emptyPorts(), { log: () => {} })
+    host.serve('commandBar', (core) => startCommandBar(core, commands), fakeCore(), COMMAND_BAR_REQUESTS)
+    return routedCommandBar({ serviceRouter: host.route, onConnectionClosed: host.closeConnection })
+  }
+
   it('requires a native local header and rejects browser origins before evaluating', async () => {
     const decide = vi.fn()
-    const { base } = await start({ onCommandBar: { status: vi.fn(), decide } })
+    const { base } = await start({ onCommandBar: commandBar({ status: vi.fn(), decide }) })
     const attempts: Record<string, string>[] = [{}, { 'x-adapter-local': '1', origin: 'https://example.com' }]
     for (const headers of attempts) {
       const response = await fetch(`${base}/api/command-bar/resolve`, { method: 'POST', headers, body: '{}' })
@@ -25,7 +38,7 @@ describe('native command bar endpoints', () => {
   })
 
   it('returns configuration without credentials and wraps useful setup errors', async () => {
-    const { base } = await start({ onCommandBar: new CommandBarService({ key: async () => null }) })
+    const { base } = await start({ onCommandBar: commandBar(new CommandBarService({ key: async () => null })) })
     const headers = { 'x-adapter-local': '1', 'content-type': 'application/json' }
     const status = await fetch(`${base}/api/command-bar/status`, { headers })
     expect(await status.json()).toMatchObject({ success: true, data: { configured: false, provider: 'OpenRouter' } })
@@ -64,6 +77,28 @@ async function start(overrides: Partial<HookServerHandlers> = {}) {
 
 describe('process-owned hook server', () => {
 
+  it('honors engine admission before registering or announcing a prompt, including a failed check', async () => {
+    const admit = vi.spyOn(engineHooks.codex, 'admit')
+      .mockReturnValueOnce({ accepted: false, reason: 'codex_subagent' })
+      .mockImplementationOnce(() => { throw new Error('rollout unavailable') })
+    try {
+      const onPromptSubmitted = vi.fn()
+      const { handlers, base, headers } = await start({
+        resolveHookAgent: async () => ({ engine: 'codex', agentId: 'parent' }) as RegisteredSession,
+        onPromptSubmitted,
+      })
+      for (const reason of ['codex_subagent', 'engine_hook_failed']) {
+        const response = await fetch(`${base}/api/hook/session-start`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ engine: 'codex', tmuxPane: '%41', sessionId: 'child', hookEvent: 'UserPromptSubmit' }),
+        })
+        expect(await response.json()).toEqual({ ignored: true, reason })
+      }
+      expect(handlers.onRegistered).not.toHaveBeenCalled()
+      expect(onPromptSubmitted).not.toHaveBeenCalled()
+    } finally { admit.mockRestore() }
+  })
+
   it('runs targeted resolution and rejects a hook without a matching pane engine process', async () => {
     const resolveHookAgent = vi.fn(async () => null)
     const { handlers, base, headers } = await start({ resolveHookAgent })
@@ -81,6 +116,7 @@ describe('process-owned hook server', () => {
     expect(await response.json()).toEqual({ ignored: true, reason: 'no_matching_engine_process' })
     expect(resolveHookAgent).toHaveBeenCalledWith({
       engine: 'codex', tmuxPane: '%41', runtimeHints: [{ backend: 'tmux', paneId: '%41' }], callerPid: undefined,
+      onWait: expect.any(Function),
     })
     expect(handlers.onRegistered).not.toHaveBeenCalled()
   })
@@ -105,7 +141,37 @@ describe('process-owned hook server', () => {
     expect(response.status).toBe(200)
     expect(resolveHookAgent).toHaveBeenCalledWith({
       engine: 'codex', tmuxPane: '%41', runtimeHints: [{ backend: 'tmux', paneId: '%41' }], callerPid: undefined,
+      onWait: expect.any(Function),
     })
+  })
+
+  it('answers a hook whose agent has yet to record its process before the wait, and only logs what the wait finds', async () => {
+    // The engine's hook command gives up on a reply after 500ms and then writes the registry itself, as for
+    // a daemon that is down (hook/notify.mjs, fallbackRegister): held for the wait, its own row took the
+    // agent's place under the running daemon. Answered first, it writes nothing.
+    let found!: (agent: RegisteredSession | null) => void
+    const resolveHookAgent = vi.fn(({ onWait }: { onWait?: () => void }) => {
+      onWait?.()
+      return new Promise<RegisteredSession | null>((resolve) => { found = resolve })
+    })
+    const { handlers, base, headers } = await start({ resolveHookAgent: resolveHookAgent as HookServerHandlers['resolveHookAgent'] })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const reply = await Promise.race([
+        fetch(`${base}/api/hook/session-start`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ engine: 'claude', tmuxPane: '%7', sessionId: 'session-7', callerPid: 4242 }),
+        }),
+        new Promise<'held'>((resolve) => setTimeout(() => resolve('held'), 2_000)),
+      ])
+      expect(reply).not.toBe('held')
+      expect(await (reply as Response).json()).toEqual({ pending: true })
+      // The wait ends with no agent for it: said in the log, and nothing is answered twice.
+      found(null)
+      await vi.waitFor(() => expect(log).toHaveBeenCalledWith('[hooks] session- session-start ignored · no_matching_engine_process'))
+      expect(handlers.onRegistered).not.toHaveBeenCalled()
+    } finally { log.mockRestore() }
   })
 
   it('ignores a hook whose only terminal is a Herdr pane', async () => {
@@ -210,6 +276,33 @@ describe('process-owned hook server', () => {
     expect(response.status).toBe(403)
     expect(await response.json()).toEqual({ error: 'UNBOUND_HOOK' })
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('hands a Stop on with when its engine ran it, and holds it as long as a test asks', async () => {
+    const onTurnStop = vi.fn()
+    const resolveHookAgent = vi.fn(async () => ({ engine: 'claude', sessionId: 'real-session', agentId: 'agent-1' } as never))
+    const stop = (base: string, headers: Record<string, string>) => fetch(`${base}/api/hook/turn-stop`, {
+      method: 'POST', headers, body: JSON.stringify({ engine: 'claude', sessionId: 'real-session', tmuxPane: '%1', callerPid: 123 }),
+    })
+    const { base, headers } = await start({ onTurnStop, resolveHookAgent })
+    expect((await stop(base, { ...headers, 'x-harness-hook-fired-at': '1700000000000' })).status).toBe(200)
+    expect(onTurnStop).toHaveBeenLastCalledWith({ sessionId: 'real-session', status: undefined, transcriptPath: undefined, firedAt: 1_700_000_000_000 })
+    // A hook client too old to say: as before.
+    expect((await stop(base, headers)).status).toBe(200)
+    expect(onTurnStop).toHaveBeenLastCalledWith({ sessionId: 'real-session', status: undefined, transcriptPath: undefined })
+    server?.close()
+    const held = await start({ onTurnStop, resolveHookAgent, stopHookDelayMs: 50 })
+    onTurnStop.mockClear()
+    expect((await stop(held.base, held.headers)).status).toBe(200)
+    expect(onTurnStop).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(onTurnStop).toHaveBeenCalledOnce())
+  })
+
+  it('reads when a hook was run from its header, and nothing else as that', () => {
+    expect(hookFiredAt({ headers: { 'x-harness-hook-fired-at': '1700000000000' } })).toBe(1_700_000_000_000)
+    for (const value of [undefined, '', 'soon', '-5', '0', '1.5', '1e400']) {
+      expect(hookFiredAt({ headers: { 'x-harness-hook-fired-at': value } })).toBeUndefined()
+    }
   })
 
   it('answers a proxied control-plane read whose handler throws, instead of hanging it', async () => {
@@ -336,6 +429,16 @@ describe('knownTranscriptFor', () => {
     expect(knownTranscriptFor({ engine: 'claude', sessionId, transcriptPath: known }, { ...row, transcriptPath: join(root, 'other.jsonl') })).toBe(known)
   })
 
+  it('keeps the announcement if the engine lookup fails', () => {
+    const lookup = vi.spyOn(engineHooks.claude, 'transcriptFor')
+      .mockImplementationOnce(() => { throw new Error('lookup failed') })
+      .mockImplementationOnce(() => { throw 'lookup failed again' })
+    try {
+      expect(knownTranscriptFor({ sessionId, transcriptPath: announced }, row)).toBe(announced)
+      expect(knownTranscriptFor({ sessionId, transcriptPath: announced }, row)).toBe(announced)
+    } finally { lookup.mockRestore() }
+  })
+
   it.each<[string, Parameters<typeof knownTranscriptFor>[0], RegisteredSession | undefined]>([
     ['another conversation', { engine: 'claude', sessionId: 'other-conversation', transcriptPath: announced }, row],
     ['another engine', { engine: 'codex', sessionId, transcriptPath: announced }, row],
@@ -343,6 +446,7 @@ describe('knownTranscriptFor', () => {
     ['a row whose file is gone', { engine: 'claude', sessionId, transcriptPath: announced }, { ...row, transcriptPath: join(root, 'gone', `${sessionId}.jsonl`) }],
     ['no row', { engine: 'claude', sessionId, transcriptPath: announced }, undefined],
     ['no announcement', { engine: 'claude', sessionId }, row],
+    ['no conversation id', { engine: 'claude', transcriptPath: announced }, row],
   ])('leaves the announcement alone for %s', (_case, body, agent) => {
     expect(knownTranscriptFor(body, agent)).toBe(body.transcriptPath)
   })
@@ -413,42 +517,52 @@ describe('requests must name this server', () => {
 
   it('refuses every route, reads included, when Host is not a loopback name for this port', async () => {
     const onStatus = vi.fn(() => ({ ok: true }))
-    const onLogs = vi.fn(() => 'secret log')
-    const { base } = await start({ onStatus, onLogs })
+    const { base } = await start({ onStatus })
     const evil = { host: 'rebind.evil.example:' + new URL(base).port }
     for (const [method, path, extra] of [
-      ['GET', '/api/status', {}], ['GET', '/api/logs', {}], ['GET', '/', {}], ['GET', '/api/machines', {}],
-      ['POST', '/api/remote-password/set', { 'x-adapter-local': '1' }], ['POST', '/api/stop', { 'x-adapter-local': '1' }],
+      ['GET', '/api/status', {}], ['GET', '/', {}], ['GET', '/api/machines', {}],
+      ['POST', '/api/remote-password/set', { 'x-adapter-local': '1' }], ['POST', '/api/group/sync', { 'x-adapter-local': '1' }],
     ] as const) {
       expect(await send(base, method, path, { ...evil, ...extra }), `${method} ${path}`).toBe(403)
     }
     expect(onStatus).not.toHaveBeenCalled()
-    expect(onLogs).not.toHaveBeenCalled()
+  })
+
+  it('serves no web dashboard: its page, log tail and stop button are gone', async () => {
+    // Nothing opened the page (no app, website, script or the backend), and the web client that linked to
+    // it retired with the browser setup links (#348). `harness stop` stops the daemon by its pid.
+    const { base } = await start({ onStatus: () => ({ ok: true }) })
+    for (const [method, path] of [['GET', '/'], ['GET', '/index.html'], ['GET', '/api/logs'], ['POST', '/api/stop']] as const) {
+      expect(await send(base, method, path, { 'x-adapter-local': '1' }), `${method} ${path}`).toBe(404)
+    }
   })
 
   it('answers every request even when its handler throws, instead of leaving the caller waiting', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const onStop = vi.fn(() => { throw new Error('stop failed after the answer') })
-    const { base } = await start({
-      onStatus: async () => { throw new Error('status read failed') },
-      onLogs: () => { throw 'log file gone' },
-      onStop,
+    let failing: 'read' | 'body' = 'read'
+    const { base, headers } = await start({
+      // A status that cannot be read, then one that cannot be written once its headers went out.
+      onStatus: async () => { if (failing === 'read') throw new Error('status read failed'); return { n: 1n } },
+      // A hook told "pending" before its resolution failed.
+      resolveHookAgent: async ({ onWait }) => { onWait?.(); throw 'resolution failed after the answer' },
     })
     // Before the answer: a 500 the caller can act on, at once.
     const status = await fetch(`${base}/api/status`)
     expect(status.status).toBe(500)
     expect(await status.json()).toEqual({ error: 'INTERNAL' })
     // After the headers went out: the response is ended, not left open.
-    const logs = await fetch(`${base}/api/logs`)
-    expect(logs.status).toBe(200)
-    expect(await logs.text()).toBe('')
+    failing = 'body'
+    const unwritable = await fetch(`${base}/api/status`)
+    expect(unwritable.status).toBe(200)
+    expect(await unwritable.text()).toBe('')
     // After the response ended: nothing more to send, and nothing breaks.
-    const stop = await fetch(`${base}/api/stop`, { method: 'POST', headers: { 'x-adapter-local': '1' } })
-    expect(await stop.json()).toEqual({ ok: true })
-    await vi.waitFor(() => expect(onStop).toHaveBeenCalled())
+    const hook = await fetch(`${base}/api/hook/session-start`, {
+      method: 'POST', headers, body: JSON.stringify({ engine: 'codex', tmuxPane: '%41', sessionId: '019fea92-e31a-7692-9c35-f616e9d458b7' }),
+    })
+    expect(await hook.json()).toEqual({ pending: true })
     expect(error).toHaveBeenCalledWith('[hooks] GET /api/status failed:', 'status read failed')
-    expect(error).toHaveBeenCalledWith('[hooks] GET /api/logs failed:', 'log file gone')
-    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('[hooks] POST /api/stop failed:', 'stop failed after the answer'))
+    expect(error).toHaveBeenCalledWith('[hooks] GET /api/status failed:', expect.stringContaining('BigInt'))
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('[hooks] POST /api/hook/session-start failed:', 'resolution failed after the answer'))
     error.mockRestore()
   })
 
@@ -460,7 +574,7 @@ describe('requests must name this server', () => {
     expect(await res.json()).toEqual({ sessions: [{ id: 'a', updatedAt: 42 }] })
   })
 
-  it('still serves loopback names, and the dashboard from its own origin', async () => {
+  it('still serves loopback names, and a page from the daemon\'s own origin', async () => {
     const { base } = await start({ onStatus: () => ({ ok: true }) })
     const port = new URL(base).port
     for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]) {
@@ -518,8 +632,8 @@ describe('the daemon socket', () => {
     const dir = mkdtempSync('/tmp/hsock-')
     const socketPath = join(dir, 'daemon.sock')
     const onStatus = vi.fn(() => ({ ok: true }))
-    const commandBar = { status: vi.fn(async () => ({ configured: false })), decide: vi.fn() }
-    const started = await startHookServer(0, { onRegistered: vi.fn(), onSessionEnd: vi.fn(), onStatus, onCommandBar: commandBar as never }, { socketPath })
+    const door = { ask: vi.fn(async () => ({ status: 200, body: { success: true, data: { configured: false } } })), closed: vi.fn() }
+    const started = await startHookServer(0, { onRegistered: vi.fn(), onSessionEnd: vi.fn(), onStatus, onCommandBar: door }, { socketPath })
     server = started.server
     try {
       expect(started.localSocket?.path).toBe(socketPath)
@@ -531,7 +645,7 @@ describe('the daemon socket', () => {
       expect(await viaSocket(socketPath, 'GET', '/api/command-bar/status', { 'x-adapter-local': '1' })).toBe(200)
       expect(await viaSocket(socketPath, 'GET', '/api/command-bar/status')).toBe(403)
       // Mutations still need the CSRF header, hooks still need their credential.
-      expect(await viaSocket(socketPath, 'POST', '/api/stop')).toBe(403)
+      expect(await viaSocket(socketPath, 'POST', '/api/group/sync')).toBe(403)
       expect(await viaSocket(socketPath, 'POST', '/api/hook/session-start')).not.toBe(200)
       // The TCP port is untouched: a foreign Host is still refused there.
       const port = (started.server.address() as { port: number }).port

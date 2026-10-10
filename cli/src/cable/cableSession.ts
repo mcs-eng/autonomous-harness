@@ -25,11 +25,15 @@ import { readCompanionIdentity, type CompanionIdentity } from './companionProtoc
 import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { DialLog } from './dialLog.js'
 import { FirmwareTransfer } from './fwPush.js'
+import { PACK_VERSION } from './pets/pack.js'
+import { planPetSync } from './pets/sync.js'
+import type { PetStore } from './pets/store.js'
+import type { PetDialState } from './pets/sync.js'
 import { SerialLink, findDialPort } from './serial.js'
 import { PassageCarry, withCarriedPassage, type CarryRead } from './passageCarry.js'
 import { VoiceDraft, type DraftPin } from './voiceDraft.js'
 import { QuestionInbox, type ReviewedAnswer, type AnswerReceipt, type QuestionSpeech } from './questionInbox.js'
-import { notificationReadToken, type UnreadNotification } from './notificationRead.js'
+import { notificationReadToken, type UnreadNotification } from '../lib/notificationRead.js'
 
 /** Bumped when the VOCABULARY changes. Separate from the frame version, which is the envelope. */
 export const CABLE_PROTO_VERSION = 3   // 3: + question.close (a question answered on another client)
@@ -251,6 +255,8 @@ export interface CableHost {
   selectSwarm(swarmId: string): void
   appName(): string
   voiceLang(): string
+  /** The window's latest selected pane, including selections made before this dial attached. */
+  appFocus?(): { machineId: string; agentId: string } | undefined
   /** The active tab's agents, in tile order — and nothing else. Empty with no window or an empty tab. */
   listAgents(): Promise<CableAgent[]>
   /** Pane rows and workspace identity from the same desktop announcement. */
@@ -324,6 +330,11 @@ export interface CableHost {
   /** What the window still has unread, newest first — replayed to a dial that has just attached. */
   listUnread(): UnreadNotification[]
   /**
+   * The custom pets kept on this computer, or null when there is no store (a host that never heard of pets).
+   * Read by the session itself on every sync, so a mapping changed while a dial is attached is the one it sees.
+   */
+  pets?(): PetStore | null
+  /**
    * The image to offer a dial running `runningVersion`, or null for "nothing to do" — which covers a
    * dial that is current, a dev build that must not be touched, and an unreachable manifest.
    */
@@ -344,6 +355,13 @@ export interface CableHost {
    * Never called for a device that has been a dial.
    */
   onForeignPort?(path: string, why: string): void
+  /**
+   * Something this session does threw, or the far end is flooding the port with what no dial sends. Told
+   * every time, so whoever owns the session can drop this dial alone, and look at its port again later,
+   * rather than let one device's fault reach every other one in the process. A dial is hardware speaking
+   * whatever its firmware says: a fault here is expected to happen, and to be this dial's alone.
+   */
+  onFault?(error: unknown, hostile?: boolean): void
   /**
    * The dial as a window would draw it: there or not, on which firmware, and whether an update is
    * going over the cable right now. Fired on every change and never on a keepalive — the window
@@ -481,6 +499,15 @@ function readSettings(value: unknown): DeviceSettings | undefined {
   }
 }
 
+/** A pet transfer with no pet.accept / pet.progress for this long is abandoned for the rest of the link. */
+const PET_STALL_MS = 10_000
+/** How long a pet.done outranks a greeting that does not list the pack (see petDoneAt). */
+const PET_DONE_TRUST_MS = 3_000
+/** A dial that refused a pack for memory right after we dropped another is given the room a moment to free. */
+const PET_RETRY_MS = 1500
+/** Refusals that say nothing about the pack itself, so a later hello or a changed mapping may try again. */
+const PET_TRANSIENT = new Set(['timeout', 'unreadable', 'memory', 'busy'])
+
 export class CableSession {
   private link: CablePort | null = null
   private decoder = new CableDecoder()
@@ -521,6 +548,8 @@ export class CableSession {
    * and it is the only thing the daemon ever re-asserts.
    */
   private desiredFocus = ''
+  /** A superseded list refresh can record the selection without ever writing its focus frame. */
+  private appFocusUnsent = false
   /**
    * App-driven machine/focus changes are one transaction. Without this queue, two quick desktop clicks
    * can interleave their machine lists and let the older click focus last.
@@ -563,6 +592,35 @@ export class CableSession {
 
   /** A firmware transfer in flight, and the versions already tried this session. */
   private transfer: FirmwareTransfer | null = null
+  /**
+   * Custom pets. A transfer of its own, never `transfer`: the firmware one and this one must never be mistaken for each
+   * other by fw.progress / pet.progress, and pets wait while a firmware image is in flight (see syncPets).
+   * All of it is per LINK: a cut cable forgets it, and the next hello (its petIds without the pack) offers again.
+   */
+  private petTransfer: { id: string; xfer: FirmwareTransfer; size: number; written: number } | null = null
+  /** `hello.pets`: the newest pack version the dial understands (a number >= 1). Absent means old firmware: no pet traffic of any kind. */
+  private petDialMax = 0
+  private petsSupported = false
+  /** A pet.drop went out on this link: the dial's memory may still be settling, so a memory refusal is retried once. */
+  private petDropSent = false
+  private petRetried = new Set<string>()
+  private petRetryTimers = new Set<ReturnType<typeof setTimeout>>()
+  /** Pack ids the dial holds: its hello's petIds, plus each pet.done, minus each pet.drop we sent. */
+  private petHeld = new Set<string>()
+  /**
+   * When each pack's pet.done arrived. A greeting the dial assembled while a pack was still arriving can land after its
+   * pet.done and list it as missing — seen 2026-10-08, when both packs went over twice. A pack confirmed this recently
+   * is believed over such a greeting.
+   */
+  private petDoneAt = new Map<string, number>()
+  /** Packs the dial refused on this link, by reason. Not offered again until the link comes back. */
+  private petErrors = new Map<string, string>()
+  /** The last `pet.map` sent on this link, so a keepalive hello does not repeat it. */
+  private petMapSent = ''
+  /** Runs one sync at a time: hello, pet.done and a changed mapping can all ask for one at once. */
+  private petChain: Promise<void> = Promise.resolve()
+  /** Fires when a pet transfer has made no progress (offer, accept, progress) for PET_STALL_MS. */
+  private petStall: ReturnType<typeof setTimeout> | null = null
   /** `<mac>:<version>` already offered on this port. The durable, cross-port guard is `mayOffer`. */
   private offered = new Set<string>()
 
@@ -611,8 +669,8 @@ export class CableSession {
 
   start(): void {
     this.stopped = false
-    this.timer = setInterval(() => void this.tick(), 1_000)
-    void this.tick()
+    this.timer = setInterval(() => this.ticked(), 1_000)
+    this.ticked()
   }
 
   async stop(): Promise<void> {
@@ -621,6 +679,17 @@ export class CableSession {
     this.timer = null
     await this.link?.close('daemon stopping')
     this.link = null
+  }
+
+  /** One tick, its failure this dial's: a rejection left unhandled would end the whole devices process. */
+  private ticked(): void {
+    void this.tick().catch((error: unknown) => this.fault(error))
+  }
+
+  /** This dial's fault, told to whoever owns the session (CableHost.onFault). */
+  private fault(error: unknown, hostile = false): void {
+    this.log(`cable: ${hostile ? 'flooded' : 'fault'} · ${error instanceof Error ? error.message : String(error)}`)
+    this.host.onFault?.(error, hostile)
   }
 
   // ── port lifecycle ────────────────────────────────────────────────────────────────────────────────
@@ -836,14 +905,65 @@ export class CableSession {
     // The dial keeps its running image; the half-written slot is erased again by the next accepted offer.
     this.transfer?.finish('interrupted by the port closing')
     this.transfer = null
+    // The dial discards a half-received pack when the link drops (it keeps showing the old pet), so there
+    // is nothing to resume: the next hello says what it holds and the missing pack is offered from byte 0.
+    this.petTransfer?.xfer.finish('interrupted by the port closing')
+    this.petTransfer = null
+    this.clearPetStall()
+    this.petsSupported = false
+    this.petHeld.clear()
+    this.petDoneAt.clear()
+    this.petErrors.clear()
+    this.petMapSent = ''
+    this.petDialMax = 0
+    this.petDropSent = false
+    this.petRetried.clear()
+    for (const timer of this.petRetryTimers) clearTimeout(timer)
+    this.petRetryTimers.clear()
   }
 
   // ── inbound ───────────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * What a dial may send in a second before it reads as hostile: a byte stream that is mostly not frames, a
+   * flood of frames, or bytes that take the decoder longer than it may spend. A dial sends a few dozen
+   * frames a second at most (voice is 16-bit PCM at 16 kHz, about 32 KB/s in frames of up to 8 KB), and its
+   * boot noise is a few hundred bytes; the decoder's worst case is a CRC over 8 KB for every eight bytes of
+   * a crafted stream, which at USB speed would hold the event loop for seconds at a time.
+   */
+  static readonly BUDGET = { garbageBytes: 64 * 1024, frames: 2_000, decodeMs: 500 }
+  private budget = { since: 0, garbage: 0, frames: 0, ms: 0 }
+
   private onBytes(chunk: Buffer): void {
+    const started = performance.now()
+    const discarded = this.decoder.discardedBytes
+    let frames = 0
+    try {
+      this.decode(chunk, () => { frames++ })
+    } catch (error) {
+      // A throw inside the decoder's callback (the console log's write, the voice buffer) is this dial's
+      // fault: thrown out of the port's `data` event it would end the whole devices process.
+      this.fault(error)
+    }
+    const now = Date.now()
+    if (now - this.budget.since >= 1_000) this.budget = { since: now, garbage: 0, frames: 0, ms: 0 }
+    this.budget.garbage += this.decoder.discardedBytes - discarded
+    this.budget.frames += frames
+    this.budget.ms += performance.now() - started
+    const over = this.budget.garbage > CableSession.BUDGET.garbageBytes ? `${this.budget.garbage} B that are no frames`
+      : this.budget.frames > CableSession.BUDGET.frames ? `${this.budget.frames} frames`
+      : this.budget.ms > CableSession.BUDGET.decodeMs ? `${Math.round(this.budget.ms)} ms of decoding` : ''
+    if (over) {
+      this.budget = { since: now, garbage: 0, frames: 0, ms: 0 }
+      this.fault(new Error(`${over} in a second, more than a dial sends`), true)
+    }
+  }
+
+  private decode(chunk: Buffer, counted: () => void): void {
     this.lastRx = Date.now()
     this.bytesSinceOpen += chunk.length
     this.decoder.feed(chunk, (frame) => {
+      counted()
       this.framesSinceOpen += 1
       if (frame.type === CableType.Json) {
         let msg: Message
@@ -852,7 +972,8 @@ export class CableSession {
         } catch {
           return // unreadable payloads are counted by the decoder, never fatal
         }
-        void this.onMessage(msg)
+        // Its failure is this dial's: a rejection left unhandled would end the whole devices process.
+        void this.onMessage(msg).catch((error: unknown) => this.fault(error))
         return
       }
       if (frame.type === CableType.Log) {
@@ -952,11 +1073,16 @@ export class CableSession {
           // screen. A repeat greeting from the same dial on the same image is a keepalive and is skipped,
           // which is the whole reason the branch exists.
           await this.pushAgents()
+          const focused = this.host.appFocus?.()
+          if (focused) await this.followApp(focused.machineId, focused.agentId)
         }
         // Offered on every greeting, but only ONCE per version per session: accepting makes the dial erase
         // a flash slot before it answers, so a cadence of retries would spend erase cycles on the user's
         // hardware every fifteen seconds, and nothing about the next greeting changes what went wrong.
         await this.maybeOfferFirmware(str('fw') ?? '')
+        // AFTER the firmware offer, so a pending image is already `this.transfer` and the pets wait for it.
+        this.readPetHello(msg)
+        await this.syncPets()
         return
       }
       case 'pong':
@@ -1045,6 +1171,7 @@ export class CableSession {
           // Remember where the dial IS, not just that it said so: followApp() compares against this to
           // avoid echoing the dial's own move back at it.
           this.desiredFocus = agentId
+          this.appFocusUnsent = false
           this.host.focus(agentId)
         }
         return
@@ -1248,8 +1375,13 @@ export class CableSession {
             : Promise.resolve({ ok: false, error: 'Choose a passage before searching.' } as const))
             .catch(() => ({ ok: false, error: 'Could not open output search. Try again.' })) }
         }
+        // The dial can still name the previous pane while a focus frame is in flight, or after the
+        // devices process restarted. Ordinary dictation belongs to the window's selection at capture
+        // start. Quoted text, carried text, questions and edits already have their own pinned targets.
+        const focused = str('agentId') && !formVoice && !searchVoice && !draftVoice && !questionVoice &&
+          !carryVoice && !('selectionId' in msg) ? this.host.appFocus?.() : undefined
         this.voice = {
-          agentId: str('agentId'),
+          agentId: focused?.agentId ?? str('agentId'),
           cmd: str('cmd'),
           lang: str('lang') ?? this.host.voiceLang(),
           // The DIAL's rate, never this side's guess. Describing 8 kHz audio as 16 kHz does not make the
@@ -1335,7 +1467,65 @@ export class CableSession {
         this.transfer = null
         this.offeringTo = ''
         this.report()
+        // Pets that waited behind the image go now.
+        await this.syncPets()
         return
+      case 'pet.accept':
+        // Only for the pack in flight; a stale accept for another id must not start slices of this one.
+        if (this.petTransfer && str('id') === this.petTransfer.id) {
+          this.armPetStall()
+          await this.petTransfer.xfer.pump()
+        }
+        return
+      case 'pet.progress':
+        // The credit that lets the next slices go, exactly as fw.progress is.
+        if (this.petTransfer && str('id') === this.petTransfer.id && typeof msg.written === 'number') {
+          this.petTransfer.written = msg.written
+          this.armPetStall()
+          await this.petTransfer.xfer.onProgress(msg.written)
+        }
+        return
+      case 'pet.done': {
+        const id = str('id')
+        if (!id) return
+        if (this.petTransfer?.id === id) {
+          this.petTransfer.xfer.finish('stored')
+          this.petTransfer = null
+          this.clearPetStall()
+        }
+        this.petHeld.add(id)
+        this.petDoneAt.set(id, Date.now())
+        // The next pack, one at a time.
+        await this.syncPets()
+        return
+      }
+      case 'pet.error': {
+        const id = str('id')
+        const reason = str('reason') ?? 'unknown'
+        if (!id) return
+        // memory and busy will not change within this link; crc, version and shape would fail identically on a
+        // resend of the same bytes. All are recorded and none retried until the link comes back.
+        this.petErrors.set(id, reason)
+        this.log(`cable: dial refused pet ${id}: ${reason}`)
+        if (this.petTransfer?.id === id) {
+          this.petTransfer.xfer.finish(`refused: ${reason}`)
+          this.petTransfer = null
+          this.clearPetStall()
+        }
+        // A swap near full memory: the pack we dropped may not be freed yet. Once per pack and link, offer again.
+        if ((reason === 'memory' || reason === 'busy') && this.petDropSent && !this.petRetried.has(id)) {
+          this.petRetried.add(id)
+          const timer = setTimeout(() => {
+            this.petRetryTimers.delete(timer)
+            if (this.petErrors.get(id) === reason) this.petErrors.delete(id)
+            void this.syncPets()
+          }, PET_RETRY_MS)
+          timer.unref?.()
+          this.petRetryTimers.add(timer)
+        }
+        await this.syncPets()
+        return
+      }
       default:
         this.log(`cable: unhandled message '${msg.t}'`)
     }
@@ -1373,10 +1563,14 @@ export class CableSession {
   }
 
   private async maybeOfferFirmware(runningVersion: string): Promise<void> {
-    if (!this.host.firmwareFor || this.transfer || !runningVersion) return
+    // A pack in flight also holds it back: the reader task that writes flash is busy with the pack, and the
+    // next hello (every fifteen seconds) asks again.
+    if (!this.host.firmwareFor || this.transfer || this.petTransfer || !runningVersion) return
     // The BOARD goes with the version. Which manifest entry this device's image comes from is decided
     // from its own hello, never defaulted — see otaKeyForBoard.
     const candidate = await this.host.firmwareFor(runningVersion, this.greetedHw).catch(() => null)
+    // A pet transfer may have started while that await was parked (petsChanged); never start an image beside it.
+    if (this.petTransfer || this.transfer) return
     // Keyed by DIAL as well as version. Holding bare version strings made this a statement about the
     // image rather than about the board: offer 0.0.42 to one dial, swap in a second still on 0.0.41, and
     // the second was refused because that version had been offered — to someone else. It then sat on the
@@ -1400,6 +1594,141 @@ export class CableSession {
       (line) => this.log(line),
     )
     await this.send({ t: 'fw.offer', version: candidate.version, size: candidate.image.length, sha256: candidate.sha256 })
+  }
+
+  // ── custom pets ───────────────────────────────────────────────────────────────────────────────────
+
+  private readPetHello(msg: Message): void {
+    const was = this.petHeld
+    this.petDialMax = typeof msg.pets === 'number' && Number.isFinite(msg.pets) ? Math.floor(msg.pets) : 0
+    this.petsSupported = this.petDialMax >= 1
+    // Each greeting forgives what was only the moment's trouble; a pack the dial found wrong stays refused.
+    this.clearTransientPetErrors()
+    const ids = Array.isArray(msg.petIds) ? msg.petIds.filter((v): v is string => typeof v === 'string' && /^[0-9a-f]{16}$/.test(v)) : []
+    this.petHeld = new Set(this.petsSupported ? ids : [])
+    const now = Date.now()
+    for (const [id, at] of this.petDoneAt) {
+      if (now - at >= PET_DONE_TRUST_MS) this.petDoneAt.delete(id)
+      else if (this.petsSupported && was.has(id)) this.petHeld.add(id)
+    }
+    // A dial that holds less than it did has rebooted under a link that stayed open: it has forgotten the
+    // map too, so it is sent again.
+    const shrank = [...was].some((id) => !this.petHeld.has(id))
+    if (shrank) this.petMapSent = ''
+    // ...and it has forgotten a transfer in flight too (it reboots without the link closing): that one is over. A
+    // hello that lists the pack in flight means it was stored and its pet.done went missing.
+    const t = this.petTransfer
+    if (t && (shrank || this.petHeld.has(t.id))) {
+      t.xfer.finish(this.petHeld.has(t.id) ? 'stored' : 'dial restarted')
+      this.petTransfer = null
+      this.clearPetStall()
+    }
+  }
+
+  private clearTransientPetErrors(): void {
+    for (const [id, reason] of this.petErrors) if (PET_TRANSIENT.has(reason)) this.petErrors.delete(id)
+  }
+
+  /** What the Devices tab shows for this dial's pets. */
+  petDial(): PetDialState & { errors: Record<string, string> } {
+    const t = this.petTransfer
+    return {
+      supported: this.petsSupported,
+      held: [...this.petHeld],
+      sending: t ? { id: t.id, percent: t.size > 0 ? Math.min(100, Math.floor((t.written / t.size) * 100)) : 0 } : null,
+      errors: Object.fromEntries(this.petErrors),
+    }
+  }
+
+  /** The mapping changed on this computer: tell the dial and send what it is missing. */
+  async petsChanged(): Promise<void> {
+    // A different mapping is a different question: whatever was refused before may be answered otherwise now.
+    this.petErrors.clear()
+    await this.syncPets()
+  }
+
+  private syncPets(): Promise<void> {
+    const next = this.petChain.then(() => this.runPetSync())
+    this.petChain = next.catch(() => {})
+    // A failed sync is this dial's log line, never a failed hello.
+    return next.catch((error: unknown) => this.log(`cable: pet sync failed: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  private async runPetSync(): Promise<void> {
+    const store = this.host.pets?.()
+    if (!store || !this.petsSupported || !this.link?.isOpen || this.greetedMac === null) return
+    const plan = planPetSync(store.mapping(), [...this.petHeld])
+    const mapKey = JSON.stringify(plan.map)
+    if (mapKey !== this.petMapSent) {
+      this.petMapSent = mapKey
+      await this.send({ t: 'pet.map', all: plan.map.all, engines: plan.map.engines })
+    }
+    for (const id of plan.drop) {
+      this.petHeld.delete(id)
+      this.petDropSent = true
+      await this.send({ t: 'pet.drop', id })
+    }
+    // ONE transfer at a time, and never beside a firmware image: both stream into the same reader task on the dial.
+    // A firmware transfer ending (fw.error here, or the reboot after fw.done and its hello) runs this again.
+    if (this.petTransfer || this.transfer) return
+    for (const id of plan.send) {
+      if (this.petErrors.has(id)) continue
+      const pack = await store.pack(id).catch((error: unknown) => {
+        this.log(`cable: pet ${id} unreadable: ${error instanceof Error ? error.message : String(error)}`)
+        this.petErrors.set(id, 'unreadable')
+        return null
+      })
+      if (!pack || pack.length < 22) continue
+      // Never a pack newer than the dial reads (or than we write): it would only be refused as 'version'.
+      if (pack[4] > Math.min(this.petDialMax, PACK_VERSION)) {
+        this.log(`cable: pet ${id} is pack version ${pack[4]}, the dial reads up to ${this.petDialMax}`)
+        continue
+      }
+      if (this.petTransfer || this.transfer || !this.link?.isOpen) return
+      this.log(`cable: offering pet ${id} (${pack.length} B)`)
+      this.petTransfer = {
+        id,
+        size: pack.length,
+        written: 0,
+        xfer: new FirmwareTransfer(
+          pack,
+          id,
+          async (slice) => {
+            if (!this.link?.isOpen) throw new Error('port closed mid-transfer')
+            await this.link.write(encodeCableFrame(CableType.Pet, slice))
+          },
+          (line) => this.log(line.replace('firmware', 'pet')),
+        ),
+      }
+      // The CRC-32 is the pack's own header field (offset 18), so the dial checks what it received against it.
+      this.armPetStall()
+      await this.send({ t: 'pet.offer', id, size: pack.length, crc: pack.readUInt32LE(18) })
+      return
+    }
+  }
+
+  private clearPetStall(): void {
+    if (this.petStall) clearTimeout(this.petStall)
+    this.petStall = null
+  }
+
+  /** (Re)start the no-progress timer for the pack in flight; a stalled one would block firmware offers forever. */
+  private armPetStall(): void {
+    this.clearPetStall()
+    const t = this.petTransfer
+    if (!t) return
+    this.petStall = setTimeout(() => {
+      this.petStall = null
+      if (this.petTransfer !== t) return
+      this.log(`cable: pet ${t.id} stalled for ${PET_STALL_MS / 1000} s, giving up on this link`)
+      t.xfer.finish('timed out')
+      this.petErrors.set(t.id, 'timeout')
+      this.petTransfer = null
+      // The dial keeps the partial pack until told otherwise; this frees it.
+      void this.send({ t: 'pet.drop', id: t.id }).catch(() => undefined)
+      void this.syncPets()
+    }, PET_STALL_MS)
+    this.petStall.unref?.()
   }
 
   private onPcm(chunk: Buffer): void {
@@ -2174,7 +2503,8 @@ export class CableSession {
 
   async focusAgent(agentId: string): Promise<void> {
     this.desiredFocus = agentId
-    await this.send({ t: 'focus', agentId })
+    const sent = await this.send({ t: 'focus', agentId })
+    if (sent && this.desiredFocus === agentId) this.appFocusUnsent = false
   }
 
   /**
@@ -2211,7 +2541,7 @@ export class CableSession {
         // this older transaction focus after it finishes.
         // Already where the window is: nothing to command. The record is right either way — this is the
         // window FOLLOWING the dial, and the dial's own report wrote it.
-        if (generation !== this.appFocusGeneration || agentId === this.desiredFocus) return
+        if (generation !== this.appFocusGeneration || (agentId === this.desiredFocus && !this.appFocusUnsent)) return
         // Said before the frame goes out, not after: the frame itself succeeds either way.
         const unknown = this.host.knows?.(agentId) === false
         this.log(`cable: following the app to agent ${agentId}${unknown ? ' — NOT in this daemon\'s list, the dial has no tile for it' : ''}`)
@@ -2231,6 +2561,7 @@ export class CableSession {
         // we are moving to, not the one we are leaving — otherwise the dial visibly steps onto the old
         // tile on its way. Cheap when nothing changed: syncAgents returns without sending a frame.
         this.desiredFocus = agentId
+        this.appFocusUnsent = true
         await this.syncAgents()
         if (generation !== this.appFocusGeneration) return
         await this.focusAgent(agentId)   // writes the record

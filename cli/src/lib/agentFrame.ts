@@ -19,7 +19,9 @@ import type { ActivityFrame } from './turnActivity.js'
  * makes the shape testable without a registry, which is the whole reason the drift went unnoticed.
  */
 
-import { agentProject, type AgentProject } from './agentProject.js'
+import { agentProject } from './agentProject.js'
+import { describeScmProject } from '../scm/scmProjects.js'
+import type { ScmDescription } from '../scm/types.js'
 import { sessionGitContext, SessionGitContextReader, type SessionGitContext } from './sessionGitContext.js'
 import { sessionGitHistory } from './sessionGitHistory.js'
 import { transcriptActivityAt } from './transcriptActivity.js'
@@ -27,7 +29,7 @@ import type { AgentTokenUsage } from './agentTokenUsage.js'
 import type { AgentOutputStats } from './agentOutputStats.js'
 import { gridEndpointMatchesLaunch, type GridAssignment } from './gridAssignment.js'
 import type { GridWebSearchStatus } from './gridLaunch.js'
-import { gridAnnotation, type GridAnnotation } from './gridModels.js'
+import type { AgentGridTarget, GridAnnotation } from './gridAnnotation.js'
 import { projectDisplayName, sessionDisplayTitle, type RegisteredSession } from './registry.js'
 import { engineCanFork } from './forkAgent.js'
 import { resumeMode, type ResumeMode } from './resumeCapability.js'
@@ -83,7 +85,9 @@ export type AgentFrame = {
   selectedModel: string | null
   grid: GridFrameBlock | null
   codexHome: string | null
-  project: AgentProject | null
+  /** The workspace as its SCM describes it, with `kind` (`git`, or `none` for a folder no SCM claims);
+   *  every other field is exactly what `agentProject` reports (scm/types.ts). */
+  project: ScmDescription | null
   /** Additive display context; project/cwd remain the registered launch workspace. */
   gitContext: SessionGitContext
   /** The domain-specific harness this agent was created as, or null for a plain engine. */
@@ -145,6 +149,9 @@ export interface AgentFrameContext {
   tokenUsage?: AgentTokenUsage | null
   /** The DSH companions' state for this agent; absent when the caller has none to give. */
   dsh?: AgentDshContext | null
+  /** What the models service says of the grid the agent is on (core/api.ts `ModelsPort.annotation`): from
+   *  memory, never I/O. Absent when the caller has none to give, and then the frame says nothing of it. */
+  gridAnnotation?: (grid: AgentGridTarget) => GridAnnotation | null
 }
 
 /**
@@ -185,8 +192,11 @@ const gitContexts = new SessionGitContextReader()
 
 export async function agentFrame(
   s: RegisteredSession,
-  { selectedModel, terminalAvailable, dsh, tokenUsage, activity: contextActivity }: AgentFrameContext,
+  { selectedModel, terminalAvailable, dsh, tokenUsage, activity: contextActivity, gridAnnotation }: AgentFrameContext,
 ): Promise<AgentFrame> {
+  // The git context is git's own display projection and keeps reading git directly; the frame's
+  // `project` goes through the SCM seam. Both resolve through agentProject's shared reader, so the
+  // seam adds no Git process.
   const home = agentProject(s.cwd)
   const context = gitContexts.read(JSON.stringify([s.agentId, s.sessionId, s.engine, s.codexHome, s.registeredAt]), async () => {
     const saved = await sessionGitHistory.get(s)
@@ -194,7 +204,7 @@ export async function agentFrame(
     value.history = await sessionGitHistory.observe(s, value)
     return value
   })
-  const [project, updatedAt, gitContext] = await Promise.all([home, lastActivityAt(s), context])
+  const [project, updatedAt, gitContext] = await Promise.all([describeScmProject(s.cwd), lastActivityAt(s), context])
   return {
     id: s.agentId,
     sessionId: s.sessionId,
@@ -226,10 +236,13 @@ export async function agentFrame(
     // grid has left behind. Read off the live process by discovery; carries no credential. Null is
     // a real answer ("on no grid") and must be sent as one — omitting the key would make every push
     // indistinguishable from a daemon too old to know about grids. The web-search status rides on
-    // the block — decided by the launch, kept on the row — so it is gone the moment the block is.
+    // the block — decided by the launch, kept on the row — so it is gone the moment the block is. So do
+    // that grid's `state` and a `note` when the agent's model will not answer (issue 03), read from what
+    // the model list last showed — no I/O, and absent for a grid this daemon is not tracking. A local
+    // profile keeps the launch's own target and is not relabeled from the remote catalogue.
     grid: s.grid ? {
       ...s.grid,
-      ...(s.gridLaunch?.targetId?.startsWith('local:') ? {} : gridAnnotation(s.grid)),
+      ...(s.gridLaunch?.targetId?.startsWith('local:') ? {} : (gridAnnotation?.(s.grid) ?? {})),
       ...(s.gridLaunch?.targetId && gridEndpointMatchesLaunch(s.engine, s.grid.baseUrl, s.gridLaunch)
         ? { targetId: s.gridLaunch.targetId }
         : {}),

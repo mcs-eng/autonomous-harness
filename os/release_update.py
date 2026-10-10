@@ -110,6 +110,12 @@ def apply(feed=FEED):
         name = manifest['package'].get('name', '')
         if not re.fullmatch(r'harness-os-[0-9A-Za-z.+_-]+-x86_64\.pkg\.tar\.gz', name):
             raise ValueError('Invalid system package filename.')
+        # How many steps to show: a newer Arch snapshot adds the base upgrade. Read here only to
+        # count; the same checks are made again under the operation lock before anything changes.
+        snapshots = set(re.findall(r'https://archive\.archlinux\.org/repos/(\d{4}/\d{2}/\d{2})/', system.PACMAN_CONFIG.read_text()))
+        base_upgrade = bool(system.pending_update()) or any(system.snapshot_date(manifest['arch_snapshot']) > day for day in snapshots)
+        steps = updater.Steps(5 if base_upgrade else 4)
+        steps('Downloading and checking the update')
         (folder / name).write_bytes(verified(release['assets']['package'], feed != FEED))
         (folder / 'package-manifest.json').write_text(json.dumps(manifest))
         with system.operation_lock():
@@ -119,6 +125,7 @@ def apply(feed=FEED):
                 raise ValueError('Restore the previous Harness package before starting another system update.')
             base = json.loads(LOCK.read_text())
             updater.validate_bundle(folder, base)
+            updater.prepare_kernel_bundle(folder)
             date = system.snapshot_date(manifest['arch_snapshot'])
             text = system.PACMAN_CONFIG.read_text()
             dates = set(re.findall(r'https://archive\.archlinux\.org/repos/(\d{4}/\d{2}/\d{2})/', text))
@@ -126,8 +133,11 @@ def apply(feed=FEED):
                 raise ValueError('Custom repository configuration needs a manual full system upgrade.')
             current = next(iter(dates))
             if system.pending_update() or date > current:
-                system.update(max(current, date))
-            updater.apply(folder, system, base, installation)
+                # This public update was already requested; pacman's extra
+                # confirmation must not stall the Updates terminal.
+                steps('Updating the Arch Linux base')
+                system.update(max(current, date), noninteractive=True)
+            updater.apply(folder, system, base, installation, steps)
 
 
 def main():

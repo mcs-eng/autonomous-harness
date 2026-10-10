@@ -995,7 +995,7 @@ pub fn now_secs() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| 
 fn started(app: &App) -> i64 { now_secs() - app.started.elapsed().as_secs() as i64 }
 
 /// localtime(3): a time's parts in this computer's zone, for the date the time is on (its DST).
-fn local_tm(t: i64) -> libc::tm {
+pub(crate) fn local_tm(t: i64) -> libc::tm {
     // SAFETY: localtime_r only writes the struct it is given.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let tt = t as libc::time_t;
@@ -1156,14 +1156,15 @@ pub fn clip_middle(text: &str, cols: usize) -> String {
 
 /// Columns available to pane-border-format inside its frame.
 fn pane_heading_columns(app: &App, window: usize, pane: u64) -> usize {
-    if app.options.pane_look() {
+    let columns = if app.options.pane_look() {
         let Some(tab) = app.tabs.get(window) else { return 0 };
         let Some(tile) = tab_rect(app, window, pane) else { return 0 };
         crate::pane_frame::frame(tile, app.window_area(tab), app.box_inner(tab), app.pane_status(tab)).title
             .map(|r| r.width.saturating_sub(2) as usize).unwrap_or(0)
     } else {
         content_rect(app, window, pane).map(|r| r.width.saturating_sub(4) as usize).unwrap_or(0)
-    }
+    };
+    columns.saturating_sub(crate::workspace_controls::title_reserve(app, window, pane, columns as u16) as usize)
 }
 
 fn pane_heading(app: &App, window: usize, pane: u64) -> String {
@@ -1278,6 +1279,8 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
         // The name in whole words within 20 columns, … after what is cut: a harness is named for its
         // task, and the window list has room for a few words of each.
         "window_short_name" => tab.map(|t| short_name(&t.name, 20)).unwrap_or_default(),
+        // Named by auto rename now (autoname.rs): its repo and its work.
+        "window_auto_named" => (tab.is_some() && crate::autoname::named(app, window)).then_some("1").unwrap_or("0").into(),
         "window_flags" => flags(app, window).replacen('#', "##", 1),
         "window_raw_flags" => flags(app, window),
         "window_active" => (window == app.active).then_some("1").unwrap_or("0").into(),
@@ -1289,6 +1292,8 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
         "pane_index" => focus.and_then(|f| tab.and_then(|t| t.panes().iter().position(|p| *p == f))).map(|i| (i + app.pane_base(window)).to_string()).unwrap_or_default(),
         "pane_title" => focus.map(|f| pane_title(app, window, f)).unwrap_or_else(|| host.clone()),
         "pane_heading" => focus.map(|f| pane_heading(app, window, f)).unwrap_or_default(),
+        "hn_controls" => crate::workspace_controls::status(app),
+        "shell_context" => crate::shell_context::status(app, focus),
         "pane_id" => focus.map(crate::pane::tag).unwrap_or_default(),
         // What tmux on the pane's machine says (terminal_info), then what the shell said (OSC 7),
         // then where the harness started.
@@ -1347,7 +1352,7 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
         "socket_path" => crate::ipc::here().map(|p| p.display().to_string()).unwrap_or_default(),
         "client_session" => app.session_name(),
         "client_name" | "client_tty" => crate::app::tty_name(),
-        "pane_mode" => pane.and_then(|p| if clock_on(app, focus) { Some("clock-mode") } else if p.tree_top() { Some(crate::tree::MODE_NAME) } else { p.modes.last().map(|m| if m.view { "view-mode" } else { "copy-mode" }) }).unwrap_or("").into(),
+        "pane_mode" => pane.and_then(|p| if clock_on(app, focus) { Some("clock-mode") } else if p.tree_top() { Some(crate::tree::MODE_NAME) } else if p.files_top() { Some(crate::files::MODE_NAME) } else { p.modes.last().map(|m| if m.view { "view-mode" } else { "copy-mode" }) }).unwrap_or("").into(),
         // window_copy_formats: a pane in copy or view mode has them (some only with a selection
         // or a search); others none.
         "scroll_position" | "rectangle_toggle" | "copy_cursor_x" | "copy_cursor_y" | "selection_start_x" | "selection_start_y" | "selection_end_x" | "selection_end_y"
@@ -1770,7 +1775,7 @@ mod tests {
         let (sink, _) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(19789, sink, (200, 60));
         app.fleet.local_id = "render-test".into();
-        app.fleet.machines.push(crate::fleet::Machine { id: "render-test".into(), name: "Render test".into(), local: true, status: "running".into(), reach: crate::fleet::Reach::Ready });
+        app.fleet.machines.push(crate::fleet::Machine { shared: false, id: "render-test".into(), name: "Render test".into(), local: true, status: "running".into(), reach: crate::fleet::Reach::Ready });
         for i in 0..agents {
             let row = serde_json::json!({ "id": format!("agent-{i}"), "name": format!("Review project {i}"), "engine": "codex", "status": "active" });
             let mut agent = crate::fleet::agent_from("render-test", &row, None);
@@ -1816,6 +1821,33 @@ mod tests {
             "Project 0=label-0/1/Project 0=label-0/0/1/%0;Project 1=label-1/1/Project 1=label-1/0/1/%1;");
         app.active = 1;
         assert_eq!(super::expand(&app, "#{window_name}/#{window_active}/#{pane_id}", 1, Some(2), false), "Project 1/1/%1");
+    }
+
+    /// What the status line renders when the current window is `filled` and the tab name is `pane`.
+    #[test]
+    fn default_tab_format_includes_the_working_state_after_its_name() {
+        let mut app = status_fixture(1, 1);
+        app.tabs[0].root = Some(crate::layout::Node::new(1, 80, 24));
+        let fmt = crate::options::status_window_format("tmux", true);
+        let mark = super::expand(&app, "#{window_agent_icon}", 0, Some(1), false);
+        assert!(!mark.is_empty());
+        assert_eq!(super::expand(&app, &fmt, 0, Some(1), false), format!("0:Project 0* {mark}"));
+    }
+
+    #[test]
+    fn window_status_overrides_reach_the_status_line() {
+        let mut app = status_fixture(2, 2);
+        let global = crate::options::SetFlags { global: true, ..Default::default() };
+        let overrides = crate::options::window_status_overrides("pane", "filled");
+        for (o, v) in &overrides { let _ = app.options.set(o, Some(v), &global, "", 0); }
+        let fmt = app.options.get("status-format[0]", &app.tabs[0].id, None).unwrap();
+        let out = super::expand(&app, &fmt, 0, Some(1), true);
+        // The current window is marked filled: no `*`, its cell takes the swapped status-line
+        // colours (the theme's background on the theme's foreground), and in `pane` mode it is
+        // named for its active pane — not the window's auto-renamed name.
+        assert!(!out.contains('*'), "no star marker: {out}");
+        assert!(out.contains("list=focus") && out.contains("bg="), "the current window is filled: {out}");
+        assert!(out.contains("Review project 0") && !out.contains("0:Project 0"), "the pane's title, not the window's: {out}");
     }
 
     #[test]

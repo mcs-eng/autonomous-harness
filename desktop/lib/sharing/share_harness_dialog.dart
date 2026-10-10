@@ -16,6 +16,7 @@ import '../widgets/desktop_chrome.dart';
 import 'harness_comments.dart';
 import '../state/app_state.dart';
 import '../ws/ws_conn.dart';
+import '../community/publish.dart';
 
 typedef ShareAction = Future<Map<String, dynamic>> Function(
   String action,
@@ -32,6 +33,7 @@ Future<void> showShareHarnessDialog(
   context,
   builder: (_) => ShareHarnessDialog(
     name: name,
+    publish: () => publishHarness(app, machineId, agentId),
     manage: (action, payload) =>
         app.manageHarnessShares(machineId, agentId, action, payload),
   ),
@@ -42,9 +44,13 @@ class ShareHarnessDialog extends StatefulWidget {
     super.key,
     required this.name,
     required this.manage,
+    this.publish,
   });
   final String name;
   final ShareAction manage;
+
+  /// Hands the harness to the Hub, returning what the person does next there.
+  final Future<String> Function()? publish;
   @override
   State<ShareHarnessDialog> createState() => _ShareHarnessDialogState();
 }
@@ -783,6 +789,34 @@ class _ShareHarnessDialogState extends State<ShareHarnessDialog> {
         ),
         const SizedBox(height: DesktopChrome.groupGap),
         _formRow(_ShareRow.copy),
+        if (widget.publish != null) ...[
+          const SizedBox(height: DesktopChrome.controlGap),
+          TextButton(
+            onPressed: _busy
+                ? null
+                : () async {
+                    setState(() {
+                      _busy = true;
+                      _error = null;
+                    });
+                    try {
+                      final next = await widget.publish!();
+                      if (mounted) setState(() => _notice = next);
+                    } catch (error) {
+                      if (mounted) {
+                        setState(
+                          () => _error = error is FormatException
+                              ? error.message
+                              : 'Could not prepare this harness. Open harness.autonomous.ai/hub/publish to choose its files.',
+                        );
+                      }
+                    } finally {
+                      if (mounted) setState(() => _busy = false);
+                    }
+                  },
+            child: const Text('Publish to Hub'),
+          ),
+        ],
         if (_rows.contains(_ShareRow.retry)) ...[
           const SizedBox(height: DesktopChrome.controlGap),
           _formRow(_ShareRow.retry),

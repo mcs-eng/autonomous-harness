@@ -12,6 +12,9 @@ import 'workspace_share_button.dart';
 Future<bool> openInNewTab(Uri uri) =>
     launchUrl(uri, webOnlyWindowName: '_blank');
 
+/// The Harness product page; its download view is one query away.
+final harnessAppPage = Uri.parse('https://www.autonomous.ai/harness-app');
+
 /// The browser's consistent handoff to the existing macOS/Linux download page,
 /// in a new tab so the workspace stays open behind it.
 class WebDownloadButton extends StatelessWidget {
@@ -27,10 +30,21 @@ class WebDownloadButton extends StatelessWidget {
   /// True fills it like Share: the bar's one filled action when Share is off.
   final bool prominent;
 
-  static final uri = Uri.parse(
-    'https://www.autonomous.ai/harness-app?page=download',
+  static final uri = harnessAppPage.replace(
+    queryParameters: {'page': 'download'},
   );
   static const _text = 'Download app';
+
+  /// Filled like Share when [prominent], a step brighter under the pointer;
+  /// otherwise bare, with the bar's recessed well under the pointer.
+  static Color backgroundFor({required bool prominent, required bool hovered}) {
+    if (prominent) {
+      return hovered
+          ? grid.AppPalette.accentHover
+          : WorkspaceShareButton.backgroundFor(true);
+    }
+    return hovered ? grid.AppSurface.recessHover : Colors.transparent;
+  }
 
   static double widthOf(BuildContext context) =>
       workspaceBarTextSizeOf(context, _text).width +
@@ -45,10 +59,10 @@ class WebDownloadButton extends StatelessWidget {
       child: WorkspaceBarControl(
         label: 'Download app',
         onPressed: () => open(uri),
-        builder: (context, emphasized) => ColoredBox(
-          color: prominent
-              ? WorkspaceShareButton.backgroundFor(true)
-              : Colors.transparent,
+        // Hover lifts the fill; the label keeps its weight. Turning bold under
+        // the pointer reflowed the word and read as a glitch, not a response.
+        builder: (context, hovered) => ColoredBox(
+          color: backgroundFor(prominent: prominent, hovered: hovered),
           child: SizedBox(
             width: widthOf(context),
             height: workspaceBarControlHeight(context),
@@ -59,7 +73,7 @@ class WebDownloadButton extends StatelessWidget {
                   color: prominent
                       ? WorkspaceShareButton.foregroundFor(true)
                       : grid.AppPalette.textPrimary,
-                  emphasized: emphasized,
+                  emphasized: prominent,
                 ),
               ),
             ),

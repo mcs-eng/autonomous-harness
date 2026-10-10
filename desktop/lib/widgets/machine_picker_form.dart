@@ -20,9 +20,18 @@ import 'link_another_machine_dialog.dart'
         kLinkServerInstallCommand,
         kLinkServerLoginCommand,
         kLinkServerStartCommand;
+import 'new_device_notice.dart' show DeviceListReviewLine;
 import 'terminal_text_action.dart';
 
 enum MachinePickerFormKind { connect, rename, password, delete, app, cli }
+
+/// What a password link in progress is doing, for anything that shows it — this
+/// form, and whatever lists the machine beside it.
+String machineLinkProgress(String? stage) => switch (stage) {
+  'deriving_key' => 'Checking password…',
+  'exchanging' || 'verifying' => 'Verifying the link…',
+  _ => 'Connecting…',
+};
 
 /// An editor in the resource preview, not another route or machine picker.
 /// Pending writes belong to AppNotifier and survive leaving this editor.
@@ -460,13 +469,9 @@ class MachinePickerFormState extends State<MachinePickerForm> {
       label == 'Show' || label == 'Hide' ? 'visibility' : label;
 
   String get _progress => switch (widget.kind) {
-    MachinePickerFormKind.connect => switch (app.machineLinkStage(
-      widget.machineId!,
-    )) {
-      'deriving_key' => 'Checking password…',
-      'exchanging' || 'verifying' => 'Verifying the link…',
-      _ => 'Connecting…',
-    },
+    MachinePickerFormKind.connect => machineLinkProgress(
+      app.machineLinkStage(widget.machineId!),
+    ),
     MachinePickerFormKind.delete => 'Deleting…',
     _ => 'Saving…',
   };
@@ -768,6 +773,12 @@ class MachinePickerFormState extends State<MachinePickerForm> {
                 _confirmation,
                 'remote-password-confirm-field',
               ),
+            ],
+            // Asked for a password because this app's device list is frozen, or the account had no room
+            // for it: the devices list is the other way in, here as under every other password prompt.
+            if (widget.kind != MachinePickerFormKind.rename && !_password) ...[
+              gap,
+              DeviceListReviewLine(notifier: app),
             ],
           ],
           gap,

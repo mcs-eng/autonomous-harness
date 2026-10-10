@@ -16,6 +16,7 @@ import { AgentRestartCoordinator, type RestartAgentDeps } from '../../lib/restar
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
 import { bypassPermissionActive, processArgvIsBoundaryFaithful, resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 
 export interface PaneSwapDeps {
@@ -23,9 +24,14 @@ export interface PaneSwapDeps {
   /** The tmux backend; a swap only ever runs where there is one. */
   tmuxBackend: TmuxBackend | null
   prepareSessionResume: (session: RegisteredSession) => void
+  /** Keeps a conversation a swap had to leave for a new one as a stopped harness (lib/keepAbandonedConversation.ts). */
+  keepAbandonedConversation: (left: RegisteredSession) => void
 }
 
-export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume }: PaneSwapDeps) {
+/** How long a relaunched engine must stay running before a restart counts it as come up (`waitForProcess`). */
+export const SWAP_SETTLE_MS = 500
+
+export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, keepAbandonedConversation }: PaneSwapDeps) {
   /**
    * The dependencies a pane-process swap needs, for both callers that do one.
    *
@@ -51,6 +57,9 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume }: P
     permissionMode: string | null = session.permissionMode ?? null,
   ): RestartAgentDeps => ({
     prepareResume: () => prepareSessionResume(session),
+    // The row as the swap found it: the conversation a fallback to a fresh start leaves behind.
+    keepAbandoned: () => keepAbandonedConversation(session),
+    respawnRefusal: () => tmuxBackend!.respawnRefusal(launch.env ? { env: launch.env } : {}),
     holdOpen: async () => {
       const result = await tmuxBackend!.holdOpen(runtime)
       return result.state === 'succeeded'
@@ -83,7 +92,15 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume }: P
         await new Promise((resolve) => setTimeout(resolve, delayMs))
         waited += delayMs
         const found = await resolvePaneEngineProcess(runtime.paneId, session.engine)
-        if (found) return found
+        if (found) {
+          // Up means still up a moment later: a launch the engine refuses (`codex resume` after an update
+          // dropped it) runs for an instant, and seen then, the restart said "resumed" and never fell back
+          // to a fresh start (e2e/updates.e2e.ts on Linux, whose faster start put it in the first look).
+          await new Promise((resolve) => setTimeout(resolve, SWAP_SETTLE_MS))
+          waited += SWAP_SETTLE_MS
+          const still = await resolvePaneEngineProcess(runtime.paneId, session.engine)
+          if (sameProcessIdentity(still, found)) return found
+        }
         delayMs = Math.min(delayMs * 2, 750)
       }
       return null
@@ -120,8 +137,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume }: P
     const identity = session.processIdentity
     if (!identity) return false
     const rows = await processRows()
-    const row = rows?.find((candidate) =>
-      candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
+    const row = rows?.find((candidate) => sameProcessIdentity(candidate, identity))
     if (!row || !processArgvIsBoundaryFaithful(row)) return false
     return bypassPermissionActive(session.engine, row.args)
   }
@@ -133,8 +149,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume }: P
     grid: GridLaunchOverride | undefined,
   ) => {
     const rows = await processRows()
-    const row = rows?.find((candidate) =>
-      candidate.pid === identity.pid && candidate.startMarker === identity.startMarker)
+    const row = rows?.find((candidate) => sameProcessIdentity(candidate, identity))
     // Keep the existing environment/config probe on hosts without faithful argv; never interpret
     // flattened ps text as flags. Linux/WSL can additionally recover the argv-backed assignment.
     const args = row && processArgvIsBoundaryFaithful(row) ? row.args : identity.executable

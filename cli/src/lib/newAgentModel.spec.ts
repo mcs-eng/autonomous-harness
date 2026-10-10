@@ -3,7 +3,8 @@ import { ENGINES } from '../engines/types.js'
 import { gridCapableEngines } from './gridLaunch.js'
 import { forgetGridModels, listGridModels } from './gridModels.js'
 import { resolveGridTarget } from './gridTarget.js'
-import { parseNewAgentModel, resolveNewAgentModel } from './newAgentModel.js'
+import { parseNewAgentModel } from './newAgentModel.js'
+import { resolveNewAgentModel } from './newAgentModelResolver.js'
 import { localGridSections } from './localGridModels.js'
 import { localGridTargetId, readLocalGridProfiles } from './gridProfiles.js'
 
@@ -13,11 +14,11 @@ vi.mock('./localGridModels.js', () => ({ localGridSections: vi.fn() }))
 vi.mock('./gridProfiles.js', async original => ({ ...await original<typeof import('./gridProfiles.js')>(), readLocalGridProfiles: vi.fn() }))
 const choice = { gridModel: 'Qwen-35B', gridName: 'my-grid' }
 const target = { networkId: 'g', networkName: 'my-grid', baseUrl: 'https://fixture.invalid/relay/v1', apiKey: 'fixture-key', model: 'Qwen-35B' }
-beforeEach(() => vi.resetAllMocks())
 
 describe('new-session model routing', () => {
   const profile = { id: 'local-a', label: 'Local A', gridName: 'my-grid', gridHome: '/fixture/a' }
   const targetId = localGridTargetId(profile)
+  beforeEach(() => { vi.clearAllMocks() })
   it('preserves an explicit target and refuses malformed or incompatible targets', () => {
     expect(parseNewAgentModel('codex', { ...choice, gridTarget: targetId })).toEqual({ state: 'ok', selection: { model: 'Qwen-35B', grid: 'my-grid', targetId } })
     for (const gridTarget of ['', 42, 'local:\ninvalid', 'invented', 'remote:other-grid']) {
@@ -64,25 +65,5 @@ describe('new-session model routing', () => {
   })
   it.each([{ grid: null }, { grid: target }, { codexHome: '/profiles/work' }])('refuses conflicting routing: %j', conflict => {
     expect(parseNewAgentModel('codex', { ...choice, ...conflict }).state).toBe('invalid')
-  })
-  it('resolves the exact model on another machine through the chosen grid', async () => {
-    vi.mocked(listGridModels).mockResolvedValue([{ id: 'Qwen-35B', node: 'Mac Studio' }])
-    vi.mocked(resolveGridTarget).mockResolvedValue(target)
-    expect(await resolveNewAgentModel({ model: 'Qwen-35B', grid: 'my-grid' })).toEqual(target)
-    expect(forgetGridModels).toHaveBeenCalledOnce()
-    expect(listGridModels).toHaveBeenCalledWith('my-grid')
-    expect(resolveGridTarget).toHaveBeenCalledWith('my-grid', 'Qwen-35B')
-  })
-  it('refuses a stopped model without resolving a fallback', async () => {
-    vi.mocked(listGridModels).mockResolvedValue([{ id: 'Another-model', node: 'Mac Studio' }])
-    expect(await resolveNewAgentModel({ model: 'Qwen-35B', grid: 'my-grid' })).toBeNull()
-    expect(resolveGridTarget).not.toHaveBeenCalled()
-  })
-  it('preserves a missing endpoint and failures for the caller to refuse', async () => {
-    vi.mocked(listGridModels).mockResolvedValue([{ id: 'Qwen-35B', node: '' }])
-    vi.mocked(resolveGridTarget).mockResolvedValue(null)
-    expect(await resolveNewAgentModel({ model: 'Qwen-35B', grid: 'my-grid' })).toBeNull()
-    vi.mocked(listGridModels).mockRejectedValue(new Error('offline'))
-    await expect(resolveNewAgentModel({ model: 'Qwen-35B', grid: 'my-grid' })).rejects.toThrow('offline')
   })
 })

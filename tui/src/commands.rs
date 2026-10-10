@@ -45,6 +45,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("open-harness", "openh", "A harness into a window of its own (-h/-v beside/below -t's pane, -d not gone to): open-harness -s name"),
     ("list-windows", "lsw", "The windows (-F a format)"),
     ("list-panes", "lsp", "The panes (-a/-s every window, -t one, -F a format)"),
+    ("sessions", "sessions", "Search local running sessions and saved conversations"),
     ("list-sessions", "ls", "The session (this computer) and its windows"),
     ("list-harnesses", "lsh", "Every harness on every machine, the most urgent first (-F format: #{harness_state} #{harness_line} …, -f filter)"),
     ("list-clients", "lsc", "This client"),
@@ -84,6 +85,20 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("command-prompt", "command-prompt", "Prompt for a command"),
     ("confirm-before", "confirm", "Ask y/n before a command"),
     ("new-harness", "newh", "New harness: [engine] [@machine] [folder] — or choose"),
+    ("close-harness", "closeh", "Save and stop a harness, checking active work first (-t pane, -w window)"),
+    ("change-agent", "change-agent", "Change a harness's agent while keeping its project and pane (-t pane)"),
+    ("workspace-menu", "workspace-menu", "Workspace actions, account and appearance"),
+    ("workspace-sync", "workspace-sync", "Retry saving a pending agent replacement to the shared workspace"),
+    ("models", "models", "Choose a model or manage models on your machines"),
+    ("devices", "devices", "Manage computer connections"),
+    ("hardware-devices", "hardware-devices", "Manage physical Harness devices on your computers"),
+    ("account", "login", "Optional sign-in and your Harness account"),
+    ("signout", "logout", "Sign out of your Harness account, after asking (-y: without); harnesses on this computer keep running"),
+    ("appearance", "appearance", "Choose the TUI appearance"),
+    ("pane-menu", "pane-menu", "Actions for a pane (-t target)"),
+    ("window-menu", "window-menu", "Actions for a window (-t target)"),
+    ("machine-menu", "machine-menu", "Actions for a machine: machine-menu <new-harness|new-terminal|open|connect|machine> <machine>"),
+    ("pane-control", "pane-control", "Run an action from a captured pane or window menu"),
     ("new-terminal", "newt", "A shell on this pane's machine"),
     ("choose-command", "choosec", "Every command and setting by name (C-b Enter)"),
     ("take-control", "take", "Reclaim control of all panes across the TUI's tabs"),
@@ -450,7 +465,7 @@ fn menu_position(app: &App, args: &crate::cmd::Args, target: Option<(usize, u64)
 
 
 pub fn is_command_name(name: &str) -> bool {
-    name == "os-action" || COMMANDS.iter().any(|(full, alias, _)| *full == name || *alias == name)
+    name == "os-action" || is_os_files(name) || COMMANDS.iter().any(|(full, alias, _)| *full == name || *alias == name)
         || matches!(name, "display" | "send" | "neww" | "splitw" | "killp" | "killw" | "selectw" | "selectp" | "lsw" | "lsp" | "ls" | "capturep" | "showw" | "show" | "set" | "bind" | "unbind" | "source" | "run" | "if"
             | "run-shell" | "if-shell" | "wait-for" | "wait" | "pipe-pane" | "pipep" | "set-hook" | "show-hooks" | "resize-window" | "resizew" | "kill-session" | "send-prefix" | "display-menu" | "menu"
             | "set-option" | "set-window-option" | "setw" | "bind-key" | "unbind-key" | "source-file" | "kill-server" | "detach-client" | "detach"
@@ -1202,9 +1217,13 @@ fn rest(words: &Words) -> String {
     out.join(" ")
 }
 
+/// Harness OS's file manager (choose-file, alias files): like os-action, private to the OS and
+/// absent from ordinary hn's command lists.
+fn is_os_files(name: &str) -> bool { matches!(name, "choose-file" | "files") }
+
 /// hn's own commands, and the tmux names hn gives its own meaning (checked before tmux's table).
 pub fn hn_owned(name: &str) -> bool {
-    name == "os-action" || COMMANDS.iter().any(|(full, alias, _)| (*full == name || *alias == name) && crate::cmd::find(full).map(|e| e.name != *full).unwrap_or(true))
+    name == "os-action" || is_os_files(name) || COMMANDS.iter().any(|(full, alias, _)| (*full == name || *alias == name) && crate::cmd::find(full).map(|e| e.name != *full).unwrap_or(true))
 }
 
 /// A command that names another session (`-t work:2`, `has-session -t work`, a pane's `%12`)
@@ -1249,6 +1268,10 @@ fn after_set(app: &mut App, name: &str, now: Option<String>, global: bool, tab: 
     // (The bar down a side and the pane frames change the panes' room.)
     if matches!(name.as_str(), "@hn-status-bar" | "@hn-border" | "@hn-focus") { app.redraw_all = true; app.fit_panes(); }
     if name == "@hn-dim" { app.redraw_all = true }
+    // (Set by hand too: the tab's format and every window's name follow, as from Appearance — the
+    // format only while it is hn's own, never one the user wrote: `set -g window-status-format '#I #W'`.)
+    if matches!(name.as_str(), "@hn-window-name" | "@hn-window-active") { app.rederive_window_status(); app.sync_titles(); app.redraw_all = true }
+    if name == "@hn-auto-rename" { app.sync_titles(); app.redraw_all = true }
     // alerts_reset_all: every window's silence timer starts again.
     if name == "monitor-silence" { for t in app.tabs.iter_mut() { t.last_output = std::time::Instant::now() } }
     if name.starts_with('@') && now.is_none() { app.opts.user.remove(&name); return }
@@ -1852,29 +1875,21 @@ fn run_words_in(app: &mut App, words: &[String]) {
                     app.close_tab(i);
                 }
             }
-            // C-b c (a bare new-window, from a key or the prompt): the home page in the new window —
-            // its recent harnesses and conversations to pick from, `t` a shell — as the desktop's
-            // new tab. From a script, or with anything asked of it (-c, -n, a command…), a shell as
-            // tmux makes; `set -g @hn-new-window shell` makes the key tmux's too.
-            // (Not when commands follow it in the same line or binding — `new-window \; split-window
-            // -h` — which want its pane, as tmux's has one.)
-            let bare = app.capture.is_none() && !app.headless && !app.chain_follows && command.is_none() && cwd.is_none() && name.is_none() && opt(words, "-t").is_none()
-                && !["-d", "-a", "-b", "-k", "-P"].iter().any(|f| flag(words, f)) && opt(words, "-e").is_none()
-                && app.options.get("@hn-new-window", "", None).as_deref() != Some("shell")
-                // (tmux's look is tmux's C-b c too.)
-                && app.options.get("@hn-look", "", None).as_deref() != Some("tmux");
+            // Interactive new windows start locally; explicit tmux commands retain their
+            // target semantics. Never reuse a remote absolute path on this computer.
+            let interactive = app.capture.is_none() && !app.headless && command.is_none() && cwd.is_none();
+            let from = if interactive {
+                from.filter(|(machine, _)| crate::local::is_local(machine) || app.fleet.machine(machine).is_some_and(|m| m.local))
+            } else { from };
+            let cwd = if interactive && from.is_none() {
+                std::env::current_dir().ok().filter(|p| p.is_dir()).or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from)).map(|p| p.display().to_string())
+            } else { cwd };
             // Use the local shell service when the local daemon is unavailable.
             let machine = input::shell_machine(app, from.as_ref());
-            if app.link(&machine).is_none() { return app.error("create window failed: the daemon is not running (harness start)") }
+            let connected = app.link(&machine).is_some();
+            if !connected { return app.error("create window failed: the daemon is not running (harness start)") }
             app.new_tab_at(idx);
             if app.capture.is_some() { app.tab_mut().size = app.cli_size; }
-            if bare {
-                app.tab_mut().home = true;
-                crate::new_harness::ensure_welcome(app, from.clone(), cwd.clone());
-                let tab = app.tab().id.clone();
-                input::new_shell_from(app, from, Placement::Fill(tab), cwd, command);
-                return;
-            }
             if let Some(n) = &name { let n = expand(app, n); app.rename_tab(&n) }
             // A window made in a session not in front: its window-linked (notify_changes sees
             // only the one in front).
@@ -1887,7 +1902,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
             // Bind it to this window, never to the later active window.
             app.tab_mut().home = false;
             let tab = app.tab().id.clone();
-            input::new_shell_from(app, from, Placement::Fill(tab), cwd, command);
+            input::new_shell_with_picker(app, from, Placement::Fill(tab), cwd, command, interactive && !flag(words, "-d"));
             // -d never visits the new window, even while its shell is still being created.
             // A later completion must not restore stale selection or last-window history.
             if flag(words, "-d") {
@@ -2191,7 +2206,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
             } else {
                 match target_pane(app, words) { Some((_, p)) => p, None => return }
             };
-            if flag(words, "-q") { crate::copy::exit_all(app, pane); crate::tree::exit(app, pane); return app.sync_copy_modal() }
+            if flag(words, "-q") { crate::copy::exit_all(app, pane); crate::tree::exit(app, pane); crate::files::exit(app, pane); return app.sync_copy_modal() }
             let source = match opt(words, "-s") {
                 Some(s) => match pane_target(app, &s) { Some((_, p)) => p, None => return app.say(format!("can't find pane: {s}"), theme::WARN) },
                 None => pane,
@@ -3035,6 +3050,9 @@ fn run_words_in(app: &mut App, words: &[String]) {
         }
         // The client that has the session this one shows changed it, or went.
         "hn-mirror-refresh" => crate::mirror::refresh(app),
+        "hn-harness-view-event" => {
+            if let Some(event) = opt(words, "-j").and_then(|text| serde_json::from_str(&text).ok()) { crate::workspace_events::receive(app, &event); }
+        }
         "hn-hand-over" => { app.write_sessions(crate::app::Save::Leave); app.handed_over = true; app.quit = true }
         // Another client of this name takes a session this one has (it attached there).
         "hn-release-session" => {
@@ -3241,6 +3259,11 @@ fn run_words_in(app: &mut App, words: &[String]) {
                     if let Some(k) = m.key { crate::tree::key(app, pane, k, Some(&m), true) }
                     return;
                 }
+                // The file manager, likewise.
+                if app.panes.get(&pane).map(|p| p.files_top()).unwrap_or(false) {
+                    if let Some(k) = m.key { crate::files::key(app, pane, k, Some(&m)) }
+                    return;
+                }
                 if app.panes.get(&pane).map(|p| p.in_mode()).unwrap_or(false) || m.wp != Some(pane) { return }
                 return crate::mouse::input_key_mouse(app, pane, &m);
             }
@@ -3362,8 +3385,14 @@ fn run_words_in(app: &mut App, words: &[String]) {
         "run-shell" | "run" => {}
         "send-prefix" => {
             // The prefix key (-2: prefix2) to the pane, as if typed there.
-            let Some((_, pane)) = target_pane(app, words) else { return };
             let key = if flag(words, "-2") { app.keymap.prefix2 } else { Some(app.keymap.prefix) };
+            // A GUI-created welcome tab has no backing pane. Its task editor still owns
+            // the forwarded key; an explicit -t keeps addressing a terminal as in tmux.
+            if opt(words, "-t").is_none() && app.home_visible() {
+                if let Some(key) = key { input::send_prefix_key(app, crossterm::event::KeyEvent::new(key.code, key.mods)); }
+                return;
+            }
+            let Some((_, pane)) = target_pane(app, words) else { return };
             // To the active pane: what has the keyboard there (a list open over it) gets it.
             if let Some(key) = key {
                 if Some(pane) == app.focused() { input::send_prefix_key(app, crossterm::event::KeyEvent::new(key.code, key.mods)) } else { input::send_chord(app, pane, key) }
@@ -3454,7 +3483,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
                 let from = (starting as usize).min(n - 1);
                 (0..n).map(|k| (from + k) % n).find(|k| !items[*k].disabled && !items[*k].separator)
             };
-            app.modal = Some(Modal::Menu(crate::modal::Menu { title, items, choice, x, y, width, stay_open: args.has('O') > 0, no_mouse, mouse: app.mouse_ev.clone(), tree: None, complete: None }));
+            app.modal = Some(Modal::Menu(crate::modal::Menu { title, items, choice, x, y, width, stay_open: args.has('O') > 0, no_mouse, mouse: app.mouse_ev.clone(), tree: None, complete: None, responsive: None, buttons: None }));
             app.wait_cli = app.capture.is_some();
         }
         "customize-mode" => {
@@ -3476,6 +3505,20 @@ fn run_words_in(app: &mut App, words: &[String]) {
             // (y/n)` (or -p's, expanded), the confirm key (-c) or Enter with -y running it.
             let command = positional(words).first().map(|w| w.strip_prefix(crate::tmuxconf::BLOCK).unwrap_or(w).to_string()).unwrap_or_default();
             if command.is_empty() { return }
+            // The shipped x / & bindings stay tmux's keys. For a Harness session, their
+            // default confirmation delegates to Desktop's inspect/save/stop contract.
+            // A custom prompt or explicit scripted kill remains exactly what it says.
+            if !app.headless && app.capture.is_none() && words.len() == 4 {
+                let prompt = opt(words, "-p");
+                if command == "kill-pane" && prompt.as_deref() == Some("kill-pane #P? (y/n)") {
+                    if let Some(p) = app.focused().filter(|p| crate::session_close::managed_pane(app, *p)) {
+                        crate::session_close::pane(app, p); return;
+                    }
+                } else if command == "kill-window" && prompt.as_deref() == Some("kill-window #W? (y/n)")
+                    && app.tab().panes().iter().any(|p| crate::session_close::managed_pane(app, *p)) {
+                    crate::session_close::tab(app, app.active); return;
+                }
+            }
             let key = opt(words, "-c").and_then(|c| { let mut it = c.chars(); match (it.next(), it.next()) { (Some(k), None) if k.is_ascii_graphic() => Some(k), _ => None } });
             let Some(key) = key.or(if opt(words, "-c").is_some() { None } else { Some('y') }) else { return app.error("invalid confirm key") };
             let name = crate::cmdparse::parse(&command, app, true).ok().and_then(|c| c.first().and_then(|c| c.args.first().cloned())).and_then(|a| match a { crate::cmdparse::Arg::Str(s) => Some(resolve(&s).to_string()), _ => None }).unwrap_or_default();
@@ -3493,7 +3536,49 @@ fn run_words_in(app: &mut App, words: &[String]) {
             crate::viewer::show(app, key, options);
         }
         "new-harness" => { if words.len() < 2 { input::run(app, "new") } else { input::new_harness_words(app, &words[1..]) } }
+        "workspace-menu" => crate::workspace_controls::command(app, &words[1..]),
+        "workspace-sync" => crate::agent_switch::retry_sync(app),
+        "account" => crate::account::open(app),
+        "signout" => if flag(words, "-y") { crate::account::sign_out_confirmed(app) } else { crate::account::ask_sign_out(app, false) },
+        "change-agent" => {
+            if let Some((_, p)) = target_pane(app, words) { crate::agent_switch::open(app, p); }
+            else { app.error("can't find pane"); }
+        }
+        "pane-menu" => {
+            if let Some((_, p)) = target_pane(app, words) { crate::workspace_controls::pane_menu(app, p, None); }
+            else { app.error("can't find pane"); }
+        }
+        "window-menu" => {
+            let target = opt(words, "-t").and_then(|t| window_target(app, &t));
+            if opt(words, "-t").is_some() && target.is_none() { app.error("can't find window"); }
+            else { crate::workspace_controls::tab_menu(app, target.unwrap_or(app.active), None); }
+        }
+        "machine-menu" => crate::machine_menu::command(app, &words[1..]),
+        "pane-control" => {
+            let args = positional(words);
+            if args.len() == 2 { crate::workspace_controls::run(app, &args[0], &args[1]); }
+        }
+        "close-harness" => {
+            if let Some(id) = opt(words, "-x") { crate::session_close::cancel(app, &id); }
+            else if let Some(id) = opt(words, "-y") { crate::session_close::confirm(app, &id); }
+            else if let Some(target) = opt(words, "-w") {
+                if let Some(tab) = window_target(app, &target) { crate::session_close::tab(app, tab); }
+                else { app.error(format!("can't find window: {target}")); }
+            } else {
+                let target = opt(words, "-t").and_then(|t| pane_target(app, &t).map(|(_, p)| p));
+                if opt(words, "-t").is_some() && target.is_none() { app.error("can't find pane"); }
+                else if let Some(pane) = target.or_else(|| app.focused()) { crate::session_close::pane(app, pane); }
+            }
+        }
         "new-terminal" => input::run(app, "terminal"),
+        "sessions" => crate::shell_context::sessions(app, app.focused(), &words[1..].join(" ")),
+        // Harness OS's file manager over the pane (files.rs): [folder] (~ home, a relative one from
+        // where the pane is), else where the pane is on this computer, else home.
+        "choose-file" | "files" => {
+            let Some((_, p)) = target_pane(app, words) else { return };
+            let dir = positional(words).first().map(|d| expand(app, d));
+            crate::files::choose(app, p, dir.as_deref())
+        }
         "choose-command" => input::run(app, "commands"),
         "take-control" => app.take_control(),
         // A harness's verbs, on -t's harness (the hook's in a harness-* hook), else the focused

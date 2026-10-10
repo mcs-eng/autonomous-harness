@@ -57,21 +57,7 @@ function stateOf(status: string): FleetMachine['state'] {
   return 'unknown'
 }
 
-/**
- * Tag a cached machine-list body as stale, where the client actually reads it.
- *
- * The backend answers `{success:true,data:{…}}` and this daemon forwards that verbatim, so the flag has
- * to go INSIDE `data` — a local client unwraps to `data` and would never see a top-level field. Older
- * shapes that return the machines at the top level get it there instead.
- */
-export function withStaleMarker(body: Record<string, unknown>, fetchedAt: number): Record<string, unknown> {
-  const marker = { stale: true, staleSince: new Date(fetchedAt).toISOString() }
-  const data = body.data
-  if (data && typeof data === 'object' && !Array.isArray(data)) {
-    return { ...body, data: { ...(data as Record<string, unknown>), ...marker } }
-  }
-  return { ...body, ...marker }
-}
+export { withStaleMarker } from '../lib/machineListReply.js'
 
 export class MachineListCache {
   private machines: ListedMachine[] = []
@@ -97,6 +83,9 @@ export class MachineListCache {
     /** The machine row this session belongs to. A machine row is per (user, computer), so it is the one
      *  local fact that tells two ACCOUNTS on this computer apart — see `lastResponse`. */
     private readonly owner: () => string | null = () => null,
+    /** Whether it writes `machines.json`. The gateway's list does; the devices' own copy reads the file at
+     *  start, to draw the wheel offline, and leaves writing it to the gateway, so one file has one writer. */
+    private readonly persist = true,
   ) {
     this.path = machineListCachePath(dataDir)
     this.loadCache()
@@ -148,17 +137,22 @@ export class MachineListCache {
    * one on the other end of the cable — so an outage downgrades `source` and keeps the last known rows
    * rather than emptying the wheel.
    */
-  async refresh(): Promise<void> {
+  async refresh(): Promise<{ status: number; body: Record<string, unknown> } | null> {
+    const owner = this.owner()
     let res: { status: number; body: Record<string, unknown> }
     try {
       res = await this.fetchMachines()
     } catch (err) {
       this.degrade(`unreachable (${(err as Error).message})`)
-      return
+      return null
     }
-    if (res.status === 401 || res.status === 403) { this.signedOut(); return }
-    if (res.status >= 400) { this.degrade(`HTTP ${res.status}`); return }
-    if (!this.adopt(res.body)) this.degrade('no machines in the response')
+    // A sign-in changed while the request was in flight: its response belongs to the old account.
+    if (owner !== this.owner()) return null
+    if (res.status === 401 || res.status === 403) this.signedOut()
+    else if (res.status >= 400) this.degrade(`HTTP ${res.status}`)
+    else if (!this.adopt(res.body)) this.degrade('no machines in the response')
+    // What was read, as it was read: the devices' own copy of the list reads it from the core's.
+    return res
   }
 
   /**
@@ -236,7 +230,7 @@ export class MachineListCache {
     for (const m of this.machines) m.state = 'unknown'
   }
 
-  private signedOut(): void {
+  signedOut(): void {
     if (this.source !== 'signed-out') this.log('machines: not signed in')
     this.source = 'signed-out'
     this.machines = []
@@ -272,6 +266,7 @@ export class MachineListCache {
   }
 
   private saveCache(): void {
+    if (!this.persist) return
     // `adopt` now runs on every local `/api/machines` too, not just the 60s poll, and this is a
     // synchronous write on the event loop of a daemon that is streaming terminals. An unchanged list is
     // the common case, so skip those. `fetchedAt` is deliberately NOT part of the comparison — it moves

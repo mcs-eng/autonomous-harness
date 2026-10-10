@@ -1,3 +1,5 @@
+import { EngineReadError } from '../../engines/worker/protocol.js'
+import { engineTranscriptFor } from '../../engines/transcripts.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { createLastTurnReader } from './lastTurn.js'
@@ -14,10 +16,10 @@ vi.mock('../../engines/devin/reader.js', () => ({ readDevinMessages: vi.fn(async
 vi.mock('../../engines/devin/normalizer.js', () => ({ lastDevinTurnText: vi.fn((rows: string[]) => ({ text: rows[0] })) }))
 vi.mock('../../engines/codex/lastTurn.js', () => ({ readLastCodexTurnText: vi.fn(async (path: string) => ({ text: `codex ${path}` })) }))
 vi.mock('../../lib/transcriptTail.js', () => ({
-  tailFile: vi.fn(async (path: string, n: number) => [`${path} last ${n}`]),
+  tailFileCapped: vi.fn(async (path: string) => ({ lines: [`${path} capped`], truncated: false })),
   tailFileUntil: vi.fn(async (path: string) => [`${path} back to the last turn`]),
 }))
-vi.mock('../../lib/normalize.js', () => ({
+vi.mock('../../engines/claude/normalize.js', () => ({
   lastTurnTextFromRawLines: vi.fn((lines: string[]) => ({ text: `raw: ${lines[0]}` })),
   selectClaudeRecapLine: vi.fn(),
 }))
@@ -38,6 +40,7 @@ async function reader(sessions: RegisteredSession[]) {
   const bySession = new Map(sessions.map((s) => [s.sessionId, s]))
   return create({
     bySession: (sessionId) => bySession.get(sessionId),
+    readerFor: engineTranscriptFor,
     dbs: { opencode: '/db/opencode.db', kilo: '/db/kilo.db', devin: '/db/devin.db' },
     hermesDb: async (s) => `/db/hermes-${s.agentId}.db`,
   })
@@ -67,9 +70,29 @@ describe('the last turn of each engine', () => {
     expect(await read('claude-s')).toEqual(text('raw: /t/claude.jsonl back to the last turn'))
     expect(await read('codex-s')).toEqual(text('codex /t/codex.jsonl'))
     for (const engine of engines) {
-      expect(await read(`${engine}-s`), engine).toEqual(text(`${engine}: /t/${engine}.jsonl last Infinity`))
+      expect(await read(`${engine}-s`), engine).toEqual(text(`${engine}: /t/${engine}.jsonl capped`))
     }
     // An engine with no reader of its own: its raw lines.
-    expect(await read('terminal-s')).toEqual(text('raw: /t/shell.log last Infinity'))
+    expect(await read('terminal-s')).toEqual(text('raw: /t/shell.log capped'))
   })
+})
+
+
+it('drops a recap read when its session binding changes and contains worker failures', async () => {
+  const s = session('claude', '/read.jsonl')
+  const deps = { bySession: () => s, dbs: { opencode: '', kilo: '', devin: '' }, hermesDb: async () => '' }
+  const result = { userMessage: 'question', assistantText: 'answer' }
+  const readerFor = () => ({ historyPage: async () => ({ events: [], timestamp: '' }), lastTurnText: async () => {
+    s.transcriptPath = '/replacement.jsonl'
+    return result
+  } })
+  expect(await createLastTurnReader({ ...deps, readerFor })('claude-s')).toBeNull()
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    for (const error of [new EngineReadError('ENGINE_BUSY'), new Error('transport')]) {
+      expect(await createLastTurnReader({ ...deps, readerFor: () => ({ ...readerFor(), lastTurnText: async () => { throw error } }) })('claude-s')).toBeNull()
+    }
+    expect(warn).toHaveBeenCalledWith('[engine claude] last turn unavailable · ENGINE_BUSY')
+    expect(warn).toHaveBeenCalledWith('[engine claude] last turn unavailable · ENGINE_UNAVAILABLE')
+  } finally { warn.mockRestore() }
 })

@@ -16,12 +16,12 @@ afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: 
 describe('local Grid profiles', () => {
   it('persists canonical server-owned homes and replaces a profile by id', () => {
     const data = root(); const home = join(data, 'grid-home'); mkdirSync(home)
-    setLocalGridProfile({ id: 'bran', label: 'Bran fleet', gridHome: home, gridName: 'bran-fleet' }, data)
-    setLocalGridProfile({ id: 'bran', label: 'Bran local', gridHome: home, gridName: 'bran-fleet' }, data)
-    expect(readLocalGridProfiles(data)).toEqual([{ id: 'bran', label: 'Bran local', gridHome: home, gridName: 'bran-fleet' }])
-    expect(localGridTargetId(readLocalGridProfiles(data)[0]!)).toMatch(/^local:bran:[a-f0-9]{16}$/)
+    setLocalGridProfile({ id: 'node1', label: 'Node1 fleet', gridHome: home, gridName: 'node1-fleet' }, data)
+    setLocalGridProfile({ id: 'node1', label: 'Node1 local', gridHome: home, gridName: 'node1-fleet' }, data)
+    expect(readLocalGridProfiles(data)).toEqual([{ id: 'node1', label: 'Node1 local', gridHome: home, gridName: 'node1-fleet' }])
+    expect(localGridTargetId(readLocalGridProfiles(data)[0]!)).toMatch(/^local:node1:[a-f0-9]{16}$/)
     expect(JSON.parse(readFileSync(gridProfilesPath(data), 'utf8')).version).toBe(1)
-    expect(removeLocalGridProfile('bran', data)).toBe(true)
+    expect(removeLocalGridProfile('node1', data)).toBe(true)
     expect(readLocalGridProfiles(data)).toEqual([])
   })
 
@@ -30,16 +30,16 @@ describe('local Grid profiles', () => {
     writeFileSync(gridProfilesPath(data), JSON.stringify({ version: 1, profiles: [
       { id: 'bad', label: 'Bad', gridHome: 'relative', gridName: 'bad' },
       { id: 'gone', label: 'Gone', gridHome: join(data, 'gone'), gridName: 'gone' },
-      { id: 'bran', label: 'Bran', gridHome: home, gridName: 'bran-fleet' },
+      { id: 'node1', label: 'Node1', gridHome: home, gridName: 'node1-fleet' },
     ] }), { mode: 0o600 })
-    expect(readLocalGridProfiles(data).map((row) => row.id)).toEqual(['gone', 'bran'])
+    expect(readLocalGridProfiles(data).map((row) => row.id)).toEqual(['gone', 'node1'])
     setLocalGridProfile({ id: 'other', label: 'Other', gridHome: home, gridName: 'other-grid' }, data)
-    expect(readLocalGridProfiles(data).map((row) => row.id).sort()).toEqual(['bran', 'gone', 'other'])
+    expect(readLocalGridProfiles(data).map((row) => row.id).sort()).toEqual(['gone', 'node1', 'other'])
   })
 
   it('refuses a group-writable profile store', () => {
     const data = root(); const home = join(data, 'grid-home'); mkdirSync(home)
-    setLocalGridProfile({ id: 'bran', label: 'Bran', gridHome: home, gridName: 'bran-fleet' }, data)
+    setLocalGridProfile({ id: 'node1', label: 'Node1', gridHome: home, gridName: 'node1-fleet' }, data)
     chmodSync(gridProfilesPath(data), 0o660)
     expect(readLocalGridProfiles(data)).toEqual([])
   })

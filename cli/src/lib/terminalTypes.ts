@@ -7,6 +7,14 @@ export interface ProcessIdentity {
   pid: number
   executable: string
   startMarker: string
+  /**
+   * Linux only: when the process started, in clock ticks since boot (`/proc/<pid>/stat` field 22).
+   * `startMarker` is `ps lstart`, which Linux derives from the boot time, and the boot time moves
+   * every time the wall clock is stepped: a Docker Desktop VM resynced after the Mac slept shifted
+   * every process's lstart by hours, and each agent got a new id for the same process (6 panes, 5
+   * times in 15 hours, machine-remote-1, 2026-10-07). The ticks never change for a process.
+   */
+  startTicks?: number
 }
 
 export interface TmuxRuntimeRef {
@@ -34,7 +42,9 @@ export type TerminalInventoryResult =
 
 export type RuntimeValidation =
   | { state: 'alive' }
-  | { state: 'gone'; reason: string }
+  /** `replaced`: the pane runs this engine, but not the process the row recorded. An engine restarted,
+   *  retargeted or resumed in place reads this way until its new identity is recorded. */
+  | { state: 'gone'; reason: string; replaced?: true }
   | { state: 'unknown'; reason: string }
 
 /**
@@ -194,6 +204,28 @@ export function terminalActionRejected(reason: string): {
   state: 'failed'; dispatch: 'rejected'; reason: string
 } {
   return { state: 'failed', dispatch: 'rejected', reason }
+}
+
+/**
+ * What a submit checks right before its Enter, the text already typed: a reason not to press it. The
+ * engine can open a dialog between a paste and its Enter (a long or multi-line one waits up to 1.5 s for
+ * the engine to take it in, tmux.ts), and that Enter would answer the dialog.
+ */
+export interface SubmitOptions {
+  beforeEnter?: () => Promise<string | null>
+  /** Synchronous authority fence, checked immediately before paste/Enter dispatch, including queues. */
+  allowed?: () => boolean
+}
+
+/** The text was typed and its Enter not pressed, for `reason`: it waits in the composer, unsent. */
+export function terminalEnterWithheld(reason: string): { state: 'unknown'; dispatch: 'possibly_executed'; reason: string } {
+  return { state: 'unknown', dispatch: 'possibly_executed', reason: `enter_withheld:${reason}` }
+}
+
+/** Why a submit's Enter was not pressed, or null when it was, or the submit did not get that far. */
+export function enterWithheldReason(result: boolean | TerminalActionResult): string | null {
+  return typeof result !== 'boolean' && result.state === 'unknown' && result.reason.startsWith('enter_withheld:')
+    ? result.reason.slice('enter_withheld:'.length) : null
 }
 
 export function terminalActionPossiblyExecuted(reason: string): {

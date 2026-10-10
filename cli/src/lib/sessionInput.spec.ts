@@ -1,3 +1,7 @@
+import { readInlineScreen } from '../testing/inlineScreen.js'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionInputController } from './sessionInput.js'
 import type { RegisteredSession } from './registry.js'
@@ -14,8 +18,110 @@ function session(engine: 'claude' | 'codex' | 'cursor' | 'commandcode' = 'codex'
   }
 }
 
+/**
+ * The composers as the engines draw them, which a message is typed into only when on screen
+ * (composerScreen.ts): Claude Code's ruled box and Codex's bold `›` row under a blank one.
+ */
+const claudeBox = (draft: string, above = '') => `${above}${'─'.repeat(40)}\n❯ ${draft}\n${'─'.repeat(40)}\n  ? for shortcuts`
+const codexComposer = (draft: string, footer = '  ? for shortcuts') => `\n\u001b[1m›\u001b[0m ${draft}\n\n${footer}`
+
 describe('SessionInputController', () => {
   afterEach(() => vi.useRealTimers())
+
+  describe('a message not typed because of what its pane shows', () => {
+    const held = (reason: string): TerminalActionResult => ({ state: 'failed', dispatch: 'not_started', reason })
+
+    it.each([
+      ['codex', 'rewind_picker_open', 'Codex is browsing its transcript, where Enter would rewind the conversation. Close it with Esc in its terminal, then send the message again.'],
+      ['claude', 'rewind_picker_open', 'Claude Code has its Rewind menu open, where Enter would pick a point to rewind to. Close it with Esc in its terminal, then send the message again.'],
+      ['claude', 'permission_open', 'Claude Code is asking for permission. Answer it first, in the app or in its terminal, then send the message again.'],
+      ['codex', 'question_open', 'Codex is asking you a question. Answer it first, in the app or in its terminal, then send the message again.'],
+    ] as const)('%s, %s: tells the person why and what to do, asks no lease again, and awaits nothing', async (engine, reason, text) => {
+      const onError = vi.fn(), onSubmitted = vi.fn(), sleep = vi.fn(async () => {})
+      const inject = vi.fn(async () => held(reason))
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session(engine), validateRuntime: async () => true,
+        inject, sendKey: async () => true, onError, onSubmitted, sleep })
+      controller.submit('s1', 'a message from the app')
+      await vi.waitFor(() => expect(onError).toHaveBeenCalledWith('s1', text))
+      expect(inject).toHaveBeenCalledTimes(1)
+      expect(sleep).not.toHaveBeenCalled()
+      expect(onSubmitted).not.toHaveBeenCalled()
+      controller.forget('s1')
+    })
+
+    it('waits for an engine to draw its composer, as for the lease, and types once it is there', async () => {
+      // A message sent while the engine starts: its pane holds nothing yet.
+      const time = { at: 0, now: () => time.at, sleep: vi.fn(async (ms: number) => { time.at += ms }) }
+      const onError = vi.fn(), onSubmitted = vi.fn()
+      const inject = vi.fn<() => Promise<TerminalActionResult>>().mockResolvedValueOnce(held('prompt_hidden'))
+        .mockResolvedValueOnce(held('screen_unreadable')).mockResolvedValue({ state: 'succeeded', dispatch: 'executed' })
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('codex'), validateRuntime: async () => true,
+        inject, sendKey: async () => true, onError, onSubmitted, now: time.now, sleep: time.sleep })
+      controller.submit('s1', 'sent while it starts')
+      await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledWith('s1', 'sent while it starts'))
+      expect(inject).toHaveBeenCalledTimes(3)
+      expect(onError).not.toHaveBeenCalled()
+      controller.forget('s1')
+    })
+
+    it('refuses with the reason once the wait is over and the composer never came', async () => {
+      const time = { at: 0, now: () => time.at, sleep: vi.fn(async (ms: number) => { time.at += ms }) }
+      const onError = vi.fn()
+      const inject = vi.fn(async () => held('prompt_hidden'))
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('claude'), validateRuntime: async () => true,
+        inject, sendKey: async () => true, onError, now: time.now, sleep: time.sleep })
+      controller.submit('s1', 'into a screen never seen')
+      await vi.waitFor(() => expect(onError).toHaveBeenCalledWith('s1', 'Claude Code isn\'t showing its prompt; finish what\'s on its screen in its terminal, then send the message again.'))
+      expect(time.at).toBeGreaterThanOrEqual(15_000)
+      controller.forget('s1')
+    })
+
+    it('typed but its Enter withheld, as something opened: never pressed later, and the person told where the text is', async () => {
+      const withheld: TerminalActionResult = { state: 'unknown', dispatch: 'possibly_executed', reason: 'enter_withheld:permission_open' }
+      const onError = vi.fn(), onSubmitted = vi.fn(), sendKey = vi.fn(async () => true), forget = vi.fn(), onDelivery = vi.fn()
+      vi.useFakeTimers()
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('claude'), validateRuntime: async () => true,
+        inject: async () => withheld, sendKey, onError, onSubmitted, onDelivery, beforeSubmit: () => forget, beforeTeamWrite: async () => null })
+      controller.submit('s1', 'a message from the app')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(onError).toHaveBeenCalledWith('s1', 'Claude Code asked for permission just as your message was typed, so it was not sent; it waits in Claude Code\'s prompt. Answer the request in the app or in its terminal, then press Enter in its terminal to send the message, or clear it there.')
+      expect(forget).toHaveBeenCalled()
+      expect(onSubmitted).not.toHaveBeenCalled()
+      expect(sendKey).not.toHaveBeenCalled()
+      // With a receipt: refused with the reason; a team's, without telling a person.
+      onError.mockClear()
+      controller.submit('s1', 'from the device', 'd1')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(onDelivery).toHaveBeenCalledWith({ sessionId: 's1', deliveryId: 'd1', state: 'rejected', reason: 'enter_withheld' })
+      expect(onError).toHaveBeenCalledTimes(1)
+      controller.submit('s1', 'a team turn', 'team:1')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(onDelivery).toHaveBeenCalledWith({ sessionId: 's1', deliveryId: 'team:1', state: 'rejected', reason: 'enter_withheld' })
+      expect(onError).toHaveBeenCalledTimes(1)
+      expect(sendKey).not.toHaveBeenCalled()
+      controller.forget('s1')
+    })
+
+    it('rejects a message that wants a receipt with the reason, and says why', async () => {
+      const onError = vi.fn(), onDelivery = vi.fn()
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('codex'), validateRuntime: async () => true,
+        inject: async () => held('permission_open'), sendKey: async () => true, onError, onDelivery })
+      controller.submit('s1', 'a message from the device', 'd1')
+      await vi.waitFor(() => expect(onDelivery).toHaveBeenCalledWith({ sessionId: 's1', deliveryId: 'd1', state: 'rejected', reason: 'permission_open' }))
+      expect(onError).toHaveBeenCalledWith('s1', 'Codex is asking for approval. Answer it first, in the app or in its terminal, then send the message again.')
+      controller.forget('s1')
+    })
+
+    it('rejects a team\'s turn with the reason, and tells no person: its team hears of it', async () => {
+      const onError = vi.fn(), onDelivery = vi.fn()
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('claude'), validateRuntime: async () => true,
+        beforeTeamWrite: async () => null, inject: vi.fn(), injectTeam: async () => held('menu_open'), sendKey: async () => true, onError, onDelivery })
+      controller.submit('s1', 'a team turn', 'team:1')
+      await vi.waitFor(() => expect(onDelivery).toHaveBeenCalledWith({ sessionId: 's1', deliveryId: 'team:1', state: 'rejected', reason: 'menu_open' }))
+      expect(onError).not.toHaveBeenCalled()
+      controller.forget('s1')
+    })
+  })
 
   describe('a paste the control lease refuses before a byte is written', () => {
     const refused: TerminalActionResult = { state: 'failed', dispatch: 'not_started', reason: TERMINAL_LEASE_REFUSED }
@@ -29,7 +135,7 @@ describe('SessionInputController', () => {
     it('waits for the lease — a resume whose new process is not confirmed yet — and then delivers, once', async () => {
       const time = clock(), onError = vi.fn(), onSubmitted = vi.fn()
       const inject = vi.fn<() => Promise<TerminalActionResult>>().mockResolvedValueOnce(refused).mockResolvedValueOnce(refused).mockResolvedValue(done)
-      const controller = new SessionInputController({ getSession: () => session('claude'), validateRuntime: async () => true,
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('claude'), validateRuntime: async () => true,
         inject, sendKey: async () => true, onError, onSubmitted, ...time })
       controller.submit('s1', 'right after the resume')
       await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledWith('s1', 'right after the resume'))
@@ -42,7 +148,7 @@ describe('SessionInputController', () => {
     it('gives up at fifteen seconds, says the message was not delivered, and wrote nothing', async () => {
       const time = clock(), onError = vi.fn()
       const inject = vi.fn(async () => refused)
-      const controller = new SessionInputController({ getSession: () => session('claude'), validateRuntime: async () => true,
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('claude'), validateRuntime: async () => true,
         inject, sendKey: async () => true, onError, ...time })
       controller.submit('s1', 'never leased')
       await vi.waitFor(() => expect(onError).toHaveBeenCalledWith('s1', 'The message could not be delivered to the agent.'))
@@ -55,14 +161,14 @@ describe('SessionInputController', () => {
       const time = clock(), onError = vi.fn()
       let present = true
       const inject = vi.fn(async () => { present = false; return refused })
-      const gone = new SessionInputController({ getSession: () => (present ? session('claude') : undefined), validateRuntime: async () => true,
+      const gone = new SessionInputController({ readScreen: readInlineScreen, getSession: () => (present ? session('claude') : undefined), validateRuntime: async () => true,
         inject, sendKey: async () => true, onError, ...time })
       gone.submit('s1', 'to an agent that left')
       await vi.waitFor(() => expect(onError).toHaveBeenCalled())
       expect(inject).toHaveBeenCalledTimes(1)
 
       const other = vi.fn(async (): Promise<TerminalActionResult> => ({ state: 'failed', dispatch: 'not_started', reason: 'terminal agent is unavailable' }))
-      const elsewhere = new SessionInputController({ getSession: () => session('claude'), validateRuntime: async () => true,
+      const elsewhere = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('claude'), validateRuntime: async () => true,
         inject: other, sendKey: async () => true, onError: vi.fn(), ...time })
       elsewhere.submit('s1', 'to an agent with no terminal')
       await vi.waitFor(() => expect(other).toHaveBeenCalledTimes(1))
@@ -73,7 +179,7 @@ describe('SessionInputController', () => {
     it('waits the same way for a message that wants a receipt, until it is cancelled', async () => {
       const time = clock(), onDelivery = vi.fn()
       const inject = vi.fn<() => Promise<TerminalActionResult>>().mockResolvedValueOnce(refused).mockResolvedValue(done)
-      const controller = new SessionInputController({ getSession: () => session('codex'), validateRuntime: async () => true,
+      const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('codex'), validateRuntime: async () => true,
         inject, sendKey: async () => true, onError: vi.fn(), onDelivery, ...time })
       controller.submit('s1', 'with a receipt', 'delivery-1')
       await vi.waitFor(() => expect(inject).toHaveBeenCalledTimes(2))
@@ -81,7 +187,7 @@ describe('SessionInputController', () => {
 
       const cancelled = vi.fn(async () => refused)
       let cancel: () => void = () => {}
-      const waiting = new SessionInputController({ getSession: () => session('codex'), validateRuntime: async () => true,
+      const waiting = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('codex'), validateRuntime: async () => true,
         inject: cancelled, sendKey: async () => true, onError: vi.fn(), onDelivery,
         now: time.now, sleep: async (ms) => { time.sleep(ms); cancel() } })
       cancel = () => waiting.forget('s1')
@@ -95,7 +201,7 @@ describe('SessionInputController', () => {
 
   it('retains the submitted swarm through the input queue and records it only at dispatch', async () => {
     const beforeSubmit = vi.fn(() => vi.fn())
-    const controller = new SessionInputController({ getSession: () => session('cursor'), validateRuntime: async () => true,
+    const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('cursor'), validateRuntime: async () => true,
       inject: async () => true, sendKey: async () => true, beforeSubmit, onError: vi.fn() })
     controller.setTurnOpen('s1', true)
     controller.submit('s1', 'task from A', undefined, 'swarm-a')
@@ -107,7 +213,7 @@ describe('SessionInputController', () => {
 
   it.each(['team_waiting_draft', 'team_waiting_user', 'team_waiting_idle'])('team input preserves the composer on %s', async reason => {
     const inject = vi.fn(async () => true), sendKey = vi.fn(async () => true), onDelivery = vi.fn()
-    const controller = new SessionInputController({ getSession: () => session('cursor'), validateRuntime: async () => true,
+    const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('cursor'), validateRuntime: async () => true,
       inject, sendKey, onError: vi.fn(), onDelivery, beforeTeamWrite: async () => reason })
     controller.submit('s1', 'peer question', 'team:fixture')
     await vi.waitFor(() => expect(onDelivery).toHaveBeenCalledWith(expect.objectContaining({ state: 'rejected', reason })))
@@ -118,7 +224,7 @@ describe('SessionInputController', () => {
 
   it('rechecks a queued team message at the actual write boundary', async () => {
     const beforeTeamWrite = vi.fn(async () => 'team_waiting_draft'), inject = vi.fn(async () => true), onDelivery = vi.fn()
-    const controller = new SessionInputController({ getSession: () => session(), validateRuntime: async () => true,
+    const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session(), validateRuntime: async () => true,
       inject, sendKey: async () => true, onError: vi.fn(), onDelivery, beforeTeamWrite })
     controller.setTurnOpen('s1', true)
     controller.submit('s1', 'peer question', 'team:fixture')
@@ -132,7 +238,7 @@ describe('SessionInputController', () => {
   it('never retries Enter for an automatic team message with uncertain acceptance', async () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true), onDelivery = vi.fn()
-    const controller = new SessionInputController({ getSession: () => session(), validateRuntime: async () => true,
+    const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session(), validateRuntime: async () => true,
       inject: async () => true, sendKey, onError: vi.fn(), onDelivery, beforeTeamWrite: async () => null })
     controller.submit('s1', 'peer question', 'team:fixture')
     await vi.advanceTimersByTimeAsync(12_000)
@@ -143,7 +249,7 @@ describe('SessionInputController', () => {
 
   it('requeues a team notice when a draft appears while waiting for the terminal writer', async () => {
     const inject = vi.fn(async () => true), onError = vi.fn(), onDelivery = vi.fn()
-    const controller = new SessionInputController({ getSession: () => session(), validateRuntime: async () => true,
+    const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session(), validateRuntime: async () => true,
       beforeTeamWrite: async () => null, inject,
       injectTeam: async () => ({ state: 'failed', dispatch: 'not_started', reason: 'team_waiting_draft' }),
       sendKey: async () => true, onError, onDelivery })
@@ -162,7 +268,7 @@ describe('SessionInputController', () => {
     { engine: 'codex', observed: '<pasted_content id="04e3">\npeer question\n</pasted_content id="04e3">', state: 'unknown' },
   ] as const)('attributes native paste evidence only to the exact $engine message: $state', async ({ engine, observed, state }) => {
     const inject = vi.fn(async () => true), sendKey = vi.fn(async () => true), onDelivery = vi.fn()
-    const controller = new SessionInputController({ getSession: () => session(engine), validateRuntime: async () => true,
+    const controller = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session(engine), validateRuntime: async () => true,
       inject, sendKey, onError: vi.fn(), onDelivery, beforeTeamWrite: async () => null })
     controller.submit('s1', 'peer question', 'team:fixture')
     await vi.waitFor(() => expect(onDelivery).toHaveBeenCalledWith(expect.objectContaining({ state: 'delivered' })))
@@ -177,7 +283,7 @@ describe('SessionInputController', () => {
     // A voice command spoken while a Codex task ran used to sit in this controller's queue, invisible,
     // until the task ended. Codex queues composer input itself, so the daemon types straight away.
     const injected: string[] = []
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'), validateRuntime: async () => true,
       inject: async (_pane, content) => { injected.push(content); return true },
       sendKey: async () => true, onError: vi.fn(),
@@ -198,7 +304,7 @@ describe('SessionInputController', () => {
 
   it('queues Command Code prompts while busy and drains exactly one after turn end', async () => {
     const injected: string[] = []
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('commandcode'), validateRuntime: async () => true,
       inject: async (_pane, content) => { injected.push(content); return true },
       sendKey: async () => true, onError: vi.fn(),
@@ -217,7 +323,7 @@ describe('SessionInputController', () => {
 
   it('clears the echoed prompt from the Cursor composer once the turn starts', async () => {
     const sendKey = vi.fn(async (_pane: string, _key: string) => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'), validateRuntime: async () => true,
       inject: async () => true, sendKey,
       capture: async () => '⠰ Working\n\n→ hello\nAuto',   // the submitted prompt is still on screen
@@ -231,7 +337,7 @@ describe('SessionInputController', () => {
 
   it('leaves a fresh terminal draft alone when the Cursor composer no longer echoes our prompt', async () => {
     const sendKey = vi.fn(async (_pane: string, _key: string) => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'), validateRuntime: async () => true,
       inject: async () => true, sendKey,
       capture: async () => '⠰ Working\n\n→ something the user just typed\nAuto',
@@ -249,7 +355,7 @@ describe('SessionInputController', () => {
     // message is typed onto the end of it and the two are submitted as one run-on prompt — observed as a
     // turn starting with the PREVIOUS message's text.
     const order: string[] = []
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'), validateRuntime: async () => true,
       inject: async (_pane, content) => { order.push(`inject:${content}`); return true },
       sendKey: async (_pane, key) => { order.push(`key:${key}`); return true },
@@ -266,7 +372,7 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const inject = vi.fn(async () => true)
     const sendKey = vi.fn(async () => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session(), validateRuntime: async () => true, inject, sendKey, onError: vi.fn(),
     })
     controller.submit('s1', 'hello')
@@ -280,7 +386,7 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const inject = vi.fn(async () => true)
     const sendKey = vi.fn(async () => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'), validateRuntime: async () => true, inject, sendKey, onError: vi.fn(),
     })
     controller.submit('s1', 'hello')
@@ -296,7 +402,7 @@ describe('SessionInputController', () => {
     const inject = vi.fn(async () => true)
     const sendKey = vi.fn(async (_pane: string, _key: string) => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'),
       validateRuntime: async () => true,
       inject,
@@ -319,7 +425,7 @@ describe('SessionInputController', () => {
   it('retries Enter for Cursor only while the exact draft remains in an idle composer', async () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async (_pane: string, _key: string) => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'),
       validateRuntime: async () => true,
       inject: async () => true,
@@ -339,7 +445,7 @@ describe('SessionInputController', () => {
   it('waits for the Cursor composer to settle before draining the next prompt', async () => {
     vi.useFakeTimers()
     const injected: string[] = []
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'),
       validateRuntime: async () => true,
       inject: async (_pane, content) => { injected.push(content); return true },
@@ -361,12 +467,12 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'),
       validateRuntime: async () => true,
       inject: async () => true,
       sendKey,
-      capture: async () => '❯ \n✻ Working (esc to interrupt)',
+      capture: async () => claudeBox('', '✻ Working (esc to interrupt)\n\n'),
       onError,
     })
 
@@ -386,7 +492,7 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('commandcode'),
       validateRuntime: async () => true,
       inject: async () => true,
@@ -409,7 +515,7 @@ describe('SessionInputController', () => {
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
     const capture = vi.fn(async () => '❯ What are you working on?\n✻ Waiting for 4 background agents to finish\n────\n❯ a different draft I am still writing\n────')
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'), validateRuntime: async () => true,
       inject: async () => true, sendKey, capture, onError,
     })
@@ -426,11 +532,64 @@ describe('SessionInputController', () => {
     controller.forget('s1')
   })
 
+  describe('a dialog over the composer when the turn has not been seen to start', () => {
+    // Recorded on Claude Code 2.1.232: the message was taken, and its turn stopped at a Bash approval.
+    // Above the prompt, the transcript's echo of the message, which used to read as an unsent draft.
+    const screen = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'permission-claude.txt'), 'utf8')
+    const message = 'Run this exact command with Bash, nothing else: curl -s https://api.coingecko.com/api/v3/simple/price?ids=bitcoin'
+
+    it('never presses Enter into a permission prompt, and takes it as the message accepted', async () => {
+      vi.useFakeTimers()
+      const sendKey = vi.fn(async () => true), onError = vi.fn(), onDelivery = vi.fn()
+      let pasted = false
+      const controller = new SessionInputController({ readScreen: readInlineScreen,
+        getSession: () => session('claude'), validateRuntime: async () => true, onDelivery,
+        inject: async () => { pasted = true; return true }, sendKey, capture: async () => pasted ? screen : '❯ ', onError,
+      })
+      controller.submit('s1', message)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(sendKey).not.toHaveBeenCalled()
+      expect(onError.mock.calls).toEqual([])
+      controller.forget('s1')
+    })
+
+    it('reports a delivery with a receipt as unknown, still without an Enter', async () => {
+      vi.useFakeTimers()
+      const sendKey = vi.fn(async () => true), onError = vi.fn(), onDelivery = vi.fn()
+      let pasted = false
+      const controller = new SessionInputController({ readScreen: readInlineScreen,
+        getSession: () => session('claude'), validateRuntime: async () => true, onDelivery,
+        inject: async () => { pasted = true; return true }, sendKey, capture: async () => pasted ? screen : '❯ ', onError,
+      })
+      controller.submit('s1', message, 'delivery-1')
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(sendKey).not.toHaveBeenCalled()
+      expect(onDelivery).toHaveBeenLastCalledWith({ sessionId: 's1', deliveryId: 'delivery-1', state: 'unknown', reason: 'dispatch_ambiguous' })
+      controller.forget('s1')
+    })
+
+    it('never presses Enter into a menu either, and says the delivery could not be confirmed', async () => {
+      vi.useFakeTimers()
+      const sendKey = vi.fn(async () => true), onError = vi.fn()
+      // Codex browsing its transcript (0.160): Enter would rewind the conversation to the prompt in view.
+      const browsing = `› ${message}\n\n  Browsing transcript · ↑↓/jk scroll · ←→/hl prompts · ↵ rewind · esc back\n`
+      const controller = new SessionInputController({ readScreen: readInlineScreen,
+        getSession: () => session('codex'), validateRuntime: async () => true,
+        inject: async () => true, sendKey, capture: async () => browsing, onError,
+      })
+      controller.submit('s1', message)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(sendKey).not.toHaveBeenCalled()
+      expect(onError).toHaveBeenCalledWith('s1', expect.stringContaining('could not be confirmed'))
+      controller.forget('s1')
+    })
+  })
+
   it('reports uncertainty without blindly pressing Enter when the terminal shows no composer', async () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'), validateRuntime: async () => true,
       inject: async () => true, sendKey, capture: async () => 'Sign in required', onError,
     })
@@ -445,12 +604,12 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'),
       validateRuntime: async () => true,
       inject: async () => true,
       sendKey,
-      capture: async () => '❯ hello',
+      capture: async () => claudeBox('hello'),
       onError,
     })
 
@@ -466,12 +625,12 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: async () => true,
       inject: async () => true,
       sendKey,
-      capture: async () => '› Find and fix a bug in @filename\n  gpt-5.5 medium ·',
+      capture: async () => codexComposer('\u001b[2mFind and fix a bug in @filename\u001b[0m', '  gpt-5.5 medium ·'),
       onError,
     })
 
@@ -487,12 +646,12 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: async () => true,
       inject: async () => true,
       sendKey,
-      capture: async () => '› hello',
+      capture: async () => codexComposer('hello'),
       onError,
     })
 
@@ -508,7 +667,7 @@ describe('SessionInputController', () => {
     vi.useFakeTimers()
     const sendKey = vi.fn(async () => true)
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: async () => true,
       inject: async () => true,
@@ -531,7 +690,7 @@ describe('SessionInputController', () => {
     const ambiguous: TerminalActionResult = {
       state: 'unknown', dispatch: 'possibly_executed', reason: 'response was lost',
     }
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: async () => true,
       inject: async () => ambiguous,
@@ -553,12 +712,12 @@ describe('SessionInputController', () => {
     const ambiguous: TerminalActionResult = {
       state: 'unknown', dispatch: 'possibly_executed', reason: 'response was lost',
     }
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: async () => true,
       inject: async () => ambiguous,
       sendKey,
-      capture: async () => '› hello',
+      capture: async () => codexComposer('hello'),
       onError: vi.fn(),
     })
 
@@ -576,7 +735,7 @@ describe('SessionInputController', () => {
     const ambiguous: TerminalActionResult = {
       state: 'unknown', dispatch: 'possibly_executed', reason: 'response was lost',
     }
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: async () => true,
       inject: async () => ambiguous,
@@ -595,12 +754,12 @@ describe('SessionInputController', () => {
 
   it('requires fresh draft evidence before retrying an ambiguously completed Enter', async () => {
     vi.useFakeTimers()
-    const captures = ['› hello', null]
+    const captures = [codexComposer('hello'), null]
     const sendKey = vi.fn(async (_target: string, _key: string): Promise<TerminalActionResult> => ({
       state: 'unknown', dispatch: 'possibly_executed', reason: 'Enter response was lost',
     }))
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: async () => true,
       inject: async () => true,
@@ -624,7 +783,7 @@ describe('SessionInputController', () => {
     const ambiguous: TerminalActionResult = {
       state: 'unknown', dispatch: 'possibly_executed', reason: 'response was lost',
     }
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'),
       validateRuntime: async () => true,
       inject: async () => ambiguous,
@@ -648,7 +807,7 @@ describe('SessionInputController', () => {
       state: 'unknown', dispatch: 'possibly_executed', reason: 'key response was lost',
     }))
     const onError = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('cursor'),
       validateRuntime: async () => true,
       inject: async () => true,
@@ -667,7 +826,7 @@ describe('SessionInputController', () => {
 
   it('serializes chat input behind a native runtime control lock', async () => {
     const injected: string[] = []
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'), validateRuntime: async () => true,
       inject: async (_pane, content) => { injected.push(content); return true },
       sendKey: async () => true, onError: vi.fn(),
@@ -691,7 +850,7 @@ describe('delivery correlation', () => {
   function setup(overrides: Partial<ConstructorParameters<typeof SessionInputController>[0]> = {}) {
     const onDelivery = vi.fn()
     const inject = vi.fn(async () => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session(), validateRuntime: async () => true,
       inject, sendKey: async () => true, onError: vi.fn(), onDelivery, ...overrides,
     })
@@ -824,7 +983,7 @@ describe('optional lamp delivery preserves legacy behavior', () => {
     // once: the second waits for the first's paste, not for the first's turn.
     const validations: Array<(valid: boolean) => void> = []
     const inject = vi.fn(async (_target: string, _text: string) => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'),
       validateRuntime: () => new Promise<boolean>(resolve => validations.push(resolve)),
       inject, sendKey: async () => true, onError: vi.fn(),
@@ -845,7 +1004,7 @@ describe('optional lamp delivery preserves legacy behavior', () => {
   it('writes messages that arrive together in the order they arrived, whichever check finishes first', async () => {
     const checks: Array<(valid: boolean) => void> = []
     const inject = vi.fn(async (_target: string, _text: string) => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('codex'),
       validateRuntime: () => new Promise<boolean>(resolve => checks.push(resolve)),
       inject, sendKey: async () => true, onError: vi.fn(),
@@ -859,7 +1018,7 @@ describe('optional lamp delivery preserves legacy behavior', () => {
     expect(inject.mock.calls.map(([, text]) => text)).toEqual(['one', 'two', 'three'])
     // A write that fails does not hold up the ones behind it.
     const failing = vi.fn(async (_target: string, text: string) => { if (text === 'bad') throw new Error('pane gone'); return true })
-    const next = new SessionInputController({ getSession: () => session('codex'), validateRuntime: async () => true,
+    const next = new SessionInputController({ readScreen: readInlineScreen, getSession: () => session('codex'), validateRuntime: async () => true,
       inject: failing, sendKey: async () => true, onError: vi.fn() })
     next.submit('s1', 'bad')
     next.submit('s1', 'good')
@@ -870,7 +1029,7 @@ describe('optional lamp delivery preserves legacy behavior', () => {
 
   it('keeps native control available during untracked runtime validation', async () => {
     let resolve!: (valid: boolean) => void
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'),
       validateRuntime: () => new Promise<boolean>(done => { resolve = done }),
       inject: async () => true, sendKey: async () => true, onError: vi.fn(),
@@ -887,7 +1046,7 @@ describe('optional lamp delivery preserves legacy behavior', () => {
   it('reports the original legacy cancellation error for a vanished process', async () => {
     const onError = vi.fn()
     const sendKey = vi.fn(async () => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session(), validateRuntime: async () => false,
       inject: async () => true, sendKey, onError,
     })
@@ -901,7 +1060,7 @@ describe('optional lamp delivery preserves legacy behavior', () => {
     vi.useFakeTimers()
     const onDelivery = vi.fn()
     const sendKey = vi.fn(async () => true)
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('commandcode'), validateRuntime: async () => true,
       inject: async () => true, sendKey, capture: async () => 'Thinking… esc to interrupt',
       onError: vi.fn(), onDelivery,
@@ -918,7 +1077,7 @@ describe('optional lamp delivery preserves legacy behavior', () => {
   it('does not invent rejection when a turn begins during pre-paste validation', async () => {
     let resolve!: (valid: boolean) => void
     const onDelivery = vi.fn()
-    const controller = new SessionInputController({
+    const controller = new SessionInputController({ readScreen: readInlineScreen,
       getSession: () => session('claude'),
       validateRuntime: () => new Promise<boolean>(done => { resolve = done }),
       inject: async () => true, sendKey: async () => true, onError: vi.fn(), onDelivery,

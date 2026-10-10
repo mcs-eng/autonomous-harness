@@ -210,4 +210,40 @@ describe('terminal control', () => {
     fake.alive = false
     expect(await control.validateTerminal(session)).toBe(false)
   })
+
+  it('calls a terminal gone only when it is known to be, never on a probe that could not answer', async () => {
+    const { fake, terminals } = backend()
+    const control = createTerminalControl({ resolve, terminals })
+    expect(await control.terminalGone(session)).toBe(false)
+    fake.alive = false
+    expect(await control.terminalGone(session)).toBe(true)
+    // A probe that timed out at a wake: no reason to write to the pane, and no evidence it is gone.
+    vi.mocked(terminals.validate).mockResolvedValueOnce({ state: 'unknown', reason: 'tmux runtime probe failed' })
+    expect(await control.terminalGone(session)).toBe(false)
+    vi.mocked(terminals.validate).mockResolvedValueOnce({ state: 'unknown', reason: 'tmux runtime probe failed' })
+    expect(await control.validateTerminal(session)).toBe(false)
+  })
+})
+
+it.each(['key', 'submit'] as const)('checks revoked %s authority after awaited terminal validation', async kind => {
+  const { terminals } = backend()
+  const control = createTerminalControl({ resolve, terminals })
+  const release = control.pinTerminalControl('agent-1')!
+  await control.keyTerminal('agent-1', 'Enter')
+  let permitted = true
+  vi.mocked(terminals.validateLease).mockImplementationOnce(async () => { permitted = false; return true })
+  const result = kind === 'key'
+    ? await control.keyTerminalAction('agent-1', 'Enter', () => permitted)
+    : await control.submitTerminalAction('agent-1', '/model next', { allowed: () => permitted })
+  expect(result).toMatchObject({ state: 'failed', dispatch: 'not_started', reason: 'terminal control revoked' })
+  expect(terminals.sendLegacyKeyLease).toHaveBeenCalledTimes(1)
+  expect(terminals.submitTextLease).not.toHaveBeenCalled()
+  release()
+})
+
+it('passes a live submission guard through to paste/Enter, and permits a guarded key', async () => {
+  const { terminals } = backend(), control = createTerminalControl({ resolve, terminals }), allowed = () => true
+  expect(await control.submitTerminal('agent-1', '/model next', { allowed })).toBe(true)
+  expect(terminals.submitTextForLease).toHaveBeenCalledWith(session, expect.anything(), '/model next', { allowed })
+  expect(await control.keyTerminal('agent-1', 'Enter', allowed)).toBe(true)
 })

@@ -51,13 +51,13 @@ impl Operation {
     pub fn parse(v: &Value) -> Option<Operation> {
         let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let (action, stage, phase) = (s("action")?, s("stage")?, s("phase")?);
-        if !["download", "start", "stop"].contains(&action.as_str()) || !["checking", "downloading", "starting", "verifying", "stopping"].contains(&stage.as_str()) || !["running", "done", "failed"].contains(&phase.as_str()) { return None }
+        if !["download", "start", "stop"].contains(&action.as_str()) || !["checking", "downloading", "updating", "starting", "verifying", "stopping"].contains(&stage.as_str()) || !["running", "done", "failed"].contains(&phase.as_str()) { return None }
         Some(Operation { id: s("id")?, model: s("modelId")?, action, stage, phase, progress: v.get("progress").and_then(num).map(|p| p.clamp(0.0, 1.0)), error: s("error") })
     }
     pub fn active(&self) -> bool { self.phase == "running" }
     pub fn failed(&self) -> bool { self.phase == "failed" }
     pub fn label(&self) -> &'static str {
-        match self.stage.as_str() { "downloading" => "Downloading", "starting" => "Starting", "verifying" => "Testing", "stopping" => "Stopping", _ => "Checking" }
+        match self.stage.as_str() { "downloading" => "Downloading", "updating" => "Updating engine", "starting" => "Starting", "verifying" => "Testing", "stopping" => "Stopping", _ => "Checking" }
     }
     /// `Downloading 42%`: what a row and its preview say while it runs.
     pub fn word(&self) -> String { match self.progress { Some(p) => format!("{} {}%", self.label(), (p * 100.0).floor() as u32), None => self.label().to_string() } }
@@ -75,6 +75,9 @@ pub struct LocalModel {
     /// The app it runs in: `Ollama`, `LM Studio` or `llama.cpp` for one that app downloaded, `Grid`
     /// for Grid's own engine (absent from an older daemon).
     pub app: Option<String>,
+    /// A Jev (System One) model (`kind: decision`): Get downloads it, updates Grid's engine when too old
+    /// to serve one, and runs it on the grid. Listed under [JEV]; never a harness's model.
+    pub decision: bool,
 }
 
 impl LocalModel {
@@ -85,7 +88,7 @@ impl LocalModel {
             size: num(&v["sizeBytes"]), quant: text(&v["quant"]), recommended: v["recommended"] == true, can_start: v["canStart"] == true, can_stop: v["canStop"] == true,
             tok_s: num(&v["tokensPerSecond"]), requests: num(&v["requests"]), window_secs: num(&v["windowSeconds"]),
             context: num(&v["contextWindow"]), est_tok_s: num(&v["estTokS"]), params_b: num(&v["paramsB"]),
-            operation: Operation::parse(&v["operation"]), asleep: v["gridAsleep"] == true, app: text(&v["app"]), id,
+            operation: Operation::parse(&v["operation"]), asleep: v["gridAsleep"] == true, app: text(&v["app"]), decision: v["kind"] == "decision", id,
         })
     }
     pub fn running(&self) -> bool { self.state == "running" }
@@ -120,8 +123,10 @@ pub fn parse_local(reply: &Value) -> Option<Snapshot> {
 }
 
 /// A model a grid serves; `offline` names the computer when every one serving it seems offline.
+/// `decision`: a Jev (System One) model (`kind: decision`) — called at `/v1/systemone`, never a
+/// harness's model, so it is listed under [JEV] and Enter copies how to call it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GridModel { pub id: String, pub node: String, pub offline: Option<String> }
+pub struct GridModel { pub id: String, pub node: String, pub offline: Option<String>, pub decision: bool }
 
 /// One grid this computer is signed into: the account's own, or a shared one, and how it answered
 /// the daemon's last look (`awake`, `asleep`, `waking`, `unknown`; empty from an older daemon).
@@ -148,7 +153,7 @@ pub fn parse_grids(reply: &Value) -> Grids {
             Value::Bool(true) => Some(node.clone()),
             _ => None,
         };
-        Some(GridModel { id, node, offline })
+        Some(GridModel { id, node, offline, decision: m["kind"] == "decision" })
     }).collect::<Vec<_>>();
     let mut sections: Vec<Section> = reply["grids"].as_array().into_iter().flatten().filter_map(|g| Some(Section {
         name: text(&g["name"])?, own: g["own"] == true, models: models(&g["models"]), state: g["state"].as_str().unwrap_or("").to_string(),
@@ -270,6 +275,7 @@ pub struct Use {
     /// The model running here that it stops before this one starts (id, name) — after a download, so
     /// that one answers until this one can start.
     pub stops: Option<(String, String)>,
+    pub identity: Option<crate::session_close::Identity>,
 }
 
 /// An `agent_retarget` sent: the harness, the model it goes to (empty: its own login), and when —
@@ -331,8 +337,18 @@ fn switched(app: &App, s: &Switch) -> bool {
 }
 
 /// Everything the Models view knows, kept on the App (and read by the pane headings).
+#[derive(Clone, PartialEq)]
+struct ReadEpoch { owner:String, connection:Option<u64>, token:String }
+
 #[derive(Default)]
 pub struct Models {
+    owner: Option<String>,
+    reads: HashMap<(String, String), ReadEpoch>,
+    /// The picker keeps the harness it opened for, even if another client changes focus.
+    pub selection: Option<crate::session_close::Identity>,
+    pub selection_fixed: bool,
+    pub panel_generation: u64,
+    pub switch_generation: u64,
     /// Each machine's local models, when they were last read, and a read out now.
     pub local: HashMap<String, Snapshot>,
     pub local_error: HashMap<String, String>,
@@ -405,11 +421,36 @@ fn due(last: Option<&Instant>, every: Duration, now: Instant) -> bool { last.is_
 #[derive(Clone, Debug)]
 pub struct Target { pub machine: String, pub agent: String, pub engine: String, pub grid_model: String, pub base_url: String }
 
+/// The desktop offers pane model switches for these verified engines. Other engines keep
+/// their own in-terminal controls; the global Models view still manages local models.
+pub fn pane_supports(app: &App, pane: u64) -> bool {
+    let Some(p) = app.panes.get(&pane) else { return false };
+    app.fleet.machine(&p.machine_id).is_some_and(|m| !m.shared)
+        && app.fleet.agent(&p.machine_id, &p.agent_id).is_some_and(|a| a.status != "stopped" && ["codex", "claude", "opencode"].contains(&a.engine.as_str()))
+}
+
+/// The model the pane's harness runs, as its title names it: Grid's, or what the engine reported.
+pub fn pane_label(app: &App, pane: u64) -> String {
+    let observed = app.panes.get(&pane).and_then(|p| app.fleet.agent(&p.machine_id, &p.agent_id)).and_then(|a| {
+        if !a.grid_model.is_empty() { Some(a.grid_model.clone()) }
+        else { crate::runtime_model::details(&a.model, &a.id, &a.engine).map(|m| m.name) }
+    });
+    let label = observed.unwrap_or_else(|| "Model".into()).chars().filter(|c| !c.is_control()).collect::<String>();
+    crate::format::clip_middle(&label, 24)
+}
+
 pub fn target(app: &App) -> Option<Target> {
     let of = |machine: String, agent: String| -> Option<Target> {
-        let a = live_in_pane(app, app.fleet.agent(&machine, &agent)?);
+        if app.fleet.machine(&machine).is_some_and(|m| m.shared) { return None }
+        let a = app.fleet.agent(&machine, &agent)?;
+        let a = if app.models_view.selection_fixed { if a.status == "stopped" { return None } a } else { live_in_pane(app, a) };
         (a.engine != "terminal").then(|| Target { engine: a.engine.clone(), grid_model: a.grid_model.clone(), base_url: a.grid_base_url.clone(), machine, agent: a.id.clone() })
     };
+    if app.models_view.selection_fixed {
+        let selected = app.models_view.selection.as_ref()?;
+        if !selected.matches(app) { return None }
+        return of(selected.machine.clone(), selected.agent.clone());
+    }
     if let Some(t) = crate::input::focused_agent(app).and_then(|(m, a)| of(m, a)) { return Some(t) }
     // No pane focused at all: the harness on screen, when it is the only one. (A pane that is
     // focused — a shell, a terminal — is the one meant: never another harness in its place.)
@@ -430,6 +471,9 @@ pub fn live_in_pane<'a>(app: &'a App, a: &'a crate::fleet::Agent) -> &'a crate::
 
 /// Why there is no harness to move: what the focused pane is, said so a person can act on it.
 pub fn no_target_why(app: &App) -> String {
+    if selection_changed(app) {
+        return "This session changed. Reopen Models for the harness you want to change.".into();
+    }
     let Some(focus) = app.focused() else { return "No pane is focused — click a harness's pane, then open Models".into() };
     let Some(p) = app.panes.get(&focus) else { return "The focused pane is not a harness's".into() };
     if p.agent_id.is_empty() { return "The focused pane is a shell, not a harness — start one with New harness".into() }
@@ -632,6 +676,61 @@ fn grid_row(app: &App, s: &Section, x: &GridModel, t: Option<&Target>, group: &s
         .right(word)
 }
 
+/// A Jev model's row: its machine and grid, and what Enter does — copy how to call it.
+fn jev_row(s: &Section, x: &GridModel) -> Row {
+    let (dot, color) = if x.offline.is_some() { ("· ", theme::MUTED) } else { ("◆ ", theme::SOFT) };
+    Row::new(format!("mv:jev:{}\t{}\t{}", s.name, x.node, x.id), x.id.clone()).group(JEV)
+        .extra(format!("{} {} jev decision", s.name, x.node))
+        .lead(vec![span(dot, fg(color))])
+        .detail(vec![span([x.node.as_str(), s.name.as_str()].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · "), fg(theme::MUTED))])
+        .right(if x.offline.is_some() { "Offline" } else { "Copy" })
+}
+
+/// A Jev model of this computer's: what Enter does with it — Get, Start, or copy how to call it.
+fn jev_local_row(app: &App, m: &LocalModel) -> Row {
+    let op = app.models_view.op_for(&app.fleet.local_id, m).filter(|o| o.active() || o.failed());
+    let word = match (op, jev_local_grid(app, m)) {
+        (Some(o), _) if o.active() => o.word(),
+        (Some(_), _) => "Failed".to_string(),
+        (None, Some(_)) => "Copy".into(),
+        _ if m.running() => "Running".into(),
+        _ if m.downloaded() => "Start".into(),
+        _ => "Get".into(),
+    };
+    let (dot, color) = if m.running() { ("◆ ", theme::accent()) } else if m.downloaded() { ("· ", theme::SOFT) } else { ("↓ ", theme::MUTED) };
+    let detail = [this_computer().to_string(), m.size.map(gb).unwrap_or_default()].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · ");
+    Row::new(format!("mv:jevlocal:{}", m.id), m.name.clone()).group(JEV)
+        .extra(format!("{} local jev decision", m.id))
+        .lead(vec![span(dot, fg(color))])
+        .detail(vec![span(detail, fg(theme::MUTED))])
+        .right(word)
+}
+
+/// The own grid a running Jev model of this computer's is listed on, by name — where it can be called.
+fn jev_local_grid(app: &App, m: &LocalModel) -> Option<String> {
+    if !m.running() { return None }
+    let g = app.models_view.grids.get(&app.fleet.local_id)?;
+    g.sections.iter().find(|s| s.own && s.models.iter().any(|x| x.decision && x.id.eq_ignore_ascii_case(&m.name))).map(|s| s.name.clone())
+}
+
+/// How to call the Jev model [model] on [grid] from a terminal: load the grid's address and key with
+/// `harness grid env` (the harness's own `grid`, so none of one's own is needed, nor one new enough to
+/// call a resting grid), then ask one decision. The key is never in it; the shell reads the variable.
+pub fn jev_request(grid: &str, model: &str) -> String {
+    // (Written in the order a person reads it — model, state, questions — as the desktop's is.)
+    let body = format!(r#"{{"model":{},"state":{},"questions":{}}}"#, json!(model),
+        json!("I was charged twice. Please refund the duplicate."),
+        r#"{"refund":{"type":"noul","instructions":"Is a refund requested?"}}"#);
+    format!("eval \"$(harness grid env {})\"\ncurl \"$OPENAI_BASE_URL/systemone\" \\\n  -H \"Authorization: Bearer $OPENAI_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d {}",
+        shell_word(grid), shell_word(&body))
+}
+
+/// [value] as one shell word: bare when plainly safe, single-quoted otherwise.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || "._:@/+-".contains(c)) { value.to_string() }
+    else { format!("'{}'", value.replace('\'', "'\\''")) }
+}
+
 fn sub_word(app: &App, sub: &Sub, t: Option<&Target>) -> String {
     if t.is_some_and(|t| t.engine == sub.engine) && switching_for(app, t) == Some("") { return SWITCHING.into() }
     match sub_payload(app, sub, t) { Ok(_) => "Use".into(), Err(why) if why == IN_USE => "✓ In use".into(), Err(_) => String::new() }
@@ -663,9 +762,11 @@ const SUBSCRIPTIONS: &str = "Subscriptions";
 const APIS: &str = "APIs";
 const YOUR_MODELS: &str = "Your models";
 const SHARED: &str = "Shared with you";
+/// Jev (System One) decision models from every grid, last: none of them can run a harness.
+const JEV: &str = "Jev models";
 
 /// The rows of the Models view: the desktop picker's sections in its order (`model_search_catalog.dart`)
-/// — Subscriptions, APIs, Your models, the downloads for this computer, Shared with you — drawn from
+/// — Subscriptions, APIs, Your models, the downloads for this computer, Shared with you, Jev models — drawn from
 /// the top as the desktop's are (`settings::top_down`). [query]: what is typed (a search lists what
 /// "More models" and a folded API hide).
 pub fn rows(app: &App, query: &str) -> Vec<Row> {
@@ -716,7 +817,7 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
         out.push(note("engine", &format!("{} can only run on its own login.", engine_label(&t.engine)), YOUR_MODELS));
     }
     let own = |g: &Grids| -> Vec<(Section, GridModel)> {
-        g.sections.iter().filter(|s| s.own).flat_map(|s| s.models.iter().map(move |x| (s.clone(), x.clone()))).collect()
+        g.sections.iter().filter(|s| s.own).flat_map(|s| s.models.iter().filter(|x| !x.decision).map(move |x| (s.clone(), x.clone()))).collect()
     };
     match snap {
         None => {
@@ -727,7 +828,12 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
         Some(s) => {
             if let Some(n) = &s.notice { out.push(note("notice", n, YOUR_MODELS)) }
             let rank = |m: &LocalModel| if v.op_for(&machine, m).is_some_and(Operation::active) || v.pending.as_ref().is_some_and(|p| p.1 == m.id) { 0 } else if m.running() { 1 } else { 2 };
-            let mut mine: Vec<(u8, usize, Row)> = s.models.iter().enumerate().filter(|(_, m)| m.downloaded() || m.can_stop)
+            // (A Jev model this computer serves is listed once, under Jev models: as a local row it
+            // would be offered to a harness, which cannot run on it.)
+            let deciders: Vec<String> = v.grids.get(&machine).into_iter().flat_map(|g| g.sections.iter().filter(|s| s.own))
+                .flat_map(|s| s.models.iter().filter(|x| x.decision).map(|x| x.id.to_lowercase())).collect();
+            let decides = |m: &LocalModel| deciders.iter().any(|d| d.eq_ignore_ascii_case(&m.id) || d.eq_ignore_ascii_case(&m.name));
+            let mut mine: Vec<(u8, usize, Row)> = s.models.iter().enumerate().filter(|(_, m)| (m.downloaded() || m.can_stop) && !m.decision && !decides(m))
                 .map(|(i, m)| (rank(m), i, local_row(app, m, t, YOUR_MODELS))).collect();
             mine.sort_by_key(|(r, i, _)| (*r, *i));
             // (This computer's running ones are listed by their local names, above.)
@@ -746,7 +852,7 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
     if let Some(s) = snap {
         let head = catalog_heading(snap);
         let busy = |m: &LocalModel| v.op_for(&machine, m).is_some_and(Operation::active) || v.pending.as_ref().is_some_and(|p| p.1 == m.id);
-        let (now, rest): (Vec<&LocalModel>, Vec<&LocalModel>) = s.models.iter().filter(|m| !m.downloaded() && !m.can_stop).partition(|m| busy(m));
+        let (now, rest): (Vec<&LocalModel>, Vec<&LocalModel>) = s.models.iter().filter(|m| !m.downloaded() && !m.can_stop && !m.decision).partition(|m| busy(m));
         let shown = if v.more || searching { rest.len() } else { rest.len().min(SHOWN_DOWNLOADS) };
         out.extend(now.iter().chain(rest.iter().take(shown)).map(|m| local_row(app, m, t, &head)));
         if !searching && rest.len() > SHOWN_DOWNLOADS {
@@ -763,7 +869,8 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
             // (A grid with no model to show is not shown — "Nobody was serving here…" says nothing
             // you can use; one that is resting with models to wake keeps its "Show models".)
             let asleep_empty = s.state == "asleep" && !words.offer_wake && !v.asking.contains(&s.name);
-            if s.models.is_empty() && (searching || asleep_empty || (words.subtitle.is_none() && words.sentence.is_none() && !words.offer_wake)) { continue }
+            let chat: Vec<&GridModel> = s.models.iter().filter(|x| !x.decision).collect();
+            if chat.is_empty() && (searching || asleep_empty || (words.subtitle.is_none() && words.sentence.is_none() && !words.offer_wake)) { continue }
             if !searching {
                 if let Some(sentence) = &words.sentence { out.push(note(&format!("grid:{}", s.name), &format!("{} · {sentence}", s.name), SHARED)) }
                 if words.offer_wake {
@@ -771,12 +878,26 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
                         .lead(vec![span("↻ ", fg(theme::accent()))]).right("usually 15–40 s"));
                 }
             }
-            for x in &s.models {
+            for x in chat {
                 let detail = [x.node.as_str(), s.name.as_str(), words.subtitle.as_deref().unwrap_or("")].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · ");
                 out.push(grid_row(app, s, x, t, SHARED).detail(vec![span(detail, fg(theme::MUTED))]));
             }
         }
         if !g.reachable && !searching { out.push(note("shared", "Shared models are unavailable.", SHARED)) }
+
+    }
+
+    // Jev models, last: this computer's own (to get, start, stop — and to call once its grid lists it),
+    // then every grid's, each naming its machine and grid. A Jev model of this computer's that its own
+    // grid lists is one row, this computer's.
+    let mine: Vec<&LocalModel> = snap.map(|s| s.models.iter().filter(|m| m.decision).collect()).unwrap_or_default();
+    for m in &mine { out.push(jev_local_row(app, m)) }
+    if let Some(g) = v.grids.get(&machine) {
+        for s in &g.sections {
+            for x in s.models.iter().filter(|x| x.decision && !(s.own && mine.iter().any(|m| m.name.eq_ignore_ascii_case(&x.id)))) {
+                out.push(jev_row(s, x))
+            }
+        }
     }
 
     out
@@ -794,6 +915,8 @@ const IN_USE: &str = "This harness is on it";
 /// The word on a row, and on the pane, while the harness moves onto it.
 pub const SWITCHING: &str = "Switching…";
 const NO_HARNESS: &str = "Focus a harness to move it onto a model";
+/// What Enter on a Jev model says once its request is copied.
+const JEV_COPIED: &str = "Copied — paste it into a terminal.";
 
 /// What a key on a row comes to — decided here, done by [run]; the tests read the plan.
 #[derive(Clone, Debug, PartialEq)]
@@ -812,6 +935,8 @@ pub enum Plan {
     Wake(String),
     More,
     Api(String),
+    /// Put [text] on the clipboard (and in a paste buffer): how to call a Jev model.
+    Copy(String),
 }
 
 fn local_model(app: &App, id: &str) -> Option<LocalModel> { app.models_view.local.get(&app.fleet.local_id)?.models.iter().find(|m| m.id == id).cloned() }
@@ -848,6 +973,19 @@ pub fn plan_enter(app: &App, id: &str) -> Plan {
     if id == "mv:more" { return Plan::More }
     if let Some(name) = id.strip_prefix("mv:wake:") { return if v.asking.contains(name) { say(STARTING_UP_WAIT) } else { Plan::Wake(name.to_string()) } }
     if let Some(key) = id.strip_prefix("mv:api:") { return Plan::Api(key.to_string()) }
+    if let Some(rest) = id.strip_prefix("mv:jev:") {
+        let mut parts = rest.splitn(3, '\t');
+        let (Some(grid), Some(_node), Some(model)) = (parts.next(), parts.next(), parts.next()) else { return Plan::Nothing };
+        return Plan::Copy(jev_request(grid, model));
+    }
+    if let Some(model) = id.strip_prefix("mv:jevlocal:") {
+        let Some(m) = local_model(app, model) else { return say("This model is gone. Try again in a moment.") };
+        if let Some(o) = v.op_for(&app.fleet.local_id, &m).filter(|o| o.active()) { return Plan::Say(o.word()) }
+        if let Some(grid) = jev_local_grid(app, &m) { return Plan::Copy(jev_request(&grid, &m.name)) }
+        if m.running() { return say("It is starting on your grid — Enter copies how to call it once the grid lists it.") }
+        // Get is the whole of it: the download, an engine new enough to serve it, and the model on the grid.
+        return if m.can_start { Plan::Act { model: m.id.clone(), action: "start" } } else { say("Wait for the current model operation to finish.") };
+    }
     if let Some(rest) = id.strip_prefix("mv:apimodel:") {
         let Some((api, model)) = rest.split_once('\t') else { return Plan::Nothing };
         let Some(api) = v.apis.as_ref().and_then(|a| a.as_ref().ok()).and_then(|l| l.iter().find(|x| x.id == api)) else { return Plan::Nothing };
@@ -913,7 +1051,7 @@ pub fn plan_enter(app: &App, id: &str) -> Plan {
 
 /// What ^S does on row [id]: stop a local model (asked first).
 pub fn plan_stop(app: &App, id: &str) -> Plan {
-    let Some(m) = id.strip_prefix("mv:local:").and_then(|model| local_model(app, model)) else { return Plan::Nothing };
+    let Some(m) = id.strip_prefix("mv:local:").or_else(|| id.strip_prefix("mv:jevlocal:")).and_then(|model| local_model(app, model)) else { return Plan::Nothing };
     let f = facts(app, &m, None);
     if f.busy { return Plan::Say("Wait for the current model operation to finish.".into()) }
     if !m.can_stop { return Plan::Say(if m.running() { "Other models share its engine — stop it from the desktop's Model Manager".into() } else { "It is not running".into() }) }
@@ -922,9 +1060,21 @@ pub fn plan_stop(app: &App, id: &str) -> Plan {
 
 /// Enter (or ^S, [stop]) on row [id] of the view: planned, then done.
 pub fn choose(app: &mut App, picker: &mut Picker, id: &str, stop: bool) {
+    if app.read_only() { picker.say("This client is read-only"); return }
+    if selection_changed(app) {
+        picker.say(no_target_why(app)); return;
+    }
     let key = format!("{id}\u{1f}{}", if stop { "stop" } else { "enter" });
     let plan = if stop { plan_stop(app, id) } else { plan_enter(app, id) };
     run(app, picker, plan, &key);
+}
+
+fn current_identity(app: &App, identity: &crate::session_close::Identity) -> bool {
+    identity.matches(app) && app.fleet.agent(&identity.machine, &identity.agent).is_some_and(|a| a.status != "stopped")
+}
+
+fn selection_changed(app: &App) -> bool {
+    app.models_view.selection_fixed && app.models_view.selection.as_ref().is_some_and(|s| !current_identity(app, s))
 }
 
 fn run(app: &mut App, picker: &mut Picker, plan: Plan, key: &str) {
@@ -956,6 +1106,12 @@ fn run(app: &mut App, picker: &mut Picker, plan: Plan, key: &str) {
         Plan::Api(key) => {
             let v = &mut app.models_view;
             if !v.api_open.remove(&key) { v.api_open.insert(key.clone()); if !v.api_models.contains_key(&key) { read_api_models(app, &key) } }
+        }
+        Plan::Copy(text) => {
+            if !app.headless { crate::clipboard::store(&text) }
+            let limit = app.buffer_limit();
+            app.paste.add(text, limit);
+            picker.say(JEV_COPIED);
         }
     }
 }
@@ -1033,13 +1189,69 @@ fn rpc(app: &mut App, machine: &str, ty: &'static str, payload: Value, wait: Dur
     }
 }
 
+fn release_read(app: &mut App, machine: &str, kind: &str) {
+    match kind {
+        "local" => { app.models_view.reading.remove(machine); },
+        "grids" => { app.models_view.grids_reading.remove(machine); },
+        "act" => { app.models_view.pending = None; },
+        _ => if let Some(name) = kind.strip_prefix("wake:") { app.models_view.asking.remove(name); },
+    }
+}
+
+/// Reconnecting must not leave a spinner stuck, and a previous owner cannot fill a new
+/// account's model/API lists. Request tokens keep an old reply from clearing a newer read.
+fn reconcile_reads(app: &mut App) {
+    let owner = app.fleet.local_id.clone();
+    if app.models_view.owner.as_ref().is_some_and(|old| old != &owner) {
+        let switch_generation = app.models_view.switch_generation.wrapping_add(1);
+        let panel_generation = app.models_view.panel_generation.wrapping_add(1);
+        app.models_view = Models { switch_generation, panel_generation, ..Default::default() };
+    }
+    app.models_view.owner = Some(owner.clone());
+    let stale: Vec<_> = app.models_view.reads.iter().filter(|((machine, _), read)| read.owner != owner || read.connection != app.connection_generation(machine))
+        .map(|(key, _)| key.clone()).collect();
+    for (machine, kind) in stale {
+        app.models_view.reads.remove(&(machine.clone(), kind.clone()));
+        release_read(app, &machine, &kind);
+        if kind == "local" { app.models_view.read_at.remove(&machine); }
+        if kind == "grids" { app.models_view.grids_at.remove(&machine); }
+    }
+}
+
+pub(crate) fn account_changed(app: &mut App) { reconcile_reads(app); }
+
+fn begin_read(app: &mut App, machine: &str, kind: &str) -> ReadEpoch {
+    let read = ReadEpoch { owner:app.fleet.local_id.clone(), connection:app.connection_generation(machine), token:uuid::Uuid::new_v4().simple().to_string() };
+    app.models_view.reads.insert((machine.into(), kind.into()), read.clone());
+    read
+}
+
+fn finish_read(app: &mut App, machine: &str, kind: &str, read: &ReadEpoch) -> bool {
+    let key = (machine.to_string(), kind.to_string());
+    if app.models_view.reads.get(&key) != Some(read) { return false }
+    app.models_view.reads.remove(&key);
+    release_read(app, machine, kind);
+    read.owner == app.fleet.local_id && read.connection == app.connection_generation(machine)
+}
+
+fn read_rpc(app: &mut App, machine: &str, kind: &str, ty: &'static str, payload: Value, wait: Duration,
+    then: impl FnOnce(&mut App, Result<Value, RpcError>) + Send + 'static) -> bool {
+    let read = begin_read(app, machine, kind);
+    let (m, k, epoch) = (machine.to_string(), kind.to_string(), read.clone());
+    let sent = rpc(app, machine, ty, payload, wait, move |app, reply| {
+        if finish_read(app, &m, &k, &epoch) { then(app, reply); }
+    });
+    if !sent { finish_read(app, machine, kind, &read); }
+    sent
+}
+
 /// A daemon's refusal in its own words (the sentence it put in `error`, or its detail).
 fn why(e: &RpcError) -> String { if e.detail.is_empty() { e.code.clone() } else { e.detail.clone() } }
 
 fn read_local(app: &mut App, machine: &str) {
     app.models_view.reading.insert(machine.to_string());
     let m = machine.to_string();
-    if !rpc(app, machine, "grid_fleet_models_list", json!({ "refresh": false }), Duration::from_secs(30), move |app, r| on_local(app, &m, r)) {
+    if !read_rpc(app, machine, "local", "grid_fleet_models_list", json!({ "refresh": false }), Duration::from_secs(30), move |app, r| on_local(app, &m, r)) {
         app.models_view.reading.remove(machine);
         app.models_view.read_at.insert(machine.to_string(), Instant::now());
     }
@@ -1061,13 +1273,24 @@ pub fn on_local(app: &mut App, machine: &str, reply: Result<Value, RpcError>) {
     }
     advance(app);
     crate::input::refill(app);
+    crate::workspace_controls::refresh_workspace(app);
+}
+
+/// The workspace menu uses owned machines' cached inventories, never API catalogs or shared
+/// grids. Read only through connections already open; a count must not wake another computer.
+pub fn refresh_inventory(app: &mut App) {
+    reconcile_reads(app);
+    let machines: Vec<_> = app.fleet.visible_machines().filter(|m| !m.shared && m.usable() && m.online()
+        && !app.models_view.reading.contains(&m.id) && due(app.models_view.read_at.get(&m.id), Duration::from_secs(30), Instant::now()))
+        .map(|m| m.id.clone()).collect();
+    for machine in machines { read_local(app, &machine); }
 }
 
 fn read_grids(app: &mut App, machine: &str) {
     app.models_view.grids_reading.insert(machine.to_string());
     let m = machine.to_string();
     // rowState: offline rows come as `unavailable`, and this window's pushes in the same form.
-    if !rpc(app, machine, "grid_models_list", json!({ "rowState": true }), Duration::from_secs(30), move |app, r| on_grids(app, &m, r)) {
+    if !read_rpc(app, machine, "grids", "grid_models_list", json!({ "rowState": true }), Duration::from_secs(30), move |app, r| on_grids(app, &m, r)) {
         app.models_view.grids_reading.remove(machine);
         app.models_view.grids_at.insert(machine.to_string(), Instant::now());
     }
@@ -1088,7 +1311,14 @@ pub fn on_grids(app: &mut App, machine: &str, reply: Result<Value, RpcError>) {
 
 /// `grid_models_changed`: the daemon's picture changed — the whole document, taken as it is.
 pub fn on_push(app: &mut App, machine: &str, payload: &Value) {
-    app.models_view.grids.insert(machine.to_string(), parse_grids(payload));
+    reconcile_reads(app);
+    // The push is the daemon's complete newer picture. An earlier list/wake reply must
+    // not replace it, nor keep its spinner alive after the requested state has arrived.
+    let stale: Vec<_> = app.models_view.reads.keys().filter(|(m, kind)| m == machine && (kind == "grids" || kind.starts_with("wake:"))).cloned().collect();
+    for (m, kind) in stale { app.models_view.reads.remove(&(m.clone(), kind.clone())); release_read(app, &m, &kind); }
+    let grids = parse_grids(payload);
+    if grids.waking() && app.models_view.follow_until.is_none() { app.models_view.follow_until = Some(Instant::now() + WAKE_FOR); }
+    app.models_view.grids.insert(machine.to_string(), grids);
     app.models_view.grids_at.insert(machine.to_string(), Instant::now());
     advance(app);
     crate::input::refill(app);
@@ -1100,7 +1330,7 @@ pub fn wake(app: &mut App, name: &str) {
     let machine = app.fleet.local_id.clone();
     if !app.models_view.asking.insert(name.to_string()) { return }
     let (m, n) = (machine.clone(), name.to_string());
-    rpc(app, &machine, "grid_models_list", json!({ "rowState": true, "wake": [name] }), Duration::from_secs(12), move |app, r| on_wake(app, &m, &n, r));
+    read_rpc(app, &machine, &format!("wake:{name}"), "grid_models_list", json!({ "rowState": true, "wake": [name] }), Duration::from_secs(12), move |app, r| on_wake(app, &m, &n, r));
 }
 
 pub fn on_wake(app: &mut App, machine: &str, name: &str, reply: Result<Value, RpcError>) {
@@ -1117,7 +1347,7 @@ pub fn on_wake(app: &mut App, machine: &str, name: &str, reply: Result<Value, Rp
 
 fn read_apis(app: &mut App) {
     let machine = app.fleet.local_id.clone();
-    rpc(app, &machine, "api_connections", json!({ "action": "list" }), Duration::from_secs(20), on_apis);
+    read_rpc(app, &machine, "apis", "api_connections", json!({ "action": "list" }), Duration::from_secs(20), on_apis);
 }
 
 pub fn on_apis(app: &mut App, reply: Result<Value, RpcError>) {
@@ -1131,7 +1361,7 @@ pub fn on_apis(app: &mut App, reply: Result<Value, RpcError>) {
 fn read_api_models(app: &mut App, id: &str) {
     let machine = app.fleet.local_id.clone();
     let key = id.to_string();
-    rpc(app, &machine, "api_connections", json!({ "action": "models", "id": id }), Duration::from_secs(25), move |app, r| on_api_models(app, &key, r));
+    read_rpc(app, &machine, &format!("api:{id}"), "api_connections", json!({ "action": "models", "id": id }), Duration::from_secs(25), move |app, r| on_api_models(app, &key, r));
 }
 
 pub fn on_api_models(app: &mut App, id: &str, reply: Result<Value, RpcError>) {
@@ -1150,7 +1380,7 @@ fn act(app: &mut App, model: &str, action: &'static str) {
     app.models_view.use_error = None;
     let ty = match action { "download" => "grid_fleet_model_download", "start" => "grid_fleet_model_start", _ => "grid_fleet_model_stop" };
     let m = machine.clone();
-    if !rpc(app, &machine, ty, json!({ "modelId": model }), Duration::from_secs(30), move |app, r| on_act(app, &m, r)) {
+    if !read_rpc(app, &machine, "act", ty, json!({ "modelId": model }), Duration::from_secs(30), move |app, r| on_act(app, &m, r)) {
         app.models_view.pending = None;
         app.say("This computer is not connected", theme::WARN);
     }
@@ -1174,8 +1404,16 @@ fn retarget(app: &mut App, machine: &str, payload: Value, name: &str, job: bool)
     let agent = payload["agentId"].as_str().unwrap_or("").to_string();
     // Where it goes: a grid's or an API's model, or (clearGrid) back to its own login.
     let to = payload["gridModel"].as_str().or_else(|| payload["apiModel"].as_str()).unwrap_or("").to_string();
+    app.models_view.switch_generation = app.models_view.switch_generation.wrapping_add(1);
+    let generation = app.models_view.switch_generation;
+    let panel = app.models_view.panel_generation;
+    let owner = app.fleet.local_id.clone();
+    let connection = app.connection_generation(machine);
+    let target_machine = machine.to_string();
     app.models_view.switching = Some(Switch { machine: machine.to_string(), agent, to, name: name.to_string(), since: Instant::now() });
-    if !rpc(app, machine, "agent_retarget", payload, Duration::from_secs(60), move |app, r| on_retarget(app, &n, job, r)) {
+    if !rpc(app, machine, "agent_retarget", payload, Duration::from_secs(60), move |app, r| {
+        if generation == app.models_view.switch_generation && owner == app.fleet.local_id && connection == app.connection_generation(&target_machine) { on_retarget_for(app, &n, job, r, panel); }
+    }) {
         app.models_view.switching = None;
         if job { fail(app, "That machine is not connected") } else { app.say("That machine is not connected", theme::WARN) }
     }
@@ -1195,15 +1433,22 @@ fn retarget_error(e: &RpcError) -> String {
 
 /// The daemon moved the harness (its pane restarts on the model — "Switching…" stays until its
 /// frame says so), or said why not.
+#[cfg(test)]
 pub fn on_retarget(app: &mut App, name: &str, job: bool, reply: Result<Value, RpcError>) {
+    let panel = app.models_view.panel_generation;
+    on_retarget_for(app, name, job, reply, panel);
+}
+
+fn on_retarget_for(app: &mut App, name: &str, job: bool, reply: Result<Value, RpcError>, panel: u64) {
+    let same_panel = panel == app.models_view.panel_generation;
     let used = if job { app.models_view.using.take() } else { None };
     let who = app.models_view.switching.as_ref().and_then(|s| app.fleet.agent(&s.machine, &s.agent)).map(|a| a.name.clone()).unwrap_or_else(|| "the harness".into());
     // (A Use's last step: its end, and the one toast that says it.)
     let end = |app: &mut App, failed: Option<String>| if let Some(u) = &used { app.models_view.ended = Some(Ended { row: format!("mv:local:{}", u.model), name: u.name.clone(), step: Step::Switch, failed, seen: false, stops: u.stops.as_ref().map(|(_, n)| n.clone()) }) };
     match reply {
         // Moved: the list has done its job — it closes, and the status line says so.
-        Ok(_) if used.is_some() => { end(app, None); close(app); app.say(format!("✓ {name} is ready · {who} is on it"), theme::ONLINE) }
-        Ok(_) => { close(app); app.say(format!("✓ Switching {who} to {name}…"), theme::ONLINE) }
+        Ok(_) if used.is_some() => { end(app, None); if same_panel { close(app); } app.say(format!("✓ {name} is ready · {who} is on it"), theme::ONLINE) }
+        Ok(_) => { if same_panel { close(app); } app.say(format!("✓ Switching {who} to {name}…"), theme::ONLINE) }
         Err(e) => {
             let why = retarget_error(&e);
             let w = format!("Could not switch {who} to {name}: {why}");
@@ -1276,7 +1521,8 @@ fn start_use(app: &mut App, model: &str, download: bool) {
     // answers until this one is ready to start.
     let stops = other_running(app, &m).map(|o| (o.id, o.name));
     let step = match (&stops, download && supports) { (_, true) => Step::Get, (Some(_), false) => Step::Stop, (None, false) => if download { Step::Get } else { Step::Start } };
-    app.models_view.using = Some(Use { model: m.id.clone(), name: m.name.clone(), machine: t.machine, agent: t.agent, step, stops: stops.clone(), since: Instant::now() });
+    let identity = app.fleet.agent(&t.machine, &t.agent).map(|a| crate::session_close::Identity::capture(app, a));
+    app.models_view.using = Some(Use { model: m.id.clone(), name: m.name.clone(), machine: t.machine, agent: t.agent, step, stops: stops.clone(), since: Instant::now(), identity });
     app.models_view.ended = None;
     match (step, stops) {
         (Step::Stop, Some((other, _))) => act(app, &other, "stop"),
@@ -1296,6 +1542,9 @@ fn fail(app: &mut App, why: &str) {
 /// Take the Use on as far as what the daemon has said allows.
 pub fn advance(app: &mut App) {
     let Some(job) = app.models_view.using.clone() else { return };
+    if job.identity.as_ref().is_some_and(|i| !current_identity(app, i)) {
+        fail(app, "The session or connection changed. Reopen Models before switching it."); return;
+    }
     let machine = app.fleet.local_id.clone();
     let v = &app.models_view;
     let snap = v.local.get(&machine);
@@ -1322,6 +1571,11 @@ pub fn advance(app: &mut App) {
 
 /// The view opened: read what it shows now (what was read in the last 20 s of the grids is kept).
 pub fn open(app: &mut App) {
+    reconcile_reads(app);
+    app.models_view.selection_fixed = false;
+    app.models_view.selection = target(app).and_then(|t| app.fleet.agent(&t.machine, &t.agent)).map(|a| crate::session_close::Identity::capture(app, a));
+    app.models_view.selection_fixed = true;
+    app.models_view.panel_generation = app.models_view.panel_generation.wrapping_add(1);
     let machine = app.fleet.local_id.clone();
     if machine.is_empty() || app.link(&machine).is_none() { return }
     if !app.models_view.reading.contains(&machine) { read_local(app, &machine) }
@@ -1335,7 +1589,9 @@ pub fn loading(app: &App) -> bool { !app.models_view.reading.is_empty() || !app.
 /// Every tick: read this computer's models as often as [poll_every] says, the grids as often as
 /// [grids_every] says, and take a Use on (its deadlines).
 pub fn tick(app: &mut App) {
+    reconcile_reads(app);
     let open = matches!(&app.modal, Some(crate::modal::Modal::Picker { kind: crate::modal::PickerKind::Models, .. }));
+    if !open { app.models_view.selection_fixed = false; app.models_view.selection = None; }
     follow(app);
     app.models_view.starts.retain(|_, at| at.elapsed() < START_CAP);
     if app.models_view.switching.as_ref().is_some_and(|s| switched(app, s)) { app.models_view.switching = None }
@@ -1498,7 +1754,7 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
         let x = section.and_then(|s| s.models.iter().find(|x| x.id == model));
         let own = section.is_some_and(|s| s.own);
         let status = match x.and_then(|x| x.offline.clone()) { Some(who) => format!("{who} seems offline — its models come back when it does"), None => "Available".into() };
-        let status = match grid_word(app, x.cloned().as_ref().unwrap_or(&GridModel { id: model.to_string(), node: node.to_string(), offline: None }), t).as_str() {
+        let status = match grid_word(app, x.cloned().as_ref().unwrap_or(&GridModel { id: model.to_string(), node: node.to_string(), offline: None, decision: false }), t).as_str() {
             SWITCHING => format!("{SWITCHING} this harness is moving onto it"),
             "✓ In use" => format!("{status} · this harness is on it"),
             _ => status,
@@ -1512,6 +1768,68 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
         if !said.is_empty() { out.push(Line::raw("")); out.push(Line::from(span(said, fg(theme::accent())))) }
         return out;
     }
+    if let Some(model) = id.strip_prefix("mv:jevlocal:") {
+        let Some(m) = local_model(app, model) else { return vec![dim("(gone)")] };
+        let here = this_computer();
+        let grid = jev_local_grid(app, &m);
+        let op = v.op_for(&machine, &m);
+        let mut out = vec![bold(m.name.clone()), Line::raw(["Jev model", &capital(here), grid.as_deref().unwrap_or("")].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · "))];
+        out.push(Line::raw(""));
+        out.push(Line::raw("Answers questions about a state with probabilities: a choice between named options, yes or no, or a score. It does not chat, so no harness runs on it."));
+        out.push(Line::raw(""));
+        out.push(match op {
+            Some(o) if o.active() => Line::raw(o.word()),
+            Some(o) if o.failed() => warn(o.error.clone().unwrap_or_else(|| "It could not start. Try again.".into())),
+            _ if m.running() => Line::raw(format!("Running on {here}, on your grid.")),
+            _ if m.downloaded() => Line::raw("Downloaded. Start runs it on your grid, beside the models already running there."),
+            _ => Line::raw(format!("Get downloads it{}, updates Grid's model engine first if it is too old to serve Jev models, and runs it on your grid, beside the models already running there.",
+                m.size.map(|s| format!(" ({})", gb(s))).unwrap_or_default())),
+        });
+        out.push(Line::raw(""));
+        if let Some(size) = m.size { out.push(kv("Size", gb(size))) }
+        out.push(kv("Runs in", "Grid's llama.cpp"));
+        if let Some(grid) = &grid {
+            out.push(kv("Grid", grid.clone()));
+            out.push(kv("Endpoint", "POST $OPENAI_BASE_URL/systemone"));
+            out.push(Line::raw(""));
+            out.push(Line::raw("Call it from a terminal:"));
+            out.extend(jev_request(grid, &m.name).lines().map(|l| Line::from(span(l.to_string(), fg(theme::SOFT)))));
+            out.push(Line::raw(""));
+            out.push(dim("The first line loads this grid's address and key into your shell; the key is never shown here."));
+        }
+        let said = match (grid.is_some(), m.running(), m.downloaded()) {
+            (true, _, _) => "Enter copies how to call it. ^S stops it and frees its memory. The download is kept.",
+            (false, true, _) => "^S stops it and frees its memory. The download is kept.",
+            (false, false, true) => "Enter starts it.",
+            _ => "Enter gets it.",
+        };
+        if op.is_none_or(|o| !o.active()) { out.push(Line::raw("")); out.push(Line::from(span(said, fg(theme::accent())))) }
+        return out;
+    }
+    if let Some(rest) = id.strip_prefix("mv:jev:") {
+        let mut parts = rest.splitn(3, '\t');
+        let (grid, node, model) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        let section = v.grids.get(&machine).and_then(|g| g.sections.iter().find(|s| s.name == grid));
+        let offline = section.and_then(|s| s.models.iter().find(|x| x.id == model)).and_then(|x| x.offline.clone());
+        let resting = section.is_some_and(|s| s.state == "asleep" || s.state == "waking");
+        let mut out = vec![bold(model.to_string()), Line::raw(["Jev model", node, grid].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · "))];
+        out.push(Line::raw(""));
+        out.push(Line::raw("Answers questions about a state with probabilities: a choice between named options, yes or no, or a score. It does not chat, so no harness runs on it."));
+        if let Some(who) = offline { out.push(Line::raw("")); out.push(warn(format!("{who} seems offline — it answers again when that computer is back"))) }
+        else if resting { out.push(Line::raw("")); out.push(dim("Its grid is resting. Your first request wakes it, which takes a few seconds.")) }
+        out.push(Line::raw(""));
+        out.push(kv("Model", model.to_string()));
+        out.push(kv("Grid", grid.to_string()));
+        out.push(kv("Endpoint", "POST $OPENAI_BASE_URL/systemone"));
+        out.push(Line::raw(""));
+        out.push(Line::raw("Call it from a terminal:"));
+        out.extend(jev_request(grid, model).lines().map(|l| Line::from(span(l.to_string(), fg(theme::SOFT)))));
+        out.push(Line::raw(""));
+        out.push(dim("The first line loads this grid's address and key into your shell; the key is never shown here. Each question is a choice (named options), a noul (yes or no) or a score (2–10 ordered levels)."));
+        out.push(Line::raw(""));
+        out.push(Line::from(span("Enter copies it.", fg(theme::accent()))));
+        return out;
+    }
     if let Some(name) = id.strip_prefix("mv:wake:") {
         return vec![bold(format!("Shared · {name}")), Line::raw("Resting to save resources. It starts by itself when you send a message."), Line::raw(""),
             Line::from(span("Enter wakes it to show its models (usually 15–40 s).", fg(theme::accent())))];
@@ -1519,7 +1837,8 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
     if let Some(rest) = id.strip_prefix("mv:sub:") {
         let Some(sub) = subscriptions(app).into_iter().find(|s| format!("{}\t{}", s.engine, s.account) == rest) else { return vec![] };
         let low = sub.left.is_some_and(|l| l <= LOW_WATER);
-        let mut out = vec![bold(if sub.account.is_empty() { sub.title.clone() } else { format!("{} · key ···{}", sub.title, sub.account) })];
+        // (The subscription's name alone: its key is not shown.)
+        let mut out = vec![bold(sub.title.clone())];
         out.push(match sub.left { Some(_) if low => warn(format!("{} · Running low", sub.status)), Some(_) => Line::raw(format!("{} · Healthy", sub.status)), None => Line::raw(sub.status.clone()) });
         match sub_word(app, &sub, t).as_str() {
             SWITCHING => out.push(Line::raw(format!("{SWITCHING} this harness is going back to its own login"))),
@@ -1582,7 +1901,7 @@ mod tests {
         let (sink, _) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(19791, sink, (150, 42));
         app.fleet.local_id = "local".into();
-        app.fleet.machines.push(Machine { id: "local".into(), name: "studio".into(), local: true, status: "online".into(), reach: Reach::Ready });
+        app.fleet.machines.push(Machine { shared: false, id: "local".into(), name: "studio".into(), local: true, status: "online".into(), reach: Reach::Ready });
         frame(&mut app, json!({}));
         let mut tab = crate::app::Tab::with_wid("work", 1);
         tab.root = Some(crate::layout::Node::new(1, 150, 40));
@@ -1592,6 +1911,44 @@ mod tests {
         app.active = 0;
         app.usage.insert("local".into(), vec![Usage { provider: "claude".into(), account: Some("7f0c".into()), windows: vec![Window { label: "5h".into(), used: 88.0, resets: None }, Window { label: "week".into(), used: 40.0, resets: None }] }]);
         app
+    }
+
+    #[test]
+    fn disconnected_inventory_reads_release_loading_without_clearing_a_newer_request() {
+        let mut app = app(); reconcile_reads(&mut app);
+        let mut old = begin_read(&mut app, "local", "local");
+        // This request belonged to a connection that has since gone away.
+        old.connection = Some(7);
+        app.models_view.reads.insert(("local".into(), "local".into()), old.clone());
+        app.models_view.reading.insert("local".into());
+        app.models_view.read_at.insert("local".into(), Instant::now());
+        reconcile_reads(&mut app);
+        assert!(!loading(&app)); assert!(!app.models_view.read_at.contains_key("local"));
+        app.models_view.reading.insert("local".into());
+        let new = begin_read(&mut app, "local", "local");
+        assert!(!finish_read(&mut app, "local", "local", &old));
+        assert!(loading(&app), "the old completion cannot clear the replacement read");
+        assert!(finish_read(&mut app, "local", "local", &new));
+        assert!(!loading(&app));
+    }
+
+    #[test]
+    fn switching_owner_drops_model_and_api_caches_and_rejects_old_replies() {
+        let mut app = app(); reconcile_reads(&mut app);
+        let old = begin_read(&mut app, "local", "apis");
+        app.models_view.apis = Some(Ok(vec![]));
+        app.models_view.grids.insert("local".into(), Grids::default());
+        app.models_view.switch_generation = 5;
+        app.fleet.local_id = "another-owner".into();
+        reconcile_reads(&mut app);
+        assert!(app.models_view.apis.is_none() && app.models_view.grids.is_empty());
+        assert_eq!(app.models_view.switch_generation, 6);
+        assert!(!finish_read(&mut app, "local", "apis", &old));
+        app.fleet.local_id = "local".into(); reconcile_reads(&mut app);
+        let new = begin_read(&mut app, "local", "apis");
+        assert!(!finish_read(&mut app, "local", "apis", &old), "even after returning to the original owner");
+        assert!(finish_read(&mut app, "local", "apis", &new));
+        assert_eq!(app.models_view.switch_generation, 7);
     }
 
     /// The harness's frame, its `grid` as given (`{}`: on its own login).
@@ -1675,6 +2032,72 @@ mod tests {
         on_local(&mut app, "local", Ok(local_reply(qwen("available", Value::Null), false)));
         on_grids(&mut app, "local", Ok(grids_reply(&[])));
         app
+    }
+
+    #[test]
+    fn an_open_picker_keeps_its_original_harness_after_focus_moves() {
+        let mut app = loaded();
+        open(&mut app);
+        let second = crate::fleet::agent_from("local", &json!({"id":"a2", "engine":"codex", "name":"other"}), None);
+        app.fleet.agents.insert(second.key(), second);
+        app.panes.insert(2, crate::pane::Pane::new(2, "local", "a2", 75, 40));
+        app.tabs[0].focus = Some(2);
+        assert_eq!(target(&app).unwrap().agent, "a1");
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, "mv:grid:team\tgpu-box\tllama-70b", false);
+        assert_eq!(last_sent(&app).2["agentId"], "a1");
+        assert_eq!(app.focused(), Some(2), "selecting a model does not move keyboard focus");
+    }
+
+    #[test]
+    fn a_replaced_stopped_or_shared_session_cannot_be_switched_from_a_stale_picker() {
+        for change in ["session", "stopped", "shared", "owner", "missing"] {
+            let mut app = loaded();
+            open(&mut app);
+            let key = ("local".into(), "a1".into());
+            match change {
+                "session" => app.fleet.agents.get_mut(&key).unwrap().session_id = "new-session".into(),
+                "stopped" => app.fleet.agents.get_mut(&key).unwrap().status = "stopped".into(),
+                "shared" => app.fleet.machines[0].shared = true,
+                "owner" => app.fleet.local_id = "new-owner".into(),
+                _ => { app.fleet.agents.remove(&key); }
+            }
+            assert!(target(&app).is_none(), "{change}");
+            let before = app.models_view.sent.len();
+            let mut picker = Picker::new("models", "");
+            choose(&mut app, &mut picker, "mv:grid:team\tgpu-box\tllama-70b", false);
+            choose(&mut app, &mut picker, "mv:local:qwen-35b", false);
+            assert_eq!(app.models_view.sent.len(), before, "{change}: no fallback download or switch");
+            assert!(flash(&picker).contains("session changed"), "{change}");
+        }
+    }
+
+    #[test]
+    fn an_ongoing_download_does_not_switch_a_replacement_session() {
+        let mut app = loaded();
+        open(&mut app);
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, "mv:local:qwen-35b", false);
+        choose(&mut app, &mut picker, "mv:local:qwen-35b", false);
+        assert_eq!(last_sent(&app).1, "grid_fleet_model_download");
+        app.fleet.agents.get_mut(&("local".into(), "a1".into())).unwrap().session_id = "replacement".into();
+        on_local(&mut app, "local", Ok(local_reply(qwen("downloaded", Value::Null), false)));
+        assert!(app.models_view.using.is_none());
+        assert!(!app.models_view.sent.iter().any(|(_, kind, _)| kind == "agent_retarget" || kind == "grid_fleet_model_start"));
+        assert!(toast(&app).contains("session or connection changed"));
+    }
+
+    #[test]
+    fn a_late_switch_receipt_keeps_a_new_picker_open() {
+        let mut app = loaded();
+        open(&mut app);
+        let old_panel = app.models_view.panel_generation;
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, "mv:grid:team\tgpu-box\tllama-70b", false);
+        open(&mut app);
+        app.modal = Some(crate::modal::Modal::Picker { kind: crate::modal::PickerKind::Models, picker });
+        on_retarget_for(&mut app, "llama-70b", false, Ok(json!({"retargeted":true})), old_panel);
+        assert!(matches!(app.modal, Some(crate::modal::Modal::Picker { kind: crate::modal::PickerKind::Models, .. })));
     }
 
     fn row<'a>(rows: &'a [Row], id: &str) -> &'a Row { rows.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("no row {id}: {:?}", rows.iter().map(|r| &r.id).collect::<Vec<_>>())) }
@@ -1801,7 +2224,7 @@ mod tests {
         assert!(text(&preview(&app, "mv:local:gemma-12b")).contains("✗ Failed · Stop a running model to make room"));
 
         // A download the daemon reports failed.
-        let job = Use { model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: None };
+        let job = Use { identity: None, model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: None };
         let failed = Operation::parse(&op("download", "downloading", "failed", None)).map(|mut o| { o.error = Some("The download stopped. Start again to resume.".into()); o });
         assert_eq!(next(&job, None, failed.as_ref(), false, None, Instant::now()), Next::Fail("The download stopped. Start again to resume.".into()));
         // Started, but never listed as served: after three minutes it says so.
@@ -2012,7 +2435,7 @@ mod tests {
         on_local(&mut app, "local", Ok(with_phi(gemma("downloaded", Value::Null), qwen("downloaded", Value::Null), phi("downloaded", op_on("phi", "stop", "stopping", "done")))));
         assert_eq!(last_sent(&app), ("local".into(), "grid_fleet_model_start".into(), json!({ "modelId": "qwen-35b" })));
         // Phi stopped already by the time the download ends: straight to the start.
-        let job = Use { model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: Some(("phi".into(), "Phi".into())) };
+        let job = Use { identity: None, model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: Some(("phi".into(), "Phi".into())) };
         let snap = parse_local(&with_phi(gemma("downloaded", Value::Null), qwen("downloaded", Value::Null), phi("downloaded", Value::Null))).unwrap();
         assert_eq!(next(&job, Some(&snap), None, false, None, Instant::now()), Next::Start);
         // A stop that never ends says so after three minutes.
@@ -2163,7 +2586,15 @@ mod tests {
     #[test]
     fn a_push_replaces_the_grids() {
         let mut app = loaded();
+        let pending_list = begin_read(&mut app, "local", "grids");
+        let pending_wake = begin_read(&mut app, "local", "wake:own-grid");
+        app.models_view.grids_reading.insert("local".into());
+        app.models_view.asking.insert("own-grid".into());
         on_push(&mut app, "local", &json!({ "gridName": "own-grid", "grids": [{ "name": "own-grid", "own": true, "models": [{ "id": "big", "node": "tower" }] }] }));
+        assert!(!finish_read(&mut app, "local", "grids", &pending_list));
+        assert!(!finish_read(&mut app, "local", "wake:own-grid", &pending_wake));
+        assert!(!app.models_view.grids_reading.contains("local"));
+        assert!(!app.models_view.asking.contains("own-grid"));
         let rows = rows_of(&app);
         assert!(rows.iter().any(|r| r.id == "mv:grid:own-grid\ttower\tbig"));
         assert!(rows.iter().all(|r| !r.id.starts_with("mv:grid:team")));
@@ -2207,7 +2638,7 @@ mod tests {
     #[test]
     fn a_resting_section_says_what_the_desktop_says() {
         let s = |state: &str, models: usize, age: Option<u64>, outcome: &str| Section { name: "team".into(), state: state.into(), age, outcome: outcome.into(),
-            models: (0..models).map(|i| GridModel { id: format!("m{i}"), node: "n".into(), offline: None }).collect(), ..Default::default() };
+            models: (0..models).map(|i| GridModel { id: format!("m{i}"), node: "n".into(), offline: None, decision: false }).collect(), ..Default::default() };
         assert_eq!(section_words(&s("asleep", 1, Some(180), ""), false).subtitle.as_deref(), Some("Asleep 3min ago"));
         assert!(section_words(&s("asleep", 0, None, ""), false).offer_wake);
         assert_eq!(section_words(&s("asleep", 0, None, ""), true), Words { subtitle: None, sentence: Some(STARTING_UP_WAIT.into()), offer_wake: false });
@@ -2335,5 +2766,104 @@ mod tests {
         assert!(s.contains("Shared with you") || s.contains("llama-70b"), "{s}");
         // It is in the Commands panel, in the Harness group.
         assert!(crate::modal::command_rows(&app).iter().any(|r| r.id == "cmd:models" && r.group.as_deref() == Some("Harness")));
+    }
+
+    /// Jev (System One) models: listed last under their own heading, from the own grid and a shared
+    /// one alike — never under Your models or Shared with you, never a harness's — and Enter puts how
+    /// to call one on the clipboard, which the panel shows too.
+    #[test]
+    fn jev_models_are_listed_apart_and_enter_copies_how_to_call_one() {
+        let mut app = app();
+        app.headless = true;
+        on_local(&mut app, "local", Ok(local_reply(qwen("running", Value::Null), false)));
+        let mut g = grids_reply(&["box-model"]);
+        g["grids"][0]["models"].as_array_mut().unwrap().push(json!({ "id": "laya-english", "node": "studio", "kind": "decision" }));
+        g["grids"][1]["models"].as_array_mut().unwrap().push(json!({ "id": "nimble", "node": "gpu-box", "kind": "decision" }));
+        on_grids(&mut app, "local", Ok(g));
+        let rows = rows_of(&app);
+        let jev: Vec<&str> = rows.iter().filter(|r| r.group.as_deref() == Some(JEV)).map(|r| r.id.as_str()).collect();
+        assert_eq!(jev, vec!["mv:jev:own-grid\tstudio\tlaya-english", "mv:jev:team\tgpu-box\tnimble"]);
+        assert_eq!(rows.last().and_then(|r| r.group.as_deref()), Some(JEV), "the last section");
+        assert!(rows.iter().filter(|r| r.group.as_deref() != Some(JEV)).all(|r| r.label != "laya-english" && r.label != "nimble"));
+        let laya = row(&rows, "mv:jev:own-grid\tstudio\tlaya-english");
+        assert_eq!(laya.right.trim(), "Copy");
+        assert_eq!(laya.detail.iter().map(|s| s.content.as_ref()).collect::<String>(), "studio · own-grid");
+
+        let request = jev_request("own-grid", "laya-english");
+        assert!(request.starts_with("eval \"$(harness grid env own-grid)\"\n"), "{request}");
+        assert!(request.contains("curl \"$OPENAI_BASE_URL/systemone\"") && request.contains("Bearer $OPENAI_API_KEY"), "{request}");
+        assert!(request.contains("\"model\":\"laya-english\""), "{request}");
+        // Byte for byte the desktop's (`jevRequest` in model_search_catalog.dart).
+        assert!(request.ends_with(r#"-d '{"model":"laya-english","state":"I was charged twice. Please refund the duplicate.","questions":{"refund":{"type":"noul","instructions":"Is a refund requested?"}}}'"#), "{request}");
+        assert_eq!(shell_word("my grid"), "'my grid'");
+        assert_eq!(shell_word("o'brien"), "'o'\\''brien'");
+
+        let panel = text(&preview(&app, "mv:jev:own-grid\tstudio\tlaya-english"));
+        assert!(panel.contains("Jev model · studio · own-grid") && panel.contains("Call it from a terminal:"), "{panel}");
+        assert!(panel.contains(&request), "{panel}");
+        assert_eq!(plan_enter(&app, "mv:jev:own-grid\tstudio\tlaya-english"), Plan::Copy(request.clone()));
+
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, "mv:jev:own-grid\tstudio\tlaya-english", false);
+        assert_eq!(picker.flash.as_ref().map(|(t, _)| t.as_str()), Some(JEV_COPIED));
+        assert_eq!(app.paste.top().map(|b| b.data.clone()), Some(request), "in a paste buffer too");
+        assert!(app.models_view.switching.is_none(), "no harness was moved");
+
+        // This computer serving the own grid's Jev model (`grid join --serve`): listed once, under Jev models.
+        let mut served = local_reply(qwen("running", Value::Null), false);
+        served["models"].as_array_mut().unwrap().push(json!({ "id": "local:Laya-English-Q8_0.gguf", "name": "laya-english", "state": "running", "canStop": true, "sizeBytes": 449397600u64 }));
+        on_local(&mut app, "local", Ok(served));
+        assert_eq!(rows_of(&app).iter().filter(|r| r.label.starts_with("laya-english")).map(|r| r.group.clone().unwrap_or_default()).collect::<Vec<_>>(), vec![JEV.to_string()]);
+
+        // A resting grid wakes on the request: the panel says so, and the row still offers the copy.
+        assert!(!text(&preview(&app, "mv:jev:team\tgpu-box\tnimble")).contains("resting"));
+        app.models_view.grids.get_mut("local").unwrap().sections.iter_mut().find(|s| s.name == "team").unwrap().state = "asleep".into();
+        assert!(text(&preview(&app, "mv:jev:team\tgpu-box\tnimble")).contains("Its grid is resting. Your first request wakes it"));
+        assert_eq!(row(&rows_of(&app), "mv:jev:team\tgpu-box\tnimble").right.trim(), "Copy");
+    }
+
+    /// A Jev model this computer can get: under Jev models (never the downloads), Get starts it — the
+    /// daemon downloads it, updates Grid's engine and runs it — and once the own grid lists it, it is one
+    /// row whose Enter copies how to call it and whose ^S asks before it stops.
+    #[test]
+    fn a_jev_model_of_this_computer_is_got_started_called_and_stopped_from_its_one_row() {
+        let mut app = app();
+        let laya = |state: &str, op: Value| json!({ "id": "jev:ggml-org/Laya-GGUF", "name": "laya-english", "kind": "decision", "state": state,
+            "sizeBytes": 449397600u64, "quant": "Q8_0", "canStart": state != "running", "canStop": state == "running", "app": "Grid", "operation": op });
+        let mut reply = local_reply(qwen("running", Value::Null), false);
+        reply["models"].as_array_mut().unwrap().push(laya("available", Value::Null));
+        on_local(&mut app, "local", Ok(reply.clone()));
+        on_grids(&mut app, "local", Ok(grids_reply(&["box-model"])));
+        let id = "mv:jevlocal:jev:ggml-org/Laya-GGUF";
+        let rows = rows_of(&app);
+        assert_eq!(row(&rows, id).group.as_deref(), Some(JEV));
+        assert_eq!(row(&rows, id).right.trim(), "Get");
+        assert!(rows.iter().filter(|r| r.label == "laya-english").count() == 1, "never also offered among the downloads");
+        assert!(text(&preview(&app, id)).contains("updates Grid's model engine first if it is too old to serve Jev models"));
+        assert_eq!(plan_enter(&app, id), Plan::Act { model: "jev:ggml-org/Laya-GGUF".into(), action: "start" });
+
+        // Its engine being updated says so, on the row and in the panel.
+        let mut updating = reply.clone();
+        updating["models"].as_array_mut().unwrap().pop();
+        updating["models"].as_array_mut().unwrap().push(laya("available", json!({ "id": "op-jev", "modelId": "jev:ggml-org/Laya-GGUF", "action": "start",
+            "stage": "updating", "phase": "running", "updatedAt": "2026-09-30T00:00:00.000Z" })));
+        on_local(&mut app, "local", Ok(updating));
+        assert_eq!(row(&rows_of(&app), id).right.trim(), "Updating engine");
+        assert!(text(&preview(&app, id)).contains("Updating engine"));
+
+        // Running, and the own grid lists it as a Jev model: one row — this computer's — to call or stop.
+        let mut running = reply.clone();
+        running["models"].as_array_mut().unwrap().pop();
+        running["models"].as_array_mut().unwrap().push(laya("running", Value::Null));
+        on_local(&mut app, "local", Ok(running));
+        let mut g = grids_reply(&["box-model"]);
+        g["grids"][0]["models"].as_array_mut().unwrap().push(json!({ "id": "laya-english", "node": "studio", "kind": "decision" }));
+        on_grids(&mut app, "local", Ok(g));
+        let rows = rows_of(&app);
+        assert_eq!(rows.iter().filter(|r| r.label.starts_with("laya-english")).map(|r| r.id.as_str()).collect::<Vec<_>>(), vec![id]);
+        assert_eq!(row(&rows, id).right.trim(), "Copy");
+        assert_eq!(plan_enter(&app, id), Plan::Copy(jev_request("own-grid", "laya-english")));
+        assert!(text(&preview(&app, id)).contains(&jev_request("own-grid", "laya-english")));
+        assert!(matches!(plan_stop(&app, id), Plan::Arm(_, ref then) if **then == Plan::Act { model: "jev:ggml-org/Laya-GGUF".into(), action: "stop" }));
     }
 }

@@ -18,7 +18,7 @@ import sys
 import time
 import zipfile
 
-CLI_JOBS = {"cli-contracts", "typecheck-test"} | {f"cli-tests ({i})" for i in range(1, 5)} | {
+CLI_JOBS = {"cli-contracts", "cli-coverage-gates", "typecheck-test"} | {f"cli-tests ({i})" for i in range(1, 5)} | {
     f"serial-native ({system}, {node})" for system in ["ubuntu-latest", "macos-latest"] for node in ["20.19.0", "22.23.2"]
 } | {f"process-images-native ({system})" for system in ["macos-15", "macos-15-intel"]}
 TUI_JOBS = {"tui-test (ubuntu-latest, x86_64-unknown-linux-musl)", "tui-test (ubuntu-24.04-arm, aarch64-unknown-linux-musl)"}
@@ -33,9 +33,14 @@ SCOPES["full"] = CLI_JOBS | TUI_JOBS | SCOPES["backend"] | DESKTOP_JOBS | {"comp
 SOURCE_INPUTS = {
     "process": (".github/", "scripts/", "desktop/scripts/", ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),
     # VM tests also read CLI protocol definitions, shared layout fixtures,
-    # daemon metadata and store catalog/artwork, including docs/images posters.
+    # daemon metadata and store catalog/artwork, including docs/images posters,
+    # the Hub's publication rules that desktop/lib/community/hub_contract.dart mirrors, and the
+    # phone's P2P/E2EE sources the web's copies are checked against (test/p2p/mobile_parity_test.dart).
     "desktop": (".github/", "scripts/", "desktop/", "cli/", "tests/", "daemons/", "store/", "docs/images/",
-                "mobile/pubspec.lock", ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),
+                "mobile/pubspec.lock", "backend/src/lib/communityContract.ts",
+                "mobile/lib/p2p/terminal_p2p_plugin.dart", "mobile/lib/p2p/terminal_p2p_link.dart", "mobile/lib/p2p/terminal_p2p_policy.dart",
+                "mobile/lib/ws/terminal_transport_plugin.dart", "mobile/lib/ws/relay_codec.dart", "mobile/lib/e2ee/relay_session_crypto.dart",
+                ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),
 }
 CHECKOUT_STEP = "Verify declared source checkout"
 
