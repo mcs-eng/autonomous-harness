@@ -1,0 +1,5 @@
+{
+"argv": {
+ "claude --resume \"01234567-89ab-cdef-0123-456789abcdef\"": {"claude":{"resumed":"01234567-89ab-cdef-0123-456789abcdef","mode":null,"approves":false},"cursor":{"resumed":"01234567-89ab-cdef-0123-456789abcdef","mode":null,"approves":false},"hermes":{"resumed":"01234567-89ab-cdef-0123-456789abcdef","mode":null,"approves":false},"commandcode":{"resumed":"01234567-89ab-cdef-0123-456789abcdef","mode":null,"approves":false},"devin":{"resumed":"01234567-89ab-cdef-0123-456789abcdef","mode":null,"approves":false},"grok":{"resumed":"01234567-89ab-cdef-0123-456789abcdef","mode":null,"approves":false},"copilot":{"resumed":"01234567-89ab-cdef-0123-456789abcdef","mode":null,"approves":false}}
+}
+}

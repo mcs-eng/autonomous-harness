@@ -34,6 +34,11 @@ import { profileHomeFromEnv, transcriptProject } from './discoveries.js'
 import { ENGINES, PROCESS_ENGINES } from '../testing/upstreamEngines.js'
 
 const GOLDEN = fileURLToPath(new URL('./__fixtures__/discovery.golden.json', import.meta.url))
+// Fork: the Windows fork reads argv with its escape-aware tokenizer (lib/tmux.ts `resumeSessionId`), because its
+// boundary-faithful argv quotes an element, and a quoted resume id is that id. Upstream's record keeps the quotes and
+// reads none. The fork's deliberate differences sit in this file and are laid over the record when comparing, so
+// upstream's record stays byte-identical and a re-record never writes them.
+const FORK_GOLDEN = fileURLToPath(new URL('./__fixtures__/discovery.golden.fork.json', import.meta.url))
 const RECORD = process.env.RECORD_DISCOVERY_GOLDEN === '1'
 
 /** No engine installed as far as file identity goes: the rules alone decide. */
@@ -306,6 +311,10 @@ describe('discovery finds what it did before Claude Code and Codex declared it',
       return
     }
     const { linux: linuxGolden, ...darwinGolden } = JSON.parse(readFileSync(GOLDEN, 'utf8')) as Sections & { linux: Sections }
+    for (const [section, cases] of Object.entries(JSON.parse(readFileSync(FORK_GOLDEN, 'utf8')) as Sections)) {
+      for (const key of Object.keys(cases)) expect(darwinGolden[section], `fork override ${section} · ${key}`).toHaveProperty([key])
+      Object.assign(darwinGolden[section]!, cases)
+    }
     for (const [platform, actual, golden] of [
       ['darwin', darwin, darwinGolden],
       ['linux', linux, Object.fromEntries(Object.entries(darwinGolden).map(([section, cases]) => [section, { ...cases, ...linuxGolden[section] }]))],
