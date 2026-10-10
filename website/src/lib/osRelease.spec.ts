@@ -61,15 +61,26 @@ describe("latest OS release", () => {
     await expect(fetchLatestOSRelease()).rejects.toThrow("Release lookup failed");
   });
 
-  it("authenticates the lookup only when the environment provides a token", async () => {
-    const answer = () => Promise.resolve(new Response(JSON.stringify([release("0.1.0-preview.13")])));
-    const request = vi.fn<typeof fetch>().mockImplementation(answer);
-    vi.stubGlobal("fetch", request);
-    vi.stubEnv("GITHUB_TOKEN", "");
+  it("authenticates every page only when the lookup token is set, keeping the API headers", async () => {
+    const pages = () => vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("[]", { headers: { link: '<ignored>; rel="next"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([release("0.1.0-preview.13")])));
+    const headersOf = (request: ReturnType<typeof pages>, call: number) => new Headers(request.mock.calls[call][1]?.headers);
+    vi.stubEnv("GITHUB_TOKEN", "a-developer-token");
+    vi.stubEnv("OS_RELEASE_LOOKUP_TOKEN", "");
+    const plain = pages();
+    vi.stubGlobal("fetch", plain);
     await fetchLatestOSRelease();
-    expect(new Headers(request.mock.calls[0][1]?.headers).has("authorization")).toBe(false);
-    vi.stubEnv("GITHUB_TOKEN", "ci-token");
+    for (const call of [0, 1]) expect(headersOf(plain, call).has("authorization")).toBe(false);
+    vi.stubEnv("OS_RELEASE_LOOKUP_TOKEN", "ci-token");
+    const signed = pages();
+    vi.stubGlobal("fetch", signed);
     await fetchLatestOSRelease();
-    expect(new Headers(request.mock.calls[1][1]?.headers).get("authorization")).toBe("Bearer ci-token");
+    for (const call of [0, 1]) {
+      const headers = headersOf(signed, call);
+      expect(headers.get("authorization")).toBe("Bearer ci-token");
+      expect(headers.get("accept")).toBe("application/vnd.github+json");
+      expect(headers.get("x-github-api-version")).toBe("2022-11-28");
+    }
   });
 });

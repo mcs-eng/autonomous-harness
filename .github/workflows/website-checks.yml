@@ -53,12 +53,12 @@ jobs:
         # The Install link resolves the latest OS release through the GitHub API; the job token keeps that
         # lookup off the shared runner address's 60-an-hour unauthenticated limit (website/src/lib/osRelease.ts).
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          OS_RELEASE_LOOKUP_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           PORT=3000 HOSTNAME=127.0.0.1 node .next/standalone/server.js > /tmp/website-server.log 2>&1 &
           server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          trap 'status=$?; kill "$server_pid" 2>/dev/null || true; if [ "$status" -ne 0 ]; then cat /tmp/website-server.log; fi' EXIT
           ready=false
           for ((attempt=1; attempt<=30; attempt++)); do
             if curl --fail --silent http://127.0.0.1:3000/os > /dev/null; then
