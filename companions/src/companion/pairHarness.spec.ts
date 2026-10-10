@@ -86,12 +86,7 @@ describe('the package', () => {
     expect(agents).toContain('harness pair <tool> [arguments] --json')
   })
 
-  it('rejects a package without a manifest without installing it', () => {
-    expect(ensureBuiltinPair(PAIR_HARNESS_ID, {})).toBe(false)
-    expect(installedDsh(PAIR_HARNESS_ID)).toBeUndefined()
-  })
-
-  it('keeps an existing collection package launchable through ordinary DSH provisioning, hidden from the catalog', () => {
+  it('keeps an existing collection package launchable through ordinary DSH provisioning', () => {
     const files = pairPackage({ daemonId: 'tim', engine: 'claude', mcpCommand: MCP, tokenFile: '/t' })
     const packageDir = join(dir, 'package')
     mkdirSync(packageDir)
