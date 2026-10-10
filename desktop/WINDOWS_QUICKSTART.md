@@ -524,6 +524,19 @@ fixtures that walk every engine read `cli/src/testing/upstreamEngines.ts`,
 which leaves out Cline, so those fixtures stay identical to upstream's. Cline
 itself is unchanged.
 
+Three of upstream's launch goldens (`launch-argv`, `launch-shapes` and
+`dsh-launch-shapes` under `cli/src/engines/__fixtures__`) are re-recorded on
+Linux for the fork. The fork's launch scripts differ in three intended ways: an
+existing engine must pass its probe before it is used (a Windows npm shim
+inside WSL does not), Copilot installs with its own installer, and a Store
+package names Cline among the engines it supports. `launch-argv` keeps
+upstream's override records, whose former call order its spec pins on purpose.
+`discovery.golden.fork.json` lays the fork's quoted-resume reading over
+upstream's discovery record instead. When a later sync changes these fixtures,
+record them again on Linux (`RECORD_LAUNCH_GOLDEN=1`,
+`RECORD_LAUNCH_SHAPES_GOLDEN=1`, `RECORD_DSH_LAUNCH_SHAPES_GOLDEN=1`); a
+Windows recording writes Windows paths into them.
+
 ## October 10 CI flake fixes
 
 The website check's Install-link lookup reads upstream's releases from the GitHub
