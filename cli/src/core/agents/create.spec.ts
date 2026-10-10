@@ -4,35 +4,45 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installedDsh } from '../../dsh/installed.js'
 import { dshPinnedPermissionMode } from '../../dsh/manifest.js'
-import { materializeWorkspace } from '../../dsh/materialize.js'
-import { harnessLaunchOrRefusal, incompatibleHarnessEngine } from '../../dsh/runtime.js'
-import { preTrustClaudeProject, preTrustCodexProject } from '../../lib/claudeTrust.js'
+import { incompatibleHarnessEngine } from '../../dsh/compatibility.js'
 import { createAndRegisterPane } from '../../lib/createAgentPane.js'
 import { enginePathOverride } from '../../lib/engineBin.js'
-import { buildEngineLaunchArgv, permissionModeFlags, refusePermissionFlagIfUnsupported, supportsFirstPrompt } from '../../lib/engineLaunch.js'
+import { buildEngineLaunchArgv, namedAgentArgs, permissionModeFlags, refusePermissionFlagIfUnsupported, supportsFirstPrompt } from '../../lib/engineLaunch.js'
 import { setUpWithin } from '../../lib/setUpWithin.js'
 import { writeGridConfigDir } from '../../lib/gridConfigDir.js'
-import { buildGridEngineLaunch } from '../../lib/gridLaunch.js'
+import type { GridLaunchAnswer, GridLaunchRequest } from '../../lib/gridLaunchWire.js'
 import { engineHooks } from '../../engines/hooks.js'
-import { installOpencodePlugin } from '../../lib/hooks.js'
+import { loadEngine } from '../../engines/inProcess.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { stopSessionOwner, type SessionOwner } from '../../lib/sessionSearch/external.js'
 import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import { tmuxSupportsSessionEnv } from '../../lib/tmuxVersion.js'
 import { createAgentCreator, type CreateAgentDeps } from './create.js'
+import { prepareInstructionWrites } from '../../scm/scmProjects.js'
+
+vi.mock('../../scm/scmProjects.js', async real => ({ ...await real<object>(), prepareInstructionWrites: vi.fn(async () => {}) }))
 
 vi.mock('../../dsh/installed.js', () => ({ installedDsh: vi.fn(() => undefined) }))
 vi.mock('../../dsh/manifest.js', async (real) => ({ ...await real<object>(), dshPinnedPermissionMode: vi.fn(() => null) }))
-vi.mock('../../dsh/materialize.js', () => ({ materializeWorkspace: vi.fn(async () => ({ warnings: [], created: [], kept: [] })) }))
-vi.mock('../../dsh/runtime.js', async (real) => ({
-  ...await real<object>(),
-  harnessLaunchOrRefusal: vi.fn((prepare: () => unknown) => { prepare(); return { ok: true, launch: { env: { HARNESS_DSH: 'blender' }, args: ['--dsh'] } } }),
-  incompatibleHarnessEngine: vi.fn(() => null),
-  prepareHarnessLaunch: vi.fn(),
-}))
+vi.mock('../../dsh/compatibility.js', () => ({ incompatibleHarnessEngine: vi.fn(() => null) }))
+const materializeWorkspace = vi.fn(async () => ({ warnings: [], created: [], kept: [] }))
+
 vi.mock('../../dsh/launch.js', async (real) => ({ ...await real<object>(), harnessEnvToClear: vi.fn(() => ['HARNESS_OLD']) }))
-vi.mock('../../engines/opencode/version.js', () => ({ opencodeMajorVersion: vi.fn(() => 2) }))
-vi.mock('../../lib/claudeTrust.js', () => ({ preTrustClaudeProject: vi.fn(), preTrustCodexProject: vi.fn() }))
+// OpenCode's version probe is its own code, loaded for an OpenCode launch alone; a test may say it could not be.
+vi.mock('../../engines/inProcess.js', async (real) => {
+  const actual = await real<typeof import('../../engines/inProcess.js')>()
+  return { ...actual, loadEngine: vi.fn(actual.loadEngine) }
+})
+vi.mock('../../engines/launchControl.js', () => ({ opencodeMajorVersion: vi.fn(() => 2) }))
+// The engines' folder trust (engines/launchPrep.ts), one spy per engine: never the person's own config.
+const trust = vi.hoisted(() => ({
+  claudeTrusts: vi.fn((_path: string) => false), codexTrusts: vi.fn((_path: string, _profile?: string | null) => false),
+  preTrustClaudeProject: vi.fn((_path: string): unknown => undefined), preTrustCodexProject: vi.fn((_path: string, _profile?: string | null): unknown => undefined),
+}))
+const { preTrustClaudeProject, preTrustCodexProject } = trust
+vi.mock('../../engines/launchPrep.js', () => ({ folderTrust: (engine: string, profile?: string | null) => engine === 'claude'
+    ? { trusts: (path: string) => trust.claudeTrusts(path), record: (path: string) => trust.preTrustClaudeProject(path) }
+    : engine === 'codex' ? { trusts: (path: string) => trust.codexTrusts(path, profile), record: (path: string) => trust.preTrustCodexProject(path, profile) } : null }))
 vi.mock('../../lib/createAgentPane.js', () => ({ createAndRegisterPane: vi.fn() }))
 vi.mock('../../lib/engineBin.js', async (real) => ({ ...await real<object>(), enginePathOverride: vi.fn(() => null) }))
 vi.mock('../../lib/engineInstall.js', async (real) => ({ ...await real<object>(), engineInstallRecipe: vi.fn(() => ({ install: 'recipe' })) }))
@@ -48,20 +58,24 @@ vi.mock('../../lib/engineLaunch.js', async (real) => ({
 }))
 vi.mock('../../lib/setUpWithin.js', async (real) => ({ ...await real<object>(), setUpWithin: vi.fn(async (run: () => Promise<unknown>) => { await run(); return 'done' }) }))
 vi.mock('../../lib/gridConfigDir.js', () => ({ writeGridConfigDir: vi.fn(async () => '/config/harness-claude') }))
-vi.mock('../../lib/gridLaunch.js', async (real) => ({
+vi.mock('../../lib/gridLaunchWire.js', async (real) => ({
   ...await real<object>(),
-  buildGridEngineLaunch: vi.fn(() => ({ ok: true, launch: { env: { GRID_KEY: 'k' }, args: ['--grid'], webSearch: 'off' } })),
   describeGridLaunch: vi.fn(() => '[grid] claude on Home'),
   gridConflictingEnvToClear: vi.fn(() => ['ANTHROPIC_API_KEY']),
+}))
+// The models service's grid launch (`CreateAgentDeps.buildGridLaunch`), as it answers a launch it can build.
+const buildGridLaunch = vi.fn(async (request: GridLaunchRequest): Promise<GridLaunchAnswer> => ({
+  ok: true, launch: { env: { GRID_KEY: 'k' }, args: ['--grid'], webSearch: 'unsupported' }, override: request.override,
 }))
 vi.mock('../../engines/hooks.js', async (real) => {
   const actual = await real<typeof import('../../engines/hooks.js')>()
   return { ...actual, engineHooks: { ...actual.engineHooks, codex: { ...actual.engineHooks.codex, installIn: vi.fn() } } }
 })
-vi.mock('../../lib/hooks.js', async (real) => ({ ...await real<object>(), installOpencodePlugin: vi.fn() }))
 vi.mock('../../lib/sessionSearch/external.js', async (real) => ({ ...await real<object>(), stopSessionOwner: vi.fn(async () => true) }))
 vi.mock('../../lib/tmux.js', async (real) => ({ ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}) }))
 vi.mock('../../lib/tmuxVersion.js', async (real) => ({ ...await real<object>(), tmuxSupportsSessionEnv: vi.fn(async () => true) }))
+
+const launchDsh = vi.fn<CreateAgentDeps['dshLaunch']['launch']>(async () => ({ ok: true, launch: { env: { HARNESS_DSH: 'blender' }, args: ['--dsh'] } }))
 
 const root = mkdtempSync(join(tmpdir(), 'core-create-'))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
@@ -85,20 +99,21 @@ function setup(over: Partial<CreateAgentDeps> = {}) {
   const deps: CreateAgentDeps = {
     tmuxBackend: {} as CreateAgentDeps['tmuxBackend'],
     registry: { setLaunch: vi.fn(() => ({ ...pending, launch: { state: 'ready' } })) } as unknown as CreateAgentDeps['registry'],
-    adoptableSession: vi.fn(async () => ({ ok: true, cwd: folder(), title: 'Adopted', owner: null, busy: false, launchArgs: [] })) as never,
-    heldBy: vi.fn(async () => 'same' as const),
-    takeOverWhenIdle: vi.fn(async () => {}),
+    externalResume: vi.fn<CreateAgentDeps['externalResume']>(async () => ({ ok: true, session: pending })),
     watchNewPane: vi.fn(async () => {}),
     announceSession: vi.fn(),
     attachDsh: vi.fn(),
     prepareApiTools: vi.fn(),
     hookPort: 4242,
     hooksDisabled: false,
+    installOpencodePlugin: vi.fn(async () => true),
     gridLaunchMachine: vi.fn(() => ({}) as never),
+    buildGridLaunch,
     terminalHintMachineName: () => 'this-mac',
     blocksFolder: vi.fn(() => false),
     gridSetup: vi.fn(() => vi.fn(async () => ({}))) as never,
     privateGridName: vi.fn(async () => 'grid-me'),
+    dshLaunch: { launch: launchDsh, materialize: async () => ({ ok: true, ...await materializeWorkspace() }) },
     ...over,
   }
   return { deps, create: createAgentCreator(deps) }
@@ -113,6 +128,16 @@ describe('creating an agent', () => {
     vi.mocked(createAndRegisterPane).mockReset().mockResolvedValue({ ok: true, spawned: { runtime: { paneId: '%1' } }, pending } as never)
   })
   afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks() })
+
+  it('hands external resume to its durable controller before folder, instructions or engine preparation', async () => {
+    const externalResume = vi.fn<CreateAgentDeps['externalResume']>(async () => ({ ok: true, session: pending }))
+    const test = setup({ externalResume })
+    const input = request({ resumeSessionId: 'conversation' })
+    expect(await test.create(input)).toEqual({ ok: true, session: pending })
+    expect(externalResume).toHaveBeenCalledWith(input)
+    expect(createAndRegisterPane).not.toHaveBeenCalled()
+    expect(test.deps.prepareApiTools).not.toHaveBeenCalled()
+  })
 
   describe('refusals before any pane opens', () => {
     it('without tmux, in a folder being purged, or in a folder that is not one', async () => {
@@ -149,34 +174,38 @@ describe('creating an agent', () => {
       vi.mocked(materializeWorkspace).mockRejectedValueOnce(new Error('disk full')).mockRejectedValueOnce('worse')
       expect(await create(request({ dsh: 'blender' }))).toMatchObject({ error: 'DSH_MATERIALIZE_FAILED', detail: 'could not prepare the workspace for blender · disk full' })
       expect(await create(request({ dsh: 'blender' }))).toMatchObject({ detail: 'could not prepare the workspace for blender · worse' })
-      vi.mocked(harnessLaunchOrRefusal).mockReturnValueOnce({ ok: false, error: 'DSH_RUNTIME', detail: 'no runtime' } as never)
+      launchDsh.mockResolvedValueOnce({ ok: false, error: 'DSH_RUNTIME', detail: 'no runtime' } as never)
       expect(await create(request({ dsh: 'blender' }))).toEqual({ ok: false, error: 'DSH_RUNTIME', detail: 'no runtime' })
+      vi.mocked(installedDsh).mockReset().mockReturnValue(undefined)
+    })
+
+    it('for a harness on a grid models cannot build: asked first, so the folder is left as it was', async () => {
+      vi.mocked(installedDsh).mockReturnValue(installed() as never)
+      const grid = { networkId: 'g1', networkName: 'Home', baseUrl: 'http://g', model: 'm' }
+      const { create } = setup()
+      buildGridLaunch.mockResolvedValueOnce({ ok: false, error: 'GRID_UNAVAILABLE', detail: 'models is down', unavailable: 'models' })
+      expect(await create(request({ dsh: 'blender', grid }))).toEqual({ ok: false, error: 'GRID_UNAVAILABLE', detail: 'models is down' })
+      expect(materializeWorkspace).not.toHaveBeenCalled()
+      expect(preTrustClaudeProject).not.toHaveBeenCalled()
+      expect(prepareInstructionWrites).not.toHaveBeenCalled()
       vi.mocked(installedDsh).mockReset().mockReturnValue(undefined)
     })
 
     it('for a grid it cannot honour: refused by the launch, a tmux too old, or a config it cannot write', async () => {
       const grid = { networkId: 'g1', networkName: 'Home', baseUrl: 'http://g', model: null }
       const { create } = setup()
-      vi.mocked(buildGridEngineLaunch).mockReturnValueOnce({ ok: false, error: 'GRID_ENGINE_UNSUPPORTED', detail: 'no grid for amp' } as never)
+      buildGridLaunch.mockResolvedValueOnce({ ok: false, error: 'GRID_ENGINE_UNSUPPORTED', detail: 'no grid for amp' })
       expect(await create(request({ grid }))).toEqual({ ok: false, error: 'GRID_ENGINE_UNSUPPORTED', detail: 'no grid for amp' })
       vi.mocked(tmuxSupportsSessionEnv).mockResolvedValueOnce(false)
       expect(await create(request({ grid }))).toMatchObject({ error: 'TMUX_TOO_OLD_FOR_GRID' })
       const configured = { ok: true, launch: { env: {}, args: [], webSearch: 'off', configDir: { envVar: 'PI_CONFIG', files: {}, links: [] } } }
-      vi.mocked(buildGridEngineLaunch).mockReturnValueOnce(configured as never).mockReturnValueOnce(configured as never)
+      buildGridLaunch.mockResolvedValueOnce(configured as never).mockResolvedValueOnce(configured as never)
       vi.mocked(writeGridConfigDir).mockRejectedValueOnce(new Error('read-only')).mockRejectedValueOnce('worse')
       expect(await create(request({ grid }))).toMatchObject({ error: 'GRID_CONFIG_FAILED', detail: "could not write claude's grid configuration · read-only" })
       expect(await create(request({ grid }))).toMatchObject({ detail: "could not write claude's grid configuration · worse" })
     })
 
-    it('when opening a conversation that cannot be opened, or that moved or would not quit in its terminal', async () => {
-      const refused = setup({ adoptableSession: vi.fn(async () => ({ ok: false, error: 'SESSION_NOT_FOUND', detail: 'gone' })) as never })
-      expect(await refused.create(request({ resumeSessionId: 'c1' }))).toEqual({ ok: false, error: 'SESSION_NOT_FOUND', detail: 'gone' })
-      const adopted = vi.fn(async () => ({ ok: true, cwd: folder(), title: '', owner, busy: false, launchArgs: [] }))
-      const moved = setup({ adoptableSession: adopted as never, heldBy: vi.fn(async () => 'other' as const) })
-      expect(await moved.create(request({ resumeSessionId: 'c1', takeOver: 'now' }))).toMatchObject({ error: 'SESSION_OPEN_ELSEWHERE' })
-      vi.mocked(stopSessionOwner).mockResolvedValueOnce(false)
-      expect(await setup({ adoptableSession: adopted as never }).create(request({ resumeSessionId: 'c1', takeOver: 'now' }))).toMatchObject({ error: 'SESSION_STOP_FAILED' })
-    })
+
 
     it('when the pane itself cannot be made', async () => {
       vi.mocked(createAndRegisterPane).mockResolvedValueOnce({ ok: false, error: 'SPAWN_FAILED', detail: 'tmux said no' } as never)
@@ -193,7 +222,6 @@ describe('creating an agent', () => {
       expect(deps.announceSession).toHaveBeenCalledWith(pending)
       expect(deps.attachDsh).not.toHaveBeenCalled()
       expect(deps.watchNewPane).toHaveBeenCalledWith('claude', pending, { runtime: { paneId: '%1' } }, ['claude'], { install: 'recipe' }, undefined)
-      expect(deps.takeOverWhenIdle).not.toHaveBeenCalled()
       const pane = vi.mocked(createAndRegisterPane).mock.calls[0][0]
       expect(pane).toMatchObject({ engine: 'claude', sessionLabel: expect.any(String), grid: null, gridLaunchRecord: null, dsh: null, dshRuntime: null, defaultName: null })
     })
@@ -212,6 +240,20 @@ describe('creating an agent', () => {
       vi.mocked(createAndRegisterPane).mockResolvedValueOnce({ ok: true, spawned: { runtime: { paneId: '%3' } }, pending: { ...pending, engine: 'terminal' } } as never)
       vi.mocked(deps.registry.setLaunch).mockReturnValueOnce(null)
       expect(await create(request({ engine: 'terminal' }))).toMatchObject({ ok: true, session: { engine: 'terminal' } })
+    })
+
+    it('does not trust, configure or launch a workspace when the Store cannot prepare it', async () => {
+      vi.mocked(installedDsh).mockReturnValue(installed() as never)
+      const refused = { ok: false as const, error: 'DSH_UNAVAILABLE', detail: 'Store unavailable', unavailable: 'store' as const }
+      const materialize = vi.fn(async () => refused)
+      const { create } = setup({ dshLaunch: { materialize, launch: launchDsh } })
+      expect(await create(request({ dsh: 'blender' }))).toEqual({ ok: false, error: refused.error, detail: refused.detail })
+      expect(launchDsh).not.toHaveBeenCalled()
+      expect(createAndRegisterPane).not.toHaveBeenCalled()
+      expect(preTrustClaudeProject).not.toHaveBeenCalled()
+      materialize.mockResolvedValueOnce({ ok: false, error: 'DSH_MATERIALIZE_FAILED', detail: 'disk full' } as never)
+      expect(await create(request({ dsh: 'blender' }))).toMatchObject({ error: 'DSH_MATERIALIZE_FAILED', detail: 'could not prepare the workspace for blender · disk full' })
+      vi.mocked(installedDsh).mockReset().mockReturnValue(undefined)
     })
 
     it('as a DSH: its workspace prepared, trusted when it went into an empty folder, and its launch layered on', async () => {
@@ -284,10 +326,10 @@ describe('creating an agent', () => {
       const { create } = setup()
       await create(request({ grid }))
       expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).toMatchObject({
-        grid: { baseUrl: 'http://g', model: 'm1' }, gridLaunchRecord: { override: grid, webSearch: 'off' }, env: expect.objectContaining({ GRID_KEY: 'k' }),
+        grid: { baseUrl: 'http://g', model: 'm1' }, gridLaunchRecord: { override: grid, webSearch: 'unsupported' }, env: expect.objectContaining({ GRID_KEY: 'k' }),
       })
       const withFile = (pointAt?: string) => ({ ok: true, launch: { env: {}, args: [], webSearch: 'off', configDir: { envVar: 'OPENCODE_CONFIG', files: {}, links: [], pointAt } } })
-      vi.mocked(buildGridEngineLaunch).mockReturnValueOnce(withFile('opencode.json') as never).mockReturnValueOnce(withFile() as never)
+      buildGridLaunch.mockResolvedValueOnce(withFile('opencode.json') as never).mockResolvedValueOnce(withFile() as never)
       await create(request({ grid: { ...grid, model: undefined } }))
       await create(request({ grid }))
       expect(vi.mocked(createAndRegisterPane).mock.calls[1][0]).toMatchObject({ grid: { model: null }, env: { OPENCODE_CONFIG: '/config/harness-claude/opencode.json' } })
@@ -300,13 +342,35 @@ describe('creating an agent', () => {
       await on.create(request({ engine: 'codex', codexHome: '/codex-work' }))
       await on.create(request({ engine: 'opencode' }))
       expect(engineHooks.codex.installIn).toHaveBeenCalledWith(4242, '/codex-work')
-      expect(installOpencodePlugin).toHaveBeenCalledWith(4242)
+      expect(on.deps.installOpencodePlugin).toHaveBeenCalledWith(4242)
       expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).toMatchObject({ env: { CODEX_HOME: '/codex-work' }, codexHome: '/codex-work' })
       const off = setup({ hooksDisabled: true })
       await off.create(request({ engine: 'codex', codexHome: '/codex-work' }))
       await off.create(request({ engine: 'opencode' }))
       expect(engineHooks.codex.installIn).toHaveBeenCalledTimes(1)
-      expect(installOpencodePlugin).toHaveBeenCalledTimes(1)
+      expect(off.deps.installOpencodePlugin).not.toHaveBeenCalled()
+    })
+
+    it('refuses an OpenCode create whose plugin installer could not be loaded, before any pane opens', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const t = setup({ installOpencodePlugin: vi.fn(async () => false) })
+      expect(await t.create(request({ engine: 'opencode' }))).toEqual({ ok: false, error: 'ENGINE_UNAVAILABLE', detail: 'OpenCode\'s plugin installer could not be loaded' })
+      expect(warn).toHaveBeenCalledWith('[agent] create opencode refused · OpenCode\'s plugin installer could not be loaded')
+      expect(createAndRegisterPane).not.toHaveBeenCalled()
+      warn.mockRestore()
+    })
+
+    it('creates OpenCode from eager facts when optional code cannot load', async () => {
+      vi.mocked(loadEngine).mockImplementation(() => new Promise(() => {}))
+      const t = setup()
+      await t.create(request({ engine: 'opencode', agent: 'reviewer' }))
+      expect(namedAgentArgs).toHaveBeenLastCalledWith('opencode', 'reviewer', 2)
+      expect(createAndRegisterPane).toHaveBeenCalledOnce()
+      expect(t.deps.installOpencodePlugin).toHaveBeenCalledWith(4242)
+      expect(loadEngine).not.toHaveBeenCalled()
+      buildGridLaunch.mockResolvedValueOnce({ ok: false, error: 'GRID_UNSUPPORTED', detail: 'no' })
+      await t.create(request({ engine: 'claude', agent: 'reviewer', grid: { networkName: 'g' } }))
+      expect(t.deps.gridLaunchMachine).toHaveBeenCalledWith('claude')
     })
 
     it('opens as a named agent, with a first prompt, and does not install an engine with a path override', async () => {
@@ -320,47 +384,8 @@ describe('creating an agent', () => {
       expect(deps.watchNewPane).toHaveBeenCalledWith('claude', pending, expect.anything(), ['claude'], undefined, undefined)
     })
 
-    it('opens a conversation Harness did not start, in its folder and under its title, resuming it', async () => {
-      const cwd = folder()
-      const adopted = vi.fn(async () => ({ ok: true, cwd, title: 'Fix the build', owner: null, busy: false, launchArgs: ['--model', 'opus'] }))
-      const { create } = setup({ adoptableSession: adopted as never })
-      await create(request({ resumeSessionId: 'c1' }))
-      expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).toMatchObject({ cwd, defaultName: 'Fix the build' })
-      expect(vi.mocked(buildEngineLaunchArgv).mock.calls[0][1]).toMatchObject({ resumeSessionId: 'c1', extraArgs: ['--model', 'opus'] })
-      const untitled = vi.fn(async () => ({ ok: true, cwd, title: '', owner: null, busy: false, launchArgs: [] }))
-      await setup({ adoptableSession: untitled as never }).create(request({ resumeSessionId: 'c1' }))
-      expect(vi.mocked(createAndRegisterPane).mock.calls[1][0]).toMatchObject({ defaultName: null })
-      await setup({ adoptableSession: untitled as never }).create(request({ resumeSessionId: 'c1', name: 'Mine' }))
-      expect(vi.mocked(createAndRegisterPane).mock.calls[2][0]).toMatchObject({ defaultName: 'Mine' })
-    })
 
-    it('takes a conversation over from a terminal: stopped now (mid-turn: told to continue), or once its turn ends', async () => {
-      const log = vi.mocked(console.log)
-      const busyOwner = vi.fn(async () => ({ ok: true, cwd: folder(), title: '', owner, busy: true, launchArgs: [] }))
-      const now = setup({ adoptableSession: busyOwner as never })
-      await now.create(request({ resumeSessionId: 'c1', takeOver: 'now' }))
-      expect(stopSessionOwner).toHaveBeenCalledWith(owner)
-      expect(vi.mocked(buildEngineLaunchArgv).mock.calls[0][1]).toMatchObject({ firstPrompt: 'continue' })
-      expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('pid 7 stopped mid-turn'))).toBe(true)
-      // An engine that cannot open with a message just resumes where it stopped.
-      vi.mocked(supportsFirstPrompt).mockReturnValueOnce(false)
-      await now.create(request({ resumeSessionId: 'c1', takeOver: 'now' }))
-      expect(vi.mocked(buildEngineLaunchArgv).mock.calls[1][1]).not.toHaveProperty('firstPrompt')
-      const idleOwner = vi.fn(async () => ({ ok: true, cwd: folder(), title: '', owner, busy: false, launchArgs: [] }))
-      await setup({ adoptableSession: idleOwner as never }).create(request({ resumeSessionId: 'c1', takeOver: 'now' }))
-      expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.endsWith('pid 7 stopped'))).toBe(true)
-      // Quit in its terminal meanwhile: nothing to stop.
-      const free = setup({ adoptableSession: idleOwner as never, heldBy: vi.fn(async () => 'free' as const) })
-      vi.mocked(stopSessionOwner).mockClear()
-      await free.create(request({ resumeSessionId: 'c1', takeOver: 'now' }))
-      expect(stopSessionOwner).not.toHaveBeenCalled()
-      // To wait for its turn: the pane waits on the process, and the watcher has a day.
-      const wait = setup({ adoptableSession: busyOwner as never })
-      await wait.create(request({ resumeSessionId: 'c1', takeOver: 'wait' }))
-      expect(stopSessionOwner).not.toHaveBeenCalled()
-      expect(vi.mocked(buildEngineLaunchArgv).mock.lastCall?.[1]).toMatchObject({ waitForPid: { pid: 7, name: 'Claude' } })
-      expect(wait.deps.watchNewPane).toHaveBeenCalledWith('claude', pending, expect.anything(), ['claude'], { install: 'recipe' }, 24 * 60 * 60_000)
-      expect(wait.deps.takeOverWhenIdle).toHaveBeenCalledWith('a1', owner, 'c1')
-    })
+
+
   })
 })

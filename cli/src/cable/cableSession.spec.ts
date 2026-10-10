@@ -1196,7 +1196,38 @@ describe('cable session', () => {
     await session.stop()
   })
 
-  it('coalesces quick app selections so the newest one focuses last', async () => {
+  it('focuses a remote pane before its machine connection answers', async () => {
+    let selected = 'mac-local'
+    let finishSelection!: () => void
+    const gate = new Promise<void>(resolve => { finishSelection = resolve })
+    const selectMachine = vi.fn(async (machineId: string) => {
+      await gate
+      selected = machineId
+      return { ok: true as const }
+    })
+    const { session, port } = await connect(makeHost({
+      selectedMachine: () => selected,
+      selectMachine,
+      listAgents: async () => [...AGENTS, { id: 'r1', name: 'Remote pane', machineId: 'remote-machine' }],
+    }))
+    let following: Promise<void> | undefined
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+      await settle()
+      port.sent.length = 0
+      following = session.followApp('remote-machine', 'r1')
+      await settle()
+      expect(selectMachine).toHaveBeenCalledWith('remote-machine')
+      expect(selected).toBe('mac-local')
+      expect(port.sent.filter(m => m.t === 'focus')).toEqual([{ t: 'focus', agentId: 'r1' }])
+    } finally {
+      finishSelection()
+      await following
+      await session.stop()
+    }
+  })
+
+  it('follows the newest pane without waiting for an older machine selection', async () => {
     let selected = 'mac-local'
     let finishFirstSelection!: () => void
     const firstSelectionGate = new Promise<void>((resolve) => { finishFirstSelection = resolve })
@@ -1217,13 +1248,21 @@ describe('cable session', () => {
 
     const oldSelection = session.followApp('remote-machine', 'r1')
     await settle()
+    port.sent.length = 0
     const newestSelection = session.followApp('mac-local', 'a2')
-    finishFirstSelection()
-    await Promise.all([oldSelection, newestSelection])
-
-    expect(port.sent.filter((m) => m.t === 'focus').map((m) => m.agentId)).toEqual(['a2'])
-    expect(selected).toBe('mac-local')
-    await session.stop()
+    try {
+      await settle()
+      expect(port.sent.filter((m) => m.t === 'focus').map((m) => m.agentId)).toEqual(['a2'])
+      finishFirstSelection()
+      await Promise.all([oldSelection, newestSelection])
+      expect(port.sent.filter((m) => m.t === 'focus').map((m) => m.agentId)).toEqual(['a2'])
+      expect(port.sent.filter((m) => m.t === 'machine.selected').map((m) => m.machineId)).toEqual(['mac-local'])
+      expect(selected).toBe('mac-local')
+    } finally {
+      finishFirstSelection()
+      await Promise.all([oldSelection, newestSelection])
+      await session.stop()
+    }
   })
 
   it.each([{ selections: ['a2'] }, { selections: ['a1', 'a2'] }])('delivers the latest focus when $selections supersedes an unsent selection', async ({ selections }) => {
@@ -1242,6 +1281,71 @@ describe('cable session', () => {
       expect(port.sent.filter(m => m.t === 'focus')).toEqual([{ t: 'focus', agentId: 'a2' }])
     } finally { await session.stop() }
   })
+
+  it('settles the machine wheel when a newer pane uses the same pending connection', async () => {
+    let selected = 'mac-local'
+    let finish!: () => void
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    const selectMachine = vi.fn(async (machineId: string) => {
+      await gate
+      selected = machineId
+      return { ok: true as const }
+    })
+    const { session, port } = await connect(makeHost({ selectedMachine: () => selected, selectMachine }))
+    const pending: Promise<void>[] = []
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+      await settle()
+      pending.push(session.followApp('remote-machine', 'r1'))
+      await settle()
+      port.sent.length = 0
+      pending.push(session.followApp('remote-machine', 'r2'))
+      await settle()
+      expect(port.sent.filter(m => m.t === 'focus')).toEqual([{ t: 'focus', agentId: 'r2' }])
+      finish()
+      await Promise.all(pending)
+      expect(selectMachine).toHaveBeenCalledTimes(1)
+      expect(port.sent.filter(m => m.t === 'machines.end').at(-1)).toMatchObject({ selected: 'remote-machine' })
+      expect(port.sent.filter(m => m.t === 'focus')).toEqual([{ t: 'focus', agentId: 'r2' }])
+    } finally { finish(); await Promise.all(pending); await session.stop() }
+  })
+
+  it.each(['refused', 'throws', 'disconnected'])(
+    'keeps pane focus independent when a remote attachment is %s', async outcome => {
+      let finish!: () => void
+      const gate = new Promise<void>(resolve => { finish = resolve })
+      const log = vi.fn()
+      const { session, port } = await connect(makeHost({
+        log,
+        selectMachine: async () => {
+          await gate
+          if (outcome === 'throws') throw new Error('connection lost')
+          if (outcome === 'refused') return { ok: false, code: 'UNREACHABLE', message: 'Remote unavailable' }
+          return { ok: true }
+        },
+      }))
+      let following: Promise<void> | undefined
+      try {
+        port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+        await settle()
+        port.sent.length = 0
+        following = session.followApp('remote-machine', 'r1')
+        await settle()
+        expect(port.sent.filter(m => m.t === 'focus')).toEqual([{ t: 'focus', agentId: 'r1' }])
+        if (outcome === 'disconnected') await port.close()
+        finish()
+        await following
+        if (outcome === 'disconnected') {
+          expect(port.sent).toEqual([{ t: 'focus', agentId: 'r1' }])
+        } else {
+          if (outcome === 'refused') expect(port.sent).toContainEqual(expect.objectContaining({ t: 'machine.error', code: 'UNREACHABLE' }))
+          else expect(log).toHaveBeenCalledWith('cable: could not follow app machine (connection lost)')
+          await session.followApp('mac-local', 'a2')
+          expect(port.sent.filter(m => m.t === 'focus').at(-1)).toEqual({ t: 'focus', agentId: 'a2' })
+        }
+      } finally { finish(); await following; await session.stop() }
+    },
+  )
 
   it('forwards a whole stroke, including the reports that carry no travel', async () => {
     // The ends of a stroke are the point of the message, not padding around it: a `down` with nothing in
@@ -2374,11 +2478,18 @@ describe('spoken output search purpose', () => {
     /** A pack the size of two slices; the crc field is the u32 at offset 18, as in the real header. */
     const pack = (fill: number, size = 20_000) => { const b = Buffer.alloc(size, fill); b[4] = 1; b.writeUInt32LE(0xdeadbeef, 18); return b }
     const packs: Record<string, Buffer> = { [A]: pack(1), [B]: pack(2, 100), [NEW]: pack(3, 100) }
+    /** The version 1 bytes of a pack, shorter and with their own crc: the id is the same. */
+    const v1Packs: Record<string, Buffer> = {}
     const fakeStore = (mapping: { all: string | null; engines: Record<string, string> }) => {
       const store = {
         current: mapping,
         mapping: () => ({ all: store.current.all, engines: { ...store.current.engines } }),
-        pack: async (id: string) => packs[id],
+        // A different size for each version, as the real store's bytes are; the asked version is kept for the specs.
+        asked: [] as Array<[string, number | undefined]>,
+        pack: async (id: string, version?: number) => {
+          store.asked.push([id, version])
+          return version === 1 ? v1Packs[id] ?? packs[id] : packs[id]
+        },
       }
       return store
     }
@@ -2541,6 +2652,45 @@ describe('spoken output search purpose', () => {
       await settle()
       expect(session.petDial().supported).toBe(true)
       expect(port.sent.filter((m) => m.t === 'pet.offer')).toHaveLength(1)
+      await session.stop()
+    })
+
+    it('a dial that reads pets:1 gets the version 1 pack and pets:2 the version 2 one, of the same id', async () => {
+      v1Packs[A] = pack(4, 19_000)
+      v1Packs[A].writeUInt32LE(0x1111, 18)
+      packs[A][4] = 2
+      const offerFor = async (pets: number) => {
+        const store = fakeStore({ all: A, engines: {} })
+        const { session, port } = await connect(makeHost({ pets: () => store as unknown as PetStore }))
+        port.say({ ...hello, pets, petIds: [] })
+        await settle()
+        const offers = port.sent.filter((m) => m.t === 'pet.offer')
+        await session.stop()
+        return { offers, asked: store.asked }
+      }
+      try {
+        const one = await offerFor(1)
+        expect(one.asked[0]).toEqual([A, 1])
+        expect(one.offers).toEqual([{ t: 'pet.offer', id: A, size: 19_000, crc: 0x1111 }])
+        const two = await offerFor(2)
+        expect(two.asked[0]).toEqual([A, 2])
+        expect(two.offers).toEqual([{ t: 'pet.offer', id: A, size: 20_000, crc: 0xdeadbeef }])
+        // A dial newer than we are is given what we write.
+        expect((await offerFor(5)).asked[0]).toEqual([A, 2])
+      } finally {
+        packs[A][4] = 1
+        delete v1Packs[A]
+      }
+    })
+
+    it('a pack newer than the dial reads is not offered', async () => {
+      const store = fakeStore({ all: B, engines: {} })
+      packs[B][4] = 2
+      const { session, port } = await connect(makeHost({ pets: () => store as unknown as PetStore }))
+      port.say({ ...hello, pets: 1, petIds: [] })
+      await settle()
+      expect(port.sent.filter((m) => m.t === 'pet.offer')).toEqual([])
+      packs[B][4] = 1
       await session.stop()
     })
 

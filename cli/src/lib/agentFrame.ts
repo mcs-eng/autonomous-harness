@@ -25,10 +25,11 @@ import type { ScmDescription } from '../scm/types.js'
 import { sessionGitContext, SessionGitContextReader, type SessionGitContext } from './sessionGitContext.js'
 import { sessionGitHistory } from './sessionGitHistory.js'
 import { transcriptActivityAt } from './transcriptActivity.js'
-import type { AgentTokenUsage } from './agentTokenUsage.js'
+import type { AgentTokenUsage } from './agentUsageWire.js'
 import type { AgentOutputStats } from './agentOutputStats.js'
-import { gridEndpointMatchesLaunch, type GridAssignment } from './gridAssignment.js'
-import type { GridWebSearchStatus } from './gridLaunch.js'
+import type { GridAssignment } from './gridAssignment.js'
+import { gridEndpointMatchesLaunch } from './gridAssignmentWire.js'
+import type { GridWebSearchStatus } from './gridLaunchWire.js'
 import type { AgentGridTarget, GridAnnotation } from './gridAnnotation.js'
 import { projectDisplayName, sessionDisplayTitle, type RegisteredSession } from './registry.js'
 import { engineCanFork } from './forkAgent.js'
@@ -66,6 +67,7 @@ export type AgentFrame = {
   closePlan: { state: 'waiting' | 'failed'; detail?: string } | null
   closeSupported: boolean
   launch: NonNullable<RegisteredSession['launch']>
+  identityHold?: string
   createdAt: string
   updatedAt: string
   /**
@@ -216,6 +218,7 @@ export async function agentFrame(
     closePlan: s.closePlan ? { state: s.closePlan.state, ...(s.closePlan.detail ? { detail: s.closePlan.detail } : {}) } : null,
     closeSupported: true,
     launch: s.launch ?? { state: 'ready' },
+    ...((s.identityHold || s.interpretationHold || s.admissionHold) ? { identityHold: s.identityHold || s.interpretationHold || s.admissionHold } : {}),
     createdAt: new Date(s.registeredAt).toISOString(),
     updatedAt: new Date(updatedAt).toISOString(),
     // Null, never omitted, for the reason the module doc gives: a push without the key would erase

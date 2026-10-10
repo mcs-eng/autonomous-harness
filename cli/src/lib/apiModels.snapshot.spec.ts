@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { ApiConnections } from './apiConnections.js'
 import { forgetApiModels, refreshApiLaunch, resolveApiTarget } from './apiModels.js'
 import { buildLaunchOverrides } from './launchOverrides.js'
+import { gridLaunchInProcess } from '../testing/gridLaunchInProcess.js'
 import type { GridLaunchOverride } from './gridLaunch.js'
 
 const model = 'fixture-coder'
@@ -28,6 +29,8 @@ async function prepare() {
 async function codexLaunch(target: GridLaunchOverride) {
   return buildLaunchOverrides({
     machine: () => ({ hermesSystemManaged: false }),
+    // The models service's builder, in this process: the launch is already refreshed above.
+    gridLaunch: gridLaunchInProcess(),
     tmuxSupportsSessionEnv: async () => true,
     writeGridConfigDir: async () => { throw new Error('Unexpected config write') },
     installCodexHooks: () => { throw new Error('Unexpected hook install') },

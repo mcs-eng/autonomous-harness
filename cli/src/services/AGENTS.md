@@ -51,7 +51,7 @@ that process. A process per risk, not per feature (`SERVICE_HOSTS` in `src/harne
 
 | Process | Services | Why its own | Started |
 |---|---|---|---|
-| `engine-claude`, `engine-codex` | history, live parsers, runtime profiles, screens and model control (`src/engines/worker/`) | engine behavior outside core; snapshots and revocable model-control grants | on demand |
+| `engine-claude`, `engine-codex` | history, live parsers, runtime profiles, screens, submission readings, model control, question navigation and Codex's app-server connection (`src/engines/worker/`) | engine behavior outside core; snapshots and revocable model- and question-control grants | on demand |
 | `search` | search | native `node:sqlite`, the index's memory | always |
 | `viewers` | viewers, store | the viewer servers, the remote viewer streams and rendered surfaces, minutes-long installs | always |
 | `edge` | workspaces, usage, monitor, projects, handoff, recaps, windowNames, shell | light pure-JS services: isolated from the core, not from each other | always |
@@ -61,7 +61,8 @@ that process. A process per risk, not per feature (`SERVICE_HOSTS` in `src/harne
 | `orchestrator` | orchestrator | an experiment | on demand |
 | `teams` | teams, collaboration | an experiment: Tab collaboration beside the prompt scopes | on demand |
 | `sharing` | sharing | an experiment: Share | on demand |
-| `commandBar` | commandBar | an experiment: the command bar | on demand |
+| `memory` | memory | an experiment: Memories across machines | on demand |
+| `router` | router | an experiment: where ⌘B sends a task, decided by Jev | on demand |
 
 A fault in one of the edge host's services can cost the others in it, never the core. Every service in
 `KNOWN_SERVICES` runs out of the core's process by default, unless `HARNESSD_SERVICES` names a subset, by
@@ -142,8 +143,8 @@ master too old to run it starts it beside itself, still in its own process (`src
   never retried as a new launch. `e2e/shell.e2e.ts` keeps an attached terminal working across an edge crash.
 - The gateway owns account/backend HTTP and the single writer of `machines.json` (`gateway/accountHttp.ts`).
   The core retains its reported list for stale replies during a restart, bound to the current account.
-  The Store prepares bundled harnesses before reporting `prepared`; the core waits at most five seconds
-  before restore. The lean bundle shares one asset file, loaded by the Store and never by the core.
+  The Store prepares bundled harnesses before reporting `prepared`; package agents wait held until
+  preparation is available, after the core reports ready. The lean bundle shares one asset file, loaded by the Store and never by the core.
 - A service that writes turns into agents (a team's question, the orchestrator's guidance) delivers each
   under an id of its own through `core.turns.deliver`, hears what became of it through `onDelivery`, and
   takes one back with `cancelDelivery` (core/deliveries.ts). In its own process `services/turnsLink.ts`
@@ -206,8 +207,8 @@ like any other. Named in `HARNESSD_SERVICES`, it starts with the others.
 
 ## Experiments
 
-An experiment (the orchestrator, Tab collaboration, Share, the command bar) is a service that costs nothing
-until it is on: its own process, which the master starts only when the core asks for it (`want`), when one of
+An experiment (the orchestrator, Tab collaboration, Share, memory, the router) is a service that costs nothing until it is
+on: its own process, which the master starts only when the core asks for it (`want`), when one of
 its requests arrives or, as the core starts, when its saved state is in the data folder. Off, nothing of it runs or
 is loaded anywhere; one failing costs its own process and nothing else. `e2e/experiments.e2e.ts` proves it:
 off, on by request, on by saved state, killed, hung and crashing on every start.

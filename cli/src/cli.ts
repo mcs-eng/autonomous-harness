@@ -60,6 +60,7 @@ import { SESSION_SEARCH_FILE, searchCommand } from './lib/sessionSearch/command.
 import { dshCommand, dshUsage } from './dsh/command.js'
 import { ApiConnections } from './lib/apiConnections.js'
 import { apiCommand, apiUsage } from './lib/apiCommand.js'
+import { connectionsCommand, connectionsUsage } from './lib/connectors/command.js'
 import { remoteCommand } from './remoteCommand.js'
 import { tuiCommand } from './tui/index.js'
 import { newCommand } from './lib/newCommand.js'
@@ -168,6 +169,8 @@ Grid (the fleet of AI engines the \`grid\` CLI serves — needs \`grid\` on PATH
 ${dshUsage()}
 
 ${apiUsage}
+
+${connectionsUsage}
 
 Browser end-to-end encryption:
   harness autonomous-device <command>     pair/status/list/revoke an Autonomous device
@@ -929,7 +932,7 @@ function gridProfileCommand(argv: string[]): void {
 /**
  * `harness grid env <grid>` — `grid --remote info <grid> --env` through the harness's own `grid`, so a
  * shell can `eval` a grid's relay address and key with no `grid` of its own on PATH, or an older one
- * that refuses a resting grid. The Models view's Jev pane builds its copy-paste request on it.
+ * that refuses a resting grid: any OpenAI-compatible client can then call the grid's models.
  *
  * A passthrough like `grid logout`: the exports, the refusals and the exit code are `grid`'s. The key
  * goes to this process's stdout only — the explicit disclosure `info --env` exists for — never a log.
@@ -2612,6 +2615,9 @@ switch (cmd) {
   case 'api':
     apiCommand(rest, new ApiConnections(env.ADAPTER_DATA_DIR))
       .then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'connections':
+    connectionsCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'new':
     // `rest`, not args/flags: a first message and a folder are words in the order they were typed.

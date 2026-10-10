@@ -262,7 +262,8 @@ function boundedPrompt(prompt) {
 
 /**
  * POST one hook event to the daemon. Resolves true when it answered 2xx, false when it could not be
- * reached or refused, and 'late' when it took the request but did not answer within the budget.
+ * reached or refused, 'held' for live admission backpressure, and 'late' when it took the request but
+ * did not answer within the budget. Neither live hold is permission for an offline registry write.
  *
  * 'late' is not "the daemon is down", and nothing may be written behind its back for it: the request is
  * in its socket, and it handles it once it gets to it. A daemon whose event loop is held for a few
@@ -272,6 +273,7 @@ function boundedPrompt(prompt) {
  * (e2e/stall.e2e.ts).
  */
 /** This process's start, epoch ms: the engine ran the hook then. */
+const DELIVERY_ID = randomUUID()
 const FIRED_AT = Date.now() - Math.round(process.uptime() * 1000)
 
 function post(port, path, body, onResponse) {
@@ -293,6 +295,7 @@ function post(port, path, body, onResponse) {
           // When the engine ran this hook: this process's start, not its arrival, which can be seconds later on
           // a loaded machine, after the engine has moved on to its next prompt (src/hookServer.ts hookFiredAt).
           'X-Harness-Hook-Fired-At': String(FIRED_AT),
+          'X-Harness-Hook-Delivery-Id': DELIVERY_ID,
         },
         timeout: Math.max(1, Math.min(500, remainingBudget())),
       },
@@ -302,6 +305,11 @@ function post(port, path, body, onResponse) {
         res.on('data', (chunk) => { if (response.length < 16_384) response += chunk })
         res.on('end', () => {
           const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300
+          let reply
+          try { if (response.length <= 16_384) reply = JSON.parse(response) } catch { /* no structured reply */ }
+          if (res.statusCode === 429 || (res.statusCode === 202 && reply?.retry === true)) { resolve('held'); return }
+          if (path === '/api/hook/turn-stop' && ok && reply?.pending === true) { resolve('held'); return }
+          if (path === '/api/hook/turn-stop' && ok && reply?.duplicate === true) { resolve('duplicate'); return }
           if (ok && onResponse && response.length <= 16_384) {
             try { onResponse(JSON.parse(response)) } catch { /* Unavailable context never blocks a turn. */ }
           }
@@ -1705,6 +1713,7 @@ async function main() {
       engine,
       hookEvent: event,
       sessionId,
+      status: input.status,
       transcriptPath: input.transcript_path,
       cwd: Array.isArray(input.workspace_roots) ? input.workspace_roots[0] : input.cwd,
       ...terminalHookFields(tmuxPane),
@@ -1740,6 +1749,7 @@ async function main() {
         engine,
         hookEvent: event,
         sessionId: input.session_id,
+        status: event === 'StopFailure' ? 'error' : undefined,
         transcriptPath: existsPath(input.transcript_path) ? input.transcript_path : undefined,
         cwd: input.cwd,
         ...terminalHookFields(tmuxPane),
@@ -1786,8 +1796,17 @@ async function main() {
     model: modelName(input.model),
     cliVersion: input.cli_version || input.cursor_version || input.version,
   }
-  const ok = await post(port, '/api/hook/session-start', body)
-  if (ok === false) await fallbackRegister(input, engine, tmuxPane)
+  let ok = await post(port, '/api/hook/session-start', body)
+  let held = ok === 'held'
+  // A live core's bounded admission queue owns the existing candidates. Retry this
+  // delivery within the hook budget, never reconstruct registry state behind it.
+  for (let attempt = 0; engine === 'hermes' && ok === 'held' && attempt < 3 && remainingBudget() > 750; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 250))
+    ok = await post(port, '/api/hook/session-start', body)
+    held ||= ok === 'held'
+  }
+  if (held && ok !== true) process.stderr.write('[harness] Hermes admission is held; this delivery could not be confirmed. The current conversation is unchanged.\n')
+  if (ok === false && !held) await fallbackRegister(input, engine, tmuxPane)
 }
 
 main()

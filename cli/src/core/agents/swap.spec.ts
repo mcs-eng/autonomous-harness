@@ -5,13 +5,12 @@ import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
 import { bypassPermissionActive, processArgvIsBoundaryFaithful, resolvePaneEngineProcess } from '../../lib/tmux.js'
-import { probeGridAssignment } from '../../lib/gridAssignment.js'
+import { AgentRestartCoordinator } from '../../lib/restartAgent.js'
 import { createPaneSwap, SWAP_SETTLE_MS, type PaneSwapDeps } from './swap.js'
 
 vi.mock('../../lib/deleteAgentFallback.js', async (real) => ({ ...await real<object>(), terminateDeletedAgent: vi.fn(async () => ({ ok: true })) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({ ...await real<object>(), buildEngineLaunchArgv: vi.fn(() => ['zsh', '-lc', 'claude']) }))
 vi.mock('../../lib/terminalAgentDiscovery.js', async (real) => ({ ...await real<object>(), processRows: vi.fn(async () => null) }))
-vi.mock('../../lib/gridAssignment.js', async (real) => ({ ...await real<object>(), probeGridAssignment: vi.fn(async () => undefined) }))
 vi.mock('../../lib/tmux.js', async (real) => ({
   ...await real<object>(),
   bypassPermissionActive: vi.fn(() => true),
@@ -45,9 +44,16 @@ describe('the pane-process swap', () => {
     vi.mocked(resolvePaneEngineProcess).mockReset().mockResolvedValue(null)
     vi.mocked(buildEngineLaunchArgv).mockClear()
     vi.mocked(processArgvIsBoundaryFaithful).mockReset().mockReturnValue(true)
-    vi.mocked(probeGridAssignment).mockClear()
   })
   afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
+
+  it('uses the coordinator that already owns boot restore revisions', () => {
+    const restartJobs = new AgentRestartCoordinator()
+    const boot = restartJobs.revision('a1')
+    const swap = createPaneSwap({ ...setup().deps, restartJobs })
+    expect(swap.restartJobs).toBe(restartJobs)
+    expect(swap.restartJobs.revision('a1')).toBe(boot)
+  })
 
   it('restarts only the agent it was asked about: same registration, same pane, same engine', () => {
     expect(setup().swap.sameRestartTarget(session())).toBe(true)
@@ -172,31 +178,12 @@ describe('the pane-process swap', () => {
     const { swap } = setup()
     const identity = { pid: 42, startMarker: 'before-clock-step', startTicks: 123, executable: '/bin/codex' }
     const argv = 'codex --dangerously-bypass-approvals-and-sandbox'
-    const grid = { gridName: 'team-grid' } as never
     const row = { ...identity, startMarker: 'after-clock-step', args: argv }
     vi.mocked(processRows).mockResolvedValue([row] as never)
     expect(await swap.liveBypassPermission(session({ engine: 'codex', processIdentity: identity }))).toBe(true)
-    await swap.restartedGridAssignment(identity as never, 'codex', grid)
-    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'codex', argv, grid)
 
     // A reused pid with another start tick is not the process, even if its wall-clock marker agrees.
     vi.mocked(processRows).mockResolvedValue([{ ...row, startMarker: identity.startMarker, startTicks: 124 }] as never)
     expect(await swap.liveBypassPermission(session({ engine: 'codex', processIdentity: identity }))).toBe(false)
-    await swap.restartedGridAssignment(identity as never, 'codex', grid)
-    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'codex', identity.executable, grid)
-  })
-
-  it('restartedGridAssignment reads faithful argv and falls back to the executable', async () => {
-    const { swap } = setup()
-    const identity = { pid: 42, startMarker: 'm1', executable: '/bin/claude' }
-    const grid = { gridName: 'team-grid' } as never
-    vi.mocked(processRows).mockResolvedValue([{ pid: 42, startMarker: 'm1', args: 'claude --grid team-grid' }] as never)
-    vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(true)
-    await swap.restartedGridAssignment(identity as never, 'claude', grid)
-    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'claude', 'claude --grid team-grid', grid)
-    // Flattened ps text is never interpreted as the launch the new process got.
-    vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(false)
-    await swap.restartedGridAssignment(identity as never, 'claude', grid)
-    expect(probeGridAssignment).toHaveBeenLastCalledWith(identity, 'claude', '/bin/claude', grid)
   })
 })

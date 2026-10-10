@@ -75,9 +75,6 @@ pub struct LocalModel {
     /// The app it runs in: `Ollama`, `LM Studio` or `llama.cpp` for one that app downloaded, `Grid`
     /// for Grid's own engine (absent from an older daemon).
     pub app: Option<String>,
-    /// A Jev (System One) model (`kind: decision`): Get downloads it, updates Grid's engine when too old
-    /// to serve one, and runs it on the grid. Listed under [JEV]; never a harness's model.
-    pub decision: bool,
 }
 
 impl LocalModel {
@@ -88,7 +85,7 @@ impl LocalModel {
             size: num(&v["sizeBytes"]), quant: text(&v["quant"]), recommended: v["recommended"] == true, can_start: v["canStart"] == true, can_stop: v["canStop"] == true,
             tok_s: num(&v["tokensPerSecond"]), requests: num(&v["requests"]), window_secs: num(&v["windowSeconds"]),
             context: num(&v["contextWindow"]), est_tok_s: num(&v["estTokS"]), params_b: num(&v["paramsB"]),
-            operation: Operation::parse(&v["operation"]), asleep: v["gridAsleep"] == true, app: text(&v["app"]), decision: v["kind"] == "decision", id,
+            operation: Operation::parse(&v["operation"]), asleep: v["gridAsleep"] == true, app: text(&v["app"]), id,
         })
     }
     pub fn running(&self) -> bool { self.state == "running" }
@@ -108,9 +105,11 @@ impl LocalModel {
 }
 
 /// What `grid_fleet_models_list` answers: the models, the machine's memory and free disk, and
-/// whether an operation is under way.
+/// whether an operation is under way. `grid_setup_needed`: grid is not set up here, so local and
+/// shared models are one Set up row (the desktop's); `grid_setup_error`: why the last Set up failed.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Snapshot { pub models: Vec<LocalModel>, pub memory: Option<f64>, pub free_disk: Option<f64>, pub hardware: Option<String>, pub notice: Option<String>, pub busy: bool, pub supports_download: bool }
+pub struct Snapshot { pub models: Vec<LocalModel>, pub memory: Option<f64>, pub free_disk: Option<f64>, pub hardware: Option<String>, pub notice: Option<String>, pub busy: bool, pub supports_download: bool,
+    pub grid_setup_needed: bool, pub grid_setup_error: Option<String> }
 
 /// None when there is no list — a daemon too old for it, or a reply that failed.
 pub fn parse_local(reply: &Value) -> Option<Snapshot> {
@@ -119,14 +118,13 @@ pub fn parse_local(reply: &Value) -> Option<Snapshot> {
         models, memory: num(&reply["memoryBytes"]).filter(|m| *m > 0.0), free_disk: num(&reply["freeDiskBytes"]), hardware: text(&reply["hardware"]),
         // A sentence beside the list, never a failure (an `error` fails the whole request).
         notice: text(&reply["notice"]), busy: reply["busy"] == true, supports_download: reply["supportsDownload"] == true,
+        grid_setup_needed: reply["gridSetupNeeded"] == true, grid_setup_error: text(&reply["gridSetupError"]),
     })
 }
 
 /// A model a grid serves; `offline` names the computer when every one serving it seems offline.
-/// `decision`: a Jev (System One) model (`kind: decision`) — called at `/v1/systemone`, never a
-/// harness's model, so it is listed under [JEV] and Enter copies how to call it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GridModel { pub id: String, pub node: String, pub offline: Option<String>, pub decision: bool }
+pub struct GridModel { pub id: String, pub node: String, pub offline: Option<String> }
 
 /// One grid this computer is signed into: the account's own, or a shared one, and how it answered
 /// the daemon's last look (`awake`, `asleep`, `waking`, `unknown`; empty from an older daemon).
@@ -153,7 +151,7 @@ pub fn parse_grids(reply: &Value) -> Grids {
             Value::Bool(true) => Some(node.clone()),
             _ => None,
         };
-        Some(GridModel { id, node, offline, decision: m["kind"] == "decision" })
+        Some(GridModel { id, node, offline })
     }).collect::<Vec<_>>();
     let mut sections: Vec<Section> = reply["grids"].as_array().into_iter().flatten().filter_map(|g| Some(Section {
         name: text(&g["name"])?, own: g["own"] == true, models: models(&g["models"]), state: g["state"].as_str().unwrap_or("").to_string(),
@@ -360,10 +358,18 @@ pub struct Models {
     pub grids_reading: HashSet<String>,
     /// This computer's saved APIs, each API's models, and those unfolded under their API.
     pub apis: Option<Result<Vec<Api>, String>>,
+    /// When the APIs were last answered: a failed answer is asked again after [APIS_RETRY].
+    pub apis_at: Option<Instant>,
     pub api_models: HashMap<String, Result<Vec<ApiModel>, String>>,
     pub api_open: HashSet<String>,
     /// "More models": the whole catalog shown, not its first five.
     pub more: bool,
+    /// A Set up asked of this computer's daemon and not yet answered; one that waits on a sign-in
+    /// first, and whether that sign-in — hn's own, started from Set up — has landed (continued by the
+    /// first read after it). Only that sign-in sets grid up: one made anywhere else signs in alone.
+    pub setting_up: bool,
+    pub set_up_after_sign_in: bool,
+    pub set_up_signed_in: bool,
     /// A download, start or stop asked and not yet answered (machine, model, action), then its
     /// acknowledgement, until a read shows the daemon's own receipt.
     pub pending: Option<(String, String, &'static str)>,
@@ -479,7 +485,7 @@ pub fn no_target_why(app: &App) -> String {
     if p.agent_id.is_empty() { return "The focused pane is a shell, not a harness — start one with New harness".into() }
     match app.fleet.agent(&p.machine_id, &p.agent_id) {
         None => format!("This pane's harness ({}) is not in the list yet — try again in a moment", p.agent_id.chars().take(8).collect::<String>()),
-        Some(a) if a.engine == "terminal" => "The focused pane is a terminal — its model can not be switched; a harness's can".into(),
+        Some(a) if a.engine == "terminal" => "The focused pane is a terminal. Focus a harness to move it onto a model.".into(),
         Some(_) => NO_HARNESS.into(),
     }
 }
@@ -637,6 +643,24 @@ fn note(key: &str, words: &str, group: &str) -> Row {
     Row::new(format!("mv:note:{key}"), words.to_string()).group(group.to_string()).lead(vec![span("  ", Style::default())]).extra("note")
 }
 
+/// The row that sets grid up here (the desktop's `model:grid-setup`), and the note over an empty
+/// Your models whose Enter goes to the models to get.
+const SET_UP: &str = "mv:setup";
+const NONE_YET: &str = "mv:note:none";
+
+/// Grid is not set up on this computer (or its Set up is under way): the view offers to set it up.
+fn needs_set_up(app: &App) -> bool {
+    app.models_view.setting_up || app.models_view.local.get(&app.fleet.local_id).is_some_and(|s| s.grid_setup_needed)
+}
+
+fn signed_out(app: &App) -> bool { app.account.status == crate::account::Status::SignedOut }
+
+/// The Set up row's word: what Enter does, or what it is doing.
+fn set_up_word(app: &App) -> &'static str {
+    let v = &app.models_view;
+    if v.setting_up { "Setting up…" } else if v.set_up_after_sign_in && crate::account::signing_in(app) { "Signing in…" } else if signed_out(app) { "Sign in" } else { "Set up" }
+}
+
 fn local_row(app: &App, m: &LocalModel, t: Option<&Target>, group: &str) -> Row {
     let f = facts(app, m, t);
     let word = f.word(m);
@@ -676,61 +700,6 @@ fn grid_row(app: &App, s: &Section, x: &GridModel, t: Option<&Target>, group: &s
         .right(word)
 }
 
-/// A Jev model's row: its machine and grid, and what Enter does — copy how to call it.
-fn jev_row(s: &Section, x: &GridModel) -> Row {
-    let (dot, color) = if x.offline.is_some() { ("· ", theme::MUTED) } else { ("◆ ", theme::SOFT) };
-    Row::new(format!("mv:jev:{}\t{}\t{}", s.name, x.node, x.id), x.id.clone()).group(JEV)
-        .extra(format!("{} {} jev decision", s.name, x.node))
-        .lead(vec![span(dot, fg(color))])
-        .detail(vec![span([x.node.as_str(), s.name.as_str()].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · "), fg(theme::MUTED))])
-        .right(if x.offline.is_some() { "Offline" } else { "Copy" })
-}
-
-/// A Jev model of this computer's: what Enter does with it — Get, Start, or copy how to call it.
-fn jev_local_row(app: &App, m: &LocalModel) -> Row {
-    let op = app.models_view.op_for(&app.fleet.local_id, m).filter(|o| o.active() || o.failed());
-    let word = match (op, jev_local_grid(app, m)) {
-        (Some(o), _) if o.active() => o.word(),
-        (Some(_), _) => "Failed".to_string(),
-        (None, Some(_)) => "Copy".into(),
-        _ if m.running() => "Running".into(),
-        _ if m.downloaded() => "Start".into(),
-        _ => "Get".into(),
-    };
-    let (dot, color) = if m.running() { ("◆ ", theme::accent()) } else if m.downloaded() { ("· ", theme::SOFT) } else { ("↓ ", theme::MUTED) };
-    let detail = [this_computer().to_string(), m.size.map(gb).unwrap_or_default()].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · ");
-    Row::new(format!("mv:jevlocal:{}", m.id), m.name.clone()).group(JEV)
-        .extra(format!("{} local jev decision", m.id))
-        .lead(vec![span(dot, fg(color))])
-        .detail(vec![span(detail, fg(theme::MUTED))])
-        .right(word)
-}
-
-/// The own grid a running Jev model of this computer's is listed on, by name — where it can be called.
-fn jev_local_grid(app: &App, m: &LocalModel) -> Option<String> {
-    if !m.running() { return None }
-    let g = app.models_view.grids.get(&app.fleet.local_id)?;
-    g.sections.iter().find(|s| s.own && s.models.iter().any(|x| x.decision && x.id.eq_ignore_ascii_case(&m.name))).map(|s| s.name.clone())
-}
-
-/// How to call the Jev model [model] on [grid] from a terminal: load the grid's address and key with
-/// `harness grid env` (the harness's own `grid`, so none of one's own is needed, nor one new enough to
-/// call a resting grid), then ask one decision. The key is never in it; the shell reads the variable.
-pub fn jev_request(grid: &str, model: &str) -> String {
-    // (Written in the order a person reads it — model, state, questions — as the desktop's is.)
-    let body = format!(r#"{{"model":{},"state":{},"questions":{}}}"#, json!(model),
-        json!("I was charged twice. Please refund the duplicate."),
-        r#"{"refund":{"type":"noul","instructions":"Is a refund requested?"}}"#);
-    format!("eval \"$(harness grid env {})\"\ncurl \"$OPENAI_BASE_URL/systemone\" \\\n  -H \"Authorization: Bearer $OPENAI_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d {}",
-        shell_word(grid), shell_word(&body))
-}
-
-/// [value] as one shell word: bare when plainly safe, single-quoted otherwise.
-fn shell_word(value: &str) -> String {
-    if !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || "._:@/+-".contains(c)) { value.to_string() }
-    else { format!("'{}'", value.replace('\'', "'\\''")) }
-}
-
 fn sub_word(app: &App, sub: &Sub, t: Option<&Target>) -> String {
     if t.is_some_and(|t| t.engine == sub.engine) && switching_for(app, t) == Some("") { return SWITCHING.into() }
     match sub_payload(app, sub, t) { Ok(_) => "Use".into(), Err(why) if why == IN_USE => "✓ In use".into(), Err(_) => String::new() }
@@ -762,11 +731,9 @@ const SUBSCRIPTIONS: &str = "Subscriptions";
 const APIS: &str = "APIs";
 const YOUR_MODELS: &str = "Your models";
 const SHARED: &str = "Shared with you";
-/// Jev (System One) decision models from every grid, last: none of them can run a harness.
-const JEV: &str = "Jev models";
 
 /// The rows of the Models view: the desktop picker's sections in its order (`model_search_catalog.dart`)
-/// — Subscriptions, APIs, Your models, the downloads for this computer, Shared with you, Jev models — drawn from
+/// — Subscriptions, APIs, Your models, the downloads for this computer, Shared with you — drawn from
 /// the top as the desktop's are (`settings::top_down`). [query]: what is typed (a search lists what
 /// "More models" and a folded API hide).
 pub fn rows(app: &App, query: &str) -> Vec<Row> {
@@ -811,13 +778,21 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
         _ => {}
     }
 
+    // Grid not set up here: local and shared models are this one row, as on the desktop — a download
+    // or a shared model cannot be used before then, and listed beside "Set up" they read as if they could.
+    if needs_set_up(app) {
+        out.push(Row::new(SET_UP, "Set up local & shared models").group(YOUR_MODELS).extra("setup grid local shared download")
+            .lead(vec![span("+ ", fg(theme::accent()))]).right(set_up_word(app)));
+        return out;
+    }
+
     // Your models: this computer's — being started, running, downloaded, in the daemon's order
     // within each — then the own grid's models the account's other machines serve.
     if let Some(t) = t.filter(|t| v.grids.contains_key(&machine) && !can_run(app, &t.engine)) {
         out.push(note("engine", &format!("{} can only run on its own login.", engine_label(&t.engine)), YOUR_MODELS));
     }
     let own = |g: &Grids| -> Vec<(Section, GridModel)> {
-        g.sections.iter().filter(|s| s.own).flat_map(|s| s.models.iter().filter(|x| !x.decision).map(move |x| (s.clone(), x.clone()))).collect()
+        g.sections.iter().filter(|s| s.own).flat_map(|s| s.models.iter().map(move |x| (s.clone(), x.clone()))).collect()
     };
     match snap {
         None => {
@@ -828,12 +803,7 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
         Some(s) => {
             if let Some(n) = &s.notice { out.push(note("notice", n, YOUR_MODELS)) }
             let rank = |m: &LocalModel| if v.op_for(&machine, m).is_some_and(Operation::active) || v.pending.as_ref().is_some_and(|p| p.1 == m.id) { 0 } else if m.running() { 1 } else { 2 };
-            // (A Jev model this computer serves is listed once, under Jev models: as a local row it
-            // would be offered to a harness, which cannot run on it.)
-            let deciders: Vec<String> = v.grids.get(&machine).into_iter().flat_map(|g| g.sections.iter().filter(|s| s.own))
-                .flat_map(|s| s.models.iter().filter(|x| x.decision).map(|x| x.id.to_lowercase())).collect();
-            let decides = |m: &LocalModel| deciders.iter().any(|d| d.eq_ignore_ascii_case(&m.id) || d.eq_ignore_ascii_case(&m.name));
-            let mut mine: Vec<(u8, usize, Row)> = s.models.iter().enumerate().filter(|(_, m)| (m.downloaded() || m.can_stop) && !m.decision && !decides(m))
+            let mut mine: Vec<(u8, usize, Row)> = s.models.iter().enumerate().filter(|(_, m)| m.downloaded() || m.can_stop)
                 .map(|(i, m)| (rank(m), i, local_row(app, m, t, YOUR_MODELS))).collect();
             mine.sort_by_key(|(r, i, _)| (*r, *i));
             // (This computer's running ones are listed by their local names, above.)
@@ -841,7 +811,9 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
             let theirs: Vec<Row> = v.grids.get(&machine).map(own).unwrap_or_default().into_iter()
                 .filter(|(_, x)| !here.iter().any(|m| x.id.eq_ignore_ascii_case(&m.id) || x.id.eq_ignore_ascii_case(&m.name)))
                 .map(|(s, x)| grid_row(app, &s, &x, t, YOUR_MODELS)).collect();
-            if mine.is_empty() && theirs.is_empty() && !searching { out.push(note("none", "No models here yet — get one below", YOUR_MODELS)) }
+            // (Only with something below to get: Enter goes to it.)
+            let to_get = s.models.iter().any(|m| !m.downloaded() && !m.can_stop);
+            if mine.is_empty() && theirs.is_empty() && !searching && to_get { out.push(note("none", "No models here yet — get one below", YOUR_MODELS)) }
             out.extend(mine.into_iter().map(|(_, _, r)| r));
             out.extend(theirs);
         }
@@ -852,7 +824,7 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
     if let Some(s) = snap {
         let head = catalog_heading(snap);
         let busy = |m: &LocalModel| v.op_for(&machine, m).is_some_and(Operation::active) || v.pending.as_ref().is_some_and(|p| p.1 == m.id);
-        let (now, rest): (Vec<&LocalModel>, Vec<&LocalModel>) = s.models.iter().filter(|m| !m.downloaded() && !m.can_stop && !m.decision).partition(|m| busy(m));
+        let (now, rest): (Vec<&LocalModel>, Vec<&LocalModel>) = s.models.iter().filter(|m| !m.downloaded() && !m.can_stop).partition(|m| busy(m));
         let shown = if v.more || searching { rest.len() } else { rest.len().min(SHOWN_DOWNLOADS) };
         out.extend(now.iter().chain(rest.iter().take(shown)).map(|m| local_row(app, m, t, &head)));
         if !searching && rest.len() > SHOWN_DOWNLOADS {
@@ -869,8 +841,7 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
             // (A grid with no model to show is not shown — "Nobody was serving here…" says nothing
             // you can use; one that is resting with models to wake keeps its "Show models".)
             let asleep_empty = s.state == "asleep" && !words.offer_wake && !v.asking.contains(&s.name);
-            let chat: Vec<&GridModel> = s.models.iter().filter(|x| !x.decision).collect();
-            if chat.is_empty() && (searching || asleep_empty || (words.subtitle.is_none() && words.sentence.is_none() && !words.offer_wake)) { continue }
+            if s.models.is_empty() && (searching || asleep_empty || (words.subtitle.is_none() && words.sentence.is_none() && !words.offer_wake)) { continue }
             if !searching {
                 if let Some(sentence) = &words.sentence { out.push(note(&format!("grid:{}", s.name), &format!("{} · {sentence}", s.name), SHARED)) }
                 if words.offer_wake {
@@ -878,26 +849,13 @@ pub fn rows(app: &App, query: &str) -> Vec<Row> {
                         .lead(vec![span("↻ ", fg(theme::accent()))]).right("usually 15–40 s"));
                 }
             }
-            for x in chat {
+            for x in &s.models {
                 let detail = [x.node.as_str(), s.name.as_str(), words.subtitle.as_deref().unwrap_or("")].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · ");
                 out.push(grid_row(app, s, x, t, SHARED).detail(vec![span(detail, fg(theme::MUTED))]));
             }
         }
         if !g.reachable && !searching { out.push(note("shared", "Shared models are unavailable.", SHARED)) }
 
-    }
-
-    // Jev models, last: this computer's own (to get, start, stop — and to call once its grid lists it),
-    // then every grid's, each naming its machine and grid. A Jev model of this computer's that its own
-    // grid lists is one row, this computer's.
-    let mine: Vec<&LocalModel> = snap.map(|s| s.models.iter().filter(|m| m.decision).collect()).unwrap_or_default();
-    for m in &mine { out.push(jev_local_row(app, m)) }
-    if let Some(g) = v.grids.get(&machine) {
-        for s in &g.sections {
-            for x in s.models.iter().filter(|x| x.decision && !(s.own && mine.iter().any(|m| m.name.eq_ignore_ascii_case(&x.id)))) {
-                out.push(jev_row(s, x))
-            }
-        }
     }
 
     out
@@ -915,8 +873,6 @@ const IN_USE: &str = "This harness is on it";
 /// The word on a row, and on the pane, while the harness moves onto it.
 pub const SWITCHING: &str = "Switching…";
 const NO_HARNESS: &str = "Focus a harness to move it onto a model";
-/// What Enter on a Jev model says once its request is copied.
-const JEV_COPIED: &str = "Copied — paste it into a terminal.";
 
 /// What a key on a row comes to — decided here, done by [run]; the tests read the plan.
 #[derive(Clone, Debug, PartialEq)]
@@ -935,8 +891,10 @@ pub enum Plan {
     Wake(String),
     More,
     Api(String),
-    /// Put [text] on the clipboard (and in a paste buffer): how to call a Jev model.
-    Copy(String),
+    /// Set grid up here, signing in first when signed out ([set_up]).
+    SetUp,
+    /// The cursor to row [0] (from the empty Your models' note to the first model to get).
+    Select(String),
 }
 
 fn local_model(app: &App, id: &str) -> Option<LocalModel> { app.models_view.local.get(&app.fleet.local_id)?.models.iter().find(|m| m.id == id).cloned() }
@@ -971,21 +929,13 @@ pub fn plan_enter(app: &App, id: &str) -> Plan {
     let v = &app.models_view;
     let say = |s: &str| Plan::Say(s.to_string());
     if id == "mv:more" { return Plan::More }
+    if id == SET_UP { return if v.setting_up { say("Setting up…") } else { Plan::SetUp } }
+    if id == NONE_YET {
+        let head = catalog_heading(v.local.get(&app.fleet.local_id));
+        return rows(app, "").into_iter().find(|r| r.id.starts_with("mv:local:") && r.group.as_deref() == Some(head.as_str())).map_or(Plan::Nothing, |r| Plan::Select(r.id));
+    }
     if let Some(name) = id.strip_prefix("mv:wake:") { return if v.asking.contains(name) { say(STARTING_UP_WAIT) } else { Plan::Wake(name.to_string()) } }
     if let Some(key) = id.strip_prefix("mv:api:") { return Plan::Api(key.to_string()) }
-    if let Some(rest) = id.strip_prefix("mv:jev:") {
-        let mut parts = rest.splitn(3, '\t');
-        let (Some(grid), Some(_node), Some(model)) = (parts.next(), parts.next(), parts.next()) else { return Plan::Nothing };
-        return Plan::Copy(jev_request(grid, model));
-    }
-    if let Some(model) = id.strip_prefix("mv:jevlocal:") {
-        let Some(m) = local_model(app, model) else { return say("This model is gone. Try again in a moment.") };
-        if let Some(o) = v.op_for(&app.fleet.local_id, &m).filter(|o| o.active()) { return Plan::Say(o.word()) }
-        if let Some(grid) = jev_local_grid(app, &m) { return Plan::Copy(jev_request(&grid, &m.name)) }
-        if m.running() { return say("It is starting on your grid — Enter copies how to call it once the grid lists it.") }
-        // Get is the whole of it: the download, an engine new enough to serve it, and the model on the grid.
-        return if m.can_start { Plan::Act { model: m.id.clone(), action: "start" } } else { say("Wait for the current model operation to finish.") };
-    }
     if let Some(rest) = id.strip_prefix("mv:apimodel:") {
         let Some((api, model)) = rest.split_once('\t') else { return Plan::Nothing };
         let Some(api) = v.apis.as_ref().and_then(|a| a.as_ref().ok()).and_then(|l| l.iter().find(|x| x.id == api)) else { return Plan::Nothing };
@@ -1051,7 +1001,7 @@ pub fn plan_enter(app: &App, id: &str) -> Plan {
 
 /// What ^S does on row [id]: stop a local model (asked first).
 pub fn plan_stop(app: &App, id: &str) -> Plan {
-    let Some(m) = id.strip_prefix("mv:local:").or_else(|| id.strip_prefix("mv:jevlocal:")).and_then(|model| local_model(app, model)) else { return Plan::Nothing };
+    let Some(m) = id.strip_prefix("mv:local:").and_then(|model| local_model(app, model)) else { return Plan::Nothing };
     let f = facts(app, &m, None);
     if f.busy { return Plan::Say("Wait for the current model operation to finish.".into()) }
     if !m.can_stop { return Plan::Say(if m.running() { "Other models share its engine — stop it from the desktop's Model Manager".into() } else { "It is not running".into() }) }
@@ -1102,18 +1052,78 @@ fn run(app: &mut App, picker: &mut Picker, plan: Plan, key: &str) {
         Plan::Use { model, download } => start_use(app, &model, download),
         Plan::Act { model, action } => { picker.say(format!("{}…", pending_word(action))); act(app, &model, action) }
         Plan::Wake(name) => { wake(app, &name); picker.say(STARTING_UP_WAIT) }
-        Plan::More => app.models_view.more = !app.models_view.more,
+        Plan::More => {
+            let before: std::collections::HashSet<String> = rows(app, "").into_iter().map(|r| r.id).collect();
+            app.models_view.more = !app.models_view.more;
+            // (Opened, the cursor goes to the first model it shows, as the desktop's does — not to Show
+            // fewer at the end of the list. The list is filled again after this, keeping the cursor's row.)
+            if app.models_view.more { if let Some(r) = rows(app, "").into_iter().find(|r| !before.contains(&r.id)) { picker.selected_id = Some(r.id) } }
+        }
         Plan::Api(key) => {
             let v = &mut app.models_view;
             if !v.api_open.remove(&key) { v.api_open.insert(key.clone()); if !v.api_models.contains_key(&key) { read_api_models(app, &key) } }
         }
-        Plan::Copy(text) => {
-            if !app.headless { crate::clipboard::store(&text) }
-            let limit = app.buffer_limit();
-            app.paste.add(text, limit);
-            picker.say(JEV_COPIED);
+        Plan::SetUp => set_up(app),
+        Plan::Select(id) => picker.select(&id),
+    }
+}
+
+/// Set up, as the desktop's: signed out, it starts with signing in (the account page) and finishes
+/// itself once that sign-in lands ([own_sign_in_done], [on_local]); signed in, it is a list read that
+/// sets grid up (`setup`).
+fn set_up(app: &mut App) {
+    if signed_out(app) {
+        app.models_view.set_up_after_sign_in = true;
+        app.models_view.set_up_signed_in = false;
+        crate::account::open(app);
+        return;
+    }
+    send_set_up(app);
+}
+
+fn send_set_up(app: &mut App) {
+    app.models_view.set_up_after_sign_in = false;
+    app.models_view.set_up_signed_in = false;
+    app.models_view.setting_up = true;
+    let machine = app.fleet.local_id.clone();
+    let m = machine.clone();
+    if !read_rpc(app, &machine, "setup", "grid_fleet_models_list", json!({ "refresh": true, "setup": true }), Duration::from_secs(180), move |app, r| on_set_up(app, &m, r)) {
+        app.models_view.setting_up = false;
+        app.say("This computer is not connected", theme::WARN);
+    }
+}
+
+/// hn's own sign-in, started from Set up, landed: the Set up goes on — back in the Models view it was
+/// asked from, whose read of this computer's list carries it on ([on_local]).
+pub(crate) fn own_sign_in_done(app: &mut App) {
+    if !app.models_view.set_up_after_sign_in { return }
+    app.models_view.set_up_signed_in = true;
+    if matches!(app.modal, Some(crate::modal::Modal::Picker { kind: crate::modal::PickerKind::Account, .. })) { crate::input::run(app, "models"); return }
+    let machine = app.fleet.local_id.clone();
+    if !machine.is_empty() && !app.models_view.reading.contains(&machine) { read_local(app, &machine) }
+}
+
+/// This computer is signed in. Not by hn's own sign-in (that is [own_sign_in_done], and one still
+/// under way decides there): it was signed in somewhere else — the desktop, a terminal — which signs
+/// in alone, so a Set up left waiting is dropped rather than carried out.
+pub(crate) fn signed_in(app: &mut App) {
+    let v = &app.models_view;
+    if !v.set_up_after_sign_in || v.set_up_signed_in || crate::account::signing_in(app) { return }
+    app.models_view.set_up_after_sign_in = false;
+}
+
+/// The Set up answered: the list it read (its `gridSetupError` says why it could not), and the
+/// shared grids read again once grid is set up.
+pub fn on_set_up(app: &mut App, machine: &str, reply: Result<Value, RpcError>) {
+    app.models_view.setting_up = false;
+    match reply {
+        Ok(r) => on_local(app, machine, Ok(r)),
+        Err(e) => {
+            if let Some(s) = app.models_view.local.get_mut(machine) { s.grid_setup_error = Some(why(&e)) }
+            crate::input::refill(app);
         }
     }
+    if !needs_set_up(app) { read_grids(app, machine) }
 }
 
 /// What a Use is doing, for the footer: `Downloading 42%…`, `Starting…`, `Moving it…`.
@@ -1194,6 +1204,7 @@ fn release_read(app: &mut App, machine: &str, kind: &str) {
         "local" => { app.models_view.reading.remove(machine); },
         "grids" => { app.models_view.grids_reading.remove(machine); },
         "act" => { app.models_view.pending = None; },
+        "setup" => { app.models_view.setting_up = false; },
         _ => if let Some(name) = kind.strip_prefix("wake:") { app.models_view.asking.remove(name); },
     }
 }
@@ -1205,7 +1216,9 @@ fn reconcile_reads(app: &mut App) {
     if app.models_view.owner.as_ref().is_some_and(|old| old != &owner) {
         let switch_generation = app.models_view.switch_generation.wrapping_add(1);
         let panel_generation = app.models_view.panel_generation.wrapping_add(1);
-        app.models_view = Models { switch_generation, panel_generation, ..Default::default() };
+        // (A Set up waiting on the sign-in that changed the owner continues on the new one.)
+        let (set_up_after_sign_in, set_up_signed_in) = (app.models_view.set_up_after_sign_in, app.models_view.set_up_signed_in);
+        app.models_view = Models { switch_generation, panel_generation, set_up_after_sign_in, set_up_signed_in, ..Default::default() };
     }
     app.models_view.owner = Some(owner.clone());
     let stale: Vec<_> = app.models_view.reads.iter().filter(|((machine, _), read)| read.owner != owner || read.connection != app.connection_generation(machine))
@@ -1270,6 +1283,17 @@ pub fn on_local(app: &mut App, machine: &str, reply: Result<Value, RpcError>) {
             v.local.insert(machine.to_string(), s);
         }
         None => { v.local_error.insert(machine.to_string(), "Models are unavailable. Try again.".into()); }
+    }
+    // A Set up that waited on hn's own sign-in: that landed, so it continues — or is done, when the list
+    // says grid is set up. No list (a read that failed while the daemon restarted for the sign-in)
+    // decides nothing: the next read does.
+    let v = &app.models_view;
+    if machine == app.fleet.local_id && v.set_up_after_sign_in && v.set_up_signed_in && !v.setting_up {
+        match v.local.get(machine).map(|s| s.grid_setup_needed) {
+            Some(true) => send_set_up(app),
+            Some(false) => { app.models_view.set_up_after_sign_in = false; app.models_view.set_up_signed_in = false }
+            None => {}
+        }
     }
     advance(app);
     crate::input::refill(app);
@@ -1345,6 +1369,18 @@ pub fn on_wake(app: &mut App, machine: &str, name: &str, reply: Result<Value, Rp
     crate::input::refill(app);
 }
 
+/// How soon an open view asks again for APIs it could not read (the daemon restarting for a sign-in).
+const APIS_RETRY: Duration = Duration::from_secs(10);
+
+/// The saved APIs are read when the view opens — and, open, whenever it has no list and asks for
+/// none: one that opened before this computer's connection was up, or whose owner changed under it —
+/// or its last answer failed a while ago.
+fn apis_due(app: &App, open: bool) -> bool {
+    let v = &app.models_view;
+    let failed = matches!(v.apis, Some(Err(_))) && due(v.apis_at.as_ref(), APIS_RETRY, Instant::now());
+    open && (v.apis.is_none() || failed) && !v.reads.contains_key(&(app.fleet.local_id.clone(), "apis".to_string()))
+}
+
 fn read_apis(app: &mut App) {
     let machine = app.fleet.local_id.clone();
     read_rpc(app, &machine, "apis", "api_connections", json!({ "action": "list" }), Duration::from_secs(20), on_apis);
@@ -1354,6 +1390,7 @@ pub fn on_apis(app: &mut App, reply: Result<Value, RpcError>) {
     let list = match reply { Ok(r) => parse_apis(&r), Err(e) => Err(if e.detail.is_empty() { "APIs are unavailable. Try again.".into() } else { e.detail.clone() }) };
     let serving: Vec<String> = list.as_ref().map(|l| l.iter().filter(|a| a.serves_models()).map(|a| a.id.clone()).collect()).unwrap_or_default();
     app.models_view.apis = Some(list);
+    app.models_view.apis_at = Some(Instant::now());
     for id in serving { if !app.models_view.api_models.contains_key(&id) { read_api_models(app, &id) } }
     crate::input::refill(app);
 }
@@ -1604,9 +1641,11 @@ pub fn tick(app: &mut App) {
     let serving = v.using.as_ref().is_some_and(|u| u.step == Step::Serve);
     let waking = v.follow_until.is_some_and(|t| now < t) && v.grids.get(&machine).is_some_and(Grids::waking);
     let grids_due = !v.grids_reading.contains(&machine) && grids_every(open, serving, waking).is_some_and(|e| due(v.grids_at.get(&machine), e, now));
+    let apis_due = apis_due(app, open);
     if !waking { app.models_view.follow_until = None }
     if local_due { read_local(app, &machine) }
     if grids_due { read_grids(app, &machine) }
+    if apis_due { read_apis(app) }
     advance(app);
 }
 
@@ -1754,7 +1793,7 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
         let x = section.and_then(|s| s.models.iter().find(|x| x.id == model));
         let own = section.is_some_and(|s| s.own);
         let status = match x.and_then(|x| x.offline.clone()) { Some(who) => format!("{who} seems offline — its models come back when it does"), None => "Available".into() };
-        let status = match grid_word(app, x.cloned().as_ref().unwrap_or(&GridModel { id: model.to_string(), node: node.to_string(), offline: None, decision: false }), t).as_str() {
+        let status = match grid_word(app, x.cloned().as_ref().unwrap_or(&GridModel { id: model.to_string(), node: node.to_string(), offline: None }), t).as_str() {
             SWITCHING => format!("{SWITCHING} this harness is moving onto it"),
             "✓ In use" => format!("{status} · this harness is on it"),
             _ => status,
@@ -1766,68 +1805,6 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
         out.push(kv("Source", if own { "On your machines".to_string() } else { format!("Shared · {grid}") }));
         let said = match plan_enter(app, id) { Plan::Retarget { .. } => "Enter moves this harness onto it.".to_string(), Plan::Arm(..) => "Enter twice moves this harness onto it anyway.".into(), Plan::Say(w) if w == NO_HARNESS => no_target_why(app), Plan::Say(w) => w, _ => String::new() };
         if !said.is_empty() { out.push(Line::raw("")); out.push(Line::from(span(said, fg(theme::accent())))) }
-        return out;
-    }
-    if let Some(model) = id.strip_prefix("mv:jevlocal:") {
-        let Some(m) = local_model(app, model) else { return vec![dim("(gone)")] };
-        let here = this_computer();
-        let grid = jev_local_grid(app, &m);
-        let op = v.op_for(&machine, &m);
-        let mut out = vec![bold(m.name.clone()), Line::raw(["Jev model", &capital(here), grid.as_deref().unwrap_or("")].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · "))];
-        out.push(Line::raw(""));
-        out.push(Line::raw("Answers questions about a state with probabilities: a choice between named options, yes or no, or a score. It does not chat, so no harness runs on it."));
-        out.push(Line::raw(""));
-        out.push(match op {
-            Some(o) if o.active() => Line::raw(o.word()),
-            Some(o) if o.failed() => warn(o.error.clone().unwrap_or_else(|| "It could not start. Try again.".into())),
-            _ if m.running() => Line::raw(format!("Running on {here}, on your grid.")),
-            _ if m.downloaded() => Line::raw("Downloaded. Start runs it on your grid, beside the models already running there."),
-            _ => Line::raw(format!("Get downloads it{}, updates Grid's model engine first if it is too old to serve Jev models, and runs it on your grid, beside the models already running there.",
-                m.size.map(|s| format!(" ({})", gb(s))).unwrap_or_default())),
-        });
-        out.push(Line::raw(""));
-        if let Some(size) = m.size { out.push(kv("Size", gb(size))) }
-        out.push(kv("Runs in", "Grid's llama.cpp"));
-        if let Some(grid) = &grid {
-            out.push(kv("Grid", grid.clone()));
-            out.push(kv("Endpoint", "POST $OPENAI_BASE_URL/systemone"));
-            out.push(Line::raw(""));
-            out.push(Line::raw("Call it from a terminal:"));
-            out.extend(jev_request(grid, &m.name).lines().map(|l| Line::from(span(l.to_string(), fg(theme::SOFT)))));
-            out.push(Line::raw(""));
-            out.push(dim("The first line loads this grid's address and key into your shell; the key is never shown here."));
-        }
-        let said = match (grid.is_some(), m.running(), m.downloaded()) {
-            (true, _, _) => "Enter copies how to call it. ^S stops it and frees its memory. The download is kept.",
-            (false, true, _) => "^S stops it and frees its memory. The download is kept.",
-            (false, false, true) => "Enter starts it.",
-            _ => "Enter gets it.",
-        };
-        if op.is_none_or(|o| !o.active()) { out.push(Line::raw("")); out.push(Line::from(span(said, fg(theme::accent())))) }
-        return out;
-    }
-    if let Some(rest) = id.strip_prefix("mv:jev:") {
-        let mut parts = rest.splitn(3, '\t');
-        let (grid, node, model) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-        let section = v.grids.get(&machine).and_then(|g| g.sections.iter().find(|s| s.name == grid));
-        let offline = section.and_then(|s| s.models.iter().find(|x| x.id == model)).and_then(|x| x.offline.clone());
-        let resting = section.is_some_and(|s| s.state == "asleep" || s.state == "waking");
-        let mut out = vec![bold(model.to_string()), Line::raw(["Jev model", node, grid].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · "))];
-        out.push(Line::raw(""));
-        out.push(Line::raw("Answers questions about a state with probabilities: a choice between named options, yes or no, or a score. It does not chat, so no harness runs on it."));
-        if let Some(who) = offline { out.push(Line::raw("")); out.push(warn(format!("{who} seems offline — it answers again when that computer is back"))) }
-        else if resting { out.push(Line::raw("")); out.push(dim("Its grid is resting. Your first request wakes it, which takes a few seconds.")) }
-        out.push(Line::raw(""));
-        out.push(kv("Model", model.to_string()));
-        out.push(kv("Grid", grid.to_string()));
-        out.push(kv("Endpoint", "POST $OPENAI_BASE_URL/systemone"));
-        out.push(Line::raw(""));
-        out.push(Line::raw("Call it from a terminal:"));
-        out.extend(jev_request(grid, model).lines().map(|l| Line::from(span(l.to_string(), fg(theme::SOFT)))));
-        out.push(Line::raw(""));
-        out.push(dim("The first line loads this grid's address and key into your shell; the key is never shown here. Each question is a choice (named options), a noul (yes or no) or a score (2–10 ordered levels)."));
-        out.push(Line::raw(""));
-        out.push(Line::from(span("Enter copies it.", fg(theme::accent()))));
         return out;
     }
     if let Some(name) = id.strip_prefix("mv:wake:") {
@@ -1884,10 +1861,34 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
         return out;
     }
     if id == "mv:more" {
-        let n = v.local.get(&machine).map(|s| s.models.iter().filter(|m| !m.downloaded()).count()).unwrap_or(0);
+        // (The models the row folds: not one running here.)
+        let n = v.local.get(&machine).map(|s| s.models.iter().filter(|m| !m.downloaded() && !m.can_stop).count()).unwrap_or(0);
         return vec![bold(format!("{n} models that fit {}", this_computer())), Line::raw(""), Line::from(span(if v.more { "Enter shows the first five." } else { "Enter lists them all." }, fg(theme::accent())))];
     }
-    id.strip_prefix("mv:note:").map(|_| vec![]).unwrap_or_default()
+    if id == SET_UP {
+        let here = this_computer();
+        let mut out = vec![bold("Local & shared models"), Line::raw(format!("Download models to run on {here}, and use the models other people share with you.")), Line::raw("")];
+        let signed_out = signed_out(app);
+        if signed_out { out.push(Line::raw("They belong to your Harness account, so you need to sign in to use them.")); out.push(Line::raw("")) }
+        // (Under way, it says so in place of what Enter would do.)
+        match set_up_word(app) {
+            "Setting up…" => out.push(Line::raw("Setting up…")),
+            "Signing in…" => out.push(Line::raw("Signing in… Finish in your browser, and setup continues here.")),
+            _ => {
+                let said = if signed_out { "Enter opens sign-in. Setup finishes here once you're signed in.".to_string() } else { format!("Enter gets {here} ready for them with your Harness account.") };
+                out.push(Line::from(span(said, fg(theme::accent()))));
+                if let Some(e) = v.local.get(&machine).and_then(|s| s.grid_setup_error.clone()).filter(|_| !signed_out) { out.push(Line::raw("")); out.push(warn(format!("Could not set up: {e}"))) }
+            }
+        }
+        return out;
+    }
+    if id == NONE_YET { return vec![bold("No models here yet"), Line::raw(""), Line::from(span("Enter goes to the models to get, below.", fg(theme::accent())))] }
+    // A note (a grid not answering, a list that could not be read) has nothing to choose: its panel says
+    // it again, whole, rather than standing blank as if something failed to load.
+    if id.starts_with("mv:note:") {
+        return rows(app, "").into_iter().find(|r| r.id == id).map(|r| vec![Line::raw(r.label)]).unwrap_or_default();
+    }
+    vec![]
 }
 
 #[cfg(test)]
@@ -2638,7 +2639,7 @@ mod tests {
     #[test]
     fn a_resting_section_says_what_the_desktop_says() {
         let s = |state: &str, models: usize, age: Option<u64>, outcome: &str| Section { name: "team".into(), state: state.into(), age, outcome: outcome.into(),
-            models: (0..models).map(|i| GridModel { id: format!("m{i}"), node: "n".into(), offline: None, decision: false }).collect(), ..Default::default() };
+            models: (0..models).map(|i| GridModel { id: format!("m{i}"), node: "n".into(), offline: None }).collect(), ..Default::default() };
         assert_eq!(section_words(&s("asleep", 1, Some(180), ""), false).subtitle.as_deref(), Some("Asleep 3min ago"));
         assert!(section_words(&s("asleep", 0, None, ""), false).offer_wake);
         assert_eq!(section_words(&s("asleep", 0, None, ""), true), Words { subtitle: None, sentence: Some(STARTING_UP_WAIT.into()), offer_wake: false });
@@ -2768,102 +2769,195 @@ mod tests {
         assert!(crate::modal::command_rows(&app).iter().any(|r| r.id == "cmd:models" && r.group.as_deref() == Some("Harness")));
     }
 
-    /// Jev (System One) models: listed last under their own heading, from the own grid and a shared
-    /// one alike — never under Your models or Shared with you, never a harness's — and Enter puts how
-    /// to call one on the clipboard, which the panel shows too.
+    /// Grid not set up here (`gridSetupNeeded`): Your models is the desktop's one Set up row — no
+    /// "Sign in to find models" sentence, nothing to get. Signed out, Enter opens the sign-in and the
+    /// Set up waits on it: hn's own sign-in lands — the daemon restarted under the account's machine
+    /// id, its first read failing — and the view comes back and the Set up goes on by itself.
     #[test]
-    fn jev_models_are_listed_apart_and_enter_copies_how_to_call_one() {
+    fn set_up_signed_out_signs_in_then_sets_up_by_itself() {
+        use crate::account::Status;
+        use crate::devices::{Reply, Req};
+        use crate::modal::{Modal, PickerKind};
         let mut app = app();
-        app.headless = true;
-        on_local(&mut app, "local", Ok(local_reply(qwen("running", Value::Null), false)));
-        let mut g = grids_reply(&["box-model"]);
-        g["grids"][0]["models"].as_array_mut().unwrap().push(json!({ "id": "laya-english", "node": "studio", "kind": "decision" }));
-        g["grids"][1]["models"].as_array_mut().unwrap().push(json!({ "id": "nimble", "node": "gpu-box", "kind": "decision" }));
-        on_grids(&mut app, "local", Ok(g));
-        let rows = rows_of(&app);
-        let jev: Vec<&str> = rows.iter().filter(|r| r.group.as_deref() == Some(JEV)).map(|r| r.id.as_str()).collect();
-        assert_eq!(jev, vec!["mv:jev:own-grid\tstudio\tlaya-english", "mv:jev:team\tgpu-box\tnimble"]);
-        assert_eq!(rows.last().and_then(|r| r.group.as_deref()), Some(JEV), "the last section");
-        assert!(rows.iter().filter(|r| r.group.as_deref() != Some(JEV)).all(|r| r.label != "laya-english" && r.label != "nimble"));
-        let laya = row(&rows, "mv:jev:own-grid\tstudio\tlaya-english");
-        assert_eq!(laya.right.trim(), "Copy");
-        assert_eq!(laya.detail.iter().map(|s| s.content.as_ref()).collect::<String>(), "studio · own-grid");
+        let needed = json!({ "models": [], "notice": "Sign in to find models for this computer.", "busy": false, "gridSetupNeeded": true });
+        on_local(&mut app, "local", Ok(needed.clone()));
+        let rows = super::rows(&app, "");
+        let mine: Vec<&str> = rows.iter().filter(|r| r.group.as_deref() == Some(YOUR_MODELS)).map(|r| r.id.as_str()).collect();
+        assert_eq!(mine, vec![SET_UP]);
+        assert!(!rows.iter().any(|r| r.label.contains("Sign in to find") || r.id == NONE_YET), "{:?}", rows.iter().map(|r| &r.label).collect::<Vec<_>>());
 
-        let request = jev_request("own-grid", "laya-english");
-        assert!(request.starts_with("eval \"$(harness grid env own-grid)\"\n"), "{request}");
-        assert!(request.contains("curl \"$OPENAI_BASE_URL/systemone\"") && request.contains("Bearer $OPENAI_API_KEY"), "{request}");
-        assert!(request.contains("\"model\":\"laya-english\""), "{request}");
-        // Byte for byte the desktop's (`jevRequest` in model_search_catalog.dart).
-        assert!(request.ends_with(r#"-d '{"model":"laya-english","state":"I was charged twice. Please refund the duplicate.","questions":{"refund":{"type":"noul","instructions":"Is a refund requested?"}}}'"#), "{request}");
-        assert_eq!(shell_word("my grid"), "'my grid'");
-        assert_eq!(shell_word("o'brien"), "'o'\\''brien'");
-
-        let panel = text(&preview(&app, "mv:jev:own-grid\tstudio\tlaya-english"));
-        assert!(panel.contains("Jev model · studio · own-grid") && panel.contains("Call it from a terminal:"), "{panel}");
-        assert!(panel.contains(&request), "{panel}");
-        assert_eq!(plan_enter(&app, "mv:jev:own-grid\tstudio\tlaya-english"), Plan::Copy(request.clone()));
-
+        app.account.status = Status::SignedOut;
+        assert_eq!(row(&super::rows(&app, ""), SET_UP).right, "Sign in");
+        assert!(text(&preview(&app, SET_UP)).contains("Enter opens sign-in"));
+        let before = app.models_view.sent.len();
         let mut picker = Picker::new("models", "");
-        choose(&mut app, &mut picker, "mv:jev:own-grid\tstudio\tlaya-english", false);
-        assert_eq!(picker.flash.as_ref().map(|(t, _)| t.as_str()), Some(JEV_COPIED));
-        assert_eq!(app.paste.top().map(|b| b.data.clone()), Some(request), "in a paste buffer too");
-        assert!(app.models_view.switching.is_none(), "no harness was moved");
+        choose(&mut app, &mut picker, SET_UP, false);
+        assert!(matches!(app.modal, Some(Modal::Picker { kind: PickerKind::Account, .. })), "the sign-in is shown");
+        assert!(app.models_view.set_up_after_sign_in);
+        assert_eq!(app.models_view.sent.len(), before, "nothing is set up signed out");
+        crate::account::tick(&mut app);
+        assert!(app.models_view.set_up_after_sign_in, "the account page is open: still waiting");
 
-        // This computer serving the own grid's Jev model (`grid join --serve`): listed once, under Jev models.
-        let mut served = local_reply(qwen("running", Value::Null), false);
-        served["models"].as_array_mut().unwrap().push(json!({ "id": "local:Laya-English-Q8_0.gguf", "name": "laya-english", "state": "running", "canStop": true, "sizeBytes": 449397600u64 }));
-        on_local(&mut app, "local", Ok(served));
-        assert_eq!(rows_of(&app).iter().filter(|r| r.label.starts_with("laya-english")).map(|r| r.group.clone().unwrap_or_default()).collect::<Vec<_>>(), vec![JEV.to_string()]);
+        // hn's own sign-in: the daemon answers to the account's machine id now, and its first read fails.
+        app.devices.runner = Some(Box::new(|req| Some(match req {
+            Req::Cli { .. } => Reply::Cli { ok: true, out: "{\"loggedIn\":true}".into(), err: String::new() },
+            _ => Reply::Http(Err(("TEST".into(), "no daemon in tests".into()))),
+        })));
+        app.fleet.local_id = "acct".into();
+        app.fleet.machines[0].id = "acct".into();
+        account_changed(&mut app);
+        crate::account::sign_in_for_test(&mut app);
+        assert_eq!(app.account.status, Status::SignedIn { offline: false, email: None });
+        assert!(matches!(app.modal, Some(Modal::Picker { kind: PickerKind::Models, .. })), "back in Models, where it was asked");
+        on_local(&mut app, "acct", Ok(json!({})));
+        assert!(app.models_view.set_up_after_sign_in, "a read with no list decides nothing");
+        crate::account::tick(&mut app);
+        assert!(app.models_view.set_up_after_sign_in, "signed in: leaving the account page gives nothing up");
 
-        // A resting grid wakes on the request: the panel says so, and the row still offers the copy.
-        assert!(!text(&preview(&app, "mv:jev:team\tgpu-box\tnimble")).contains("resting"));
-        app.models_view.grids.get_mut("local").unwrap().sections.iter_mut().find(|s| s.name == "team").unwrap().state = "asleep".into();
-        assert!(text(&preview(&app, "mv:jev:team\tgpu-box\tnimble")).contains("Its grid is resting. Your first request wakes it"));
-        assert_eq!(row(&rows_of(&app), "mv:jev:team\tgpu-box\tnimble").right.trim(), "Copy");
+        on_local(&mut app, "acct", Ok(needed));
+        assert_eq!(last_sent(&app), ("acct".into(), "grid_fleet_models_list".into(), json!({ "refresh": true, "setup": true })));
+        assert!(!app.models_view.set_up_after_sign_in);
+        assert_eq!(row(&super::rows(&app, ""), SET_UP).right, "Setting up…");
+        assert_eq!(plan_enter(&app, SET_UP), Plan::Say("Setting up…".into()));
+
+        on_set_up(&mut app, "acct", Ok(local_reply(qwen("running", Value::Null), false)));
+        assert_eq!(last_sent(&app).1, "grid_models_list", "the shared grids are read again");
+        let rows = super::rows(&app, "");
+        assert!(!rows.iter().any(|r| r.id == SET_UP));
+        assert!(rows.iter().any(|r| r.id == "mv:local:qwen-35b"));
     }
 
-    /// A Jev model this computer can get: under Jev models (never the downloads), Get starts it — the
-    /// daemon downloads it, updates Grid's engine and runs it — and once the own grid lists it, it is one
-    /// row whose Enter copies how to call it and whose ^S asks before it stops.
+    /// Only Set up signs in AND sets grid up. A sign-in anywhere else signs in alone: from hn's account
+    /// page, or the desktop — even with a Set up left waiting — or after a Set up's sign-in was given up.
     #[test]
-    fn a_jev_model_of_this_computer_is_got_started_called_and_stopped_from_its_one_row() {
+    fn a_sign_in_for_anything_else_sets_nothing_up() {
+        use crate::account::Status;
+        use crate::devices::{Reply, Req};
+        use crate::modal::{Modal, PickerKind};
+        let needed = json!({ "models": [], "busy": false, "gridSetupNeeded": true });
+        let signed_in = || -> crate::devices::Runner { Box::new(|req| Some(match req {
+            Req::Cli { .. } => Reply::Cli { ok: true, out: "{\"loggedIn\":true}".into(), err: String::new() },
+            _ => Reply::Http(Err(("TEST".into(), "no daemon in tests".into()))),
+        })) };
+        let nothing_set_up = |app: &mut App| {
+            let before = app.models_view.sent.len();
+            on_local(app, "local", Ok(json!({ "models": [], "busy": false, "gridSetupNeeded": true })));
+            assert_eq!(app.models_view.sent.len(), before, "nothing is set up");
+            assert_eq!(row(&super::rows(app, ""), SET_UP).right, "Set up");
+        };
+
+        // hn's own sign-in from its account page, no Set up asked: it signs in alone.
         let mut app = app();
-        let laya = |state: &str, op: Value| json!({ "id": "jev:ggml-org/Laya-GGUF", "name": "laya-english", "kind": "decision", "state": state,
-            "sizeBytes": 449397600u64, "quant": "Q8_0", "canStart": state != "running", "canStop": state == "running", "app": "Grid", "operation": op });
-        let mut reply = local_reply(qwen("running", Value::Null), false);
-        reply["models"].as_array_mut().unwrap().push(laya("available", Value::Null));
-        on_local(&mut app, "local", Ok(reply.clone()));
-        on_grids(&mut app, "local", Ok(grids_reply(&["box-model"])));
-        let id = "mv:jevlocal:jev:ggml-org/Laya-GGUF";
-        let rows = rows_of(&app);
-        assert_eq!(row(&rows, id).group.as_deref(), Some(JEV));
-        assert_eq!(row(&rows, id).right.trim(), "Get");
-        assert!(rows.iter().filter(|r| r.label == "laya-english").count() == 1, "never also offered among the downloads");
-        assert!(text(&preview(&app, id)).contains("updates Grid's model engine first if it is too old to serve Jev models"));
-        assert_eq!(plan_enter(&app, id), Plan::Act { model: "jev:ggml-org/Laya-GGUF".into(), action: "start" });
+        on_local(&mut app, "local", Ok(needed.clone()));
+        app.account.status = Status::SignedOut;
+        crate::account::open(&mut app);
+        app.devices.runner = Some(signed_in());
+        crate::account::sign_in_for_test(&mut app);
+        assert!(matches!(app.modal, Some(Modal::Picker { kind: PickerKind::Account, .. })), "no view is opened for it");
+        nothing_set_up(&mut app);
 
-        // Its engine being updated says so, on the row and in the panel.
-        let mut updating = reply.clone();
-        updating["models"].as_array_mut().unwrap().pop();
-        updating["models"].as_array_mut().unwrap().push(laya("available", json!({ "id": "op-jev", "modelId": "jev:ggml-org/Laya-GGUF", "action": "start",
-            "stage": "updating", "phase": "running", "updatedAt": "2026-09-30T00:00:00.000Z" })));
-        on_local(&mut app, "local", Ok(updating));
-        assert_eq!(row(&rows_of(&app), id).right.trim(), "Updating engine");
-        assert!(text(&preview(&app, id)).contains("Updating engine"));
+        // A Set up waiting on the sign-in page, and the computer signed in elsewhere (the desktop).
+        let mut app = super::tests::app();
+        on_local(&mut app, "local", Ok(needed.clone()));
+        app.account.status = Status::SignedOut;
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, SET_UP, false);
+        assert!(app.models_view.set_up_after_sign_in);
+        app.devices.runner = Some(signed_in());
+        crate::account::refresh(&mut app, true);
+        assert!(!app.models_view.set_up_after_sign_in, "signed in elsewhere: the Set up is dropped");
+        nothing_set_up(&mut app);
 
-        // Running, and the own grid lists it as a Jev model: one row — this computer's — to call or stop.
-        let mut running = reply.clone();
-        running["models"].as_array_mut().unwrap().pop();
-        running["models"].as_array_mut().unwrap().push(laya("running", Value::Null));
-        on_local(&mut app, "local", Ok(running));
-        let mut g = grids_reply(&["box-model"]);
-        g["grids"][0]["models"].as_array_mut().unwrap().push(json!({ "id": "laya-english", "node": "studio", "kind": "decision" }));
-        on_grids(&mut app, "local", Ok(g));
-        let rows = rows_of(&app);
-        assert_eq!(rows.iter().filter(|r| r.label.starts_with("laya-english")).map(|r| r.id.as_str()).collect::<Vec<_>>(), vec![id]);
-        assert_eq!(row(&rows, id).right.trim(), "Copy");
-        assert_eq!(plan_enter(&app, id), Plan::Copy(jev_request("own-grid", "laya-english")));
-        assert!(text(&preview(&app, id)).contains(&jev_request("own-grid", "laya-english")));
-        assert!(matches!(plan_stop(&app, id), Plan::Arm(_, ref then) if **then == Plan::Act { model: "jev:ggml-org/Laya-GGUF".into(), action: "stop" }));
+        // A Set up whose sign-in was given up (the page left), then a sign-in later.
+        let mut app = super::tests::app();
+        on_local(&mut app, "local", Ok(needed));
+        app.account.status = Status::SignedOut;
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, SET_UP, false);
+        app.modal = None;
+        crate::account::tick(&mut app);
+        assert!(!app.models_view.set_up_after_sign_in, "the sign-in was given up");
+        app.devices.runner = Some(signed_in());
+        crate::account::open(&mut app);
+        crate::account::sign_in_for_test(&mut app);
+        nothing_set_up(&mut app);
+    }
+
+    /// A Set up that fails says why in its preview, and Enter tries again.
+    #[test]
+    fn a_failed_set_up_says_why_and_enter_tries_again() {
+        let mut app = app();
+        app.account.status = crate::account::Status::SignedIn { offline: false, email: None };
+        on_local(&mut app, "local", Ok(json!({ "models": [], "gridSetupNeeded": true })));
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, SET_UP, false);
+        assert_eq!(last_sent(&app).2, json!({ "refresh": true, "setup": true }));
+        on_set_up(&mut app, "local", Ok(json!({ "models": [], "gridSetupNeeded": true, "gridSetupError": "Grid could not be set up on this computer. Try again." })));
+        assert!(text(&preview(&app, SET_UP)).contains("Could not set up: Grid could not be set up"));
+        assert_eq!(row(&super::rows(&app, ""), SET_UP).right, "Set up");
+        assert_eq!(plan_enter(&app, SET_UP), Plan::SetUp);
+    }
+
+    /// "No models here yet — get one below" only with something below to get, and Enter goes to it.
+    #[test]
+    fn the_empty_note_points_at_the_models_to_get() {
+        let mut app = app();
+        on_local(&mut app, "local", Ok(json!({ "models": [model("first", "available", 4.0), model("second", "available", 4.0)], "memoryBytes": 64.0 * GIB, "supportsDownload": true })));
+        assert!(super::rows(&app, "").iter().any(|r| r.id == NONE_YET));
+        assert_eq!(plan_enter(&app, NONE_YET), Plan::Select("mv:local:first".into()));
+        on_local(&mut app, "local", Ok(json!({ "models": [], "notice": "The model catalog is unavailable." })));
+        let rows = super::rows(&app, "");
+        assert!(!rows.iter().any(|r| r.id == NONE_YET), "nothing below to get");
+        assert!(rows.iter().any(|r| r.label == "The model catalog is unavailable."));
+    }
+
+    /// An open view with no saved APIs listed asks for them — opened before this computer's
+    /// connection was up, or after the sign-in that changed its owner — and only once at a time.
+    #[test]
+    fn an_open_view_without_the_apis_reads_them() {
+        let mut app = app();
+        reconcile_reads(&mut app);
+        assert!(!apis_due(&app, false), "closed, it reads nothing");
+        assert!(apis_due(&app, true));
+        read_apis(&mut app);
+        assert_eq!(last_sent(&app).1, "api_connections");
+        assert!(!apis_due(&app, true), "one read at a time");
+        let read = app.models_view.reads[&("local".to_string(), "apis".to_string())].clone();
+        assert!(finish_read(&mut app, "local", "apis", &read));
+        on_apis(&mut app, Ok(json!({ "connections": [] })));
+        assert!(!apis_due(&app, true), "listed");
+        // A failed answer (the daemon restarting for a sign-in) is asked again a little later.
+        on_apis(&mut app, Err(RpcError::new("start the Harness daemon to use this feature", "")));
+        assert!(!apis_due(&app, true), "not at once");
+        app.models_view.apis_at = Some(Instant::now() - APIS_RETRY);
+        assert!(apis_due(&app, true));
+        app.fleet.local_id = "acct".into();
+        app.fleet.machines[0].id = "acct".into();
+        reconcile_reads(&mut app);
+        assert!(apis_due(&app, true), "a new owner's are read again");
+    }
+
+    /// More models says how many it folds and, opened, puts the cursor on the first model it shows,
+    /// not on Show fewer at the end of the list.
+    #[test]
+    fn more_models_counts_what_it_folds_and_opens_at_the_first_it_shows() {
+        let mut app = app();
+        on_local(&mut app, "local", Ok(local_reply(qwen("available", Value::Null), false)));
+        assert_eq!(row(&super::rows(&app, ""), "mv:more").label, "More models (2)");
+        assert!(text(&preview(&app, "mv:more")).starts_with("7 models that fit"), "{}", text(&preview(&app, "mv:more")));
+        let mut picker = Picker::new("models", "");
+        picker.set_rows(super::rows(&app, ""));
+        picker.select("mv:more");
+        choose(&mut app, &mut picker, "mv:more", false);
+        picker.set_rows(super::rows(&app, ""));
+        assert_eq!(picker.current_id().as_deref(), Some("mv:local:extra-5"));
+    }
+
+    /// A note's panel says the note again instead of standing blank.
+    #[test]
+    fn a_note_s_panel_says_it() {
+        let mut app = app();
+        on_local(&mut app, "local", Ok(json!({ "models": [], "notice": "The model catalog is unavailable." })));
+        assert_eq!(text(&preview(&app, "mv:note:notice")), "The model catalog is unavailable.");
     }
 }

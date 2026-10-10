@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createResumeAgentService, type ResumeAgentServiceDeps } from './resumeAgentService.js'
 import { RESUME_READINESS_BUDGET_MS } from './resumeStoppedAgent.js'
-import { registry, validTranscriptPath, type RegisteredSession } from './registry.js'
+import { registry, type RegisteredSession } from './registry.js'
+import { controlTranscriptEvidence } from '../engines/transcriptBindings.js'
+import { IdentityReadUnavailable } from '../engines/kit/identityScan.js'
 import { env } from '../config/env.js'
 import { StoppedAgentStore } from './stoppedAgents.js'
 import { AgentRestartCoordinator } from './restartAgent.js'
@@ -14,6 +16,8 @@ import { checkSessionRuntime, clearPaneRemainOnExit, resolvePaneEngineProcess, t
 import { buildEngineLaunchArgv, dropPermissionFlagIfUnsupported, refusePermissionFlagIfUnsupported } from './engineLaunch.js'
 import { enginePathOverride } from './engineBin.js'
 import { installedDsh } from '../dsh/installed.js'
+import { createLaunchHelpers } from '../core/agents/launch.js'
+import { createLaunchAuthority } from '../core/agents/launchAuthority.js'
 
 vi.mock('./deleteAgentFallback.js', () => ({ checkPidRuntime: vi.fn() }))
 vi.mock('./tmuxAgentDiscovery.js', () => ({ listTmuxPanes: vi.fn() }))
@@ -29,9 +33,9 @@ vi.mock('./engineLaunch.js', async importOriginal => ({
   refusePermissionFlagIfUnsupported: vi.fn(async () => null),
 }))
 vi.mock('./engineBin.js', () => ({ enginePathOverride: vi.fn(() => undefined) }))
-vi.mock('./engineInstall.js', () => ({ engineInstallRecipe: () => ({ command: 'fixture-install' }) }))
+vi.mock('./engineInstall.js', async original => ({ ...await original<object>(), engineInstallRecipe: () => ({ command: 'fixture-install' }) }))
 vi.mock('../dsh/installed.js', () => ({ installedDsh: vi.fn() }))
-vi.mock('./registry.js', async original => ({ ...await original<object>(), validTranscriptPath: vi.fn(() => true) }))
+vi.mock('../engines/transcriptBindings.js', async original => ({ ...await original<object>(), controlTranscriptEvidence: vi.fn() }))
 
 let dir: string
 let saved: RegisteredSession
@@ -48,6 +52,14 @@ function rewrite(extra: Partial<RegisteredSession>) { saved = { ...saved, ...ext
 function start() { return createResumeAgentService(deps)(saved.agentId) }
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
 
+it('retains the reservation if terminal dispatch starts but loses its reply', async () => {
+  create.mockImplementationOnce(async request => { request.onDispatch(); throw Error('Terminal transport disconnected') })
+  await expect(start()).rejects.toThrow('Terminal transport disconnected')
+  expect(deps.stoppedAgents.resumeReservedAt(saved.agentId)).not.toBeNull()
+  expect(registry.byAgent(saved.agentId)).toBeUndefined()
+  expect(deps.announceSession).not.toHaveBeenCalled()
+})
+
 beforeEach(() => {
   vi.clearAllMocks()
   for (const row of registry.list()) registry.removeAgent(row.agentId)
@@ -59,7 +71,7 @@ beforeEach(() => {
   store.save(saved)
   create.mockReset().mockResolvedValue({ state: 'succeeded', runtime: { backend: 'tmux', paneId: pane } })
   kill.mockReset().mockResolvedValue({ state: 'succeeded' })
-  vi.mocked(validTranscriptPath).mockReturnValue(true)
+  vi.mocked(controlTranscriptEvidence).mockImplementation((_engine, _id, path) => ({ path, verify: vi.fn() }))
   vi.mocked(enginePathOverride).mockReturnValue(undefined)
   vi.mocked(refusePermissionFlagIfUnsupported).mockReset().mockResolvedValue(null)
   vi.mocked(installedDsh).mockReturnValue(undefined)
@@ -85,6 +97,21 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); for (const row of registry.list()) registry.removeAgent(row.agentId); rmSync(dir, { recursive: true, force: true }) })
 
 describe('production resume handler', () => {
+  it('composes stopped resume with real launch preparation before any live row exists', async () => {
+    const apiNotes = vi.fn()
+    const helpers = createLaunchHelpers({
+      authority: createLaunchAuthority({ byAgent: id => registry.byAgent(id), revision: id => deps.restartJobs.revision(id), cancelled: id => deps.stopJobs.has(id) }),
+      prepareApiTools: apiNotes, setGridLaunch: vi.fn(), setTail: vi.fn(),
+      launchOverridesDeps: { machine: () => ({ hermesSystemManaged: false }), gridLaunch: vi.fn(),
+        tmuxSupportsSessionEnv: async () => true, writeGridConfigDir: vi.fn(), installCodexHooks: vi.fn(), readCodexConfig: () => null },
+    })
+    deps.relaunchOverrides = helpers.relaunchOverrides
+    expect(registry.byAgent(saved.agentId)).toBeUndefined()
+    expect(await start()).toMatchObject({ ok: true, resumed: true, session: { agentId: saved.agentId, sessionId: saved.sessionId } })
+    expect(apiNotes).toHaveBeenCalledWith(dir, 'codex')
+    expect(create).toHaveBeenCalledOnce()
+  })
+
   it.each(['auto', 'ask'])('resumes the same conversation with an explicit %s permission choice', async permissionMode => {
     rewrite({ engine: 'opencode', permissionMode: permissionMode === 'auto' ? 'ask' : 'auto' })
     vi.mocked(deps.relaunchOverrides).mockResolvedValue({ ok: true, overrides: {
@@ -262,7 +289,7 @@ describe('production resume handler', () => {
     ['removed cwd', () => rewrite({ cwd: join(dir, 'gone') }), 'CWD_NOT_FOUND'],
     ['file cwd', () => { const file = join(dir, 'file'); writeFileSync(file, 'file'); rewrite({ cwd: file }) }, 'CWD_NOT_FOUND'],
     ['missing transcript', () => rewrite({ transcriptPath: '' }), 'RESUME_UNAVAILABLE'],
-    ['invalid transcript', () => vi.mocked(validTranscriptPath).mockReturnValue(false), 'RESUME_UNAVAILABLE'],
+    ['invalid transcript', () => vi.mocked(controlTranscriptEvidence).mockImplementation(() => { throw new IdentityReadUnavailable('fixture source unavailable') }), 'IDENTITY_UNAVAILABLE'],
     ['old process alive', () => vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }), 'AGENT_BUSY'],
     ['old process unknown', () => vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'unknown', reason: 'fixture' }), 'AGENT_BUSY'],
   ] as const)('refuses %s without allocating or losing history', async (_label, setup, error) => {
@@ -300,6 +327,34 @@ describe('production resume handler', () => {
     expect(deps.stoppedAgents.beginResume(saved.agentId) === null).toBe(reason !== 'tmux is unavailable')
     expect(registry.byAgent(saved.agentId)).toBeUndefined()
   })
+  it('retains a typed native hold from synchronous history repair and releases its reservation', async () => {
+    vi.mocked(deps.prepareSessionResume).mockImplementationOnce(() => { throw new IdentityReadUnavailable('the native store is incomplete') })
+    expect(await start()).toMatchObject({ ok: false, error: 'IDENTITY_UNAVAILABLE' })
+    expect(create).not.toHaveBeenCalled()
+    expect(deps.stoppedAgents.resumeReservedAt(saved.agentId)).toBeNull()
+    expect(deps.stoppedAgents.get(saved.agentId)?.sessionId).toBe(saved.sessionId)
+  })
+
+  it.each(['permission', 'argv'] as const)('checks cancellation after %s preparation before allocating a pane', async phase => {
+    if (phase === 'permission') vi.mocked(dropPermissionFlagIfUnsupported).mockImplementationOnce(async (_engine, choice) => {
+      deps.restartJobs.cancel(saved.agentId)
+      return { choice, droppedFlag: null }
+    })
+    else vi.mocked(buildEngineLaunchArgv).mockImplementationOnce(() => { deps.restartJobs.cancel(saved.agentId); return ['fixture-engine'] })
+    expect(await start()).toMatchObject({ ok: false, error: 'AGENT_CHANGED' })
+    expect(create).not.toHaveBeenCalled()
+    expect(deps.stoppedAgents.resumeReservedAt(saved.agentId)).toBeNull()
+  })
+
+  it('releases the reservation and preserves an unexpected launch preparation failure', async () => {
+    const failure = new Error('private configuration write refused')
+    vi.mocked(deps.relaunchOverrides).mockRejectedValueOnce(failure)
+    await expect(start()).rejects.toBe(failure)
+    expect(create).not.toHaveBeenCalled()
+    expect(deps.stoppedAgents.resumeReservedAt(saved.agentId)).toBeNull()
+    expect(deps.stoppedAgents.get(saved.agentId)?.sessionId).toBe(saved.sessionId)
+  })
+
   it('cancels a tmux allocation without registering or reusing its pane', async () => {
     create.mockImplementation(async () => { deps.restartJobs.cancel(saved.agentId); return { state: 'succeeded', runtime: { backend: 'tmux', paneId: pane } } })
     expect(await start()).toMatchObject({ error: 'AGENT_CHANGED' }); expect(kill).toHaveBeenCalledTimes(1)

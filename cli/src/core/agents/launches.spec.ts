@@ -4,12 +4,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installedDsh } from '../../dsh/installed.js'
 import { dshSupportedEngines } from '../../dsh/manifest.js'
-import { opencodeMajorVersion } from '../../engines/opencode/version.js'
+import { loadEngine } from '../../engines/inProcess.js'
+import { opencodeMajorVersion } from '../../engines/launchControl.js'
 import { AgentCreationReceiptError, AgentCreationReceipts, type AgentCreationOutcome } from '../../lib/agentCreationReceipt.js'
 import type { AgentFrame } from '../../lib/agentFrame.js'
-import { claudeTrusts, codexTrusts, preTrustClaudeProject, preTrustCodexProject } from '../../lib/claudeTrust.js'
 import { MAX_FIRST_PROMPT_CHARS, permissionModeApproves, permissionModeFlags, supportsFirstPrompt, supportsNamedAgent } from '../../lib/engineLaunch.js'
-import { parseGridLaunchOverride } from '../../lib/gridLaunch.js'
+import { parseGridLaunchOverride } from '../../lib/gridLaunchWire.js'
 import { parseNewAgentModel } from '../../lib/newAgentModel.js'
 import { parseProjectFolder, prepareProjectFolder, ProjectFolderError } from '../../lib/projectFolder.js'
 import type { RegisteredSession } from '../../lib/registry.js'
@@ -22,15 +22,25 @@ import { createLaunchRequests, type CreateAgent, type ForkAgent, type LaunchRequ
  * they are tested with their own modules, and a test must never write the person's own engine config.
  */
 const root = vi.hoisted(() => ({ projects: '' }))
-vi.mock('../../lib/claudeTrust.js', async (real) => ({
-  ...await real<object>(),
-  claudeTrusts: vi.fn(() => false), codexTrusts: vi.fn(() => false), preTrustClaudeProject: vi.fn(), preTrustCodexProject: vi.fn(),
+// The engines' folder trust (engines/launchPrep.ts), one spy per engine.
+const trust = vi.hoisted(() => ({
+  claudeTrusts: vi.fn((_path: string) => false), codexTrusts: vi.fn((_path: string, _profile?: string | null) => false),
+  preTrustClaudeProject: vi.fn((_path: string): unknown => undefined), preTrustCodexProject: vi.fn((_path: string, _profile?: string | null): unknown => undefined),
 }))
-vi.mock('../../engines/opencode/version.js', async (real) => ({ ...await real<object>(), opencodeMajorVersion: vi.fn(() => 1) }))
+const { claudeTrusts, codexTrusts, preTrustClaudeProject, preTrustCodexProject } = trust
+vi.mock('../../engines/launchPrep.js', () => ({ folderTrust: (engine: string, profile?: string | null) => engine === 'claude'
+    ? { trusts: (path: string) => trust.claudeTrusts(path), record: (path: string) => trust.preTrustClaudeProject(path) }
+    : engine === 'codex' ? { trusts: (path: string) => trust.codexTrusts(path, profile), record: (path: string) => trust.preTrustCodexProject(path, profile) } : null }))
+// OpenCode's version probe is its own code, loaded for an OpenCode launch alone; a test may say it could not be.
+vi.mock('../../engines/inProcess.js', async (real) => {
+  const actual = await real<typeof import('../../engines/inProcess.js')>()
+  return { ...actual, loadEngine: vi.fn(actual.loadEngine) }
+})
+vi.mock('../../engines/launchControl.js', async (real) => ({ ...await real<object>(), opencodeMajorVersion: vi.fn(() => 1) }))
 vi.mock('../../lib/newAgentModel.js', async (real) => ({
   ...await real<object>(), parseNewAgentModel: vi.fn(() => ({ state: 'absent' })),
 }))
-vi.mock('../../lib/gridLaunch.js', async (real) => ({ ...await real<object>(), parseGridLaunchOverride: vi.fn(() => ({ state: 'absent' })) }))
+vi.mock('../../lib/gridLaunchWire.js', async (real) => ({ ...await real<object>(), parseGridLaunchOverride: vi.fn(() => ({ state: 'absent' })) }))
 vi.mock('../../dsh/installed.js', async (real) => ({ ...await real<object>(), installedDsh: vi.fn(() => undefined) }))
 vi.mock('../../dsh/manifest.js', async (real) => ({ ...await real<object>(), dshSupportedEngines: vi.fn(() => ['claude', 'codex']) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({
@@ -161,6 +171,15 @@ describe('agent_create, refused before any pane exists', () => {
     expect(await ask({ engine: 'opencode', cwd: '/w', agent: 'reviewer' })).toMatchObject({ error: 'AGENT_UNSUPPORTED' })
     expect(supportsNamedAgent).toHaveBeenLastCalledWith('opencode', 2)
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it('validates a named OpenCode launch without optional code', async () => {
+    const { ask, create } = setup()
+    vi.mocked(loadEngine).mockResolvedValue(null)
+    await ask({ engine: 'opencode', cwd: '/w', agent: 'reviewer' })
+    expect(create).toHaveBeenCalledOnce()
+    await ask({ engine: 'claude', cwd: '/w', agent: 'reviewer' })
+    expect(loadEngine).not.toHaveBeenCalled()
   })
 
   it('a permission mode the engine does not have, and a conversation to resume that is not one or comes with new-conversation choices', async () => {

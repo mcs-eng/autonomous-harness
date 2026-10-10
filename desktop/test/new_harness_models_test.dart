@@ -656,61 +656,13 @@ void main() {
       );
     }
   });
-  test('decision models are never offered to run a harness on', () async {
-    final box = controller();
-    final decisions = [
-      {'id': 'tev1', 'node': 'Mac Studio', 'kind': 'decision'},
-      {'id': 'kev-0.8b', 'node': 'Mac Studio', 'kind': 'decision'},
-    ];
-    final mixed = catalog();
-    final own = (mixed['grids'] as List).first as Map<String, dynamic>;
-    own['models'] = [...own['models'] as List, ...decisions];
-    connections.putIfAbsent('m', _Connection.new).answer = mixed;
-    await load(box);
-    expect(
-      box.options.where((o) => o.model != null).map((o) => o.title).toList(),
-      ['Qwen-35B', 'Qwen-35B'],
-    );
-    expect(box.modelNotice, isNull);
-
-    // A grid serving only decision models runs nothing a harness can use.
-    connections['m']!.answer = {
-      ...catalog(),
-      'grids': [
-        {'name': 'my-grid', 'own': true, 'models': decisions},
-      ],
-    };
-    await load(box);
-    expect(box.options.where((o) => o.model != null), isEmpty);
-    expect(box.modelNotice, contains('No models are running'));
-  });
-  test('local profiles exclude decision models from choices and counts', () async {
-    final answer = profileCatalog();
-    final local = (answer['grids'] as List).first as Map<String, dynamic>;
-    local['models'] = [
-      ...local['models'] as List,
-      {'id': 'decision-only', 'node': 'Studio', 'kind': 'decision'},
-    ];
-    connections.putIfAbsent('m', _Connection.new).answer = answer;
-    final box = controller();
-    await load(box);
-    expect(box.options.where((row) => row.model != null), hasLength(3));
-    expect(box.total, 4); // Subscription plus three compatible chat targets.
-    expect(box.options.any((row) => row.title == 'decision-only'), isFalse);
-
-    box.setQuery('Studio · a');
-    expect(
-      box.options.where((row) => row.model != null).single.model?.targetId,
-      'local:a:fixture',
-    );
-  });
-  test('a local target cannot launch its decision model via a remote namesake', () async {
+  test('a local target that stopped serving a model never falls back to a remote namesake', () async {
     final answer = profileCatalog();
     final local = (answer['grids'] as List)[1] as Map<String, dynamic>;
-    // The remote section still serves SameModel for chat. It is not a fallback
-    // for a selected local target that now serves only a decision model.
+    // The remote section still serves SameModel. It is not a fallback for a
+    // selected local target that now serves only another model.
     local['models'] = [
-      {'id': 'SameModel', 'node': 'Studio', 'kind': 'decision'},
+      {'id': 'OtherModel', 'node': 'Studio'},
     ];
     final connection = connections.putIfAbsent('m', _Connection.new)
       ..answer = answer;

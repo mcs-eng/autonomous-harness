@@ -750,7 +750,7 @@ class _TerminalPanelState extends State<TerminalPanel>
     }
     _followTail = atEnd;
     // Resizes and resyncs are output updates, not requests to enter this pane.
-    // Its retained renderer/editor keeps its current focus; a command bar or
+    // Its retained renderer/editor keeps its current focus; a palette or
     // other control must keep any keyboard ownership it already has.
     _afterTerminalMounted(scrollToEnd: atEnd, claimFocus: false);
   }
@@ -2125,10 +2125,16 @@ class _TerminalPanelState extends State<TerminalPanel>
     final cancellation = MediaDownloadCancellation();
     _previewCancellation = cancellation;
     try {
+      final machine = notifier.stateOf(session.machineId);
       final message = await _linkOpener.open(
         target,
-        isLocalMachine:
-            notifier.stateOf(session.machineId)?.isLocalMachine == true,
+        isLocalMachine: machine?.isLocalMachine == true,
+        // "index.html" as the agent printed it is a file in its project.
+        workingDirectory: machine?.agents
+            .where((agent) => agent.id == session.agentId)
+            .firstOrNull
+            ?.project
+            ?.cwd,
         isCancelled: () =>
             cancellation.isCancelled ||
             !mounted ||

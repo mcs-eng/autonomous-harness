@@ -7,11 +7,8 @@
  */
 import { homedir } from 'node:os'
 import { checkPidRuntime, terminateDeletedAgent } from '../../lib/deleteAgentFallback.js'
-import type { AgentEngine } from '../../engines/types.js'
 import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
-import { probeGridAssignment } from '../../lib/gridAssignment.js'
-import type { GridLaunchOverride } from '../../lib/gridLaunch.js'
-import type { ProcessIdentity, RegisteredSession } from '../../lib/registry.js'
+import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, type RestartAgentDeps } from '../../lib/restartAgent.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
@@ -20,6 +17,7 @@ import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 
 export interface PaneSwapDeps {
+  restartJobs?: AgentRestartCoordinator
   byAgent: (agentId: string) => RegisteredSession | undefined
   /** The tmux backend; a swap only ever runs where there is one. */
   tmuxBackend: TmuxBackend | null
@@ -31,7 +29,7 @@ export interface PaneSwapDeps {
 /** How long a relaunched engine must stay running before a restart counts it as come up (`waitForProcess`). */
 export const SWAP_SETTLE_MS = 500
 
-export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, keepAbandonedConversation }: PaneSwapDeps) {
+export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, keepAbandonedConversation, restartJobs = new AgentRestartCoordinator() }: PaneSwapDeps) {
   /**
    * The dependencies a pane-process swap needs, for both callers that do one.
    *
@@ -41,7 +39,6 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
    * is the only thing this takes. Written once because two copies of a kill sequence drift, and the
    * half that drifts is the half nobody ran today.
    */
-  const restartJobs = new AgentRestartCoordinator()
   const sameRestartTarget = (session: RegisteredSession): boolean => {
     const current = byAgent(session.agentId)
     return !!current && current.registeredAt === session.registeredAt
@@ -141,21 +138,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
     if (!row || !processArgvIsBoundaryFaithful(row)) return false
     return bypassPermissionActive(session.engine, row.args)
   }
-
-  /** Read the new process's argv, not its executable name: Codex keeps its Grid URL/model there. */
-  const restartedGridAssignment = async (
-    identity: ProcessIdentity,
-    engine: AgentEngine,
-    grid: GridLaunchOverride | undefined,
-  ) => {
-    const rows = await processRows()
-    const row = rows?.find((candidate) => sameProcessIdentity(candidate, identity))
-    // Keep the existing environment/config probe on hosts without faithful argv; never interpret
-    // flattened ps text as flags. Linux/WSL can additionally recover the argv-backed assignment.
-    const args = row && processArgvIsBoundaryFaithful(row) ? row.args : identity.executable
-    return probeGridAssignment(identity, engine, args, grid)
-  }
-  return { restartJobs, sameRestartTarget, paneSwapDeps, liveBypassPermission, restartedGridAssignment }
+  return { restartJobs, sameRestartTarget, paneSwapDeps, liveBypassPermission }
 }
 
 export type PaneSwap = ReturnType<typeof createPaneSwap>

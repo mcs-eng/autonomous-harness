@@ -1,18 +1,24 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { stopSharedCodexSession } from './codexSessionLifecycle.js'
 import { captureResumeIdentity } from './captureResumeIdentity.js'
 import { createStopAgentService, type StopAgentServiceDeps } from './stopAgentService.js'
 import { registry, type RegisteredSession } from './registry.js'
 import { stoppedAgents } from './stoppedAgents.js'
 import { AgentRestartCoordinator } from './restartAgent.js'
 import { checkPidRuntime, terminateDeletedAgent } from './deleteAgentFallback.js'
-vi.mock('./codexSessionLifecycle.js', () => ({ stopSharedCodexSession: vi.fn(async () => {}) }))
+import { createForgetSession } from '../core/agents/forget.js'
+import { env } from '../config/env.js'
+import { controlTranscriptEvidence } from '../engines/transcriptBindings.js'
 vi.mock('./captureResumeIdentity.js', () => ({ captureResumeIdentity: vi.fn(async session => session) }))
+vi.mock('../engines/transcriptBindings.js', async original => ({ ...await original<object>(),
+  controlTranscriptEvidence: vi.fn(),
+}))
 vi.mock('./deleteAgentFallback.js', () => ({ checkPidRuntime: vi.fn(), terminateDeletedAgent: vi.fn() }))
+vi.mock('../core/engines/cursorTasks.js', () => ({ removePendingCursorTasks: vi.fn(async () => {}) }))
 let row: RegisteredSession
 let deps: StopAgentServiceDeps
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(controlTranscriptEvidence).mockReset().mockImplementation((_engine, _id, path) => ({ path, verify: vi.fn() }))
   vi.mocked(captureResumeIdentity).mockReset().mockImplementation(async session => session)
   row = registry.openPendingAgent({ engine: 'codex', runtimes: [{ backend: 'tmux', paneId: '%44' }], cwd: '/tmp' })!
   Object.assign(row, { sessionId: 'saved', processIdentity: { pid: 77, executable: 'codex', startMarker: 'fixture' } })
@@ -20,6 +26,7 @@ beforeEach(() => {
     tmuxBackend: { kill: vi.fn(async () => ({ state: 'succeeded' as const, dispatch: 'executed' as const })) },
     agentReconciler: { suppress: vi.fn(), holdRoute: vi.fn(), releaseRoute: vi.fn(), trigger: vi.fn(async () => {}) },
     forgetSession: vi.fn(id => registry.removeAgent(id)), markDeleted: vi.fn(), clearDeleted: vi.fn(),
+    stopNative: vi.fn(async () => {}),
   }
   vi.mocked(terminateDeletedAgent).mockResolvedValue('gone')
 })
@@ -37,10 +44,56 @@ it('saves history before removing the runtime, joins concurrent stops, and clear
 it('missing identities are harmless and never allocate or signal anything', async () => {
   await createStopAgentService(deps)('missing'); expect(deps.forgetSession).not.toHaveBeenCalled(); expect(terminateDeletedAgent).not.toHaveBeenCalled()
 })
+it.each(['forget', 'checkpoint'] as const)('retains a captured Pi resume path through a pathless %s save', async stage => {
+  Object.assign(row, { engine: 'pi', transcriptPath: null,
+    processIdentity: { pid: 77, executable: 'pi', startMarker: 'fixture' } })
+  vi.mocked(captureResumeIdentity).mockImplementation(async session => ({ ...session,
+    transcriptPath: '/fixture/native.jsonl', source: 'stop-repair' }))
+  deps.forgetSession = createForgetSession({
+    registry, stoppedAgents, syncRecapPool: vi.fn(), normalizers: { forget: vi.fn() },
+    forgetAttach: vi.fn(), turnStartedAt: new Map(), neverFoldedHistory: new Set(), replayedFirstTurn: new Set(),
+    clearAgyIdleWatch: vi.fn(), cursorDiscovery: { remove: vi.fn() }, cursorSubagents: { forget: vi.fn() },
+    runtimeProfiles: { forget: vi.fn() }, watcher: { removeSession: vi.fn(async () => {}) },
+    stopHeartbeat: vi.fn(), teams: { forget: vi.fn() }, input: { forget: vi.fn() }, deviceInput: { forget: vi.fn() },
+    detachDsh: vi.fn(), mirror: { forget: vi.fn() }, clients: { send: vi.fn(), sendCommander: vi.fn() },
+    dataDir: env.ADAPTER_DATA_DIR,
+  })
+  await createStopAgentService(deps)(row.agentId, { checkpoint: async (_session, phase) => {
+    if (stage === 'checkpoint' && phase === 'before') {
+      // A hook can save the same live row while Close awaits its checkpoint, before tombstones exist.
+      expect(row.transcriptPath).toBeNull()
+      stoppedAgents.save({ ...row, title: 'Hook arrived' })
+      expect(stoppedAgents.get(row.agentId)?.transcriptPath).toBe('/fixture/native.jsonl')
+    }
+  } })
+  expect(registry.byAgent(row.agentId)).toBeUndefined()
+  expect(stoppedAgents.get(row.agentId)).toMatchObject({ sessionId: row.sessionId,
+    transcriptPath: '/fixture/native.jsonl', active: false })
+})
+it('cancels immediately, then joins the core pane commit before capturing the runtime to stop', async () => {
+  let committed!: () => void
+  deps.settlePane = vi.fn(() => new Promise<void>(done => { committed = done }))
+  const stopping = createStopAgentService(deps)(row.agentId)
+  expect(deps.stopJobs.has(row.agentId)).toBe(true)
+  await vi.waitFor(() => expect(deps.settlePane).toHaveBeenCalledWith(row.agentId))
+  expect(captureResumeIdentity).not.toHaveBeenCalled()
+  row.runtimes = [{ backend: 'tmux', paneId: '%90' }]
+  committed()
+  await stopping
+  expect(deps.tmuxBackend!.kill).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%90' })
+})
 it('storage failure leaves the live process and registry untouched', async () => {
   vi.spyOn(stoppedAgents, 'save').mockImplementation(() => { throw new Error('disk full') })
   await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('disk full')
   expect(registry.byAgent(row.agentId)).toBe(row); expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled(); expect(deps.markDeleted).not.toHaveBeenCalled()
+})
+it('preserves an unexpected evidence failure without signalling or hiding its cause', async () => {
+  row.transcriptPath = '/fixture/history.jsonl'
+  vi.mocked(controlTranscriptEvidence).mockReturnValue({ path: row.transcriptPath,
+    verify: () => { throw new Error('Evidence implementation unavailable') } })
+  await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('Evidence implementation unavailable')
+  expect(terminateDeletedAgent).not.toHaveBeenCalled()
+  expect(deps.forgetSession).not.toHaveBeenCalled()
 })
 it.each(['before', 'after'] as const)('honors cancellation at the %s checkpoint before retiring the terminal', async phase => {
   let current = true
@@ -158,7 +211,7 @@ it.each(['capture', 'termination'] as const)('accepts a hook rebuilding the same
   if (stage === 'capture') vi.mocked(captureResumeIdentity).mockImplementation(async session => { rebuild(); return session })
   else vi.mocked(terminateDeletedAgent).mockImplementation(async () => { rebuild(); return 'terminated' })
   await createStopAgentService(deps)(row.agentId)
-  expect(deps.forgetSession).toHaveBeenCalledExactlyOnceWith(row.agentId, { force: true })
+  expect(deps.forgetSession).toHaveBeenCalledExactlyOnceWith(row.agentId, { force: true, captured: expect.objectContaining({ sessionId: 'saved' }) })
   expect(registry.byAgent(row.agentId)).toBeUndefined()
   expect(stoppedAgents.get(row.agentId)?.sessionId).toBe('saved')
 })
@@ -208,7 +261,7 @@ it('keeps the newer hook binding that arrives during capture', async () => {
 
 it('checks cancellation at the shared-server boundary and never signals after a failure there', async () => {
   let current = true
-  vi.mocked(stopSharedCodexSession).mockImplementationOnce(async (_row, guard) => {
+  vi.mocked(deps.stopNative).mockImplementationOnce(async (_row, guard) => {
     expect(guard()).toBe(true); current = false; expect(guard()).toBe(false)
     throw new Error('shared server could not stop')
   })
@@ -232,5 +285,43 @@ it('does not forget a new agent published while its old pane was being retired',
     return { state: 'succeeded', dispatch: 'executed' }
   })
   await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('changed while pausing')
+  expect(deps.forgetSession).not.toHaveBeenCalled()
+})
+
+it('cancels an external intent through core without archiving, signalling or waiting for search', async () => {
+  Object.assign(row, { sessionId: '', processIdentity: null, launch: { state: 'held', service: 'search', detail: 'Reader unavailable' },
+    externalResume: { phase: 'waiting' } })
+  deps.cancelExternal = vi.fn(async (entry, current) => { expect(entry).toBe(row); expect(current()).toBe(true); return true })
+  const save = vi.spyOn(stoppedAgents, 'save')
+  await createStopAgentService(deps)(row.agentId)
+  expect(deps.cancelExternal).toHaveBeenCalledOnce()
+  expect(save).not.toHaveBeenCalled()
+  expect(captureResumeIdentity).not.toHaveBeenCalled()
+  expect(terminateDeletedAgent).not.toHaveBeenCalled()
+  expect(deps.stopNative).not.toHaveBeenCalled()
+  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled()
+  expect(deps.forgetSession).not.toHaveBeenCalled()
+})
+
+it.each(['missing', 'refused', 'error', 'unknown', 'cancelled'] as const)('keeps an external intent intact when cancellation is %s', async failure => {
+  Object.assign(row, { sessionId: '', processIdentity: null, launch: { state: 'held', service: 'search', detail: 'Reader unavailable' },
+    externalResume: { phase: 'waiting' } })
+  if (failure !== 'missing') deps.cancelExternal = vi.fn(async (_entry, current) => {
+    if (failure === 'error') throw new Error('Journal is unavailable')
+    if (failure === 'unknown') throw 'unavailable'
+    if (failure === 'cancelled') { expect(current()).toBe(false); return current() }
+    return false
+  })
+  const save = vi.spyOn(stoppedAgents, 'save')
+  await expect(createStopAgentService(deps)(row.agentId, { current: () => failure !== 'cancelled' }))
+    .rejects.toMatchObject({ code: 'STOP_UNCONFIRMED', message: failure === 'error' ? 'Journal is unavailable'
+      : failure === 'unknown' ? 'Adoption could not be cancelled.' : 'Adoption cancellation is unavailable.' })
+  expect(registry.byAgent(row.agentId)).toBe(row)
+  expect(deps.stopJobs.size).toBe(0)
+  expect(save).not.toHaveBeenCalled()
+  expect(captureResumeIdentity).not.toHaveBeenCalled()
+  expect(terminateDeletedAgent).not.toHaveBeenCalled()
+  expect(deps.stopNative).not.toHaveBeenCalled()
+  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled()
   expect(deps.forgetSession).not.toHaveBeenCalled()
 })
