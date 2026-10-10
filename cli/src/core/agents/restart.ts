@@ -17,6 +17,7 @@ import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
 import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
+import type { HeldRestart } from './heldLaunches.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import type { createLaunchHelpers } from './launch.js'
 import type { RestartAgent } from './launches.js'
@@ -58,18 +59,21 @@ export interface RestartDeps {
   agentReconciler: Pick<TerminalAgentReconciler, 'holdRoute' | 'releaseRoute'>
   terminalHintMachineName: () => string
   announceSession: (session: RegisteredSession) => void
+  refreshGridAssignment: (session: RegisteredSession) => void
   relaunchOverrides: LaunchHelpers['relaunchOverrides']
   downgradedPermission: LaunchHelpers['downgradedPermission']
   refreshGridWebSearch: LaunchHelpers['refreshGridWebSearch']
   liveBypassPermission: PaneSwap['liveBypassPermission']
   paneSwapDeps: PaneSwap['paneSwapDeps']
-  restartedGridAssignment: PaneSwap['restartedGridAssignment']
+  /** A held agent runs no engine to swap: its restart is its launch, now (core/agents/heldLaunches.ts). Null for
+   *  any other agent. */
+  restartHeld: (agentId: string) => Promise<HeldRestart> | null
 }
 
 export function createAgentRestarter({
   restartJobs, registry, purgeBusy, stopJobs, pinnedControls, tmuxBackend, sameRestartTarget, agentReconciler,
-  terminalHintMachineName, announceSession, relaunchOverrides, downgradedPermission, refreshGridWebSearch,
-  liveBypassPermission, paneSwapDeps, restartedGridAssignment,
+  terminalHintMachineName, announceSession, refreshGridAssignment, relaunchOverrides, downgradedPermission, refreshGridWebSearch,
+  liveBypassPermission, paneSwapDeps, restartHeld,
 }: RestartDeps) {
   /**
    * Web or device restarted an agent (`agent_restart`): exit the live engine process and relaunch it in
@@ -94,6 +98,8 @@ export function createAgentRestarter({
     if (purgeBusy(agentId) || stopJobs.has(agentId) || pinnedControls.has(agentId)) return { ok: false, error: 'AGENT_BUSY' }
     const session = registry.resolve(agentId)
     if (!session) return { ok: false, error: 'AGENT_NOT_FOUND' }
+    const held = restartHeld(session.agentId)
+    if (held) return held
     if (!session.tmuxPane || !tmuxBackend) return { ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' }
     const target = { ...session }
     const current = () => operationCurrent() && sameRestartTarget(target)
@@ -155,7 +161,7 @@ export function createAgentRestarter({
     // half, and an agent moved here by a retarget has nothing in the session env at all), or its
     // Codex profile. Refused before anything is killed, so a restart that cannot honour the grid
     // leaves the running process alone.
-    const built = await relaunchOverrides(session)
+    const built = await relaunchOverrides(session, session, current)
     if (!current()) return changed
     if (!built.ok) return { ok: false, error: built.error, detail: built.detail }
 
@@ -164,7 +170,7 @@ export function createAgentRestarter({
       const restartPermission = await downgradedPermission(session,
         await bypassPermissionFor(session, () => liveBypassPermission(session)), 'restart')
       const outcome = await restartAgent(
-        { engine, sessionId: session.sessionId },
+        { engine, sessionId: session.sessionId, ...(session.resumeOnly ? { resumeOnly: true as const } : {}) },
         restartPermission.bypassPermission === true,
         { ...paneSwapDeps(session, runtime, built.overrides, restartPermission.permissionMode ?? null), isCurrent: current },
       )
@@ -175,20 +181,18 @@ export function createAgentRestarter({
 
       // Address the CANONICAL agentId from the resolved session, not the raw RPC input — `resolve()`
       // accepts either an agentId or a bare sessionId, but `setActive`/`byAgent` only ever key on the
-      // real agentId. Gateway and grid are re-read off the new pid now (one cached env read) rather
-      // than left to the next scan, so the announce below already says where the engine came back.
-      const [gateway, assignment] = await Promise.all([
-        probeGatewayRuntime(outcome.processIdentity),
-        restartedGridAssignment(outcome.processIdentity, engine, session.gridLaunch ?? undefined),
-      ])
+      // real agentId. Gateway is a core process fact; optional grid metadata follows the committed
+      // binding in the background, so an unavailable models service cannot hold this route.
+      const gateway = await probeGatewayRuntime(outcome.processIdentity)
       if (!current()) return changed
-      registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind, assignment)
+      registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind)
       registry.setActive(session.agentId, true)
       await clearPaneRemainOnExit(pane)
       if (!current()) return changed
       const refreshed = registry.byAgent(session.agentId)
       if (!refreshed) return { ok: false, error: 'RESTART_FAILED', detail: 'agent vanished from the registry mid-restart' }
       announceSession(refreshed)
+      refreshGridAssignment(refreshed)
       console.log(`[restart] ${sid(session.agentId)} ${engine} · ${outcome.resumed ? 'resumed' : 'fresh session'}`
         + (session.gridLaunch ? ` · grid ${session.gridLaunch.networkName}` : ''))
       return { ok: true, session: refreshed, resumed: outcome.resumed }

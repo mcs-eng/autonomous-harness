@@ -168,14 +168,35 @@ export async function refreshApiLaunch(
   return { ...launch, networkName: connection.name, baseUrl: connection.baseUrl, apiKey }
 }
 
-/** Every saved API's endpoint, so agents already running on one are recognised (`gridAssignment.ts`). */
-export function rememberSavedApis(store: ApiConnections): void {
-  try {
-    for (const connection of store.list()) rememberApiBase(connection.baseUrl)
-  } catch {
-    // An unreadable store is reported where it is managed; recognising agents is best effort.
+/**
+ * `refreshApiLaunch` as the models service's grid launch asks it (lib/gridLaunch.ts `answerGridLaunch`): the
+ * launch as saved now and the endpoint it read, or why the API cannot be used, in the words a relaunch always gave.
+ * Asynchronous because a changed URL or key revalidates the selected model against the API as saved now.
+ */
+export function refreshApiFor(store: ApiConnections, deps: ApiModelDeps = {}) {
+  return async (launch: GridLaunchOverride): Promise<{ override: GridLaunchOverride; apiBase?: string } | { error: string; detail: string }> => {
+    if (!isApiLaunch(launch)) return { override: launch }
+    try {
+      const override = await refreshApiLaunch(store, launch, deps)
+      return { override, apiBase: override.baseUrl }
+    } catch (error) {
+      return { error: 'API_UNAVAILABLE', detail: error instanceof ApiConnectionError ? error.message : `${launch.networkName} could not be read from saved APIs.` }
+    }
   }
 }
+
+/** `resolveApiTarget` as the core asks it (`ModelsPort.apiTarget`): the launch and the endpoint it read, or the
+ *  sentence a person reads, as the socket always answered it. */
+export async function apiTargetAnswer(store: ApiConnections, connectionId: string, model: string, deps: ApiModelDeps = {}): Promise<{ target: GridLaunchOverride; apiBase: string } | { detail: string }> {
+  try {
+    const target = await resolveApiTarget(store, connectionId, model, deps)
+    return { target, apiBase: target.baseUrl }
+  } catch (error) {
+    return { detail: error instanceof ApiConnectionError ? error.message : 'This API could not be used. Try again.' }
+  }
+}
+
+export { rememberSavedApis } from './gridAssignment.js'
 
 /** `api_connections {action: 'models', id}`: one API's chat models. No key in any reply. */
 export async function apiModelsRequest(

@@ -1,6 +1,6 @@
 import { gridExec } from './gridExec.js'
 import type { GridModel, GridSection } from './gridModels.js'
-import { localGridCapableEngines } from './gridLaunch.js'
+import { localGridCapableEngines } from './gridLaunchWire.js'
 import { localGridTargetId, type LocalGridProfile } from './gridProfiles.js'
 
 export function localProcessEnv(profile: LocalGridProfile): NodeJS.ProcessEnv {

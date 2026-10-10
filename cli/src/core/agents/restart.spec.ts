@@ -7,7 +7,7 @@ import { probeGatewayRuntime } from '../../lib/gatewayRuntime.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
-import { clearPaneRemainOnExit } from '../../lib/tmux.js'
+import { clearPaneRemainOnExit, processArgs } from '../../lib/tmux.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import { createAgentRestarter, type RestartDeps } from './restart.js'
 
@@ -18,7 +18,6 @@ vi.mock('../../lib/engineLaunch.js', async (real) => ({
   commandAvailableInInteractiveShell: vi.fn(async () => true),
 }))
 vi.mock('../../lib/gatewayRuntime.js', async (real) => ({ ...await real<object>(), probeGatewayRuntime: vi.fn(async () => ({ kind: 'none' })) }))
-vi.mock('../../lib/gridAssignment.js', async (real) => ({ ...await real<object>(), probeGridAssignment: vi.fn(async () => undefined) }))
 vi.mock('../../lib/restartAgent.js', async (real) => ({
   ...await real<object>(),
   bypassPermissionFor: vi.fn(async (_s: unknown, live: () => Promise<boolean>) => live()),
@@ -59,12 +58,13 @@ function setup(row: RegisteredSession | null = agent(), over: Partial<RestartDep
     agentReconciler: { holdRoute: vi.fn(), releaseRoute: vi.fn() },
     terminalHintMachineName: () => 'studio',
     announceSession: vi.fn(),
+    refreshGridAssignment: vi.fn(),
     relaunchOverrides: vi.fn(async () => ({ ok: true, overrides: { env: { GRID_KEY: 'k' } } })) as never,
     downgradedPermission: vi.fn(async (_s, bypass: boolean) => ({ bypassPermission: bypass, permissionMode: 'auto' })) as never,
     refreshGridWebSearch: vi.fn() as never,
     liveBypassPermission: vi.fn(async () => true),
-    restartedGridAssignment: vi.fn(async () => undefined),
     paneSwapDeps: vi.fn(() => ({ swap: true })) as never,
+    restartHeld: vi.fn(() => null),
     ...over,
   }
   return { deps, state, tmuxBackend, restart: createAgentRestarter(deps) }
@@ -76,12 +76,36 @@ describe('restarting an agent', () => {
   beforeEach(() => { vi.spyOn(console, 'log').mockImplementation(() => {}) })
   afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks() })
 
+  it('never starts a fresh conversation when an admitted external resume fails', async () => {
+    const actual = await vi.importActual<typeof import('../../lib/restartAgent.js')>('../../lib/restartAgent.js')
+    vi.mocked(restartAgent).mockImplementationOnce(actual.restartAgent)
+    const respawn = vi.fn(async () => ({ ok: true }))
+    const keepAbandoned = vi.fn(), buildArgv = vi.fn(options => ['fixture-engine', options.resumeSessionId ?? 'fresh'])
+    const run = setup(agent({ resumeOnly: true }), { paneSwapDeps: () => ({
+      holdOpen: async () => ({ ok: true }), terminate: async () => 'gone', respawn,
+      waitForProcess: async () => null, buildArgv, keepAbandoned, log: () => {},
+    }) })
+    expect(await run.restart('a1')).toMatchObject({ ok: false, error: 'RESTART_FAILED' })
+    expect(respawn).toHaveBeenCalledExactlyOnceWith(['fixture-engine', 's1'])
+    expect(keepAbandoned).not.toHaveBeenCalled()
+    expect(run.deps.registry.updateProcessIdentity).not.toHaveBeenCalled()
+  })
+
   describe('refusals before anything is touched', () => {
     it('for an agent being purged, stopped or answered, and for one that is not there', async () => {
       expect(await setup(agent(), { purgeBusy: () => true }).restart('a1')).toEqual({ ok: false, error: 'AGENT_BUSY' })
       expect(await setup(agent(), { stopJobs: new Map([['a1', Promise.resolve()]]) }).restart('a1')).toEqual({ ok: false, error: 'AGENT_BUSY' })
       expect(await setup(agent(), { pinnedControls: new Set(['a1']) }).restart('a1')).toEqual({ ok: false, error: 'AGENT_BUSY' })
       expect(await setup(null).restart('a1')).toEqual({ ok: false, error: 'AGENT_NOT_FOUND' })
+    })
+
+    it('for an agent held for a service, its launch, now, with nothing of a swap touched', async () => {
+      const launched = { ok: true as const, session: agent(), resumed: true }
+      const run = setup(agent({ processIdentity: undefined, tmuxPane: '%4' } as Partial<RegisteredSession>), { restartHeld: vi.fn(() => Promise.resolve(launched)) })
+      expect(await run.restart('a1')).toBe(launched)
+      expect(run.deps.restartHeld).toHaveBeenCalledWith('a1')
+      expect(run.deps.relaunchOverrides).not.toHaveBeenCalled()
+      expect(run.tmuxBackend.respawn).not.toHaveBeenCalled()
     })
 
     it('for an agent with no tmux pane, or no tmux at all', async () => {
@@ -237,11 +261,12 @@ describe('restarting an agent', () => {
       expect(swapDeps.isCurrent?.()).toBe(true)
       expect(run.deps.refreshGridWebSearch).toHaveBeenCalledWith('a1', { env: { GRID_KEY: 'k' } })
       expect(probeGatewayRuntime).toHaveBeenCalledWith(newProcess)
-      expect(run.deps.restartedGridAssignment).toHaveBeenCalledWith(newProcess, 'claude', undefined)
-      expect(run.deps.registry.updateProcessIdentity).toHaveBeenCalledWith('a1', newProcess, 'none', undefined)
+      // Its command line, where a Codex or pi grid's address and model are: never its executable alone.
+      expect(run.deps.registry.updateProcessIdentity).toHaveBeenCalledWith('a1', newProcess, 'none')
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)
       expect(clearPaneRemainOnExit).toHaveBeenCalledWith('%4')
       expect(run.deps.announceSession).toHaveBeenCalledWith(agent())
+      expect(run.deps.refreshGridAssignment).toHaveBeenCalledWith(agent())
       expect(console.log).toHaveBeenCalledWith('[restart] a1 claude · resumed')
       expect(run.deps.agentReconciler.holdRoute).toHaveBeenCalledWith(routeKey)
       expect(run.deps.agentReconciler.releaseRoute).toHaveBeenCalledWith(routeKey)

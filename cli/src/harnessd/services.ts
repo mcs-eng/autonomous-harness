@@ -381,14 +381,18 @@ export const SERVICE_HOSTS: Readonly<Record<string, ServiceHostSpec>> = {
   // than workspaces alone had. The recaps hold each session's last three recaps, answers (8 KiB each at
   // most) and asks, as the core did while they ran in it, and a few timers per open turn. The window
   // names hold at most 400 short names; their model runs in its own process (lib/oneshot.ts).
-  edge: { services: ['workspaces', 'usage', 'monitor', 'projects', 'handoff', 'recaps', 'windowNames', 'shell'], heapLimitMiB: 384, rssLimitMiB: 768 },
+  edge: { services: ['workspaces', 'usage', 'monitor', 'projects', 'handoff', 'recaps', 'windowNames', 'shell', 'connectors'], heapLimitMiB: 384, rssLimitMiB: 768 },
   // The orchestrator (services/orchestratorProcess.ts), an experiment: started only once it is on, for a
   // saved project or a request (core/api.ts `EXPERIMENTS`). Its projects' files and the frames of their
   // Directors; the agents it runs are the core's.
   orchestrator: { services: ['orchestrator'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true },
-  // The command bar (services/commandBarProcess.ts), an experiment: started at its first request. What it holds
-  // is at most eight decisions in flight and one bounded JEV answer each (lib/commandBar.ts).
-  commandBar: { services: ['commandBar'], heapLimitMiB: 128, rssLimitMiB: 384, onDemand: true },
+  // Memories (services/memoryProcess.ts), an experiment: started at its first request, another machine's
+  // Memories pane asking. It runs the Memories package's own command: writes one at a time, snapshots
+  // asked together as one read, each answer at most 8 MB.
+  memory: { services: ['memory'], heapLimitMiB: 128, rssLimitMiB: 384, onDemand: true },
+  // The router (services/routerProcess.ts), an experiment: started at its first request. A few decisions in
+  // flight, each one bounded Jev answer.
+  router: { services: ['router'], heapLimitMiB: 128, rssLimitMiB: 384, onDemand: true },
   // Tab collaboration and teams, an experiment: the prompt scopes, a few drafts and fingerprints per agent, and
   // beside them the teams, their mailbox and the tab channels (services/collaborationProcess.ts), each on its
   // own link to the core. Started only once it is on (core/api.ts `EXPERIMENTS`).
@@ -461,6 +465,9 @@ export const ENGINE_LIVE_ENV = 'HARNESSD_ENGINE_LIVE'
 export const ENGINE_RUNTIME_ENV = 'HARNESSD_ENGINE_RUNTIME'
 export const ENGINE_SCREEN_ENV = 'HARNESSD_ENGINE_SCREEN'
 export const ENGINE_MODEL_CONTROL_ENV = 'HARNESSD_ENGINE_MODEL_CONTROL'
+export const ENGINE_QUESTION_CONTROL_ENV = 'HARNESSD_ENGINE_QUESTION_CONTROL'
+export const ENGINE_SUBMISSION_ENV = 'HARNESSD_ENGINE_SUBMISSION'
+export const ENGINE_NATIVE_CONTROL_ENV = 'HARNESSD_ENGINE_NATIVE_CONTROL'
 
 /**
  * What a master puts in its core's environment about the services it runs in their own processes: the
@@ -472,7 +479,7 @@ export function serviceProcessesEnv(specs: readonly ServiceSpec[], masterPid: nu
   // The services, not the processes: a core knows what it routes by service, and one from before the
   // edge host still finds the services it knows here (workspaces) and runs the rest itself.
   const names = specs.flatMap((spec) => spec.services).join(',')
-  return { [SERVICE_PROCESSES_ENV]: names, HARNESSD_SERVICES: names || 'none', [ENGINE_LIVE_ENV]: `${masterPid}:1`, [ENGINE_RUNTIME_ENV]: `${masterPid}:1`, [ENGINE_SCREEN_ENV]: `${masterPid}:1`, [ENGINE_MODEL_CONTROL_ENV]: `${masterPid}:1` }
+  return { [SERVICE_PROCESSES_ENV]: names, HARNESSD_SERVICES: names || 'none', [ENGINE_LIVE_ENV]: `${masterPid}:1`, [ENGINE_RUNTIME_ENV]: `${masterPid}:1`, [ENGINE_SCREEN_ENV]: `${masterPid}:1`, [ENGINE_MODEL_CONTROL_ENV]: `${masterPid}:1`, [ENGINE_QUESTION_CONTROL_ENV]: `${masterPid}:1`, [ENGINE_SUBMISSION_ENV]: `${masterPid}:1`, [ENGINE_NATIVE_CONTROL_ENV]: `${masterPid}:1` }
 }
 
 /** An older master may inherit a newer master's environment after rollback. Trust only this parent. */
@@ -531,4 +538,18 @@ export function masterRunsEngineScreen(env: NodeJS.ProcessEnv, parentPid: number
 /** A new core must not route controls through an older worker host. */
 export function masterRunsEngineModelControl(env: NodeJS.ProcessEnv, parentPid: number): boolean {
   return masterRunsLiveEngines(env, parentPid) && env[ENGINE_MODEL_CONTROL_ENV] === `${parentPid}:1`
+}
+
+export function masterRunsEngineQuestionControl(env: NodeJS.ProcessEnv, parentPid: number): boolean {
+  return masterRunsLiveEngines(env, parentPid) && env[ENGINE_QUESTION_CONTROL_ENV] === `${parentPid}:1`
+}
+
+/** A new core must not ask an older worker host for submission readings it does not serve. */
+export function masterRunsEngineSubmission(env: NodeJS.ProcessEnv, parentPid: number): boolean {
+  return masterRunsLiveEngines(env, parentPid) && env[ENGINE_SUBMISSION_ENV] === `${parentPid}:1`
+}
+
+/** A new core must not send an older worker host a stop its Codex worker cannot speak. */
+export function masterRunsEngineNativeControl(env: NodeJS.ProcessEnv, parentPid: number): boolean {
+  return masterRunsLiveEngines(env, parentPid) && env[ENGINE_NATIVE_CONTROL_ENV] === `${parentPid}:1`
 }

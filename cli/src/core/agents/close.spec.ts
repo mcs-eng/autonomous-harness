@@ -3,7 +3,7 @@ import { screenFor } from '../../engines/screens.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { inspectCloseActivity, type CloseAgentServiceDeps } from '../../lib/closeAgentService.js'
 import { projectDisplayName, type RegisteredSession } from '../../lib/registry.js'
-import { createAgentClosing, createCloseRequests, type ClosingDeps } from './close.js'
+import { CLOSE_READ_RECONNECT_MS, createAgentClosing, createCloseRequests, type ClosingDeps } from './close.js'
 
 // The real close service, recording what it was built with so its callbacks can be driven directly.
 vi.mock('../../lib/closeAgentService.js', async (real) => {
@@ -30,6 +30,7 @@ function setup(over: Partial<ClosingDeps> = {}, advertised: RegisteredSession[] 
     sessionCheckpoints: { save: vi.fn(async () => {}) } as unknown as ClosingDeps['sessionCheckpoints'],
     stopAgent: vi.fn(async () => {}),
     announceSession: vi.fn(),
+    engineReady: vi.fn(async () => {}),
     ...over,
   }
   const closing = createAgentClosing(deps)
@@ -63,6 +64,54 @@ describe('closing agents no window shows', () => {
       const { deps, close } = setup()
       await close.activity(row({ sessionId: '' }))
       expect(deps.watcher.pollSession).not.toHaveBeenCalled()
+    })
+
+    it.each(['ENGINE_STALE_REPLY', 'ENGINE_UNAVAILABLE'])('reads once more after %s, once the restarted worker is linked again', async code => {
+      vi.spyOn(console, 'log').mockImplementation(() => {})
+      const pollSession = vi.fn().mockRejectedValueOnce(Object.assign(new Error(code), { code })).mockResolvedValue(undefined)
+      const { deps, close } = setup({ watcher: { pollSession } as unknown as ClosingDeps['watcher'] })
+      expect(await close.activity(row({ engine: 'codex' }))).toBe('idle')
+      expect(deps.engineReady).toHaveBeenCalledWith('codex', CLOSE_READ_RECONNECT_MS)
+      expect(pollSession).toHaveBeenCalledTimes(2)
+    })
+
+    it('holds changed transcript evidence before reading a screen or closing', async () => {
+      const pollSession = vi.fn().mockRejectedValue(Object.assign(new Error('changed'), { code: 'ENGINE_TRANSCRIPT_CHANGED' }))
+      const { deps, close } = setup({ watcher: { pollSession } as never })
+      await expect(close.activity(row())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      expect(pollSession).toHaveBeenCalledOnce()
+      expect(deps.captureTerminal).not.toHaveBeenCalled()
+      expect(deps.stopAgent).not.toHaveBeenCalled()
+    })
+
+    it.each(['ENGINE_UNAVAILABLE', 'ENGINE_TRANSCRIPT_CHANGED', 'DISK_UNREADABLE', undefined])(
+      'retains a failed second activity read with its correct reason: %s', async code => {
+        vi.spyOn(console, 'log').mockImplementation(() => {})
+        const failure = code ? Object.assign(new Error(code), { code }) : null
+        const pollSession = vi.fn().mockRejectedValueOnce(Object.assign(new Error('reconnect'), { code: 'ENGINE_UNAVAILABLE' }))
+          .mockRejectedValueOnce(failure)
+        const { close } = setup({ watcher: { pollSession } as never })
+        const result = expect(close.activity(row()))
+        if (code === 'ENGINE_UNAVAILABLE' || code === 'ENGINE_TRANSCRIPT_CHANGED') {
+          await result.rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+        } else await result.rejects.toBe(failure)
+        expect(pollSession).toHaveBeenCalledTimes(2)
+      })
+
+    it('reads only once more, and never retries a failure that is not a worker\'s restart', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {})
+      const stale = Object.assign(new Error('stale'), { code: 'ENGINE_STALE_REPLY' })
+      const twice = vi.fn().mockRejectedValue(stale)
+      const again = setup({ watcher: { pollSession: twice } as unknown as ClosingDeps['watcher'] })
+      await expect(again.close.activity(row())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      expect(twice).toHaveBeenCalledTimes(2)
+      for (const error of [new Error('disk gone'), null]) {
+        const other = vi.fn().mockRejectedValue(error)
+        const once = setup({ watcher: { pollSession: other } as unknown as ClosingDeps['watcher'] })
+        await expect(once.close.activity(row())).rejects.toBe(error)
+        expect(other).toHaveBeenCalledOnce()
+        expect(once.deps.engineReady).not.toHaveBeenCalled()
+      }
     })
   })
 

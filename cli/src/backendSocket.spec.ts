@@ -1,3 +1,4 @@
+import { USAGE_FALLBACKS } from './core/api.js'
 import * as gitPullRequest from './lib/gitPullRequest.js'
 import * as sessionGitPullRequest from './lib/sessionGitPullRequest.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,7 +10,8 @@ import { BackendSocket } from './backendSocket.js'
 import { dispatchDown, gatewayOf, relaySocket, upstreamOf } from './testing/relaySocket.js'
 import { AGENT_OPENED_THROTTLE_MS } from './core/agents/update.js'
 import { deviceAgentListItem, deviceAgentRow } from './core/agents/list.js'
-import { grokHistoryPage } from './core/transcripts/history.js'
+import { wholeHistoryPage } from './core/transcripts/history.js'
+import { grokMessagesToEvents } from './engines/grok/normalizer.js'
 import { bindAgentList, bindAgentUpdate, bindCancelRequest, bindLaunchRequests, bindCloseRequests, bindMessageRequest, bindPurgeRequest, bindQuestionResponse, bindStopRequest, bindTerminalRequests } from './testing/socketCore.js'
 import { emptyPorts, MODELS_FALLBACKS, MODELS_OFF, MONITOR_FALLBACKS, type ModelsPort } from './core/api.js'
 import { createServiceHost, ServiceUnavailableError } from './core/serviceHost.js'
@@ -35,9 +37,8 @@ import * as gitProject from './lib/gitProject.js'
 import * as scmProjects from './scm/scmProjects.js'
 import * as machineResources from './lib/machineResources.js'
 import * as projectFolder from './lib/projectFolder.js'
-import * as claudeTrust from './lib/claudeTrust.js'
 import * as projectPreview from './lib/projectPreview.js'
-import * as opencodeVersion from './engines/opencode/version.js'
+import * as opencodeVersion from './engines/launchControl.js'
 import { randomUUID } from 'node:crypto'
 import { fakeGridAnswers, installFakeGrid, type FakeGrid } from './lib/__fixtures__/fakeGrid.js'
 import { clearGridMcpUrlCache } from './lib/gridMcpUrl.js'
@@ -399,30 +400,30 @@ describe('agent_update opened: one "last used" for every app', () => {
 })
 
 describe('viewer forwarding authentication', () => {
-  it('routes a sealed command_bar to the command bar with its connection, who asked, and nothing in the clear', async () => {
+  it('routes a sealed service request with its connection, who asked, and nothing in the clear', async () => {
     const socket = relaySocket('token')
     const routed: Array<{ type: string; asker: unknown }> = []
-    socket.serviceRouter = (type, _payload, asker, reply) => { routed.push({ type, asker }); reply({ selectedId: null }); return true }
+    socket.serviceRouter = (type, _payload, asker, reply) => { routed.push({ type, asker }); reply({ memories: [] }); return true }
     const ownerCommands = vi.spyOn(socket.ownerCommands, 'request')
     vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
     const role = vi.spyOn(gatewayOf(socket).e2ee, 'sessionRole').mockReturnValue('web')
-    const clear = { type: 'command_bar', payload: { requestId: 'one', request: { prompt: 'fixture', candidates: [] } } }
+    const clear = { type: 'memory_snapshot', payload: { requestId: 'one' } }
     vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue(clear)
-    const sealedReply = vi.spyOn(gatewayOf(socket).e2ee, 'wrapRpcReply').mockReturnValue({ type: 'command_bar_result', payload: { __e2e: 'sealed' } })
+    const sealedReply = vi.spyOn(gatewayOf(socket).e2ee, 'wrapRpcReply').mockReturnValue({ type: 'memory_snapshot_result', payload: { __e2e: 'sealed' } })
     await dispatchDown(socket, clear, 'remote')
     expect(routed).toEqual([])
-    const sealed = { type: 'command_bar', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'fixture' } } }
-    // A device's session asks as no owner: the command bar refuses it (services/commandBar.ts).
+    const sealed = { type: 'memory_snapshot', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'fixture' } } }
+    // A device's session asks as no owner: the service refuses it (services/memory.ts).
     role.mockReturnValue('device')
     await dispatchDown(socket, sealed, 'remote')
     role.mockReturnValue('web')
     await dispatchDown(socket, sealed, 'remote')
     expect(routed).toEqual([
-      { type: 'command_bar', asker: { local: false, owner: false, connection: 'remote', requestId: 'one' } },
-      { type: 'command_bar', asker: { local: false, owner: true, connection: 'remote', requestId: 'one' } },
+      { type: 'memory_snapshot', asker: { local: false, owner: false, connection: 'remote', requestId: 'one' } },
+      { type: 'memory_snapshot', asker: { local: false, owner: true, connection: 'remote', requestId: 'one' } },
     ])
     expect(ownerCommands).not.toHaveBeenCalled()
-    expect(sealedReply).toHaveBeenCalledWith('remote', 'command_bar_result', 'one', { selectedId: null })
+    expect(sealedReply).toHaveBeenCalledWith('remote', 'memory_snapshot_result', 'one', { memories: [] })
     await socket.stop()
   })
 
@@ -637,9 +638,15 @@ vi.mock('./lib/gridAttach.js', async (real) => ({
 }))
 // Never the person's real ~/.claude.json or ~/.codex/config.toml: creating an agent records folder trust,
 // and an unmocked run of these specs used to write test paths into the developer's own config.
-vi.mock('./lib/claudeTrust.js', () => ({
-  claudeTrusts: vi.fn(() => false), codexTrusts: vi.fn(() => false),
-  preTrustClaudeProject: vi.fn(() => 'trusted'), preTrustCodexProject: vi.fn(() => 'trusted'),
+const claudeTrust = vi.hoisted(() => ({
+  claudeTrusts: vi.fn((_path: string) => false), codexTrusts: vi.fn((_path: string, _profile?: string | null) => false),
+  preTrustClaudeProject: vi.fn((_path: string) => 'trusted' as const), preTrustCodexProject: vi.fn((_path: string, _profile?: string | null) => 'trusted' as const),
+}))
+vi.mock('./engines/launchPrep.js', async (real) => ({
+  ...await real<object>(),
+  folderTrust: (engine: string, profile?: string | null) => engine === 'claude'
+    ? { trusts: (path: string) => claudeTrust.claudeTrusts(path), record: (path: string) => claudeTrust.preTrustClaudeProject(path) }
+    : engine === 'codex' ? { trusts: (path: string) => claudeTrust.codexTrusts(path, profile), record: (path: string) => claudeTrust.preTrustCodexProject(path, profile) } : null,
 }))
 
 function parseSent(ws: InstanceType<typeof wsMock.MockWebSocket>): Array<Record<string, unknown>> {
@@ -1283,7 +1290,7 @@ describe('BackendSocket outbound queue', () => {
         body: { seven_day: { utilization: 42 } },
       },
     ]
-    serveOn(socket, (host) => host.serve('usage', (core) => startUsage(core, { read: async () => readings }), fakeCore(), USAGE_REQUESTS))
+    serveOn(socket, (host) => host.start('usage', (core, ports) => { ports.usage = { read: async () => ({}), stop: () => {} }; return startUsage(core, { read: async () => readings }) }, fakeCore(), USAGE_FALLBACKS, USAGE_REQUESTS))
     socket.connect()
     const ws = wsMock.instances[0]
     ws.open()
@@ -3017,8 +3024,8 @@ describe('Grok session_get history', () => {
   ).split('\n').filter(Boolean)
 
   it('replays the real transcript for both legacy and web-paginated requests', () => {
-    const full = grokHistoryPage(fixture, false)
-    const paginated = grokHistoryPage(fixture, true)
+    const full = wholeHistoryPage(grokMessagesToEvents(fixture), false)
+    const paginated = wholeHistoryPage(grokMessagesToEvents(fixture), true)
 
     expect(full.events).toEqual(paginated.events)
     expect(full.events[0]).toMatchObject({ type: 'user_message' })
@@ -3201,6 +3208,7 @@ describe('agent_retarget onto a Local model resolves web tools', () => {
         const target = await resolveGridTarget(request.gridName, request.model, request.targetId)
         return target ? { target } : { detail: 'Could not read this machine\'s grid endpoint.' }
       },
+      apiTarget: () => Promise.reject(new Error('no APIs')),
     })
     socket.connect()
     const ws = wsMock.instances[0]
@@ -3373,10 +3381,10 @@ describe('grid_models_list says whether this machine has a grid CLI', () => {
 describe('a move onto a grid model asks models where it goes', () => {
   /** A daemon whose models is a stub, asked over a local frame. Where the move goes, grid's set-up before
    *  it and the prewarm after it are the models service's (services/models.spec.ts). */
-  function daemon(moveTarget: ModelsPort['moveTarget'] | null) {
+  function daemon(moveTarget: ModelsPort['moveTarget'] | null, apiTarget: ModelsPort['apiTarget'] = () => Promise.reject(new Error('no APIs'))) {
     const socket = relaySocket('token')
     const moved = vi.fn()
-    if (moveTarget) socket.models = () => ({ annotation: () => null, lists: () => Promise.reject(new Error('no lists')), moveTarget, moved })
+    if (moveTarget) socket.models = () => ({ annotation: () => null, lists: () => Promise.reject(new Error('no lists')), moveTarget, moved, apiTarget })
     const retargeted = vi.fn(async (_request: { agentId: string; grid: unknown }) => ({ ok: true as const }))
     socket.onRetargetAgent = retargeted
     const frames: Array<Record<string, unknown>> = []
@@ -3422,6 +3430,33 @@ describe('a move onto a grid model asks models where it goes', () => {
       const d = daemon(down)
       expect(await d.ask('agent_retarget', { agentId: 'a1', gridModel: 'Own-Model' }))
         .toMatchObject({ error: 'GRID_UNAVAILABLE', detail: 'Models are unavailable. Try again.' })
+      expect(d.retargeted).not.toHaveBeenCalled()
+      await d.done()
+    }
+  })
+
+  const API = { networkId: 'api:router', networkName: 'Router', baseUrl: 'https://router.fixture.invalid/v1', apiKey: 'fixture-key', model: 'vendor/model-a' }
+
+  it("a move onto a saved API's model: the launch models read, its endpoint recognised from then on, no grid started", async () => {
+    const apiTarget = vi.fn(async () => ({ target: API, apiBase: API.baseUrl }))
+    const d = daemon(vi.fn(), apiTarget)
+    expect(await d.ask('agent_retarget', { agentId: 'a1', apiConnection: 'router', apiModel: ' vendor/model-a ' })).toMatchObject({ retargeted: true })
+    expect(apiTarget).toHaveBeenCalledWith({ connectionId: 'router', model: 'vendor/model-a' })
+    expect(d.retargeted).toHaveBeenCalledWith({ agentId: 'a1', grid: API })
+    // Target resolution and endpoint recognition belong to models; core forwards the launch.
+    expect(d.moved).not.toHaveBeenCalled()
+    await d.done()
+  })
+
+  it('a saved API that cannot be used says why in models\' words; models down or off says so; nothing moves', async () => {
+    const refused = daemon(vi.fn(), async () => ({ detail: 'This API is not saved. Add it in Models → APIs.' }))
+    expect(await refused.ask('agent_retarget', { agentId: 'a1', apiConnection: 'gone', apiModel: 'vendor/model-a' }))
+      .toMatchObject({ error: 'API_UNAVAILABLE', detail: 'This API is not saved. Add it in Models → APIs.' })
+    expect(refused.retargeted).not.toHaveBeenCalled()
+    await refused.done()
+    for (const d of [daemon(vi.fn(), async () => { throw new Error('models is down') }), daemon(null)]) {
+      expect(await d.ask('agent_retarget', { agentId: 'a1', apiConnection: 'router', apiModel: 'vendor/model-a' }))
+        .toMatchObject({ error: 'API_UNAVAILABLE', detail: 'The models service is not running, so this API cannot be used now. Try again in a moment.' })
       expect(d.retargeted).not.toHaveBeenCalled()
       await d.done()
     }
@@ -3502,7 +3537,7 @@ describe('the connect burst with no network', () => {
     bindAgentList(socket)
     // A grid name that never comes, as a grid read that never lands; and a vendor that never answers, asked
     // of the usage service beside models.
-    serveModels(socket, { account: { privateGridName: () => new Promise<null>(() => {}) } }).serve('usage', (core) => startUsage(core, { read: () => new Promise(() => {}) }), fakeCore(), USAGE_REQUESTS)
+    serveModels(socket, { account: { privateGridName: () => new Promise<null>(() => {}) } }).start('usage', (core, ports) => { ports.usage = { read: async () => ({}), stop: () => {} }; return startUsage(core, { read: () => new Promise(() => {}) }) }, fakeCore(), USAGE_FALLBACKS, USAGE_REQUESTS)
     const frames: Array<Record<string, unknown>> = []
     socket.registerLocalClient('local:burst', { sendFrame: (frame) => { frames.push(frame); return true }, sendBinary: () => true })
 

@@ -34,6 +34,7 @@ import {
   firstPromptArgs,
   gridPanePrelude,
   harnessNodePrelude,
+  noDevtoolsPrelude,
   namedAgentArgs,
   supportsFirstPrompt,
   supportsNamedAgent,
@@ -81,6 +82,7 @@ afterAll(() => {
 /** The prelude every case below gets by default: no managed grid on this machine, so PATH is left
  *  alone and only grid's update check is turned off. */
 const GRID_PRELUDE = gridPanePrelude('grid')
+const NO_DEVTOOLS = noDevtoolsPrelude()
 /** The engine-in-a-shell wrapper every launch carries, for the shell each case names — see
  *  `engineFallbackPrelude`. `null` tmux: the suite must not depend on what this machine has. */
 const FALLBACK = (engine: AgentEngine, shell: string) => engineFallbackPrelude(engine, shell, null)
@@ -131,13 +133,13 @@ describe('buildEngineLaunchArgv', () => {
     expect(argv).toEqual([
       '/usr/bin/env', 'DISABLE_AUTO_UPDATE=true', '/bin/zsh', '-lic', expect.stringMatching(SOURCED), 'harness-engine', engineBin('claude'),
     ])
-    expect(launchScriptOf(argv)).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${RUN}`)
+    expect(launchScriptOf(argv)).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${NO_DEVTOOLS}${RUN}`)
   })
 
   it('uses Ubuntu bash interactive startup files without making it a login shell', () => {
     const argv = buildEngineLaunchArgv('claude', {}, '/bin/bash', undefined, undefined, NO_TMUX)
     expect(argv).toEqual(['/bin/bash', '-ic', expect.stringMatching(SOURCED), 'harness-engine', engineBin('claude')])
-    expect(launchScriptOf(argv)).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/bash')}${GRID_PRELUDE}${RUN}`)
+    expect(launchScriptOf(argv)).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/bash')}${GRID_PRELUDE}${NO_DEVTOOLS}${RUN}`)
   })
 
   it('hands the shell its script in a one-time file that removes itself, private to this user', () => {
@@ -180,7 +182,7 @@ describe('buildEngineLaunchArgv', () => {
     env.ADAPTER_DATA_DIR = '/dev/null/no-data-folder'
     try {
       const argv = buildEngineLaunchArgv('claude', {}, '/bin/zsh', undefined, undefined, NO_TMUX)
-      expect(argv[4]).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${RUN}`)
+      expect(argv[4]).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${NO_DEVTOOLS}${RUN}`)
     } finally { env.ADAPTER_DATA_DIR = saved }
   })
 
@@ -224,7 +226,7 @@ describe('buildEngineLaunchArgv', () => {
       'harness-engine', '/work/project', engineBin('claude'),
     ])
     expect(launchScriptOf(argv)).toBe(
-      `${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}if ! cd -- "$1"; then printf '%s\\n' 'harness: the selected working directory is unavailable.' >&2; exit 1; fi\n${unreadableCwdGuard(process.platform)}shift\n${RUN}`,
+      `${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${NO_DEVTOOLS}if ! cd -- "$1"; then printf '%s\\n' 'harness: the selected working directory is unavailable.' >&2; exit 1; fi\n${unreadableCwdGuard(process.platform)}shift\n${RUN}`,
     )
   })
 
@@ -340,7 +342,9 @@ describe('buildEngineLaunchArgv', () => {
       const runs = lines.filter((line) => /"\$harness_engine_bin"(?: \$\{harness_codex_no_daemon:\+--no-daemon\})? "\$@" \|\| harness_status=\$\?$/.test(line.trim()))
       expect(runs.length).toBe(name.startsWith('codex, run again') || name.startsWith('codex installed') ? 4 : 1)
       for (const run of runs) expect(run).toMatch(/^(?:\[ "\$harness_codex_go" != 1 \] \|\| )?"\$harness_engine_bin"/)
-      for (const install of lines.filter((line) => line.includes('eval '))) expect(install).toMatch(/^(?:\[ -n "\$harness_engine_bin" \] \|\| )?\((?:export npm_config_prefix=.*; )?eval /)
+      // The friendly install (its progress on screen, the installer's output in a log) is the same
+      // install in a pipeline inside one more top-level subshell, behind the same guards.
+      for (const install of lines.filter((line) => line.includes('eval '))) expect(install).toMatch(/^(?:\[ -n "\$harness_engine_bin" \] \|\| )?(?:\[ "\$harness_quiet" -eq [01] \] \|\| )?(?:\( \( )?\((?:export npm_config_prefix=.*; )?eval /)
       // What follows each run is the resume, at the top level too.
       for (const run of runs) expect(lines[lines.indexOf(run) + 1]).toBe('harness_resume')
     })
@@ -626,10 +630,10 @@ printf '%s %s' "$harness_status" "$resumed"`], { encoding: 'utf8', stdio: ['igno
     // On this branch every pane script opens with the open-files raise, the engine-in-a-shell
     // wrapper and the grid prelude; the Node line lands after them, and a launch without
     // `harnessNode` is exactly the baseline above.
-    expect(launchScriptOf(argv)).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${harnessNodePrelude('/opt/harness runtime/bin/node')}${RUN}`)
+    expect(launchScriptOf(argv)).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${NO_DEVTOOLS}${harnessNodePrelude('/opt/harness runtime/bin/node')}${RUN}`)
     expect(harnessNodePrelude('/opt/harness runtime/bin/node')).toBe(
       'if ! command -v node >/dev/null 2>&1; then PATH="${PATH:+$PATH:}"\'/opt/harness runtime/bin\'; export PATH; fi\n')
-    expect(launchScriptOf(buildEngineLaunchArgv('claude', { harnessNode: false }, '/bin/zsh', undefined, undefined, NO_TMUX))).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${RUN}`)
+    expect(launchScriptOf(buildEngineLaunchArgv('claude', { harnessNode: false }, '/bin/zsh', undefined, undefined, NO_TMUX))).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('claude', '/bin/zsh')}${GRID_PRELUDE}${NO_DEVTOOLS}${RUN}`)
   })
 
   it('the DSH prelude, run by a real shell, reaches the engine\'s PATH only when node is missing', () => {
@@ -1405,7 +1409,7 @@ describe('buildEngineLaunchArgv with installFirst', () => {
     buildEngineLaunchArgv('opencode', { installFirst: install }, '/bin/zsh')[4]
 
   it('leaves the plain launch alone when nothing has to be installed', () => {
-    expect(launchScriptOf(buildEngineLaunchArgv('opencode', {}, '/bin/zsh', undefined, undefined, NO_TMUX))).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('opencode', '/bin/zsh')}${GRID_PRELUDE}${RUN}`)
+    expect(launchScriptOf(buildEngineLaunchArgv('opencode', {}, '/bin/zsh', undefined, undefined, NO_TMUX))).toBe(`${RAISE_OPEN_FILES_SH}${FALLBACK('opencode', '/bin/zsh')}${GRID_PRELUDE}${NO_DEVTOOLS}${RUN}`)
   })
 
   it('keeps the engine argv positional, so the shell never re-parses a path or a flag', () => {
@@ -1454,7 +1458,9 @@ describe('buildEngineLaunchArgv with installIfMissing', () => {
     command: string,
     executable: EngineInstallRecipe['executable'] = { names: ['harness-no-such-engine'] },
   ): EngineInstallRecipe => ({ command, source: 'test fixture', executable })
-  const script = (install: EngineInstallRecipe, runtimeNode?: string): string =>
+  // No Harness Node unless a test names one: these check the plain install, which shows the installer
+  // itself. The friendly one, which needs Node for its progress, has its own tests below.
+  const script = (install: EngineInstallRecipe, runtimeNode = '/nonexistent/harness-node'): string =>
     buildEngineLaunchArgv('opencode', { installIfMissing: install }, '/bin/zsh', runtimeNode)[4]
   const scriptWithoutProcessRuntime = (install: EngineInstallRecipe): string => {
     const original = Object.getOwnPropertyDescriptor(process, 'execPath')
@@ -1465,6 +1471,51 @@ describe('buildEngineLaunchArgv with installIfMissing', () => {
       if (original) Object.defineProperty(process, 'execPath', original)
     }
   }
+
+  describe('the friendly install: plain lines and a bar on screen, the installer in a log', () => {
+    let home = ''
+    beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'harness-friendly-install-')); dirs.push(home) })
+    const friendly = (install: EngineInstallRecipe, firstPrompt?: string): string =>
+      buildEngineLaunchArgv('opencode', { installIfMissing: install, ...(firstPrompt ? { firstPrompt } : {}) }, '/bin/zsh', process.execPath)[4]
+    const run = (paneScript: string) => runPaneScript(paneScript, 'harness-no-such-engine', { ...process.env, HOME: home })
+    const log = () => readFileSync(join(home, '.harness', 'logs', 'install-opencode.log'), 'utf8')
+
+    it('shows what is happening without the installer, and keeps the installer\'s output in the log', async () => {
+      const result = await run(friendly(recipe("printf 'npm notice New major version of npm available!\\n'")))
+      expect(result.stdout).toContain('Installing OpenCode…')
+      expect(result.stdout).toMatch(/[█░]{24}/)
+      expect(result.stdout).not.toContain('npm notice')
+      expect(result.stdout).not.toContain('engine is missing')
+      expect(result.stdout).not.toContain('Your message goes as soon as it starts.')
+      expect(log()).toContain('npm notice New major version of npm available!')
+    })
+
+    it('says the first message is waiting when there is one', async () => {
+      const result = await run(friendly(recipe('true'), 'make a web page'))
+      expect(result.stdout).toContain('Your message goes as soon as it starts.')
+    })
+
+    it('a failed install says so, with the last of the log and where the rest is', async () => {
+      const result = await run(friendly(recipe("printf 'E404 not found: fixture\\n'; exit 3")))
+      expect(result).toMatchObject({ code: 1, ranEngine: false })
+      expect(result.stdout).toContain('OpenCode could not be installed.')
+      expect(result.stdout).toContain('E404 not found: fixture')
+      expect(result.stdout).toContain(`Full details: ${join(home, '.harness', 'logs', 'install-opencode.log')}`)
+      expect(result.stdout).not.toContain('The command is above')
+    })
+
+    it('runs the engine after an install that put it in place', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'harness-friendly-engine-'))
+      dirs.push(dir)
+      const source = join(dir, 'source-engine')
+      const installed = join(dir, 'new-engine')
+      writeFileSync(source, '#!/bin/sh\n/usr/bin/printf "%s" "$1"\n')
+      chmodSync(source, 0o700)
+      const result = await run(friendly(recipe(`cp ${JSON.stringify(source)} ${JSON.stringify(installed)}`, { names: ['harness-no-such-engine'], absolutePaths: [installed] })))
+      expect(result).toMatchObject({ code: 0, ranEngine: true })
+      expect(result.stdout).toContain('Installing OpenCode…')
+    })
+  })
 
   it('execs an installed engine without running the installer', async () => {
     await expect(runPaneScript(script(recipe('false')))).resolves.toMatchObject({ code: 0, ranEngine: true })

@@ -27,6 +27,7 @@ Future<void> loadPersistedSettings({
   AlertSoundStore? alertSounds,
   ScreenAlertStore? screenAlerts,
   DesktopNotificationStore? desktopNotifications,
+  NotificationOfferStore? notificationOffer,
 }) async {
   // Independent stores may load together, but all must finish before runApp.
   // Font and appearance share a serialized file store; each reads its related
@@ -50,5 +51,6 @@ Future<void> loadPersistedSettings({
     (alertSounds ?? alertSoundStore).load(),
     (screenAlerts ?? screenAlertStore).load(),
     (desktopNotifications ?? desktopNotificationStore).load(),
+    (notificationOffer ?? notificationOfferStore).load(),
   ]);
 }

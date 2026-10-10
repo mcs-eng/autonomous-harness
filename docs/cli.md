@@ -26,7 +26,7 @@ works the same on a headless Linux server; the app is not required on a machine,
 | `harness devices [list] [--json]` · `show <#\|fp>` · `remove <fp>` · `history [--json]` · `dismiss [<#\|fp>]` · `rebaseline [--yes]` | The account's devices as this machine verified them (below): list · one in full · take one out on every device · every add and removal, newest first · mark new ones seen · review and trust a frozen list again. |
 | `harness grid login [--force] [--json]` · `harness grid logout` | Sign the `grid` CLI in with this computer's account, no second browser. |
 | `harness grid profile list\|set\|remove` | Register isolated local Grid homes that this daemon may offer in the model picker. |
-| `harness grid env <grid>` | `<grid>`'s relay address and key as shell exports, through the harness's own `grid`: `eval "$(harness grid env <grid>)"` before calling a Jev model at `$OPENAI_BASE_URL/systemone`. |
+| `harness grid env <grid>` | `<grid>`'s relay address and key as shell exports, through the harness's own `grid`: `eval "$(harness grid env <grid>)"` before pointing an OpenAI-compatible client at `$OPENAI_BASE_URL`. |
 | `harness flash [flags]` | Re-flash a plugged-in Harness device over USB. Flags pass straight to the flasher. |
 | `harness autonomous-device discover\|status\|list\|pair\|revoke` | Pair Autonomous OS devices found on the LAN, directly, with no relay. |
 

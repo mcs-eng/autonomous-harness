@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyGridAssignment, probeGridAssignment, readOpencodeGridAssignment, readPiGridAssignment } from './gridAssignment.js'
+import { classifyGridAssignment, gridAssignments, probeGridAssignment, readOpencodeGridAssignment, readPiGridAssignment } from './gridAssignment.js'
 import { buildGridEngineLaunch, gridCapableEngines, type GridLaunchOverride } from './gridLaunch.js'
 import type { AgentEngine } from '../engines/types.js'
 import { clearProcessEnvCache, parsePsEnviron } from './processEnv.js'
@@ -340,5 +340,15 @@ describe('web tools do not disturb the probe', () => {
       [built.launch.configDir!.envVar]: join(dir, built.launch.configDir!.pointAt!),
     })
     expect(assignment).toEqual({ baseUrl: RELAY_V1, model: 'GLM-4.7-Flash' })
+  })
+})
+
+describe('a local profile launch, classified by models', () => {
+  it('recognises a loopback hub only on the endpoint the core marked as its own launch', async () => {
+    const local = 'http://127.0.0.1:8090/v1'
+    const process = { key: 'a', engine: 'codex' as const, env: {}, args: `model_providers.grid.base_url="${local}" -m qwen` }
+    expect(await gridAssignments([{ ...process, trustedBaseUrl: local }])).toEqual([{ key: 'a', assignment: { baseUrl: local, model: 'qwen' } }])
+    expect(await gridAssignments([process])).toEqual([{ key: 'a', assignment: null }])
+    expect(await gridAssignments([{ ...process, trustedBaseUrl: 'http://127.0.0.1:9090/v1' }])).toEqual([{ key: 'a', assignment: null }])
   })
 })

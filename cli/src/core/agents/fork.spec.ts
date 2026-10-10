@@ -3,22 +3,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installedDsh } from '../../dsh/installed.js'
-import { harnessLaunchOrRefusal } from '../../dsh/runtime.js'
 import { createAndRegisterPane } from '../../lib/createAgentPane.js'
 import { enginePathOverride } from '../../lib/engineBin.js'
 import { buildEngineLaunchArgv, refusePermissionFlagIfUnsupported, supportsNamedAgent } from '../../lib/engineLaunch.js'
 import { planFork } from '../../lib/forkAgent.js'
+import { prepareInstructionWrites } from '../../scm/scmProjects.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { createAgentForker, type ForkAgentDeps } from './fork.js'
 
 vi.mock('../../dsh/installed.js', () => ({ installedDsh: vi.fn(() => undefined) }))
-vi.mock('../../dsh/runtime.js', async (real) => ({
-  ...await real<object>(),
-  forkRuntimeKey: vi.fn(() => 'source-key'),
-  harnessLaunchOrRefusal: vi.fn((prepare: () => unknown) => { prepare(); return { ok: true, launch: { env: { HARNESS_DSH: 'blender' }, args: ['--dsh'] } } }),
-  prepareHarnessLaunch: vi.fn(),
-}))
-vi.mock('../../engines/opencode/version.js', () => ({ opencodeMajorVersion: vi.fn(() => 2) }))
+
+// OpenCode's version probe is its own code, loaded for an OpenCode launch alone; a test may say it could not be.
+vi.mock('../../engines/inProcess.js', async (real) => {
+  const actual = await real<typeof import('../../engines/inProcess.js')>()
+  return { ...actual, loadEngine: vi.fn(actual.loadEngine) }
+})
+vi.mock('../../engines/launchControl.js', () => ({ opencodeMajorVersion: vi.fn(() => 2) }))
 vi.mock('../../lib/createAgentPane.js', () => ({ createAndRegisterPane: vi.fn() }))
 vi.mock('../../lib/engineBin.js', async (real) => ({ ...await real<object>(), enginePathOverride: vi.fn(() => null) }))
 vi.mock('../../lib/engineInstall.js', async (real) => ({ ...await real<object>(), engineInstallRecipe: vi.fn(() => ({ install: 'recipe' })) }))
@@ -30,7 +30,13 @@ vi.mock('../../lib/engineLaunch.js', async (real) => ({
   refusePermissionFlagIfUnsupported: vi.fn(async () => null),
   supportsNamedAgent: vi.fn(() => true),
 }))
+vi.mock('../../scm/scmProjects.js', async (real) => {
+  const actual = await real<typeof import('../../scm/scmProjects.js')>()
+  return { ...actual, prepareInstructionWrites: vi.fn(actual.prepareInstructionWrites) }
+})
 vi.mock('../../lib/forkAgent.js', async (real) => ({ ...await real<object>(), planFork: vi.fn(() => ({ ok: true, level: 'native', forkSessionId: 's1' })) }))
+
+const launchDsh = vi.fn<ForkAgentDeps['dshLaunch']['launch']>(async () => ({ ok: true, launch: { env: { HARNESS_DSH: 'blender' }, args: ['--dsh'] } }))
 
 const root = mkdtempSync(join(tmpdir(), 'core-fork-'))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
@@ -62,6 +68,7 @@ function setup(row: RegisteredSession | null = source(), over: Partial<ForkAgent
       ok: true as const, overrides: { env: (session.codexHome ? { CODEX_HOME: session.codexHome } : {}) as Record<string, string>, extraArgs: [] as string[], clearEnv: [] as string[] },
     })),
     gridName: () => 'grid-me',
+    dshLaunch: { launch: launchDsh },
     ...over,
   }
   return { deps, fork: createAgentForker(deps) }
@@ -74,6 +81,16 @@ describe('forking an agent', () => {
     vi.mocked(createAndRegisterPane).mockReset().mockResolvedValue({ ok: true, spawned: { runtime: { paneId: '%3' } }, pending } as never)
   })
   afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks() })
+
+  it('does not open instruction files or install API notes while its harness waits for the Store', async () => {
+    vi.mocked(installedDsh).mockReturnValueOnce({ manifest: { name: 'Fixture' } } as never)
+    launchDsh.mockResolvedValueOnce({ ok: false, error: 'DSH_UNAVAILABLE', detail: 'Waiting for the Store.', unavailable: 'store' })
+    const { fork, deps } = setup(source({ dsh: 'fixture/tools' }))
+    expect(await fork({ agentId: 'a1', name: null, prompt: null })).toMatchObject({ ok: false, error: 'DSH_UNAVAILABLE' })
+    expect(prepareInstructionWrites).not.toHaveBeenCalled()
+    expect(deps.prepareApiTools).not.toHaveBeenCalled()
+    expect(createAndRegisterPane).not.toHaveBeenCalled()
+  })
 
   it('refuses without tmux, an agent, a folder, or with a grid or a turn in progress', async () => {
     expect(await setup(source(), { tmuxBackend: null }).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
@@ -94,7 +111,7 @@ describe('forking an agent', () => {
     expect(await setup().fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'FORK_UNSUPPORTED', detail: 'amp cannot fork' })
     expect(await setup(source({ dsh: 'blender' } as Partial<RegisteredSession>)).fork({ agentId: 'a1', name: null, prompt: null })).toMatchObject({ error: 'INVALID_DSH' })
     vi.mocked(installedDsh).mockReturnValue({ manifest: { name: 'Blender' } } as never)
-    vi.mocked(harnessLaunchOrRefusal).mockReturnValueOnce({ ok: false, error: 'DSH_RUNTIME', detail: 'no runtime' } as never)
+    launchDsh.mockResolvedValueOnce({ ok: false, error: 'DSH_RUNTIME', detail: 'no runtime' } as never)
     expect(await setup(source({ dsh: 'blender' } as Partial<RegisteredSession>)).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'DSH_RUNTIME', detail: 'no runtime' })
     vi.mocked(installedDsh).mockReset().mockReturnValue(undefined)
     vi.mocked(refusePermissionFlagIfUnsupported).mockResolvedValueOnce({ error: 'PERMISSION_MODE_UNSUPPORTED', detail: 'no --auto' } as never)
@@ -166,6 +183,17 @@ describe('forking an agent', () => {
     const refused = vi.fn(async () => ({ ok: false as const, error: 'API_UNAVAILABLE', detail: 'gone' }))
     expect(await setup(source(), { relaunchOverrides: refused }).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'API_UNAVAILABLE', detail: 'gone' })
     expect(createAndRegisterPane).not.toHaveBeenCalled()
+  })
+
+  it('forks OpenCode with eager version facts while optional code is unavailable', async () => {
+    const { loadEngine } = await import('../../engines/inProcess.js')
+    vi.mocked(loadEngine).mockResolvedValue(null)
+    await setup(source({ agent: 'reviewer' })).fork({ agentId: 'a1', name: null, prompt: null })
+    expect(supportsNamedAgent).toHaveBeenLastCalledWith('claude', null)
+    await setup(source({ engine: 'opencode', agent: 'reviewer' })).fork({ agentId: 'a1', name: null, prompt: null })
+    expect(supportsNamedAgent).toHaveBeenLastCalledWith('opencode', 2)
+    expect(createAndRegisterPane).toHaveBeenCalledTimes(2)
+    expect(loadEngine).not.toHaveBeenCalled()
   })
 
   it('carries the harness and the named agent over, when the engine still takes it', async () => {

@@ -21,44 +21,27 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AgentEngine } from '../engines/types.js'
-import { anthropicBaseUrl, GRID_ROUTER_MODEL, relayBaseUrl, type GridLaunchOverride } from './gridLaunch.js'
+import { enginesDeclaring } from '../engines/discoveries.js'
+import type { ApiConnections } from './apiConnections.js'
+import { anthropicBaseUrl, GRID_ROUTER_MODEL, relayBaseUrl, type GridLaunchOverride } from './gridLaunchWire.js'
 import { readProcessEnv } from './processEnv.js'
 import type { ProcessIdentity } from './registry.js'
 
-/** Where an agent's inference goes, as far as anyone outside the pane needs to know. */
-export interface GridAssignment {
-  /** The relay root the engine was handed. The grid id is a path segment inside it. */
-  baseUrl: string
-  /** The model the launch pinned. Null = the engine's own choice. */
-  model: string | null
-}
-
-/** The environment variable each engine's endpoint was written to, where it is one. */
-const BASE_URL_VAR: Partial<Record<AgentEngine, string>> = {
-  claude: 'ANTHROPIC_BASE_URL',
-  // opencode is deliberately absent: its endpoint moved into a config file (see
-  // `readOpencodeGridAssignment`), and leaving it here would read a stray OPENAI_BASE_URL from the
-  // user's own shell as proof this agent is on a grid.
-  hermes: 'OPENAI_BASE_URL',
-  grok: 'GROK_MODELS_BASE_URL',
-  copilot: 'COPILOT_PROVIDER_BASE_URL',
-}
-
-/** The environment variable each engine's model was written to, where it is one. */
-const MODEL_VAR: Partial<Record<AgentEngine, string>> = {
-  claude: 'ANTHROPIC_MODEL',
-  hermes: 'HERMES_INFERENCE_MODEL',
-  copilot: 'COPILOT_MODEL',
-}
+export type { GridAssignment } from './gridAssignmentWire.js'
+import { GRID_ENDPOINT_VARS as BASE_URL_VAR, GRID_MODEL_VARS as MODEL_VAR, GRID_CODEX_ENDPOINT as CODEX_BASE_URL,
+  GRID_ARGV_MODEL as ARGV_MODEL, GRID_PI_MODEL as PI_ARGV_MODEL, gridEndpointMatchesLaunch, type GridAssignment,
+  type GridAssignmentProcess, type GridAssignmentAnswer } from './gridAssignmentWire.js'
+export { gridEndpointMatchesLaunch, sameGridAssignment } from './gridAssignmentWire.js'
 
 /**
- * Engines whose model was written into argv as `-m <model>` rather than an environment variable.
+ * Engines whose model was written into argv as `-m <model>` rather than an environment variable: Codex's
+ * discovery contract declares it (`modelInArgv`).
  *
  * Codex omits the flag when no model was picked; grok always carries one, because its grid credential
  * rides on a declared model block and "let the grid route" is therefore spelled `-m Auto` rather than
  * by leaving the flag off. [classifyGridAssignment] maps that id back to null.
  */
-const MODEL_IN_ARGV = new Set<AgentEngine>(['codex', 'grok'])
+const MODEL_IN_ARGV = new Set<AgentEngine>([...enginesDeclaring('modelInArgv'), 'grok'])
 
 /**
  * Pi's endpoint is in neither its environment nor its argv — it is in the `models.json` inside the
@@ -67,11 +50,7 @@ const MODEL_IN_ARGV = new Set<AgentEngine>(['codex', 'grok'])
  */
 const PI_CONFIG_DIR_VAR = 'PI_CODING_AGENT_DIR'
 /** `--model grid/<model>` — how Pi is told which provider and model to use. */
-const PI_ARGV_MODEL = /(?:^|\s)--model\s+([A-Za-z0-9_-]+)\/(\S+)/
 
-/** `-c model_providers.<name>.base_url="…"` — how Codex's endpoint is written, so how it is read. */
-const CODEX_BASE_URL = /model_providers\.[A-Za-z0-9_-]+\.base_url=(?:"([^"]+)"|(\S+))/
-const ARGV_MODEL = /(?:^|\s)-m\s+(\S+)/
 
 /**
  * Endpoints of the APIs saved on this computer (`apiModels.ts`), in both forms an engine is handed
@@ -83,6 +62,15 @@ const apiBases = new Set<string>()
 
 export function rememberApiBase(baseUrl: string): void {
   for (const form of [relayBaseUrl(baseUrl), anthropicBaseUrl(baseUrl)]) apiBases.add(form)
+}
+
+/** Every saved API's endpoint, so agents already running on one are recognised. */
+export function rememberSavedApis(store: Pick<ApiConnections, 'list'>): void {
+  try {
+    for (const connection of store.list()) rememberApiBase(connection.baseUrl)
+  } catch {
+    // An unreadable store is reported where it is managed; recognising agents is best effort.
+  }
 }
 
 /**
@@ -102,30 +90,6 @@ function isGridUrl(value: string): boolean {
   } catch {
     return false
   }
-}
-
-function comparableUrl(value: string): string | null {
-  try {
-    const url = new URL(value)
-    url.hash = ''
-    url.search = ''
-    url.pathname = url.pathname.replace(/\/+$/, '') || '/'
-    return url.toString().replace(/\/$/, '')
-  } catch {
-    return null
-  }
-}
-
-/** Does the live engine endpoint equal the endpoint this server-owned launch produced? */
-export function gridEndpointMatchesLaunch(
-  engine: AgentEngine,
-  observed: string,
-  launch: Pick<GridLaunchOverride, 'baseUrl'>,
-): boolean {
-  const expected = engine === 'claude' ? anthropicBaseUrl(launch.baseUrl) : relayBaseUrl(launch.baseUrl)
-  const left = comparableUrl(observed)
-  const right = comparableUrl(expected)
-  return left !== null && right !== null && left === right
 }
 
 /** Classify an already-read environment and argv. Exported so a spec can pin the rules with no I/O. */
@@ -303,13 +267,10 @@ export async function gridAssignmentFromEnv(
   return classifyGridAssignment(engine, env, args, trustedLaunch)
 }
 
-/**
- * Do these two describe the same assignment?
- *
- * `undefined` is not compared here and must not reach this: it means the probe could not look, which
- * is never evidence that anything moved. Callers guard on it before asking.
- */
-export function sameGridAssignment(a: GridAssignment | null, b: GridAssignment | null): boolean {
-  if (a === null || b === null) return a === b
-  return a.baseUrl === b.baseUrl && (a.model ?? null) === (b.model ?? null)
+/** One fresh classification per process per pass; this is deliberately not an assignment cache. A process the
+ *  core marked with its own launch's endpoint (a local Grid profile) is recognised on that endpoint too. */
+export async function gridAssignments(processes: readonly GridAssignmentProcess[]): Promise<GridAssignmentAnswer[]> {
+  return Promise.all(processes.map(async process => ({ key: process.key,
+    assignment: await gridAssignmentFromEnv(process.engine, process.env, process.args,
+      process.trustedBaseUrl ? { baseUrl: process.trustedBaseUrl } : undefined) })))
 }

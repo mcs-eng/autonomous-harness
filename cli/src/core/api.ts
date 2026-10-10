@@ -1,3 +1,5 @@
+import type { AgentTokenUsage, AgentUsageTarget } from '../lib/agentUsageWire.js'
+import type { GridAssignmentProcess, GridAssignmentAnswer } from '../lib/gridAssignmentWire.js'
 /**
  * The boundary the services stand on (docs/design/2026-10-03-harnessd.md, "The core boundary"):
  * `CoreApi` is what a service may ask of the core, and `CorePorts` is what the core asks of services.
@@ -17,20 +19,21 @@ import type { AppSwarms } from '../cable/cableSession.js'
 import type { UnreadNotification } from '../lib/notificationRead.js'
 import type { AutonomousDeviceAgent, AutonomousDeviceDelivery, AutonomousDeviceReceipt } from '../lib/autonomous-device/service.js'
 import type { StoreAgent } from '../lib/autonomous-device/store.js'
+import type { DshLaunchAnswer, DshLaunchRequest, DshMaterializeAnswer, DshMaterializeRequest } from '../dsh/launchWire.js'
 import type { AgentDshContext } from '../lib/agentFrame.js'
 import type { GridAccess } from '../lib/gridAttach.js'
 import type { createHarnessResourcesReader } from '../lib/harnessResources.js'
 import type { createHarnessStorageReader } from '../lib/harnessTelemetry.js'
 import type { AgentGridTarget, GridAnnotation } from '../lib/gridAnnotation.js'
 import { GRID_FLEET_MAX_TIMEOUT_MS } from '../lib/gridFleetProtocol.js'
-import type { GridLaunchOverride } from '../lib/gridLaunch.js'
+import type { GridLaunchAnswer, GridLaunchOverride, GridLaunchRequest } from '../lib/gridLaunchWire.js'
 import type { NewAgentModel } from '../lib/newAgentModel.js'
-import type { LastTurnText, LiveEvent } from '../lib/normalize.js'
+import type { LastTurnText, LiveEvent } from '../engines/kit/events.js'
 import type { SessionRecaps } from '../lib/recapReads.js'
 import type { SessionInputDelivery } from '../lib/sessionInput.js'
 import { projectDisplayName, type registry, type RegisteredSession } from '../lib/registry.js'
 import type { RuntimeModelOption } from '../lib/runtimeProfile.js'
-import type { ExternalSessions, OpenSessions } from '../lib/sessionSearch/external.js'
+import { externalUnavailable, type ExternalSessionAnswer, type ExternalSessionRequest } from '../lib/externalSessionWire.js'
 import type { SessionSearchIndex } from '../lib/sessionSearch/indexer.js'
 import type { StoppedAgentStore } from '../lib/stoppedAgents.js'
 import type { TerminalBinaryClear } from '../lib/terminalBinary.js'
@@ -105,7 +108,15 @@ export const CONVERSATIONS_OFF: ConversationReads = {
   transcriptOk: async () => false,
 }
 
+export interface UsagePort {
+  read(target: AgentUsageTarget): Promise<Record<string, unknown>>
+  stop(): void
+}
+export const USAGE_FALLBACKS: PortFallbacks<UsagePort> = { read: later(FAIL), stop: undefined }
+
 export interface CoreApi {
+  /** Last aggregate observation, never a transcript read. Optional for services that do not ask. */
+  usage?: (target: AgentUsageTarget) => Promise<AgentTokenUsage | null>
   /** The daemon's data folder; a service keeps its own files in it. */
   dataDir: string
   terminals: TerminalsPort
@@ -191,11 +202,6 @@ export interface CoreApi {
     /** A session's last turn as its engine recorded it: what was asked and the final answer; null when
      *  there is none yet. Read from the end of its transcript, bounded (core/transcripts/lastTurn.ts). */
     lastTurn(sessionId: string): Promise<LastTurnText | null>
-  }
-  /** Conversations on this machine that Harness did not start, and which of them a process has open. */
-  external: {
-    sessions: Pick<ExternalSessions, 'list' | 'scan'>
-    open: Pick<OpenSessions, 'known' | 'fresh'>
   }
   /** The sign-in the core holds for every service: a service never holds a credential itself. */
   account: {
@@ -455,15 +461,20 @@ export const STORE_REQUESTS = ['dsh_list', 'dsh_install', 'dsh_update', 'dsh_rem
 export const USAGE_REQUESTS = ['usage_read'] as const
 /** The machine monitor (services/monitor.ts). */
 export const MONITOR_REQUESTS = ['machine_resources'] as const
-/** The command bar (services/commandBar.ts), an experiment: the socket's `command_bar`, and the hook server's
- *  `/api/command-bar/*`, which it asks as `command_bar_http`. */
-export const COMMAND_BAR_REQUESTS = ['command_bar', 'command_bar_http'] as const
+/** Memories (services/memory.ts), an experiment: what this machine's agents remember, for the owner's Memories
+ *  panes on their other machines, and the About You profile and its on/off choice from them. */
+export const MEMORY_REQUESTS = ['memory_snapshot', 'memory_about_put', 'memory_deliver'] as const
+/** The router (services/router.ts), an experiment: where a task a person typed or said should go, decided for
+ *  the client that asks, which acts on it. */
+export const ROUTER_REQUESTS = ['route_decide'] as const
 /** The project and folder readers (services/projects.ts). */
 export const PROJECTS_REQUESTS = ['git_pull_request', 'git_project_info', 'scm_project_info', 'project_preview', 'fs_list_dir', 'agent_read_file'] as const
 /** A window's name for its repo and its work, by a small model in the background (services/windowNames.ts). */
 export const WINDOW_NAMES_REQUESTS = ['window_name'] as const
 /** Change agent's handoff file, prepared in the edge host (services/handoff.ts). */
 export const HANDOFF_REQUESTS = ['agent_handoff_prepare'] as const
+/** Connected services for every local agent, and their MCP bridge, in the edge host (services/connectors.ts). */
+export const CONNECTORS_REQUESTS = ['connectors'] as const
 /**
  * Models (services/models.ts).
  *
@@ -496,6 +507,10 @@ const MINUTE = 60_000
  *   a move onto a grid model (`moveTarget`) each wait for it.
  * - A launch target, the private grid's name and the lists each run a few `grid` calls of up to 30 s.
  * - The Store's install and update set up a harness's toolchain: minutes.
+ *
+ * A grid or saved-API launch (`gridLaunch`) is built from what models has in hand, and a saved API's target
+ * (`apiTarget`) reads its model list for at most 15 s (lib/apiModels.ts): both take the half minute, which bounds
+ * how long a launch on one can wait. A launch on the engine's own login asks models nothing.
  */
 export const LONG_ANSWERS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
   models: {
@@ -504,7 +519,7 @@ export const LONG_ANSWERS: Readonly<Record<string, Readonly<Record<string, numbe
     ensure: 15 * MINUTE, moveTarget: 15 * MINUTE,
     launchTarget: 3 * MINUTE, privateGridName: 2 * MINUTE, lists: 2 * MINUTE,
   },
-  store: { dsh_install: 30 * MINUTE, dsh_update: 30 * MINUTE },
+  store: { dsh_install: 30 * MINUTE, dsh_update: 30 * MINUTE, dshMaterialize: 6 * MINUTE },
 }
 
 /** The orchestrator (services/orchestrator.ts): its projects, for the apps and for the agents it runs. */
@@ -539,8 +554,11 @@ export const EXPERIMENTS: Readonly<Record<string, { requests: readonly string[];
   collaboration: { requests: TEAMS_REQUESTS, state: ['teams'] },
   // Its invitations and links: a harness was shared from here.
   sharing: { requests: SHARE_REQUESTS, state: ['harness-shares.json', 'harness-collaboration.json'] },
-  // Request-only: it keeps nothing, so it is on from its first request until the daemon stops.
-  commandBar: { requests: COMMAND_BAR_REQUESTS, state: [] },
+  // Request-only, on from its first request until the daemon stops: another machine's Memories pane asks, and
+  // the package's own files are its state.
+  memory: { requests: MEMORY_REQUESTS, state: [] },
+  // Request-only too: it keeps nothing, and asks Jev only when a client asks it.
+  router: { requests: ROUTER_REQUESTS, state: [] },
 }
 
 /** The core's calls into Share: an observer's frame as the relay handed it over, the relay gone (every observer
@@ -575,11 +593,13 @@ export const ORCHESTRATOR_FALLBACKS: PortFallbacks<OrchestratorPort> = { roleOf:
 /** The core's calls into session search: index a session at its turn boundaries, forget a purged
  *  conversation, the title it indexed for one being adopted, and stopping its sweeps. The apps' own
  *  requests (`session_search`, `session_tail`) are its `ServiceRequests`, not the core's calls. */
-export type SearchPort = Pick<SessionSearchIndex, 'touch' | 'deleteHistory' | 'session' | 'stop'>
+export type SearchPort = Pick<SessionSearchIndex, 'touch' | 'deleteHistory' | 'session' | 'stop'> & {
+  inspect(request: ExternalSessionRequest): Promise<ExternalSessionAnswer>
+}
 
 /** What the core gets when search fails: nothing indexed and no title. */
 export const SEARCH_FALLBACKS: PortFallbacks<SearchPort> = {
-  touch: undefined, deleteHistory: undefined, session: undefined, stop: undefined,
+  touch: undefined, deleteHistory: undefined, session: undefined, stop: undefined, inspect: later(externalUnavailable()),
 }
 
 /*
@@ -703,6 +723,18 @@ export interface ModelsPort {
   moveTarget(request: { gridName: string | null; model: string; targetId?: string; engine?: string }): Promise<{ target: GridLaunchOverride } | { detail: string; error?: string }>
   /** An agent was just moved onto a grid model: start that grid while its pane restarts, if it sleeps. */
   moved(launch: GridLaunchOverride): void
+  /**
+   * The launch that points `request.engine` at a grid or a saved API (lib/gridLaunch.ts): what its pane starts
+   * with and the config files the core writes for it, with a saved API's endpoint and key as saved now when
+   * `refresh`. An engine that cannot be pointed there is answered with the reason. The core builds no grid launch
+   * itself (docs/design/2026-10-08-launch-port.md).
+   */
+  gridLaunch(request: GridLaunchRequest): Promise<GridLaunchAnswer>
+  /** Fresh process evidence, batched; core never waits for it to discover or bind a session. */
+  gridAssignments(processes: readonly GridAssignmentProcess[]): Promise<GridAssignmentAnswer[]>
+  /** Where an agent moved onto a saved API's model sends its inference: the key travels only into its launch. The
+   *  sentence a person reads when the API cannot be used. */
+  apiTarget(request: { connectionId: string; model: string }): Promise<{ target: GridLaunchOverride; apiBase: string } | { detail: string }>
   /** The account's private grid: the backend's word, else what this machine works out; null for none. */
   privateGridName(): Promise<string | null>
   /** What `grid_models_changed` tells the windows: the list as a window that draws row state reads it,
@@ -716,13 +748,14 @@ export interface ModelsPort {
 }
 
 /**
- * What the core gets when models fails: grid set-up and every target answered with an error (a create on
- * a grid model answers GRID_UNAVAILABLE), frames with no note and no prewarm, the private grid as the
- * backend said it or none, and no push of the lists.
+ * What the core gets when models fails: grid set-up, every target and every grid or saved-API launch answered
+ * with an error (a create on a grid model answers GRID_UNAVAILABLE, and so does a relaunch on one), frames with no
+ * note and no prewarm, the private grid as the backend said it or none, and no push of the lists. A launch on the
+ * engine's own login never asks models.
  */
 export const MODELS_FALLBACKS: PortFallbacks<ModelsPort> = {
   ensure: later(FAIL), annotation: null, prewarm: undefined, launchTarget: later(FAIL), moveTarget: later(FAIL), moved: undefined,
-  privateGridName: later(null), lists: later(FAIL), machines: undefined, signedOut: undefined,
+  gridAssignments: later(FAIL), gridLaunch: later(FAIL), apiTarget: later(FAIL), privateGridName: later(null), lists: later(FAIL), machines: undefined, signedOut: undefined,
 }
 
 /** What the core calls while `ports.models` is null (models is off): its fallbacks' answers. */
@@ -733,6 +766,9 @@ export const MODELS_OFF: ModelsPort = {
   launchTarget: () => Promise.reject(new ServiceUnavailableError('models')),
   moveTarget: () => Promise.reject(new ServiceUnavailableError('models')),
   moved: () => {},
+  gridAssignments: () => Promise.reject(new ServiceUnavailableError('models')),
+  gridLaunch: () => Promise.reject(new ServiceUnavailableError('models')),
+  apiTarget: () => Promise.reject(new ServiceUnavailableError('models')),
   privateGridName: async () => null,
   lists: () => Promise.reject(new ServiceUnavailableError('models')),
   machines: () => {},
@@ -1265,9 +1301,22 @@ export interface WindowRelay {
     onClosed: (code: number, reason: string) => void): Promise<WindowRelaySession>
 }
 
+export interface StorePort {
+  dshMaterialize(request: DshMaterializeRequest): Promise<DshMaterializeAnswer>
+  dshLaunch(request: DshLaunchRequest): Promise<DshLaunchAnswer>
+}
+
+export const STORE_FALLBACKS: PortFallbacks<StorePort> = { dshMaterialize: later(FAIL), dshLaunch: later(FAIL) }
+export const STORE_OFF: StorePort = {
+  dshMaterialize: () => Promise.reject(new ServiceUnavailableError('store')),
+  dshLaunch: () => Promise.reject(new ServiceUnavailableError('store')),
+}
+
 /** Each port is filled by the service that owns it when that service starts, and is null while the
  *  service is off: the core never waits on one. */
 export interface CorePorts {
+  usage: UsagePort | null
+  store: StorePort | null
   search: SearchPort | null
   viewers: ViewersPort | null
   models: ModelsPort | null
@@ -1282,7 +1331,7 @@ export interface CorePorts {
 }
 
 export function emptyPorts(): CorePorts {
-  return { search: null, viewers: null, models: null, workspaces: null, teams: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null }
+  return { usage: null, store: null, search: null, viewers: null, models: null, workspaces: null, teams: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null }
 }
 
 export interface CoreApiDeps {
@@ -1292,8 +1341,6 @@ export interface CoreApiDeps {
   registry: Pick<typeof registry, 'list' | 'byAgent' | 'resolve' | 'advertised' | 'terminalAvailable'>
   stoppedAgents: Pick<StoppedAgentStore, 'list'>
   databaseHistory: CoreApi['transcripts']['databaseHistory']
-  externalSessions: CoreApi['external']['sessions']
-  openSessions: CoreApi['external']['open']
   syncSession: CoreApi['agents']['sync']
   runtimeModels: CoreApi['agents']['runtimeModels']
   viewerChanged: CoreApi['clients']['viewerChanged']
@@ -1341,7 +1388,7 @@ export interface CoreApiDeps {
 }
 
 export function createCoreApi({
-  dataDir, registry, stoppedAgents, databaseHistory, externalSessions, openSessions, syncSession, runtimeModels, viewerChanged,
+  dataDir, registry, stoppedAgents, databaseHistory, syncSession, runtimeModels, viewerChanged,
   gridNamed, gridModelsChanged, dshInstallStatus, mintGridName, accessToken, lane, observerKey, observer, privateGridName, machineName, backend, onNotice,
   runtimeProfile, setRuntime, fork, create, dsh, windows, daemon, turns, questions, terminals = TERMINALS_OFF, conversations = CONVERSATIONS_OFF, viewerFrame, machine, activityText,
   signedIn, environment, machines, sendLocal, sendToWindow, hasWindow, devicesChanged, dialWatching, wifi, lastTurn, turnCard, turnSummary,
@@ -1379,7 +1426,6 @@ export function createCoreApi({
     turns,
     questions,
     transcripts: { databaseHistory, lastTurn },
-    external: { sessions: externalSessions, open: openSessions },
     account: { mintGridName, accessToken, lane, observerKey, privateGridName, machineName, backend, onNotice, signedIn, environment, machines },
     clients: {
       viewerChanged, gridNamed, gridModelsChanged, dshInstallStatus, windows, observer, hasWindow, devicesChanged, dialWatching,

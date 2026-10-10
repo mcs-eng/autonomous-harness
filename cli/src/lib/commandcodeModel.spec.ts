@@ -16,6 +16,9 @@ let commandcodeHome = ''
 async function loadRuntimeProfile() {
   vi.resetModules()
   process.env.COMMANDCODE_HOME = commandcodeHome
+  // The daemon's attach loads native interpretation before delivering transcript records.
+  const { loadEngine } = await import('../engines/inProcess.js')
+  await loadEngine('commandcode')
   return import('./runtimeProfile.js')
 }
 
@@ -127,7 +130,7 @@ describe('a Command Code agent', () => {
     expect(parseRuntimeProfile(manager.selectedModel(target))?.effort).toBe('high')
 
     manager.ingest(target, assistantLine('moonshotai/kimi-k3'))
-    // ingest() starts an asynchronous config read; wait for its observable result.
+    manager.ingest(target, assistantLine('moonshotai/kimi-k3')) // one watcher batch can contain several replies
     await vi.waitFor(() => {
       const profile = parseRuntimeProfile(manager.selectedModel(target))
       expect(profile?.model).toBe('kimi-k3')

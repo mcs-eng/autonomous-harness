@@ -15,6 +15,8 @@ import {
   type AgentCommandOwnershipSnapshot,
 } from './engineBin.js'
 import { BYPASS_PERMISSION_FLAGS, PERMISSION_MODES, permissionModeApproves } from './engineLaunch.js'
+import { ENGINE_EXIT_PANE_OPTION } from './engineExitOption.js'
+import { discoveryField, versionedInstalls } from '../engines/discoveries.js'
 import { psEnv } from './childLocale.js'
 import { processStartTicks } from './processLiveness.js'
 import { nativeProcessImages } from './nativeProcessImages.js'
@@ -86,6 +88,8 @@ export function listPaneTitles(): Promise<Map<string, string>> {
 export interface ProcessRow extends ProcessIdentity {
   parentPid: number
   args: string
+  /** Kernel argv boundaries, when available. Native control must not parse prompt text as flags. */
+  nativeArgv?: readonly string[]
   /** Ephemeral evidence only; never persisted or sent to another machine. */
   imagePath?: string
   imageFileKey?: string
@@ -142,7 +146,8 @@ export function argvTokens(args: string): string[] {
 /** Discovery only needs a command prefix. Do not tokenize a shell script or
  * prompt suffix once per candidate engine. Keep the same token grammar as
  * argvTokens, but stop scanning as soon as the consumer has enough evidence. */
-function argvPrefix(args: string): () => string | undefined {
+function argvPrefix(args: string, nativeArgv?: readonly string[]): () => string | undefined {
+  if (nativeArgv) { let index = 0; return () => nativeArgv[index++] }
   // Same escape-aware scan argvTokens() runs (review cycle-2/3, P1 security), one token per
   // call. The regex tokenizer this replaces split on ANY quote, so one escaped `\"` inside a
   // quoted PROMPT argument closed the token early and let a path mentioned in prompt text pose
@@ -234,8 +239,8 @@ function processEntrypoint(args: string, next = argvPrefix(args)): string {
  * In particular, Codex startup runs `codex --help` before the real resume. Adopting
  * that short-lived PID ends a restart too early and discovery then evicts its pane.
  * Only a standalone probe argument counts: prompt text and option values do not. */
-function engineCapabilityProbe(args: string): boolean {
-  const next = argvPrefix(args)
+function engineCapabilityProbe(args: string, nativeArgv?: readonly string[]): boolean {
+  const next = argvPrefix(args, nativeArgv)
   if (!processEntrypoint(args, next)) return false
   const option = next()
   return (option === '--help' || option === '-h' || option === '--version' || option === '-V')
@@ -919,37 +924,15 @@ function commTruncatedPrefixOf(seen: string, want: string): boolean {
   return Buffer.byteLength(seen) === 15 && want.length > seen.length && want.startsWith(seen)
 }
 
-/**
- * Claude's native installer exposes `~/.local/bin/claude` as a symlink to a binary whose basename is
- * only its version (`~/.local/share/claude/versions/2.1.246`). During early startup both `comm` and
- * argv[0] can still contain that target path, before Claude rewrites either one to `claude`.
- *
- * Match the vendor-specific install layout, never a bare semver: an unrelated process called
- * `2.1.246` is not evidence that Claude is running.
- */
-function claudeNativeInstallPath(value: string): boolean {
-  const normalized = value.replace(/\\/g, '/').toLowerCase()
-  return /(?:^|\/)\.local\/share\/claude\/versions\/[^/]+$/.test(normalized)
-}
-
 interface EngineProcessSignature {
   basenames: readonly RegExp[]
   entrypoints: readonly RegExp[]
 }
 
-/** Vendor-supported native names and launcher/package entrypoints, independent of install prefix. */
+/** Vendor-supported native names and launcher/package entrypoints, independent of install prefix. Claude Code's
+ *  and Codex's are their discovery contracts' (engines/discoveries.ts). */
 export const ENGINE_PROCESS_SIGNATURES: Readonly<Record<RegisteredSession['engine'], EngineProcessSignature>> = {
-  claude: {
-    // Windows interop repair exposes native names (comm / relayed basename can be `claude.exe`,
-    // `codex.exe`) — the optional `.exe` covers direct native Windows launches too
-    // (review cycle-6, P2).
-    basenames: [/^claude(?:\.exe)?$/],
-    entrypoints: [/@anthropic-ai[\/\\]claude-code[\/\\]cli\.js$/],
-  },
-  codex: {
-    basenames: [/^codex(?:\.exe)?$/, /^codex-(?:aarch64|x86_64)-(?:apple-darwin|unknown-linux-(?:gnu|musl))$/],
-    entrypoints: [/@openai[\/\\]codex[\/\\]bin[\/\\]codex(?:\.js)?$/],
-  },
+  ...discoveryField('process'),
   cursor: {
     basenames: [/^cursor-agent$/],
     entrypoints: [/cursor-agent[\/\\]versions[\/\\][^/\\]+[\/\\]index\.js$/],
@@ -1009,12 +992,12 @@ export const ENGINE_PROCESS_SIGNATURES: Readonly<Record<RegisteredSession['engin
 }
 
 function heuristicEngineProcessMatchScore(
-  row: Pick<ProcessRow, 'executable' | 'args' | 'imageFileKey' | 'entrypointFileKey'>,
+  row: Pick<ProcessRow, 'executable' | 'args' | 'nativeArgv' | 'imageFileKey' | 'entrypointFileKey'>,
   engine: RegisteredSession['engine'],
   ownership = agentCommandOwnershipSnapshot(),
 ): number {
   const executable = basename(row.executable).toLowerCase()
-  const entrypoint = processEntrypoint(row.args).toLowerCase()
+  const entrypoint = processEntrypoint(row.args, argvPrefix(row.args, row.nativeArgv)).toLowerCase()
   const entrybase = basename(entrypoint).toLowerCase()
   // Antigravity also ships an IDE-side `agy` inside its .app bundle. It is not the terminal engine,
   // even when an AGY_PATH override happens to use the same basename.
@@ -1040,8 +1023,9 @@ function heuristicEngineProcessMatchScore(
   if (signature.basenames.some((pattern) => pattern.test(executable) || pattern.test(entrybase))) return 3
   if (signature.entrypoints.some((pattern) => pattern.test(entrypoint))) return 2
 
-  // Native Claude exposes a version-only target; only the vendor layout makes that name meaningful.
-  if (engine === 'claude' && (claudeNativeInstallPath(row.executable) || claudeNativeInstallPath(entrypoint))) return 3
+  // A native binary named only by its version (Claude Code's): only the vendor layout makes that name meaningful.
+  const versioned = versionedInstalls[engine]
+  if (versioned && (versioned(row.executable) || versioned(entrypoint))) return 3
 
   if (engine === 'cursor') {
     return agentAliasOwner([row.imageFileKey, row.entrypointFileKey], ownership) === 'cursor' ? 4 : 0
@@ -1071,11 +1055,11 @@ export interface EngineProcessMatch {
  * File identity wins; basename/package rules are compatibility fallbacks for launchers and scripts.
  */
 export function engineProcessMatch(
-  row: Pick<ProcessRow, 'executable' | 'args' | 'imagePath' | 'imageFileKey' | 'entrypointFileKey'>,
+  row: Pick<ProcessRow, 'executable' | 'args' | 'nativeArgv' | 'imagePath' | 'imageFileKey' | 'entrypointFileKey'>,
   engine: RegisteredSession['engine'],
   ownership = agentCommandOwnershipSnapshot(),
 ): EngineProcessMatch {
-  if (engineCapabilityProbe(row.args)) return { score: 0, evidence: 'none' }
+  if (engineCapabilityProbe(row.args, row.nativeArgv)) return { score: 0, evidence: 'none' }
   const owners = engineFileOwners([row.imageFileKey, row.entrypointFileKey], ownership)
   if (owners.length === 1) {
     return owners[0] === engine
@@ -1102,7 +1086,7 @@ export function engineProcessMatch(
 
 /** Compatibility surface for callers that only need ordering. */
 export function engineProcessMatchScore(
-  row: Pick<ProcessRow, 'executable' | 'args' | 'imagePath' | 'imageFileKey' | 'entrypointFileKey'>,
+  row: Pick<ProcessRow, 'executable' | 'args' | 'nativeArgv' | 'imagePath' | 'imageFileKey' | 'entrypointFileKey'>,
   engine: RegisteredSession['engine'],
   ownership = agentCommandOwnershipSnapshot(),
 ): number {
@@ -1170,10 +1154,11 @@ function selectEngineProcess(
  *
  * The id pattern is a filter, not decoration: `-r` on Command Code takes "a name (use quotes for
  * multi-word names)", so a title would otherwise be registered as a session id.
+ *
+ * Claude Code's and Codex's entries are their discovery contracts' (`resumeArgs`, engines/discoveries.ts).
  */
-const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]; id: RegExp; unless?: string[] }>> = {
-  claude: { flags: ['--resume', '-r'], id: /^[0-9a-f-]{16,}$/i, unless: ['--fork-session'] },
-  codex: { flags: ['resume'], id: /^[0-9a-f-]{16,}$/i },
+const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: readonly string[]; id: RegExp; unless?: readonly string[] }>> = {
+  ...discoveryField('resumeArgs'),
   cursor: { flags: ['--resume'], id: /^[0-9a-f-]{16,}$/i },
   // `--fork` continues from the id but writes a NEW session, so the id in argv is the parent's.
   opencode: { flags: ['--session', '-s'], id: /^ses_[A-Za-z0-9]+$/, unless: ['--fork'] },
@@ -1352,9 +1337,25 @@ export function argsMatchProcCmdlineSerialization(args: string, cmdline: string)
  * Callers should also honour `processArgvIsBoundaryFaithful`: like bypass state, a session id
  * read from flattened `ps` text is a guess, not evidence.
  */
-export function resumeSessionId(engine: RegisteredSession['engine'], args: string): string | null {
+export function resumeSessionId(engine: RegisteredSession['engine'], args: string, nativeArgv?: readonly string[]): string | null {
   const spec = RESUME_ARGS[engine]
   if (!spec) return null
+  if (nativeArgv) {
+    // Kernel boundaries make every element a real argument, but a bare `--` still ends the options:
+    // what follows is positional prompt text however flag-shaped (the token scan below, same rule).
+    const terminator = nativeArgv.indexOf('--')
+    const options = terminator === -1 ? nativeArgv : nativeArgv.slice(0, terminator)
+    if (spec.unless?.some(flag => options.includes(flag))) return null
+    for (const flag of spec.flags) {
+      for (let index = 0; index < options.length; index++) {
+        const token = options[index]
+        const value = token.toLowerCase() === flag.toLowerCase() ? options[index + 1]
+          : token.toLowerCase().startsWith(`${flag.toLowerCase()}=`) ? token.slice(flag.length + 1) : undefined
+        if (value && spec.id.test(value)) return value
+      }
+    }
+    return null
+  }
   const tokens = argvTokens(args)
   const terminator = tokens.indexOf('--')
   const optionTokens = terminator === -1 ? tokens : tokens.slice(0, terminator)
@@ -1643,13 +1644,7 @@ export async function setPaneStyle(pane: string, style: string): Promise<boolean
 }
 
 /** What tmux knows about a pane right now. See `agentCreateDiagnosis.ts` for why this is read. */
-/**
- * The pane option an engine's launch wrapper sets when the engine exits and the pane falls back to
- * a shell (engineLaunch.ts, `harness_after`): the engine's exit status. Empty/absent while the
- * wrapper is still running the engine — and for the whole life of the fallback shell after that,
- * once something reads it, so `respawn` clears it before every new launch in the same pane.
- */
-export const ENGINE_EXIT_PANE_OPTION = '@harness_engine_exit'
+export { ENGINE_EXIT_PANE_OPTION }
 
 export interface TmuxPaneState {
   dead: boolean
