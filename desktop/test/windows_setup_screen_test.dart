@@ -154,7 +154,7 @@ void main() {
     );
 
     expect(find.text('This computer is ready'), findsOneWidget);
-    expect(find.text('Continue to sign in'), findsOneWidget);
+    expect(find.text('Continue'), findsOneWidget);
   });
 
   testWidgets('the review uses the provisioner plan for manual WSL setup', (

@@ -232,7 +232,11 @@ describe('where the core finds the other engines\' conversations', () => {
       teams: { forget: () => {} } as never, input: { forget: () => {} } as never, deviceInput: { forget: () => {} } as never,
       homes: { copilot: home('.copilot'), grok: home('.grok'), agy: home('.gemini', 'antigravity-cli') },
     })
+    // Fork: a resume id is trusted only from argv whose element boundaries are known (core/agents/bind.ts,
+    // review cycle-7); flattened `ps` text needs the store to corroborate it. These rows stand for Linux's
+    // /proc argv, which keeps its boundaries, as upstream's record assumes.
     const observed = (engine: string, over: Record<string, unknown>) => ({
+      argsBoundaryFaithful: true,
       engine, cwd: '/work/g', runtimes: [{ backend: 'tmux', paneId: '%1' }], primaryRuntimeKey: 'tmux:%1',
       processIdentity: { pid: 4242, startMarker: 'Mon Oct  8 10:00:00 2026', executable: engine }, ...over,
     })
