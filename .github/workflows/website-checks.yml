@@ -50,6 +50,10 @@ jobs:
         run: npm run build
 
       - name: Verify production routes and static OS page
+        # The Install link resolves the latest OS release through the GitHub API; the job token keeps that
+        # lookup off the shared runner address's 60-an-hour unauthenticated limit (website/src/lib/osRelease.ts).
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           PORT=3000 HOSTNAME=127.0.0.1 node .next/standalone/server.js > /tmp/website-server.log 2>&1 &

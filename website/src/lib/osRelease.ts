@@ -35,6 +35,17 @@ export function latestOSRelease(releases: unknown[]): string {
   return candidates[0].url;
 }
 
+// Unauthenticated, the API allows 60 requests an hour per address. A CI runner shares its address with
+// other jobs, and the website check then saw the Install link answer 503 instead of redirecting (fork
+// PR #44, 2026-10-10). A token, where the environment provides one, lifts that limit; without one the
+// request is exactly what it was.
+function releaseHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+  const token = process.env.GITHUB_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
 export async function fetchLatestOSRelease(): Promise<string> {
   const releases: unknown[] = [];
   const signal = AbortSignal.timeout(15_000);
@@ -42,7 +53,7 @@ export async function fetchLatestOSRelease(): Promise<string> {
   // releases cannot push the OS out of the result, with a bounded failure path.
   for (let page = 1; page <= 20; page++) {
     const response = await fetch(`${api}?per_page=100&page=${page}`, {
-      headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+      headers: releaseHeaders(),
       cache: "no-store", signal,
     });
     if (!response.ok) throw new Error(`Release lookup failed (${response.status})`);
