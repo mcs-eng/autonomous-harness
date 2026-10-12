@@ -11,11 +11,11 @@ import { existsSync, realpathSync } from 'node:fs'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { join, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { env } from './env.js'
-import { AUTH_DIR } from '../lib/authSession.js'
 import { hooks as claude } from '../engines/claude/hookContract.js'
 import { hooks as codex } from '../engines/codex/hookContract.js'
 import { defaultHookHome } from '../engines/kit/hookSettings.js'
+import { env } from './env.js'
+import { AUTH_DIR } from '../lib/authSession.js'
 
 const productRoot = join(homedir(), '.harness')
 
