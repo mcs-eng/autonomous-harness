@@ -37,7 +37,7 @@ What you can do after reading this: pick the Part 5 items you want this week, an
 | PR review sessions | Claude Code, Codex, agy, Cursor, Devin | Session titles "Review PR 38", "Review PR 321", four "PR review and merge" sessions, "PR findings review". A GitHub app `devin-ai-integration[bot]` commented on 13 of the last 25 merged PRs in the estate repo and the business dashboard and 1 of 25 in the agent-ops repo. No repo document mentions Devin or how it is triggered. **Measured** via `gh`. | Sometimes a second model, when you ask: "Approved 482 after it's been reviewed by a different agent" (2026-09-28). |
 | Codex sessions | Codex app and CLI on the control station | 109 session files on 2026-10-10 alone, 50 each on 10-11 and 10-12; 30 Codex worktrees under `~/.codex/worktrees`; about 45 dated task folders under `Documents\Codex` totalling about 34 GB. **Measured.** | A weekly Codex learning digest (the only active Codex automation). PRs go through the same review path as above. |
 | TensorFold night-shift chain (Fable 5.1 pickups on the inference pair) | Claude Code in the custody-board repo and the agent-ops repo, with the DeepSeek Harness | Session titles "10-05 TensorFold handoff pickup", "Harden the tracked TensorFold climb tooling", "TensorFold Night 2 artifacts debug". The chain is six dated entries in the coordination repo's machine log (10-05, 10-09/10, three on 10-10, 10-11), PRs the agent-ops repo #346 to #348, #353 to #355, #358, #363, run folders under `the agent-ops repo/runs/`, and explainer pages in the Artifact Library Inbox. Free prose with "Open for the owner" bullets; no schema. **Read.** | You, from the log entries and the Inbox pages. |
-| Hermes digests | Hermes gateway on the control station | Unfinished-Business Sweeper nightly 21:00, Sweeper Cold Backstop 21:20, Weekly Homelab Review Sundays 19:00. All three ran 2026-10-11 and delivered to Bot Chat. **Measured** from the live jobs file. | Nobody. They are rung-1 "watch and talk" and report only. |
+| Hermes digests | Hermes gateway on the control station | Unfinished-Business Sweeper nightly 21:00, Sweeper Cold Backstop 21:20, Weekly Review Sundays 19:00. All three ran 2026-10-11 and delivered to Bot Chat. **Measured** from the live jobs file. | Nobody. They are rung-1 "watch and talk" and report only. |
 | Document and page builds | Artifact Library Inbox, repo docs, PR bodies | 20 entries in the Inbox; the latest dated 2026-10-12. Ten pages landed 2026-10-06 to 10-11 (TensorFold nights, local-AI comparisons, Fleet Day recap). | You open the library. |
 | Learning loop (model of you as an operator) | coordination-repo ledgers, cloud Routine | Last cycle 2026-08-15 (cycle 5). Cycle 6 did not fire on 09-15 because all cloud Routines were disabled on 08-16. The register says the loop Routine was re-enabled 09-20 with the next run 2026-10-15. Four questions (Q-0019 to Q-0022) have waited since August. **Read.** | Nothing consumes the ledgers except the loop itself. |
 
@@ -283,7 +283,7 @@ Three doors. Anything that does not fit one of them stays inside the team.
 The packet is the same for all three doors, and it is the only shape in which work may reach you:
 
 ```
-DECISION <short id> | door: disagreement | mason-only | blocker
+DECISION <short id> | door: disagreement | owner-only | blocker
 Question: one sentence you can answer with a word or a number.
 Recommendation: <A>, because <one line>.
 A: what happens, reversible yes/no, cost.
