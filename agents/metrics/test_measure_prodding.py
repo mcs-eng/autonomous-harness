@@ -303,6 +303,18 @@ class OptionsTest(unittest.TestCase):
         self.assertEqual(json.loads(self.base.read_text(encoding="utf-8"))
                          ["typed_turns"], 7)
 
+    def test_baseline_refuses_transcript_folder_and_non_json(self):
+        inside = Path(self.root) / "baseline.json"
+        code, _, err = run_main(fixture_args(self.root, "--baseline", str(inside)))
+        self.assertEqual(code, 2)
+        self.assertIn("projects directory", err)
+        self.assertFalse(inside.exists())
+        bad = Path(self.tmp.name) / "baseline.jsonl"
+        code, _, err = run_main(fixture_args(self.root, "--baseline", str(bad)))
+        self.assertEqual(code, 2)
+        self.assertIn(".json", err)
+        self.assertFalse(bad.exists())
+
     def test_table_has_header_and_total_row(self):
         code, out, _ = run_main(fixture_args(self.root))
         self.assertEqual(code, 0)

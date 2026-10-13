@@ -1,6 +1,6 @@
 {
   "updated": "2026-10-12",
-  "notes": "Which harness and model fill each role today. Change this file, not the contracts. A role's 'fill' may be one name or a list; 'max' is how many sessions may hold the role at once; 'must_differ_from' is the only hard constraint and means the reviewer's model and harness differ from the author's.",
+  "notes": "Which harness and model fill each role today. Change this file, not the contracts. A role's 'fill' may be one name or a list; 'max' is how many sessions may hold the role at once; 'must_differ_from' is the only hard constraint and means the reviewer's model differs from the author's, and its harness differs too when one is available.",
   "sizes": {
     "lean": ["router+scribe+historian", "implementer", "reviewer+verifier"],
     "standard": ["router", "implementer", "reviewer", "verifier", "historian+scribe", "librarian"],

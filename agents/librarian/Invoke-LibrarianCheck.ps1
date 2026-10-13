@@ -282,10 +282,11 @@ function ConvertTo-ProcessArg([string]$Arg) {
 }
 
 # Runs one read-only git command. Every call goes through here, always with
-# -C <path> --no-optional-locks, and only with the subcommands the caller passes
+# -c core.fsmonitor=false -C <path> --no-optional-locks (so no configured fsmonitor
+# helper program can run), and only with the subcommands the caller passes
 # (worktree list --porcelain, status --porcelain, log -1 --format=%cI).
 function Invoke-GitRead([string]$Path, [string[]]$GitArgs) {
-    $all = @('-C', $Path.TrimEnd('\'), '--no-optional-locks') + $GitArgs
+    $all = @('-c', 'core.fsmonitor=false', '-C', $Path.TrimEnd('\'), '--no-optional-locks') + $GitArgs
     $argLine = ($all | ForEach-Object { ConvertTo-ProcessArg $_ }) -join ' '
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:GitExe
@@ -347,6 +348,7 @@ function Measure-Folder([string]$Path, [int]$Cap) {
     $files = [int64]0
     $errors = 0
     $links = 0
+    $frozen = 0
     $capHit = $false
     $rp = [System.IO.FileAttributes]::ReparsePoint
     $stack = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
@@ -358,6 +360,7 @@ function Measure-Folder([string]$Path, [int]$Cap) {
                 if ($e -is [System.IO.DirectoryInfo]) {
                     if (($e.Attributes -band $rp) -ne 0) { $links++; continue }
                     if ($e.Name.StartsWith('_Quarantine_', [StringComparison]::OrdinalIgnoreCase)) { continue }
+                    if ([System.IO.File]::Exists([System.IO.Path]::Combine($e.FullName, 'FROZEN-DEPLOYMENT.md'))) { $frozen++; continue }
                     $stack.Push($e)
                 } else {
                     $bytes += $e.Length
@@ -367,7 +370,7 @@ function Measure-Folder([string]$Path, [int]$Cap) {
             }
         } catch { $errors++ }
     }
-    return [pscustomobject]@{ Bytes = $bytes; Files = $files; Errors = $errors; LinksSkipped = $links; CapHit = $capHit }
+    return [pscustomobject]@{ Bytes = $bytes; Files = $files; Errors = $errors; LinksSkipped = $links; FrozenSkipped = $frozen; CapHit = $capHit }
 }
 
 # Registers kept in public places often redact account SIDs in task names
@@ -398,7 +401,12 @@ try {
         $RegisterFile = Resolve-ParamPath $RegisterFile
         if (-not (Test-PathSafe $RegisterFile 'Leaf')) { throw ('-RegisterFile not found: ' + $RegisterFile) }
     }
-    if ($OutFile) { $OutFile = Resolve-ParamPath $OutFile }
+    if ($OutFile) {
+        $OutFile = Resolve-ParamPath $OutFile
+        $outParent = Split-Path -Parent $OutFile
+        if (-not $outParent -or -not (Test-PathSafe $outParent 'Container')) { throw ('-OutFile parent folder does not exist: ' + $OutFile) }
+        if ((Test-PathSafe $OutFile 'Leaf') -and -not $OutFile.StartsWith($StateDir, [StringComparison]::OrdinalIgnoreCase)) { throw ('-OutFile already exists outside the state folder; choose a new name or a path under -StateDir: ' + $OutFile) }
+    }
     $HomeDir = Get-NormalPath $HOME
 
     $started = Get-Date

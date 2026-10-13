@@ -109,7 +109,7 @@ per-project table, and the baseline file hold counts and directory names only.
 Text appears only when you pass `--explain BUCKET`, which prints a warning
 first and then at most 20 snippets of at most 60 characters. Treat that output
 as personal: do not paste it into a pull request, an issue, or a shared channel.
-Nothing is written to the transcripts, and no network call is made.
+The only file the meter ever writes is the `--baseline` path, which must end in `.json` and may not lie inside the projects folder. Nothing is written to the transcripts, and no network call is made.
 
 ## How the team uses the number
 

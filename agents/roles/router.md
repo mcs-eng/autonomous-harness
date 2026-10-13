@@ -19,7 +19,7 @@ The Historian samples routing decisions in the retro. A card re-routed twice tri
 Two roles still disagree after two rounds (door 1). The request touches a subject in the filing standard's owner-override table, or needs a capability above rung 1 that no ruling covers (door 2). The request needs a credential, sudo, physical presence, or a paid run beyond budget (door 3).
 
 ## May be filled by
-Any harness with the session-management tools and read access to the files above. Today: a Claude Code desktop session on a stronger model. It reads a lot and writes little.
+Any harness with the session-management tools and read access to the files above. Example today, assigned by the roster: a Claude Code desktop session on a stronger model. It reads a lot and writes little.
 
 ## May be merged with
 Scribe and Historian (the lean "Lead"). Never with Implementer.

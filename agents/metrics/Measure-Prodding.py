@@ -494,10 +494,23 @@ def main(argv=None):
     if not args.projects_dir.is_dir():
         print("error: projects directory not found", file=sys.stderr)
         return 2
-    if args.baseline is not None and args.baseline.exists() and not args.force:
-        print("error: baseline file exists; use --force to overwrite",
-              file=sys.stderr)
-        return 2
+    if args.baseline is not None:
+        dest = args.baseline.resolve()
+        if dest.suffix.lower() != ".json":
+            print("error: --baseline must end in .json", file=sys.stderr)
+            return 2
+        try:
+            dest.relative_to(args.projects_dir.resolve())
+        except ValueError:
+            pass
+        else:
+            print("error: --baseline may not be inside the projects directory",
+                  file=sys.stderr)
+            return 2
+        if dest.exists() and not args.force:
+            print("error: baseline file exists; use --force to overwrite",
+                  file=sys.stderr)
+            return 2
 
     result = collect(args.projects_dir, since, until, tz,
                      keep_text=args.explain is not None)

@@ -21,7 +21,7 @@ Work moves through roles, not through named agents. A role is a contract file un
 
 1. A request arrives. The Router names the repository, the lane (harness and model), the custody card, and the roles. It never implements.
 2. The Implementer works in one worktree on one branch, opens a draft PR with the receipts block and the handoff block, and checkpoints the card.
-3. The Reviewer, a different model or harness from the Implementer, reports blockers only, each with a failing reproduction, for at most two rounds. The Verifier reruns the repository's checks on the exact head and records command plus exit code.
+3. The Reviewer, a different model from the Implementer's, and a different harness when one is available, reports blockers only, each with a failing reproduction, for at most two rounds. The Verifier reruns the repository's checks on the exact head and records command plus exit code.
 4. The Scribe writes the PR body from the receipts. The Librarian confirms the machine is as it was. The Historian confirms a cold start could resume from the card and the PR, and writes the retro.
 5. Only then does the PR go ready for review, or the card's next actor become the owner, and only in the decision-packet shape.
 

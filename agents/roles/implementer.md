@@ -19,7 +19,7 @@ Reviewer and Verifier, always. Librarian on postflight.
 It needs a credential, sudo, physical presence, a paid confirmation it cannot request, or a read of a production clone (door 3). It escalates by writing the decision packet on the card, not by stopping silently. It never marks its own work ready for review.
 
 ## May be filled by
-Claude Code on `claude/*` branches, Codex on `codex/*` branches, a Hermes profile, or Antigravity. The Router records the lane on the card.
+Examples today, assigned by the roster: Claude Code on `claude/*` branches, Codex on `codex/*` branches, a Hermes profile, or Antigravity. The Router records the lane on the card.
 
 ## May be merged with
 Nothing that checks its own work. Never Reviewer, never Verifier, never Historian.

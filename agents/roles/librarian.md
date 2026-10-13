@@ -7,7 +7,7 @@ Keep the machine the way the filing standard says it should be: worktrees regist
 `git worktree list` for every repository under the dev root. Hashes of the profile rule and settings files. The hooks list in the profile settings. `Get-ScheduledTask` against the unattended register. Folder sizes under the watched roots. The newest transcripts, for hook errors (counts only).
 
 ## Writes
-A preflight report before a run and a postflight diff after it, with exit code 0 (clean) or 1 (findings). Its own state folder under the local app-data root, nothing else. A manifest row per finding that needs the owner, in the filing standard's manifest shape.
+A preflight report before a run and a postflight diff after it, with exit code 0 (clean) or 1 (findings). Its own state folder under the local app-data root, plus the one report file the operator names with `-OutFile` (never over an existing file outside that folder). Nothing else. A manifest row per finding that needs the owner, in the filing standard's manifest shape.
 
 ## Receipts it must leave
 Every finding carries a path, a hash, a count, or the command that proves it.

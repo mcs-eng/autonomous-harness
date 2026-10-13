@@ -15,8 +15,8 @@ Add `-SkipSizes` for a quick run (a few seconds). The full run measures folder s
 ## What it may touch
 
 - Reads: files under the profile folder, the transcript folder, the dev root, the watched size roots, and the scheduled task list.
-- Runs only these git commands, always as `git -C <path> --no-optional-locks ...`: `worktree list --porcelain`, `status --porcelain`, and `log -1 --format=%cI <commit>`. No fetch, no prune, no write.
-- Writes only to `-StateDir` (`latest.json`, `previous.json`) and, when given, to `-OutFile`.
+- Runs only these git commands, always as `git -c core.fsmonitor=false -C <path> --no-optional-locks ...` (the fsmonitor setting is forced off, so no helper program a repository might configure can run): `worktree list --porcelain`, `status --porcelain`, and `log -1 --format=%cI <commit>`. No fetch, no prune, no write.
+- Writes only to `-StateDir` (`latest.json`, `previous.json`) and, when given, to `-OutFile`. The `-OutFile` parent folder must exist, and a file that already exists outside `-StateDir` is refused with exit 2 before anything is written.
 - Skips any checkout with `FROZEN-DEPLOYMENT.md` at its root and any folder whose name starts with `_Quarantine_`. It runs no git there and does not measure them. It lists them as "skipped by rule".
 - Prints no file contents from transcripts or settings. Output holds paths, hashes, counts, and dates only. Hook commands appear in the JSON as SHA-256 hashes, not as text.
 
@@ -39,7 +39,7 @@ Add `-SkipSizes` for a quick run (a few seconds). The full run measures folder s
 
 - `0`: no findings.
 - `1`: one or more findings.
-- `2`: the script itself failed. This includes an unknown parameter, a bad number, or a missing `-RegisterFile`. A failed run writes nothing.
+- `2`: the script itself failed. This includes an unknown parameter, a bad number, or a missing `-RegisterFile`. The state files are written last, after every check and after the output path is validated, so a run that fails writes nothing.
 
 ## Output
 
