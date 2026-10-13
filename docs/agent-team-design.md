@@ -377,7 +377,7 @@ A trip-wire is a condition that triggers a review automatically, without anyone 
 
 ### 3.4 The bottleneck meter
 
-One number per week, computed by a script, not by feel: the count of your typed turns that fall into the buckets of section 1.2 (approve, nudge, verify, route, re-supply, hygiene, hand-step paste). Appendix A describes the extraction. The baseline for the three weeks before this document is about 330 such turns, or roughly 110 per week.
+One number per week, computed by a script, not by feel: the count of your typed turns that fall into the buckets of section 1.2 (approve, nudge, verify, route, re-supply, hygiene, hand-step paste). Appendix A describes the extraction. The meter run on 2026-10-12 over 2026-09-20 to 10-12 counts 257 such turns out of 686 typed, a 37.5 percent prodding share; by week: 75, 109, 68 for the three full weeks.
 
 Targets, so the team can be judged:
 

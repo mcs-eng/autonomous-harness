@@ -598,3 +598,7 @@ again. An unavailable model or failed lookup refuses the launch before the pane
 is changed. A later edit during that lookup applies to the next launch; the
 current launch keeps one endpoint, key and model result together. An unchanged
 URL and key need no extra lookup.
+
+## October 12 agent team files
+
+The fork adds an `agents/` folder: role contracts, a roster, the receipts, handoff, decision-packet and retro templates, a read-only Librarian check script for Windows PowerShell 5.1, a bottleneck meter for Claude Code transcripts, and two slash-command files. The design and its evidence are in `docs/agent-team-design.md`. None of it runs on a schedule or installs anything; the command files are copied into a profile by hand. Upstream has no equivalent, so a sync keeps the folder as a fork-only addition.
