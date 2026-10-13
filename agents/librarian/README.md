@@ -16,7 +16,7 @@ Add `-SkipSizes` for a quick run (a few seconds). The full run measures folder s
 
 - Reads: files under the profile folder, the transcript folder, the dev root, the watched size roots, and the scheduled task list.
 - Runs only these git commands, always as `git -c core.fsmonitor=false -C <path> --no-optional-locks ...` (the fsmonitor setting is forced off, so no helper program a repository might configure can run): `worktree list --porcelain`, `status --porcelain`, and `log -1 --format=%cI <commit>`. No fetch, no prune, no write.
-- Writes only to `-StateDir` (`latest.json`, `previous.json`) and, when given, to `-OutFile`. The `-OutFile` parent folder must exist, and a file that already exists outside `-StateDir` is refused with exit 2 before anything is written.
+- Writes only to `-StateDir`: `latest.json`, `previous.json`, and the Markdown report as `latest.md`. There is no free output path; a first review showed that any such parameter needs containment checks that are easy to get subtly wrong, so the report lives beside the state and the operator reads it there or on stdout.
 - Skips any checkout with `FROZEN-DEPLOYMENT.md` at its root and any folder whose name starts with `_Quarantine_`. It runs no git there and does not measure them. It lists them as "skipped by rule".
 - Prints no file contents from transcripts or settings. Output holds paths, hashes, counts, and dates only. Hook commands appear in the JSON as SHA-256 hashes, not as text.
 
@@ -32,7 +32,6 @@ Add `-SkipSizes` for a quick run (a few seconds). The full run measures folder s
 | `-SizeTopN` | `8` | How many of the largest child folders to show per watched root. |
 | `-SizeFileCap` | `0` (no cap) | Stop counting a folder after this many files and mark its size as a lower bound. |
 | `-RegisterFile` | none | A Markdown file whose table rows start with a backtick-quoted task name, for example a first cell of `` `\TaskName` ``. Any non-Microsoft task not named there is reported. |
-| `-OutFile` | none | Also write the Markdown report to this file. |
 | `-Json` | off | Print the JSON result to stdout instead of Markdown. |
 
 ## Exit codes

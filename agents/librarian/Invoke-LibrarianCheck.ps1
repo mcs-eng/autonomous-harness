@@ -7,7 +7,7 @@
     Reports profile file hashes, hook command paths, hook errors in recent
     transcripts, git worktrees, non-Microsoft scheduled tasks, and folder sizes.
     It never moves, deletes, prunes, or edits anything. It writes only to
-    -StateDir (latest.json and previous.json) and, when given, to -OutFile.
+    -StateDir (latest.json, previous.json and latest.md).
 
     Exit codes: 0 no findings, 1 findings, 2 the script itself failed.
 
@@ -26,7 +26,6 @@ param(
     $SizeTopN = 8,
     $SizeFileCap = 0,
     [string]$RegisterFile,
-    [string]$OutFile,
     [switch]$Json
 )
 
@@ -400,12 +399,6 @@ try {
     if ($RegisterFile) {
         $RegisterFile = Resolve-ParamPath $RegisterFile
         if (-not (Test-PathSafe $RegisterFile 'Leaf')) { throw ('-RegisterFile not found: ' + $RegisterFile) }
-    }
-    if ($OutFile) {
-        $OutFile = Resolve-ParamPath $OutFile
-        $outParent = Split-Path -Parent $OutFile
-        if (-not $outParent -or -not (Test-PathSafe $outParent 'Container')) { throw ('-OutFile parent folder does not exist: ' + $OutFile) }
-        if ((Test-PathSafe $OutFile 'Leaf') -and -not $OutFile.StartsWith($StateDir, [StringComparison]::OrdinalIgnoreCase)) { throw ('-OutFile already exists outside the state folder; choose a new name or a path under -StateDir: ' + $OutFile) }
     }
     $HomeDir = Get-NormalPath $HOME
 
@@ -1055,7 +1048,7 @@ try {
     $utf8 = New-Object System.Text.UTF8Encoding $false
     if (Test-PathSafe $latestPath 'Leaf') { [System.IO.File]::Copy($latestPath, $previousPath, $true) }
     [System.IO.File]::WriteAllText($latestPath, $jsonText, $utf8)
-    if ($OutFile) { [System.IO.File]::WriteAllText($OutFile, $mdText, $utf8) }
+    [System.IO.File]::WriteAllText((Join-Path $StateDir 'latest.md'), $mdText, $utf8)
 
     if ($Json) { Write-Output $jsonText } else { Write-Output $mdText }
     exit $exitCode
