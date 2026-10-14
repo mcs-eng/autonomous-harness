@@ -2,6 +2,12 @@
 
 Read [CLAUDE.md](CLAUDE.md) for this fork's standing context and boundaries. It applies to every agent. Keep this file a pointer rather than duplicating the guidance.
 
+## Public repository
+
+This repository is public. Do not name the maintainer's machines, task boards, internal repositories, users, network names, or the AI agents or tools that did the work in code, commit messages, or pull request text. Use generic wording such as "a Windows 11 host". Test evidence should describe the operating system and runtime only.
+
+The term list is not stored in this repository. Hosted scans read the `PRIVATE_TERMS` Actions secret. Fork pull requests do not receive secrets; the check warns and passes when that secret is unset. Install the local commit check with `git config core.hooksPath scripts/hooks` (it reads `$PRIVATE_TERMS_FILE` or `~/.config/private-terms.txt` and does nothing if neither file exists).
+
 ## Cursor Cloud specific instructions
 
 Development commands stay in [docs/development.md](docs/development.md). On a Cloud Agent VM:

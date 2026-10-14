@@ -1,0 +1,57 @@
+name: Privacy guard
+
+# Scans the pull request title, body, every commit message in base..head, and
+# the added lines of the diff. The term list is the PRIVATE_TERMS repository
+# secret (newline- or comma-separated). It is not stored in this repository.
+# A match fails the job and prints only the location, never the term.
+#
+# Draft pull requests are included. opened, edited, and synchronize run while
+# a pull request is still a draft; ready_for_review runs when it is marked
+# ready. This workflow does not skip drafts.
+#
+# Fork pull requests do not receive repository secrets. An unset or empty
+# PRIVATE_TERMS value warns and passes. That is expected: sharing the list
+# with untrusted pull request code would reveal it. Same-repository pull
+# requests receive the secret and are enforced.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacy-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Default pull_request checkout is the merge commit, which exists for
+      # fork pull requests as well as same-repository ones. The scan still
+      # uses the event's base and head SHAs, not the merge commit.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Fetch the base and head commits
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_REF"
+          git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "pull/${PR_NUMBER}/head"
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+      - name: Scan for private terms
+        env:
+          PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/privacy-guard.py --pull-request

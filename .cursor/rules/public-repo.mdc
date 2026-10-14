@@ -1,0 +1,8 @@
+---
+description: This repository is public; do not put private infrastructure names in code, commits, or pull requests
+alwaysApply: true
+---
+
+This repository is public. Do not name the maintainer's machines, task boards, internal repositories, users, network names, or the AI agents or tools that did the work in code, commit messages, or pull request text. Use generic wording such as "a Windows 11 host". Test evidence should describe the operating system and runtime only.
+
+Do not commit the private term list. Hosted scans read the PRIVATE_TERMS Actions secret.

@@ -173,6 +173,8 @@ Security reports go through [SECURITY.md](SECURITY.md).
    to select checks, bound their runtime, and reuse results. Say exactly what ran and what did not.
 3. **Make it reproducible.** Use the PR template to describe the result, how to try it, and the
    validation. Remove credentials and private project content from logs and recordings.
+   Install the local privacy commit hook with `git config core.hooksPath scripts/hooks` (it reads
+   `$PRIVATE_TERMS_FILE` or `~/.config/private-terms.txt` and does nothing if neither exists).
 4. **Review together.** A maintainer checks the change while automatic CI selects complete
    component suites from its Git diff. Native, browser, real-engine and hardware acceptance
    still need the checks relevant to the change; report those separately.
