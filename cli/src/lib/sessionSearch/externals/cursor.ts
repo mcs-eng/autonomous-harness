@@ -199,8 +199,9 @@ async function transcriptOf(
 async function walkToFolder(slug: string, bucket: string, list: (dir: string) => Promise<Dirent[]> = entries): Promise<string | null> {
   let reads = WALK_READS
   // Windows slugs retain the drive letter; starting at / would search only the current drive.
-  const root = process.platform === 'win32' && /^[a-z](?:-|$)/i.test(slug)
-    ? join(`${slug[0]}:`, sep) : parse(resolve('.')).root
+  // Elsewhere the walk starts at `/`, which never depends on a working directory that may be gone.
+  const root = process.platform !== 'win32' ? '/'
+    : /^[a-z](?:-|$)/i.test(slug) ? join(`${slug[0]}:`, sep) : parse(resolve('.')).root
   const walk = async (dir: string): Promise<string | null> => {
     const own = cursorSlug(dir)
     if (own === slug && cursorBucket(dir) === bucket) return dir
