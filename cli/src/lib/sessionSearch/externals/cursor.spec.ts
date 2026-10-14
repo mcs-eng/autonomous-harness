@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync, type Dirent } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, parse, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { externalEvidence } from '../evidence.js'
@@ -23,7 +24,7 @@ function temp(prefix = 'cursor-external-'): string {
 const ID = '6c3b2a1d-0e9f-4a8b-9c7d-6e5f4a3b2c1d'
 const ID2 = '7d4c3b2e-1f0a-4b9c-8d7e-6f5a4b3c2d1e'
 const ID3 = '8e5d4c3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f'
-const CWD = '/work/app'
+const CWD = join(parse(tmpdir()).root, 'work', 'app')
 
 interface ChatFixture { meta?: unknown; store?: boolean; bucket?: string }
 
@@ -107,7 +108,7 @@ describe('cursorProvider.scan', () => {
   it('offers a chat with its folder, title and transcript, from a config folder and a data folder apart', async () => {
     const { config, data, provider } = roots()
     chat(config, CWD, ID)
-    const path = transcript(data, 'work-app', ID)
+    const path = transcript(data, cursorSlug(CWD), ID)
     expect(await provider().scan(counted().context())).toEqual([{
       sessionId: ID, engine: 'cursor', cwd: CWD, origin: 'terminal', title: 'Fix the build', mtime: 1_790_000_100_000, transcriptPath: path,
     }])
@@ -146,7 +147,7 @@ describe('cursorProvider.scan', () => {
     const { config, provider } = roots()
     chat(config, CWD, ID, { meta: { createdAtMs: 1, hasConversation: true, updatedAtMs: 5 } })
     chat(config, CWD, ID2, { meta: { createdAtMs: 1, hasConversation: true, updatedAtMs: 6, cwd: '/work/elsewhere' } })
-    chat(config, CWD, ID3, { meta: { createdAtMs: 1, hasConversation: true, updatedAtMs: 7, cwd: `${CWD}/` } })
+    chat(config, CWD, ID3, { meta: { createdAtMs: 1, hasConversation: true, updatedAtMs: 7, cwd: `${CWD}${sep}` } })
     const found = await provider().scan(counted().context())
     expect(found.map((s) => [s.sessionId, s.cwd])).toEqual([ID, ID2, ID3].map((id) => [id, CWD]))
     // A bucket whose only folder is wrong is not placed.
@@ -190,14 +191,25 @@ describe('cursorProvider.scan', () => {
   })
 
   it('stops walking after a bounded number of folders', async () => {
-    const { config, data, provider } = roots()
+    const { config, data } = roots()
     const base = temp('cursor-deep-')
-    // Folders named `_` add nothing to a slug: every one of them looks like the way on.
-    mkdirSync(join(base, ...Array.from({ length: 300 }, () => '_')), { recursive: true })
+    // Simulate an endless tree: physical deep paths make Windows directory I/O dominate this bound check.
+    let reads = 0, deepReads = 0
+    const listDeep = async (dir: string): Promise<Dirent[]> => {
+      reads++
+      if (dir === base || dir.startsWith(`${base}${sep}`)) {
+        deepReads++
+        return [{ name: '_', isDirectory: () => true } as Dirent]
+      }
+      return listFolder(dir)
+    }
     const target = join(base, 'missing')
     chat(config, target, ID, { meta: { createdAtMs: 1, hasConversation: true } })
     transcript(data, cursorSlug(target), ID)
-    expect(await provider().scan(counted().context())).toEqual([])
+    const provider = cursorProvider({ configDir: config, dataDir: data, database: null, listFolder: listDeep })
+    expect(await provider.scan(counted().context())).toEqual([])
+    expect(deepReads).toBeGreaterThan(0)
+    expect(reads).toBeLessThanOrEqual(256)
   })
 
   it('dates a chat by its store when `meta.json` does not say, the WAL included', async () => {
@@ -339,7 +351,9 @@ describe('a chat with no meta.json, read from its store', () => {
     writeFileSync(join(dir, 'store.db-wal'), '')
     writeFileSync(join(dir, 'store.db-shm'), '')
     await readChat(counted().context(), dir, () => fakeDatabase(value, opened))
-    expect(opened.map(String)).toEqual([`file://${join(dir, 'store.db')}?immutable=1`, join(dir, 'store.db')])
+    const immutable = pathToFileURL(join(dir, 'store.db'))
+    immutable.search = 'immutable=1'
+    expect(opened.map(String)).toEqual([String(immutable), join(dir, 'store.db')])
   })
 })
 

@@ -612,3 +612,48 @@ again. An unavailable model or failed lookup refuses the launch before the pane
 is changed. A later edit during that lookup applies to the next launch; the
 current launch keeps one endpoint, key and model result together. An unchanged
 URL and key need no extra lookup.
+
+## October 13 native Windows session-search tests
+
+Session-search discovery now accepts native absolute Windows folders, including
+Pi drive and UNC headers. Cursor's lost-folder walk starts on the drive retained
+in its transcript slug. Pi fixtures and Cursor's XDG and immutable-file URL
+expectations use platform path construction. The external-shapes golden comparison
+normalizes only paths under its disposable fixture root.
+
+A failed session-index opener closes its SQLite handle before moving a corrupt
+database and its existing WAL/SHM files aside under a unique `.corrupt-` name and
+creating a replacement. Non-corrupt initialization errors preserve the index and
+propagate. Database fixtures close both cached readers and writers before temp
+cleanup, including when an assertion fails.
+
+On Windows 11 with Node 24.16.0 and the installed CLI dependencies, from `cli/`,
+`npm test -- src/lib/sessionSearch` changed from **54 failures / 349 passes**
+(exit 1) to **0 failures / 377 passes / 29 skips** (exit 0). The baseline's
+failed-test counts were OpenCode 9, Hermes 10, Devin 7, Pi 14, Cursor 4, support 3,
+external ownership 2, adopted homes 2, session store 1, golden shapes 1, and XDG
+defaults 1. `npm run typecheck` exits 0.
+
+The 29 skips have explicit reasons: six real integrations require POSIX shells,
+signals, ps/lsof or tmux; one unreadable-lock fixture requires POSIX chmod mode
+000; and 22 SQLite fallback cases require a `sqlite3` executable missing from this
+Windows host. Fallback cases run on Windows when that executable is on PATH.
+Portable parser, simulated ownership and built-in SQLite assertions still run.
+
+The directly affected engine-spec check has 15 passes and three failures (exit 1).
+The three remaining `engines/cursor/home.spec.ts` failures are transcript discovery,
+subagent replay and recap cleanup. Their shared, untouched native identity walker
+in `engines/kit/nativePaths.ts` still starts at `/` and splits on `/`; source
+inspection traces these refusals to that broader Windows transcript-binding defect.
+The XDG assertion and `engines/kit/sessionIdentity.spec.ts` pass.
+
+The full default CLI suite, run through the installed Vitest runner with JSON
+reporting, completed in 14 minutes 14 seconds: **11,353 passes / 2,585 failures /
+602 skips**, exit 1, across 830 spec files (269 files reported failure). All 25
+session-search files retained **377 passes / 29 skips / zero failures** in that
+run. The broader suite remains red: observed Windows clusters include POSIX
+state-permission checks, native identity path traversal, unavailable POSIX
+commands, drive paths passed directly to Node's ESM loader, and locked-file
+cleanup in other fixtures. The remaining failures were not individually
+baselined or all proven Windows-only; this focused change does not claim a green
+full Windows CLI suite.

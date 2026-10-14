@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { builtinSqlite, closeSqliteHandles, overrideBuiltinSqlite } from '../../sqliteBuiltin.js'
+import { hasSqliteCli } from '../../sqliteAvailability.js'
 import { devinListSql, devinProvider, devinTurnOpen, lockPid } from './devin.js'
 import { LIST_LIMIT, ownerRecord, readSql, type SqlRead } from './opencode.js'
 import { scanMemo } from './support.js'
@@ -20,6 +21,7 @@ import type { ProcessView, RunningProcess, ScanContext } from './types.js'
 
 const Database = builtinSqlite()!
 type Db = InstanceType<typeof Database>
+const fixtureDbs: Db[] = []
 
 const dirs: string[] = []
 function tempDir(): string {
@@ -29,6 +31,10 @@ function tempDir(): string {
 }
 afterEach(() => {
   closeSqliteHandles()
+  // A failed assertion must release fixture writers before Windows can remove their stores.
+  for (const db of fixtureDbs.splice(0)) {
+    try { db.close() } catch { /* Already closed by the spec. */ }
+  }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -56,6 +62,7 @@ class Store {
   constructor(readonly home: string, schema = SCHEMA) {
     mkdirSync(home, { recursive: true })
     this.db = new Database(join(home, 'sessions.db'), { readOnly: false })
+    fixtureDbs.push(this.db)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(schema)
   }
@@ -94,7 +101,10 @@ function context(excluded: string[] = []): ScanContext {
 
 const READERS: Array<[string, typeof Database | null]> = [['node:sqlite', Database], ['the sqlite3 CLI', null]]
 
-describe.each(READERS)('Devin discovery read through %s', (_name, reader) => {
+// The sqlite3 fallback needs a CLI on PATH, which stock Windows does not provide.
+READERS.forEach(([name, reader]) => describe.skipIf(
+  process.platform === 'win32' && reader === null && !hasSqliteCli(),
+)(`Devin discovery read through ${name}`, () => {
   beforeAll(() => { overrideBuiltinSqlite(reader) })
   afterAll(() => { overrideBuiltinSqlite(Database) })
 
@@ -228,7 +238,7 @@ describe.each(READERS)('Devin discovery read through %s', (_name, reader) => {
     expect(await provider.busy!({ pid: 1, record: ownerRecord(join(home, 'gone.db'), 'x-y') })).toBeNull()
     store.close()
   })
-})
+}))
 
 describe('a Devin store that cannot be read', () => {
   it('finds nothing with no store or no reader, and throws on one it cannot read', async () => {
@@ -291,8 +301,6 @@ describe('Devin owners', () => {
     writeFileSync(join(locks, 'Not_A_Slug.lock'), '101')
     writeFileSync(join(locks, 'notes.txt'), '101')
     mkdirSync(join(locks, 'folder-otter.lock'))
-    writeFileSync(join(locks, 'sealed-otter.lock'), '101')
-    chmodSync(join(locks, 'sealed-otter.lock'), 0o000) // unreadable: no pid to trust
     writeFileSync(join(locks, 'editor-otter.lock'), '106')
     const claims = await devinProvider({ home }).owners!(view([
       devin(101), devin(102), devin(103),
@@ -311,6 +319,20 @@ describe('Devin owners', () => {
       // No lock says so: the id it was started on, which it may have left since.
       { sessionId: 'argv-otter', pid: 107, record: ownerRecord(db, 'argv-otter'), fromArgs: true },
     ])
+  })
+
+  // Windows chmod does not enforce POSIX mode 000, so it cannot make this lock unreadable.
+  it.skipIf(process.platform === 'win32')('does not trust a lock whose pid cannot be read', async () => {
+    const home = tempDir(), locks = join(home, 'session_locks')
+    mkdirSync(locks)
+    const path = join(locks, 'sealed-otter.lock')
+    writeFileSync(path, '101')
+    chmodSync(path, 0o000)
+    try {
+      expect(await devinProvider({ home }).owners!(view([devin(101)]))).toEqual([])
+    } finally {
+      chmodSync(path, 0o600)
+    }
   })
 
   it('refuses a lock written before the process now under its pid began', async () => {
