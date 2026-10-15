@@ -471,6 +471,7 @@ class PolicyFileTests(unittest.TestCase):
         # The secret is only given to base-branch code: pull_request_target,
         # with no step that checks out or runs the pull request head.
         self.assertIn("pull_request_target:", text)
+        self.assertIn("head.repo.full_name == github.repository && secrets.PRIVATE_TERMS || ''", text)
         self.assertNotIn("github.event.pull_request.head.ref", text)
         self.assertNotIn("ref: ${{", text)
         self.assertNotIn("$RUNNER_TEMP", text)

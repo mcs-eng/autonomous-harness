@@ -8,7 +8,8 @@ match inside a longer word. A hit fails the process and prints only the
 location. The matched term is never written to stdout or stderr.
 
 The hosted workflow runs this scanner from the base branch on
-pull_request_target, so fork pull requests are scanned too. When PRIVATE_TERMS is
+pull_request_target. Fork pull requests get an empty term list, because their
+logs are public and a match location would confirm a guess. When PRIVATE_TERMS is
 unset or empty, this scan warns and passes. That happens only when the
 secret is missing.
 
