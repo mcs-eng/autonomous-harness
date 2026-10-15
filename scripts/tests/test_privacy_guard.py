@@ -15,7 +15,7 @@ spec = importlib.util.spec_from_file_location("privacy_guard", SCRIPT)
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
-FAKE_TERMS = ["examplehost", "sampleboard", "bran"]
+FAKE_TERMS = ["examplehost", "sampleboard", "exam"]
 
 
 def combined(result):
@@ -45,11 +45,11 @@ class MatchTests(unittest.TestCase):
         self.assertTrue(guard.contains_term("sampleboard.", ["sampleboard"]))
 
     def test_word_boundary_does_not_match_inside_a_longer_word(self):
-        self.assertFalse(guard.contains_term("update the branch", ["bran"]))
-        self.assertFalse(guard.contains_term("brand", ["bran"]))
-        self.assertFalse(guard.contains_term("rebran", ["bran"]))
-        self.assertTrue(guard.contains_term("the bran name", ["bran"]))
-        self.assertTrue(guard.contains_term("bran", ["bran"]))
+        self.assertFalse(guard.contains_term("update the example", ["exam"]))
+        self.assertFalse(guard.contains_term("exams", ["exam"]))
+        self.assertFalse(guard.contains_term("reexam", ["exam"]))
+        self.assertTrue(guard.contains_term("the exam name", ["exam"]))
+        self.assertTrue(guard.contains_term("exam", ["exam"]))
 
     def test_metacharacters_are_literal(self):
         self.assertTrue(guard.contains_term("use sample.board now", ["sample.board"]))
@@ -88,11 +88,11 @@ class DiffTests(unittest.TestCase):
             --- /dev/null
             +++ b/notes.txt
             @@ -0,0 +1,2 @@
-            +branch update
+            +example update
             +sampleboard
             """)
         self.assertEqual(list(guard.added_lines(diff)), [
-            ("notes.txt", 1, "branch update"),
+            ("notes.txt", 1, "example update"),
             ("notes.txt", 2, "sampleboard"),
         ])
 
@@ -106,7 +106,7 @@ class RepositoryScanTests(unittest.TestCase):
         self.git("config", "user.email", "fixture@example.test")
         self.git("config", "user.name", "Fixture")
         self.git("config", "commit.gpgsign", "false")
-        self.write("README.md", "hello branch\n")
+        self.write("README.md", "hello example\n")
         self.base = self.commit("base")
 
     def git(self, *args):
@@ -127,7 +127,7 @@ class RepositoryScanTests(unittest.TestCase):
             self.root, base or self.base, head, title, body, terms if terms is not None else FAKE_TERMS)
 
     def test_match_in_each_location_and_word_boundary_on_added_lines(self):
-        self.write("notes.txt", "hello branch\nuses sampleboard today\n")
+        self.write("notes.txt", "hello example\nuses sampleboard today\n")
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "subject line", "-m", "note examplehost in the lab")
         head = self.git("rev-parse", "HEAD")
@@ -159,8 +159,8 @@ class RepositoryScanTests(unittest.TestCase):
         self.assertNotIn("sampleboard", rendered)
 
     def test_clean_text_passes(self):
-        self.write("notes.txt", "hello branch\n")
-        head = self.commit("update the branch")
+        self.write("notes.txt", "hello example\n")
+        head = self.commit("update the example")
         self.assertEqual(self.scan(head, title="Public notes", body="No private names.\n"), [])
 
 
@@ -225,7 +225,7 @@ class CliTests(unittest.TestCase):
         git("config", "user.email", "fixture@example.test")
         git("config", "user.name", "Fixture")
         git("config", "commit.gpgsign", "false")
-        (repo / "README.md").write_text("hello branch\n")
+        (repo / "README.md").write_text("hello example\n")
         git("add", "-A")
         git("commit", "-q", "-m", "base")
         base = git("rev-parse", "HEAD")
@@ -310,9 +310,9 @@ class CliTests(unittest.TestCase):
 
     def test_commit_message_file_allows_a_longer_word(self):
         terms = self.root / "terms.txt"
-        terms.write_text("bran\n")
+        terms.write_text("exam\n")
         message = self.root / "COMMIT_MSG"
-        message.write_text("update the branch\n")
+        message.write_text("update the example\n")
         result = self.run_guard(["--terms-file", str(terms), "--commit-message-file", str(message)])
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
@@ -372,8 +372,8 @@ class HookTests(unittest.TestCase):
         self.assertNotIn("examplehost", combined(result).lower())
 
     def test_hook_word_boundary(self):
-        (self.home / ".config" / "private-terms.txt").write_text("bran\n")
-        self.message.write_text("update the branch\n")
+        (self.home / ".config" / "private-terms.txt").write_text("exam\n")
+        self.message.write_text("update the example\n")
         result = self.run_hook()
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
