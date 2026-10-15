@@ -81,6 +81,38 @@ class DiffTests(unittest.TestCase):
             ("notes.txt", 5, "sampleboard"),
         ])
 
+    def test_added_lines_that_look_like_headers_are_still_scanned(self):
+        diff = (
+            "diff --git a/notes.md b/notes.md\n"
+            "--- a/notes.md\n"
+            "+++ b/notes.md\n"
+            "@@ -1,1 +1,4 @@\n"
+            " keep\n"
+            "+++ looks like a header\n"
+            "+diff --git looks like a file\n"
+            "+examplehost after them\n"
+        )
+        self.assertEqual(list(guard.added_lines(diff)), [
+            ("notes.md", 2, "++ looks like a header"),
+            ("notes.md", 3, "diff --git looks like a file"),
+            ("notes.md", 4, "examplehost after them"),
+        ])
+
+    def test_form_feed_and_line_separator_do_not_split_an_added_line(self):
+        diff = (
+            "+++ b/notes.txt\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+public\x0cexamplehost\n"
+            "+public\u2028sampleboard\r\n"
+        )
+        lines = list(guard.added_lines(diff))
+        self.assertEqual([line_no for _, line_no, _ in lines], [1, 2])
+        self.assertTrue(guard.contains_term(lines[0][2], ["examplehost"]))
+        self.assertTrue(guard.contains_term(lines[1][2], ["sampleboard"]))
+
+    def test_annotation_text_escapes_workflow_command_characters(self):
+        self.assertEqual(guard.annotation_text("a%b\rc\nd"), "a%25b%0Dc%0Ad")
+
     def test_new_file_lines_are_added(self):
         diff = textwrap.dedent("""\
             diff --git a/notes.txt b/notes.txt
@@ -308,6 +340,17 @@ class CliTests(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old)
 
+    def test_actions_annotations_do_not_print_the_term(self):
+        terms = self.root / "terms.txt"
+        terms.write_text("examplehost\n")
+        message = self.root / "COMMIT_MSG"
+        message.write_text("Touch examplehost.\n")
+        self.env["GITHUB_ACTIONS"] = "true"
+        result = self.run_guard(["--terms-file", str(terms), "--commit-message-file", str(message)])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "::error::commit message: [redacted 11 chars]\n")
+        self.assertNotIn("examplehost", combined(result).lower())
+
     def test_commit_message_file_allows_a_longer_word(self):
         terms = self.root / "terms.txt"
         terms.write_text("exam\n")
@@ -424,6 +467,9 @@ class PolicyFileTests(unittest.TestCase):
         self.assertIn("scripts/privacy-guard.py", text)
         self.assertIn("fork", text.lower())
         self.assertNotIn("draft == false", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn('git show "$BASE_SHA:scripts/privacy-guard.py"', text)
+        self.assertIn('python3 "$RUNNER_TEMP/privacy-guard.py" --pull-request', text)
 
     def test_agent_rules_and_install_note(self):
         rule = repo_text(".cursor/rules/public-repo.mdc")

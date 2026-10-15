@@ -36,6 +36,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Fetch the base and head commits
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -47,6 +48,22 @@ jobs:
           git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "pull/${PR_NUMBER}/head"
           git cat-file -e "$BASE_SHA^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
+      # The secret is only handed to the scanner from the base branch, not the
+      # copy in the pull request, so a pull request cannot edit the scanner to
+      # print the list. The one exception is the pull request that first adds
+      # the scanner, when the base has no copy yet. A same-repository author
+      # can still edit this workflow itself; that needs write access.
+      - name: Pick the trusted scanner
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git cat-file -e "$BASE_SHA:scripts/privacy-guard.py" 2>/dev/null; then
+            git show "$BASE_SHA:scripts/privacy-guard.py" > "$RUNNER_TEMP/privacy-guard.py"
+            echo "Using the scanner from the base branch"
+          else
+            cp scripts/privacy-guard.py "$RUNNER_TEMP/privacy-guard.py"
+            echo "::warning::Base branch has no scanner yet; using the pull request copy"
+          fi
       - name: Scan for private terms
         env:
           PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
@@ -54,4 +71,4 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/privacy-guard.py --pull-request
+        run: python3 "$RUNNER_TEMP/privacy-guard.py" --pull-request

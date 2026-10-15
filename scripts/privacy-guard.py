@@ -52,7 +52,14 @@ def parse_terms(raw):
     return terms
 
 
+_PATTERN_CACHE = {}
+
+
 def term_patterns(terms):
+    key = tuple(terms)
+    cached = _PATTERN_CACHE.get(key)
+    if cached is not None:
+        return cached
     patterns = []
     for term in terms:
         # Boundaries sit outside the term, so a term that starts or ends with
@@ -60,6 +67,7 @@ def term_patterns(terms):
         # brackets, and other metacharacters literal.
         pattern = r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])"
         patterns.append(re.compile(pattern, re.IGNORECASE | re.ASCII))
+    _PATTERN_CACHE[key] = patterns
     return patterns
 
 
@@ -107,14 +115,39 @@ def destination_path(header):
     return raw or None
 
 
-HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def added_lines(diff):
-    """Yield (path, new_line_number, text) for lines added by a unified diff."""
+    """Yield (path, new_line_number, text) for lines added by a unified diff.
+
+    Hunk headers give the old and new line counts. Lines inside a hunk are
+    consumed by those counts, so an added line that itself starts with
+    "++ " or "diff --git" is scanned as content, not read as a header.
+    Lines split only on newline, so form feeds and Unicode line separators
+    stay inside the line they belong to.
+    """
     path = None
     new_line = None
-    for line in diff.splitlines():
+    old_left = new_left = 0
+    for line in diff.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
+        if old_left > 0 or new_left > 0:
+            if line.startswith("+"):
+                if path is not None:
+                    yield path, new_line, line[1:]
+                new_line += 1
+                new_left -= 1
+            elif line.startswith("-"):
+                old_left -= 1
+            elif line.startswith("\\"):
+                pass
+            else:
+                new_line += 1
+                old_left -= 1
+                new_left -= 1
+            continue
         if line.startswith("diff --git "):
             path = None
             new_line = None
@@ -125,17 +158,11 @@ def added_lines(diff):
             continue
         if line.startswith("@@"):
             match = HUNK.match(line)
-            new_line = int(match.group(1)) if match and path else None
+            if match:
+                old_left = int(match.group(1)) if match.group(1) is not None else 1
+                new_line = int(match.group(2))
+                new_left = int(match.group(3)) if match.group(3) is not None else 1
             continue
-        if path is None or new_line is None:
-            continue
-        if line.startswith("+"):
-            yield path, new_line, line[1:]
-            new_line += 1
-        elif line.startswith("-") or line.startswith("\\"):
-            continue
-        else:
-            new_line += 1
 
 
 def git_output(repo, *args):
@@ -223,11 +250,16 @@ def warn_skipped():
         print(f"warning: {message}", file=sys.stderr)
 
 
+def annotation_text(text):
+    """Escape a value for a GitHub Actions workflow command."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def emit(findings):
     for location in findings:
         print(location)
         if os.environ.get("GITHUB_ACTIONS") == "true":
-            print(f"::error::{location}", file=sys.stderr)
+            print(f"::error::{annotation_text(location)}", file=sys.stderr)
     return 1 if findings else 0
 
 

@@ -24,4 +24,12 @@ else
 fi
 
 root=$(git rev-parse --show-toplevel)
-exec python3 "$root/scripts/privacy-guard.py" --terms-file "$terms_file" --commit-message-file "$message_file"
+# Prefer a working python3, then python, then the Windows py launcher. The
+# Windows Store stub named python3 exists but fails, so test each one.
+for candidate in python3 python py; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import sys" >/dev/null 2>&1; then
+    exec "$candidate" "$root/scripts/privacy-guard.py" --terms-file "$terms_file" --commit-message-file "$message_file"
+  fi
+done
+echo "commit-msg hook: python 3 not found" >&2
+exit 1
