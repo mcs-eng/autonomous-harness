@@ -19,8 +19,9 @@ name: Privacy guard
 #
 # Fork pull requests do not get the term list. Their logs are public, and the
 # reported location of a match would let an outsider confirm a guessed term.
-# For a fork the secret is replaced with an empty value, so the scan warns and
-# passes. An unset or empty PRIVATE_TERMS value warns and passes too.
+# The scan job only runs for same-repository pull requests, so a fork run
+# never receives the secret at all (not even for log masking). Forks get the
+# fork-notice job, which warns and passes. An unset or empty PRIVATE_TERMS value warns and passes too.
 
 on:
   pull_request_target:
@@ -34,7 +35,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  fork-notice:
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "::warning::Fork pull request; privacy scan skipped (the term list is not shared with forks)"
   scan:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -57,7 +65,7 @@ jobs:
           git cat-file -e "$HEAD_SHA^{commit}"
       - name: Scan for private terms
         env:
-          PRIVATE_TERMS: ${{ github.event.pull_request.head.repo.full_name == github.repository && secrets.PRIVATE_TERMS || '' }}
+          PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
