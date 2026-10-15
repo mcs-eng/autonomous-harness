@@ -29,6 +29,10 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(guard.parse_terms("examplehost,\nsampleboard"), ["examplehost", "sampleboard"])
         self.assertEqual(guard.parse_terms("\n,\n  ,"), [])
 
+    def test_comment_lines_are_ignored(self):
+        self.assertEqual(guard.parse_terms("# heading\n  # indented\nexamplehost\n"), ["examplehost"])
+        self.assertEqual(guard.parse_terms("\ufeff# first\nsampleboard, examplehost"), ["sampleboard", "examplehost"])
+
     def test_duplicate_terms_collapse_case_insensitively(self):
         self.assertEqual(guard.parse_terms("ExampleHost\nexamplehost"), ["ExampleHost"])
 
@@ -129,10 +133,10 @@ class RepositoryScanTests(unittest.TestCase):
         head = self.git("rev-parse", "HEAD")
         findings = self.scan(head, title="Ship ExampleHost", body="See sampleboard.\n")
         self.assertEqual(findings, [
-            "PR title",
-            "PR body",
-            f"commit {head} message",
-            "file notes.txt line 2",
+            "PR title: [redacted 11 chars]",
+            "PR body: [redacted 11 chars]",
+            f"commit {head} message: [redacted 11 chars]",
+            "file notes.txt line 2 column 6: [redacted 11 chars]",
         ])
         rendered = "\n".join(findings).lower()
         self.assertNotIn("examplehost", rendered)
@@ -149,7 +153,7 @@ class RepositoryScanTests(unittest.TestCase):
         self.write("examplehost.txt", "sampleboard\n")
         head = self.commit("public change")
         findings = self.scan(head, terms=["examplehost", "sampleboard"])
-        self.assertEqual(findings, ["file [redacted].txt line 1"])
+        self.assertEqual(findings, ["file [redacted].txt line 1 column 1: [redacted 11 chars]"])
         rendered = "\n".join(findings).lower()
         self.assertNotIn("examplehost", rendered)
         self.assertNotIn("sampleboard", rendered)
@@ -197,7 +201,7 @@ class CliTests(unittest.TestCase):
         result = self.run_guard(["--pull-request"])
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
-        self.assertIn("PRIVATE_TERMS is unset or empty", result.stderr)
+        self.assertIn("PRIVATE_TERMS and PRIVATE_TERMS_FILE are unset or empty", result.stderr)
         self.assertNotIn("sampleboard", combined(result).lower())
         self.assertNotIn("examplehost", combined(result).lower())
 
@@ -237,8 +241,8 @@ class CliTests(unittest.TestCase):
         result = self.run_guard(["--pull-request", "--repo", str(repo)])
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout.splitlines(), [
-            "PR body",
-            "file notes.txt line 1",
+            "PR body: [redacted 11 chars]",
+            "file notes.txt line 1 column 1: [redacted 11 chars]",
         ])
         self.assertEqual(result.stderr, "")
         rendered = combined(result).lower()
@@ -252,8 +256,57 @@ class CliTests(unittest.TestCase):
         message.write_text("subject\n\nTouch examplehost.\n")
         result = self.run_guard(["--terms-file", str(terms), "--commit-message-file", str(message)])
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout, "commit message\n")
+        self.assertEqual(result.stdout, "commit message: [redacted 11 chars]\n")
         self.assertNotIn("examplehost", combined(result).lower())
+
+    def test_pull_request_mode_reads_private_terms_file_with_comments(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        git = lambda *args: subprocess.check_output(["git", *args], cwd=repo, stderr=subprocess.PIPE, text=True).strip()
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "fixture@example.test")
+        git("config", "user.name", "Fixture")
+        git("config", "commit.gpgsign", "false")
+        (repo / "README.md").write_text("hello\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "base")
+        base = git("rev-parse", "HEAD")
+        (repo / "notes.txt").write_text("public\nsee examplehost here\n# commentword\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "public change")
+        head = git("rev-parse", "HEAD")
+        terms = self.root / "terms.txt"
+        terms.write_text("# commentword\n  # another comment\nexamplehost\n")
+        self.env["PRIVATE_TERMS_FILE"] = str(terms)
+        self.env["BASE_SHA"] = base
+        self.env["HEAD_SHA"] = head
+        self.env["PR_TITLE"] = "Public title"
+        self.env["PR_BODY"] = "commentword is not a term"
+        result = self.run_guard(["--pull-request", "--repo", str(repo)])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.splitlines(), [
+            "file notes.txt line 2 column 5: [redacted 11 chars]",
+        ])
+        self.assertNotIn("examplehost", combined(result).lower())
+
+    def test_private_terms_env_wins_over_private_terms_file(self):
+        terms = self.root / "terms.txt"
+        terms.write_text("examplehost\n")
+        self.env["PRIVATE_TERMS_FILE"] = str(terms)
+        self.env["PRIVATE_TERMS"] = "sampleboard"
+        self.env["BASE_SHA"] = "x"
+        self.env["HEAD_SHA"] = "y"
+        args = guard.parse_args(["--pull-request"])
+        old = os.environ.copy()
+        try:
+            os.environ.clear()
+            os.environ.update(self.env)
+            self.assertEqual(guard.load_pr_terms(args), ["sampleboard"])
+            os.environ["PRIVATE_TERMS"] = ""
+            self.assertEqual(guard.load_pr_terms(args), ["examplehost"])
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
 
     def test_commit_message_file_allows_a_longer_word(self):
         terms = self.root / "terms.txt"
@@ -301,8 +354,21 @@ class HookTests(unittest.TestCase):
         self.message.write_text("Ship SampleBoard\n")
         result = self.run_hook()
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout, "commit message\n")
+        self.assertEqual(result.stdout, "commit message: [redacted 11 chars]\n")
         self.assertNotIn("sampleboard", combined(result).lower())
+        self.assertNotIn("examplehost", combined(result).lower())
+
+    def test_hook_reads_the_privacy_guard_default_file_first(self):
+        folder = self.home / ".config" / "privacy-guard"
+        folder.mkdir()
+        (folder / "private-terms.txt").write_text("# comment line\nexamplehost\n")
+        (self.home / ".config" / "private-terms.txt").write_text("sampleboard\n")
+        self.message.write_text("sampleboard only\n")
+        self.assertEqual(self.run_hook().returncode, 0)
+        self.message.write_text("touch examplehost\n")
+        result = self.run_hook()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "commit message: [redacted 11 chars]\n")
         self.assertNotIn("examplehost", combined(result).lower())
 
     def test_hook_word_boundary(self):
@@ -323,7 +389,7 @@ class HookTests(unittest.TestCase):
         self.message.write_text("examplehost only\n")
         result = self.run_hook()
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout, "commit message\n")
+        self.assertEqual(result.stdout, "commit message: [redacted 11 chars]\n")
         self.assertNotIn("examplehost", combined(result).lower())
 
     def test_missing_explicit_file_falls_back_to_the_home_file(self):
@@ -368,6 +434,7 @@ class PolicyFileTests(unittest.TestCase):
             self.assertIn("core.hooksPath scripts/hooks", text)
             self.assertIn("PRIVATE_TERMS_FILE", text)
             self.assertIn("~/.config/private-terms.txt", text)
+            self.assertIn("~/.config/privacy-guard/private-terms.txt", text)
 
 
 if __name__ == "__main__":

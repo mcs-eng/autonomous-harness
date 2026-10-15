@@ -11,8 +11,18 @@ Fork pull requests do not receive repository secrets. When PRIVATE_TERMS is
 unset or empty, this scan warns and passes. That is expected: the list cannot
 be given to untrusted pull request code without revealing it.
 
-The commit-msg hook uses the same matcher. It reads $PRIVATE_TERMS_FILE or
-~/.config/private-terms.txt and does nothing when neither file exists.
+Pull request mode reads --terms-file, else the PRIVATE_TERMS variable, else
+the file named by $PRIVATE_TERMS_FILE.
+
+The commit-msg hook uses the same matcher. It reads $PRIVATE_TERMS_FILE,
+~/.config/privacy-guard/private-terms.txt, or ~/.config/private-terms.txt
+(home is $HOME, else %USERPROFILE%) and does nothing when none exists.
+
+Term lists are newline- or comma-separated. A line whose first non-space
+character is # is a comment.
+
+A finding prints its location (title, body, commit, or file, line, and
+column) and a masked stand-in for the match that shows only its length.
 """
 import argparse
 import os
@@ -28,7 +38,9 @@ def parse_terms(raw):
         return []
     terms = []
     seen = set()
-    for part in re.split(r"[\n,]+", str(raw).lstrip("\ufeff")):
+    lines = str(raw).lstrip("\ufeff").splitlines()
+    kept = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+    for part in re.split(r"[\n,]+", kept):
         term = part.strip()
         if not term:
             continue
@@ -52,9 +64,26 @@ def term_patterns(terms):
 
 
 def contains_term(text, terms):
+    return first_match(text, terms) is not None
+
+
+def first_match(text, terms):
+    """Return (column, length) of the earliest match, 1-based column, or None."""
     if not text or not terms:
-        return False
-    return any(pattern.search(text) for pattern in term_patterns(terms))
+        return None
+    best = None
+    for pattern in term_patterns(terms):
+        match = pattern.search(text)
+        if match and (best is None or match.start() < best[0]):
+            best = (match.start(), match.end() - match.start())
+    if best is None:
+        return None
+    return best[0] + 1, best[1]
+
+
+def masked(length):
+    """A stand-in for a match that reveals only its length."""
+    return f"[redacted {length} chars]"
 
 
 def redact(text, terms):
@@ -151,27 +180,30 @@ def diff_text(repo, base, head):
 def scan_pull_request(repo, base, head, title, body, terms):
     """Return location strings. Terms themselves are redacted out of each one."""
     findings = []
-    if contains_term(title or "", terms):
-        findings.append("PR title")
-    if contains_term(body or "", terms):
-        findings.append("PR body")
+    for label, text in (("PR title", title or ""), ("PR body", body or "")):
+        hit = first_match(text, terms)
+        if hit:
+            findings.append(f"{label}: {masked(hit[1])}")
     for sha, message in commit_messages(repo, base, head):
-        if contains_term(message, terms):
-            findings.append(f"commit {sha} message")
+        hit = first_match(message, terms)
+        if hit:
+            findings.append(f"commit {sha} message: {masked(hit[1])}")
     for path, line_no, text in added_lines(diff_text(repo, base, head)):
-        if contains_term(text, terms):
-            findings.append(f"file {path} line {line_no}")
+        hit = first_match(text, terms)
+        if hit:
+            findings.append(f"file {path} line {line_no} column {hit[0]}: {masked(hit[1])}")
     return [redact(location, terms) for location in findings]
 
 
 def locate_hook_file():
-    """$PRIVATE_TERMS_FILE, else ~/.config/private-terms.txt, else None."""
+    """$PRIVATE_TERMS_FILE, else the default files under the home directory."""
     candidates = []
     env_path = os.environ.get("PRIVATE_TERMS_FILE", "").strip()
     if env_path:
         candidates.append(Path(env_path).expanduser())
-    home = os.environ.get("HOME", "").strip()
+    home = os.environ.get("HOME", "").strip() or os.environ.get("USERPROFILE", "").strip()
     if home:
+        candidates.append(Path(home) / ".config" / "privacy-guard" / "private-terms.txt")
         candidates.append(Path(home) / ".config" / "private-terms.txt")
     for path in candidates:
         if path.is_file():
@@ -184,7 +216,7 @@ def read_text(path):
 
 
 def warn_skipped():
-    message = "PRIVATE_TERMS is unset or empty; privacy scan skipped"
+    message = "PRIVATE_TERMS and PRIVATE_TERMS_FILE are unset or empty; privacy scan skipped"
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::warning::{message}", file=sys.stderr)
     else:
@@ -202,13 +234,18 @@ def emit(findings):
 def load_pr_terms(args):
     """Return the hosted term list. An empty result means warn-and-pass.
 
-    Pull request mode reads --terms-file or the PRIVATE_TERMS environment
-    variable only. It does not consult the local hook file.
+    Pull request mode reads --terms-file, else a non-empty PRIVATE_TERMS
+    variable, else the file named by PRIVATE_TERMS_FILE. It does not fall
+    back to the hook's default home-directory files.
     """
     if args.terms_file:
         return parse_terms(read_text(args.terms_file))
-    if "PRIVATE_TERMS" in os.environ:
-        return parse_terms(os.environ.get("PRIVATE_TERMS", ""))
+    terms = parse_terms(os.environ.get("PRIVATE_TERMS", ""))
+    if terms:
+        return terms
+    file_path = os.environ.get("PRIVATE_TERMS_FILE", "").strip()
+    if file_path:
+        return parse_terms(read_text(Path(file_path).expanduser()))
     return []
 
 
@@ -231,9 +268,10 @@ def run_commit_message(args):
     if not terms:
         return 0
     message = read_text(args.commit_message_file)
-    if not contains_term(message, terms):
+    hit = first_match(message, terms)
+    if hit is None:
         return 0
-    return emit([redact("commit message", terms)])
+    return emit([redact(f"commit message: {masked(hit[1])}", terms)])
 
 
 def run_pull_request(args):

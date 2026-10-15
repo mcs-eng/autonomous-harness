@@ -1,7 +1,8 @@
 #!/bin/sh
 # commit-msg hook: reject a message that contains a private term.
-# Terms come from $PRIVATE_TERMS_FILE or ~/.config/private-terms.txt.
-# If neither file exists, this hook does nothing. It never prints a term.
+# Terms come from $PRIVATE_TERMS_FILE, ~/.config/privacy-guard/private-terms.txt,
+# or ~/.config/private-terms.txt (home is $HOME, else $USERPROFILE).
+# If none exists, this hook does nothing. It never prints a term.
 set -eu
 
 message_file=${1:-}
@@ -10,11 +11,14 @@ if [ -z "$message_file" ]; then
   exit 1
 fi
 
+home=${HOME:-${USERPROFILE:-}}
 terms_file=
 if [ -n "${PRIVATE_TERMS_FILE:-}" ] && [ -f "$PRIVATE_TERMS_FILE" ]; then
   terms_file=$PRIVATE_TERMS_FILE
-elif [ -n "${HOME:-}" ] && [ -f "${HOME}/.config/private-terms.txt" ]; then
-  terms_file=${HOME}/.config/private-terms.txt
+elif [ -n "$home" ] && [ -f "$home/.config/privacy-guard/private-terms.txt" ]; then
+  terms_file=$home/.config/privacy-guard/private-terms.txt
+elif [ -n "$home" ] && [ -f "$home/.config/private-terms.txt" ]; then
+  terms_file=$home/.config/private-terms.txt
 else
   exit 0
 fi
