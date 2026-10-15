@@ -113,6 +113,14 @@ class DiffTests(unittest.TestCase):
     def test_annotation_text_escapes_workflow_command_characters(self):
         self.assertEqual(guard.annotation_text("a%b\rc\nd"), "a%25b%0Dc%0Ad")
 
+    def test_quoted_git_paths_decode_utf8_octal_escapes(self):
+        self.assertEqual(guard.unquote_git_path("q\\303\\274nal.txt"), "q\u00fcnal.txt")
+        self.assertEqual(guard.unquote_git_path('a\\"b\\\\c\\td'), 'a"b\\c\td')
+        header = '+++ "b/q\\303\\274nal.txt"'
+        path = guard.destination_path(header)
+        self.assertEqual(path, "q\u00fcnal.txt")
+        self.assertEqual(guard.redact(f"file {path} line 1", ["q\u00fcnal"]), "file [redacted].txt line 1")
+
     def test_new_file_lines_are_added(self):
         diff = textwrap.dedent("""\
             diff --git a/notes.txt b/notes.txt

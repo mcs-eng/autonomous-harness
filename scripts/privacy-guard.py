@@ -106,12 +106,36 @@ def redact(text, terms):
     return rendered
 
 
+_GIT_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def unquote_git_path(text):
+    """Undo git's C-style path quoting. Octal escapes are UTF-8 bytes."""
+    out = bytearray()
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt in "01234567" and i + 3 < len(text) + 0 and all(c in "01234567" for c in text[i + 1:i + 4]) and len(text[i + 1:i + 4]) == 3:
+                out.append(int(text[i + 1:i + 4], 8) & 0xFF)
+                i += 4
+                continue
+            if nxt in _GIT_ESCAPES:
+                out.append(_GIT_ESCAPES[nxt])
+                i += 2
+                continue
+        out.extend(ch.encode("utf-8"))
+        i += 1
+    return out.decode("utf-8", errors="replace")
+
+
 def destination_path(header):
     raw = header[4:].split("\t", 1)[0].strip()
     if raw == "/dev/null":
         return None
     if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
-        raw = raw[1:-1].encode("utf-8").decode("unicode_escape")
+        raw = unquote_git_path(raw[1:-1])
     if raw.startswith("b/"):
         raw = raw[2:]
     return raw or None
