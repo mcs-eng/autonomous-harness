@@ -121,6 +121,13 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(path, "q\u00fcnal.txt")
         self.assertEqual(guard.redact(f"file {path} line 1", ["q\u00fcnal"]), "file [redacted].txt line 1")
 
+    def test_non_ascii_terms_match_case_insensitively(self):
+        self.assertTrue(guard.contains_term("Über alles", ["\u00fcber"]))
+        self.assertFalse(guard.contains_term("Überhaupt", ["\u00fcber"]))
+
+    def test_control_characters_in_a_location_are_replaced(self):
+        self.assertEqual(guard.safe_line("file ok\n::notice::x line 1"), "file ok?::notice::x line 1")
+
     def test_new_file_lines_are_added(self):
         diff = textwrap.dedent("""\
             diff --git a/notes.txt b/notes.txt

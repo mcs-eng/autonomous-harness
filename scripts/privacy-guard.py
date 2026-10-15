@@ -68,7 +68,9 @@ def term_patterns(terms):
         # punctuation still matches as a whole token. re.escape keeps dots,
         # brackets, and other metacharacters literal.
         pattern = r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])"
-        patterns.append(re.compile(pattern, re.IGNORECASE | re.ASCII))
+        # No re.ASCII: case folding must work for non-ASCII terms too. The
+        # boundary classes above are spelled out, so they stay ASCII-only.
+        patterns.append(re.compile(pattern, re.IGNORECASE))
     _PATTERN_CACHE[key] = patterns
     return patterns
 
@@ -280,8 +282,14 @@ def annotation_text(text):
     return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
+def safe_line(text):
+    """Replace control characters so a crafted file name cannot start a new log line."""
+    return "".join(ch if ch.isprintable() else "?" for ch in text)
+
+
 def emit(findings):
     for location in findings:
+        location = safe_line(location)
         print(location)
         if os.environ.get("GITHUB_ACTIONS") == "true":
             print(f"::error::{annotation_text(location)}", file=sys.stderr)
