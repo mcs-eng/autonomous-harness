@@ -190,6 +190,15 @@ class RepositoryScanTests(unittest.TestCase):
         self.assertNotIn("examplehost", rendered)
         self.assertNotIn("sampleboard", rendered)
 
+    def test_lone_carriage_return_does_not_hide_later_lines(self):
+        self.write("notes.txt", "public\rmore\nexamplehost\nsampleboard\n")
+        head = self.commit("public change")
+        findings = self.scan(head, terms=["examplehost", "sampleboard"])
+        self.assertEqual(findings, [
+            "file notes.txt line 2 column 1: [redacted 11 chars]",
+            "file notes.txt line 3 column 1: [redacted 11 chars]",
+        ])
+
     def test_clean_text_passes(self):
         self.write("notes.txt", "hello example\n")
         head = self.commit("update the example")
@@ -459,8 +468,12 @@ def repo_text(path):
 class PolicyFileTests(unittest.TestCase):
     def test_workflow_covers_drafts_and_documents_fork_secrets(self):
         text = repo_text(".github/workflows/privacy-guard.yml")
-        self.assertIn("pull_request:", text)
-        self.assertNotIn("pull_request_target", text)
+        # The secret is only given to base-branch code: pull_request_target,
+        # with no step that checks out or runs the pull request head.
+        self.assertIn("pull_request_target:", text)
+        self.assertNotIn("github.event.pull_request.head.ref", text)
+        self.assertNotIn("ref: ${{", text)
+        self.assertNotIn("$RUNNER_TEMP", text)
         for kind in ("opened", "edited", "synchronize", "reopened", "ready_for_review"):
             self.assertIn(kind, text)
         self.assertIn("secrets.PRIVATE_TERMS", text)
@@ -468,8 +481,7 @@ class PolicyFileTests(unittest.TestCase):
         self.assertIn("fork", text.lower())
         self.assertNotIn("draft == false", text)
         self.assertIn("persist-credentials: false", text)
-        self.assertIn('git show "$BASE_SHA:scripts/privacy-guard.py"', text)
-        self.assertIn('python3 "$RUNNER_TEMP/privacy-guard.py" --pull-request', text)
+        self.assertIn("python3 scripts/privacy-guard.py --pull-request", text)
 
     def test_agent_rules_and_install_note(self):
         rule = repo_text(".cursor/rules/public-repo.mdc")

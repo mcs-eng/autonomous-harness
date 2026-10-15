@@ -3,19 +3,26 @@ name: Privacy guard
 # Scans the pull request title, body, every commit message in base..head, and
 # the added lines of the diff. The term list is the PRIVATE_TERMS repository
 # secret (newline- or comma-separated). It is not stored in this repository.
-# A match fails the job and prints only the location, never the term.
+# A match fails the job and prints only the location and a masked length,
+# never the term.
+#
+# Trust model: this runs on pull_request_target, so the workflow file and the
+# scanner both come from the base branch. The pull request's commits are
+# fetched as data and only read by git; no code from the pull request is
+# checked out or run, so a pull request cannot edit the scanner or this
+# workflow to print the secret. Do not add a step that checks out or runs
+# pull request code here.
 #
 # Draft pull requests are included. opened, edited, and synchronize run while
 # a pull request is still a draft; ready_for_review runs when it is marked
 # ready. This workflow does not skip drafts.
 #
-# Fork pull requests do not receive repository secrets. An unset or empty
-# PRIVATE_TERMS value warns and passes. That is expected: sharing the list
-# with untrusted pull request code would reveal it. Same-repository pull
-# requests receive the secret and are enforced.
+# Fork pull requests are scanned the same way, because the secret stays with
+# trusted base-branch code. An unset or empty PRIVATE_TERMS value warns and
+# passes.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, edited, synchronize, reopened, ready_for_review]
 
 permissions:
@@ -30,40 +37,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # Default pull_request checkout is the merge commit, which exists for
-      # fork pull requests as well as same-repository ones. The scan still
-      # uses the event's base and head SHAs, not the merge commit.
+      # pull_request_target checks out the base branch, which is trusted.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Fetch the base and head commits
+      - name: Fetch the pull request commits as data
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
         run: |
-          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_REF"
-          git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "pull/${PR_NUMBER}/head"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags "$REPO_URL" "$BASE_REF"
+          git fetch --no-tags "$REPO_URL" "pull/${PR_NUMBER}/head"
           git cat-file -e "$BASE_SHA^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
-      # The secret is only handed to the scanner from the base branch, not the
-      # copy in the pull request, so a pull request cannot edit the scanner to
-      # print the list. The one exception is the pull request that first adds
-      # the scanner, when the base has no copy yet. A same-repository author
-      # can still edit this workflow itself; that needs write access.
-      - name: Pick the trusted scanner
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if git cat-file -e "$BASE_SHA:scripts/privacy-guard.py" 2>/dev/null; then
-            git show "$BASE_SHA:scripts/privacy-guard.py" > "$RUNNER_TEMP/privacy-guard.py"
-            echo "Using the scanner from the base branch"
-          else
-            cp scripts/privacy-guard.py "$RUNNER_TEMP/privacy-guard.py"
-            echo "::warning::Base branch has no scanner yet; using the pull request copy"
-          fi
       - name: Scan for private terms
         env:
           PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
@@ -71,4 +61,4 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 "$RUNNER_TEMP/privacy-guard.py" --pull-request
+        run: python3 scripts/privacy-guard.py --pull-request

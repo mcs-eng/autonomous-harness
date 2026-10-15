@@ -7,9 +7,10 @@ case-insensitive and uses ASCII word boundaries, so a shorter term does not
 match inside a longer word. A hit fails the process and prints only the
 location. The matched term is never written to stdout or stderr.
 
-Fork pull requests do not receive repository secrets. When PRIVATE_TERMS is
-unset or empty, this scan warns and passes. That is expected: the list cannot
-be given to untrusted pull request code without revealing it.
+The hosted workflow runs this scanner from the base branch on
+pull_request_target, so fork pull requests are scanned too. When PRIVATE_TERMS is
+unset or empty, this scan warns and passes. That happens only when the
+secret is missing.
 
 Pull request mode reads --terms-file, else the PRIVATE_TERMS variable, else
 the file named by $PRIVATE_TERMS_FILE.
@@ -171,14 +172,13 @@ def git_output(repo, *args):
         cwd=repo,
         check=False,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=120,
     )
     if result.returncode != 0:
         raise RuntimeError("git failed")
-    return result.stdout
+    # Decode bytes directly. Text mode would turn a lone CR inside a line
+    # into a line break and throw off the hunk line counts.
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def commit_messages(repo, base, head):
