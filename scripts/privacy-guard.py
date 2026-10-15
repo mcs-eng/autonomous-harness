@@ -99,7 +99,7 @@ def masked(length):
 
 
 def shown_path(path, terms):
-    """The path as printed: hidden entirely when any term appears inside it.
+    """A path or SHA as printed: hidden entirely when any term appears inside it.
 
     Only the path is checked. Replacing term substrings across a whole
     finding line would mark which letters of fixed words or SHAs spell a
@@ -255,7 +255,7 @@ def scan_pull_request(repo, base, head, title, body, terms):
     for sha, message in commit_messages(repo, base, head):
         hit = first_match(message, terms)
         if hit:
-            findings.append(f"commit {sha} message: {masked(hit[1])}")
+            findings.append(f"commit {shown_path(sha, terms)} message: {masked(hit[1])}")
     for path, line_no, text in added_lines(diff_text(repo, base, head)):
         hit = first_match(text, terms)
         if hit:

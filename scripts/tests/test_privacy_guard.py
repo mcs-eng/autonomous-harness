@@ -220,6 +220,16 @@ class RepositoryScanTests(unittest.TestCase):
         findings = self.scan(head, terms=["examplehost", "ed", "lin", "ann"])
         self.assertEqual(findings, ["file notes.txt line 1 column 1: [redacted 11 chars]"])
 
+    def test_term_inside_a_commit_sha_is_not_printed(self):
+        self.write("notes.txt", "public\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "touch examplehost")
+        head = self.git("rev-parse", "HEAD")
+        piece = head[5:12]
+        findings = self.scan(head, terms=["examplehost", piece])
+        self.assertEqual(findings, ["commit [redacted path] message: [redacted 11 chars]"])
+        self.assertNotIn(piece, "\n".join(findings))
+
     def test_clean_text_passes(self):
         self.write("notes.txt", "hello example\n")
         head = self.commit("update the example")
