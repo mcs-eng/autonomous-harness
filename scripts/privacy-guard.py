@@ -98,6 +98,19 @@ def masked(length):
     return f"[redacted {length} chars]"
 
 
+def shown_path(path, terms):
+    """The path as printed: hidden entirely when any term appears inside it.
+
+    Only the path is checked. Replacing term substrings across a whole
+    finding line would mark which letters of fixed words or SHAs spell a
+    term, which reveals terms that are not even in the pull request.
+    """
+    lowered = path.casefold()
+    if any(term.casefold() in lowered for term in terms if term):
+        return "[redacted path]"
+    return path
+
+
 def redact(text, terms):
     """Remove every term from a location string, including as a substring."""
     rendered = text
@@ -119,7 +132,8 @@ def unquote_git_path(text):
         ch = text[i]
         if ch == "\\" and i + 1 < len(text):
             nxt = text[i + 1]
-            if nxt in "01234567" and i + 3 < len(text) + 0 and all(c in "01234567" for c in text[i + 1:i + 4]) and len(text[i + 1:i + 4]) == 3:
+            digits = text[i + 1:i + 4]
+            if len(digits) == 3 and all(c in "01234567" for c in digits):
                 out.append(int(text[i + 1:i + 4], 8) & 0xFF)
                 i += 4
                 continue
@@ -245,8 +259,8 @@ def scan_pull_request(repo, base, head, title, body, terms):
     for path, line_no, text in added_lines(diff_text(repo, base, head)):
         hit = first_match(text, terms)
         if hit:
-            findings.append(f"file {path} line {line_no} column {hit[0]}: {masked(hit[1])}")
-    return [redact(location, terms) for location in findings]
+            findings.append(f"file {shown_path(path, terms)} line {line_no} column {hit[0]}: {masked(hit[1])}")
+    return findings
 
 
 def locate_hook_file():
@@ -336,7 +350,7 @@ def run_commit_message(args):
     hit = first_match(message, terms)
     if hit is None:
         return 0
-    return emit([redact(f"commit message: {masked(hit[1])}", terms)])
+    return emit([f"commit message: {masked(hit[1])}"])
 
 
 def run_pull_request(args):

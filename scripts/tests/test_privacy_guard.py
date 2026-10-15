@@ -119,7 +119,7 @@ class DiffTests(unittest.TestCase):
         header = '+++ "b/q\\303\\274nal.txt"'
         path = guard.destination_path(header)
         self.assertEqual(path, "q\u00fcnal.txt")
-        self.assertEqual(guard.redact(f"file {path} line 1", ["q\u00fcnal"]), "file [redacted].txt line 1")
+        self.assertEqual(guard.shown_path(path, ["Q\u00dcNAL"]), "[redacted path]")
 
     def test_non_ascii_terms_match_case_insensitively(self):
         self.assertTrue(guard.contains_term("Über alles", ["\u00fcber"]))
@@ -200,7 +200,7 @@ class RepositoryScanTests(unittest.TestCase):
         self.write("examplehost.txt", "sampleboard\n")
         head = self.commit("public change")
         findings = self.scan(head, terms=["examplehost", "sampleboard"])
-        self.assertEqual(findings, ["file [redacted].txt line 1 column 1: [redacted 11 chars]"])
+        self.assertEqual(findings, ["file [redacted path] line 1 column 1: [redacted 11 chars]"])
         rendered = "\n".join(findings).lower()
         self.assertNotIn("examplehost", rendered)
         self.assertNotIn("sampleboard", rendered)
@@ -213,6 +213,12 @@ class RepositoryScanTests(unittest.TestCase):
             "file notes.txt line 2 column 1: [redacted 11 chars]",
             "file notes.txt line 3 column 1: [redacted 11 chars]",
         ])
+
+    def test_short_terms_do_not_mark_letters_in_fixed_words(self):
+        self.write("notes.txt", "examplehost\n")
+        head = self.commit("public change")
+        findings = self.scan(head, terms=["examplehost", "ed", "lin", "ann"])
+        self.assertEqual(findings, ["file notes.txt line 1 column 1: [redacted 11 chars]"])
 
     def test_clean_text_passes(self):
         self.write("notes.txt", "hello example\n")
@@ -238,6 +244,7 @@ class CliTests(unittest.TestCase):
             cwd=self.root,
             env=env or self.env,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             check=False,
         )
@@ -405,6 +412,7 @@ class HookTests(unittest.TestCase):
             cwd=ROOT,
             env=self.env,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             check=False,
         )
