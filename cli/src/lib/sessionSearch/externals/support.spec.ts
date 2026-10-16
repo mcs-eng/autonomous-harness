@@ -78,6 +78,13 @@ describe('reading values', () => {
     expect(UUID.test('11111111-2222-4333-8444-555555555555')).toBe(true)
     expect(UUID.test('not-a-uuid')).toBe(false)
     expect(absoluteFolder('/work')).toBe('/work')
+    const native = join(tmpdir(), 'work')
+    expect(absoluteFolder(native)).toBe(native)
+    if (process.platform === 'win32') {
+      expect(absoluteFolder('C:\\work\\app')).toBe('C:\\work\\app')
+      expect(absoluteFolder('\\\\server\\share\\app')).toBe('\\\\server\\share\\app')
+      expect(absoluteFolder('C:relative')).toBeNull()
+    }
     expect(absoluteFolder('work')).toBeNull()
     expect(absoluteFolder(3)).toBeNull()
   })
@@ -165,7 +172,8 @@ describe('processes', () => {
     expect(processAlive(2 ** 22 + 7)).toBe(false)
   })
 
-  it("runs a command and keeps what it printed, even when it fails", async () => {
+  // Windows does not provide /bin/sh or its POSIX shell commands.
+  it.skipIf(process.platform === 'win32')("runs a command and keeps what it printed, even when it fails", async () => {
     expect(await run('/bin/sh', ['-c', 'printf ok'], 5_000)).toBe('ok')
     expect(await run('/bin/sh', ['-c', 'printf partial; exit 1'], 5_000)).toBe('partial')
     expect(await run('/bin/sh', ['-c', 'exit 1'], 5_000)).toBeNull()
@@ -278,7 +286,8 @@ describe('processes', () => {
     expect(await sameProject(join(dir, 'mainly'), join(dir, 'main'), dir)).toBe(false)
   })
 
-  it('lists the real machine: this very process is among them, with its own open files', async () => {
+  // The real process view uses ps/lsof and POSIX terminals, unavailable on native Windows.
+  it.skipIf(process.platform === 'win32')('lists the real machine: this very process is among them, with its own open files', async () => {
     const view = processView()
     const me = (await view.list()).find((row) => row.pid === process.pid)
     expect(me?.args).toContain('node')
@@ -323,7 +332,11 @@ describe('processes', () => {
     expect(await harnessTtys(async (_command, args) => { asked = args; return { stdout: old, failed: false, stderr: '' } }, false))
       .toEqual(new Set(['/dev/ttys006']))
     expect(asked.at(-1)).toContain('#{m:/usr/bin/env HARNESS_DAEMON=*,#{pane_start_command}}')
-    // A real tmux answers one way or the other: a private one with no server, never the developer's own.
+  })
+
+  // Native Windows does not provide tmux or its POSIX socket directory.
+  it.skipIf(process.platform === 'win32')('finds no Harness panes on a private tmux server that is not running', async () => {
+    // A private one with no server, never the developer's own.
     vi.stubEnv('TMUX', undefined)
     vi.stubEnv('TMUX_PANE', undefined)
     vi.stubEnv('TMUX_TMPDIR', home())

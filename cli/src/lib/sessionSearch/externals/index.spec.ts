@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 import { describe, expect, it, vi } from 'vitest'
 
@@ -29,10 +30,11 @@ describe('where each engine keeps its conversations', () => {
   })
 
   it("uses the defaults where nothing is overridden, and XDG for Cursor's chats", () => {
-    const paths = externalPaths({ XDG_CONFIG_HOME: '/xdg', OPENCODE_DB: ':memory:' })
+    const xdg = join(tmpdir(), 'xdg')
+    const paths = externalPaths({ XDG_CONFIG_HOME: xdg, OPENCODE_DB: ':memory:' })
     expect(paths).toMatchObject({
       claudeProjectsDir: env.CLAUDE_PROJECTS_DIR, codexHome: env.CODEX_HOME,
-      cursorConfigDir: '/xdg/cursor', cursorDataDir: env.CURSOR_HOME,
+      cursorConfigDir: join(xdg, 'cursor'), cursorDataDir: env.CURSOR_HOME,
       opencodeDb: join(env.OPENCODE_DATA_DIR, 'opencode.db'), kiloDb: join(env.KILO_DATA_DIR, 'kilo.db'),
       piAgentDir: join(env.PI_HOME, 'agent'),
     })

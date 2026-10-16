@@ -11,7 +11,8 @@
  * the better match and ranks first.
  */
 
-import { chmodSync, existsSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, renameSync } from 'node:fs'
 
 import { builtinSqlite } from '../sqliteBuiltin.js'
 import type { IndexedTurn } from './turns.js'
@@ -296,7 +297,7 @@ export class SessionSearchStore {
   /**
    * The index at `path`, created if missing, for its one writer: the daemon. Null on a Node without
    * `node:sqlite`. The index is derived data — every row can be rebuilt from the transcripts — so a
-   * file SQLite says is not a database, or is corrupt, is deleted and started again rather than
+   * file SQLite says is not a database, or is corrupt, is moved aside and started again rather than
    * leaving search broken until somebody notices. Anything else (a lock held by another process)
    * is thrown: deleting a file somebody has open loses their writes.
    */
@@ -305,7 +306,10 @@ export class SessionSearchStore {
       return SessionSearchStore.openOnce(path)
     } catch (error) {
       if (path === ':memory:' || !isCorrupt(error)) throw error
-      for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true })
+      const backup = `${path}.corrupt-${randomUUID()}`
+      for (const suffix of ['', '-wal', '-shm']) {
+        if (existsSync(`${path}${suffix}`)) renameSync(`${path}${suffix}`, `${backup}${suffix}`)
+      }
       return SessionSearchStore.openOnce(path)
     }
   }
@@ -343,20 +347,26 @@ export class SessionSearchStore {
     if (!Constructor) return null
     const fresh = path !== ':memory:' && !existsSync(path)
     const db = new Constructor(path)
-    if (path !== ':memory:') {
-      db.exec('PRAGMA journal_mode = WAL')
-      db.exec('PRAGMA synchronous = NORMAL')
-    }
-    db.exec('PRAGMA busy_timeout = 1000')
-    const store = new SessionSearchStore(db)
-    store.migrate()
-    if (fresh) {
-      // What people said to their agents: this user's eyes only, like the transcripts themselves.
-      for (const suffix of ['', '-wal', '-shm']) {
-        try { chmodSync(`${path}${suffix}`, 0o600) } catch { /* not created yet */ }
+    try {
+      if (path !== ':memory:') {
+        db.exec('PRAGMA journal_mode = WAL')
+        db.exec('PRAGMA synchronous = NORMAL')
       }
+      db.exec('PRAGMA busy_timeout = 1000')
+      const store = new SessionSearchStore(db)
+      store.migrate()
+      if (fresh) {
+        // What people said to their agents: this user's eyes only, like the transcripts themselves.
+        for (const suffix of ['', '-wal', '-shm']) {
+          try { chmodSync(`${path}${suffix}`, 0o600) } catch { /* not created yet */ }
+        }
+      }
+      return store
+    } catch (error) {
+      // Windows cannot move a corrupt index aside while this failed opener still holds it.
+      try { db.close() } catch { /* Preserve the initialization error. */ }
+      throw error
     }
-    return store
   }
 
   private migrate(): void {

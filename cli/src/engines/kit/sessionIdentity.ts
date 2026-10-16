@@ -48,7 +48,7 @@ export async function readSessionHeader(rule: SessionHeader, read: (bytes: numbe
       const id = valueAt(record, rule.id.field)
       const cwd = valueAt(record, rule.cwd)
       return typeof id === 'string' && rule.id.pattern.test(id)
-        && typeof cwd === 'string' && cwd.startsWith('/') ? { sessionId: id, cwd: resolve(cwd) } : null
+        && typeof cwd === 'string' && isAbsolute(cwd) ? { sessionId: id, cwd: resolve(cwd) } : null
     }
     if (Buffer.byteLength(head) < bytes) return UNSETTLED
   }

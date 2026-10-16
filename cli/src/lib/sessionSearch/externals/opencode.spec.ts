@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { builtinSqlite, closeSqliteHandles, overrideBuiltinSqlite } from '../../sqliteBuiltin.js'
+import { hasSqliteCli } from '../../sqliteAvailability.js'
 import {
   LIST_LIMIT, ancestry, argvSubcommand, engineProcess, opencodeListSql, opencodeProvider, opencodeTurnOpen,
   ownerRecord, parseOwnerRecord, readSql, rowsOf, splitCounts, storeStamp, tableColumns, tally, type SqlRead,
@@ -21,6 +22,7 @@ import type { ProcessView, RunningProcess, ScanContext } from './types.js'
 
 const Database = builtinSqlite()!
 type Db = InstanceType<typeof Database>
+const fixtureDbs: Db[] = []
 
 const dirs: string[] = []
 function tempDir(): string {
@@ -30,6 +32,10 @@ function tempDir(): string {
 }
 afterEach(() => {
   closeSqliteHandles()
+  // A failed assertion must release fixture writers before Windows can remove their stores.
+  for (const db of fixtureDbs.splice(0)) {
+    try { db.close() } catch { /* Already closed by the spec. */ }
+  }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -91,6 +97,7 @@ class Store {
   private seq = 0
   constructor(readonly path: string, schema = SCHEMA) {
     this.db = new Database(path, { readOnly: false })
+    fixtureDbs.push(this.db)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(schema)
     if (schema === SCHEMA) {
@@ -137,7 +144,10 @@ function context(excluded: string[] = []): { ctx: ScanContext; memo: ReturnType<
 
 const READERS: Array<[string, typeof Database | null]> = [['node:sqlite', Database], ['the sqlite3 CLI', null]]
 
-describe.each(READERS)('OpenCode discovery read through %s', (_name, reader) => {
+// The sqlite3 fallback needs a CLI on PATH, which stock Windows does not provide.
+READERS.forEach(([name, reader]) => describe.skipIf(
+  process.platform === 'win32' && reader === null && !hasSqliteCli(),
+)(`OpenCode discovery read through ${name}`, () => {
   beforeAll(() => { overrideBuiltinSqlite(reader) })
   afterAll(() => { overrideBuiltinSqlite(Database) })
 
@@ -364,7 +374,7 @@ describe.each(READERS)('OpenCode discovery read through %s', (_name, reader) => 
     expect(await provider.busy!({ pid: 1, record: ownerRecord(join(tempDir(), 'gone.db'), 'ses_x') })).toBeNull()
     store.close()
   })
-})
+}))
 
 describe('Kilo discovery', () => {
   it('reads kilo.db the same way and replays its history with the kilo reader', async () => {

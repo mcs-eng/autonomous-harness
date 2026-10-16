@@ -22,7 +22,7 @@ import { externalEvidenceActive, externalReadFailed } from '../evidence.js'
 import { createHash } from 'node:crypto'
 import type { Dirent } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, parse, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { agentCommandOwnershipSnapshot } from '../../engineBin.js'
@@ -193,11 +193,15 @@ async function transcriptOf(
 }
 
 /**
- * The folder whose bucket is [bucket] and whose slug is [slug], walked down to from `/` through real
+ * The folder whose bucket is [bucket] and whose slug is [slug], walked down to from its root through real
  * folders whose slugs lead to it. The md5 decides: a slug alone never names a folder.
  */
 async function walkToFolder(slug: string, bucket: string, list: (dir: string) => Promise<Dirent[]> = entries): Promise<string | null> {
   let reads = WALK_READS
+  // Windows slugs retain the drive letter; starting at / would search only the current drive.
+  // Elsewhere the walk starts at `/`, which never depends on a working directory that may be gone.
+  const root = process.platform !== 'win32' ? '/'
+    : /^[a-z](?:-|$)/i.test(slug) ? join(`${slug[0]}:`, sep) : parse(resolve('.')).root
   const walk = async (dir: string): Promise<string | null> => {
     const own = cursorSlug(dir)
     if (own === slug && cursorBucket(dir) === bucket) return dir
@@ -210,7 +214,7 @@ async function walkToFolder(slug: string, bucket: string, list: (dir: string) =>
     }
     return null
   }
-  return walk('/')
+  return walk(root)
 }
 
 interface Chat {
