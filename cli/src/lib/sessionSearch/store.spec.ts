@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { MARK_CLOSE, MARK_OPEN, SessionSearchStore, makeSnippet, queryTerms, wordFamily, type IndexedSession } from './store.js'
+import { builtinSqlite, overrideBuiltinSqlite } from '../sqliteBuiltin.js'
 import type { IndexedTurn } from './turns.js'
 
 const DAY = 86_400_000
@@ -307,10 +308,42 @@ describe('SessionSearchStore', () => {
     const dir = mkdtempSync(join(tmpdir(), 'session-search-'))
     dirs.push(dir)
     const path = join(dir, 'index.db')
-    writeFileSync(path, 'this is not a database, it is a sentence long enough to be read as a header')
+    const corrupt = 'this is not a database, it is a sentence long enough to be read as a header'
+    writeFileSync(path, corrupt)
     const store = open(path)
+    const backups = readdirSync(dir).filter(name => name.startsWith('index.db.corrupt-'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(dir, backups[0]), 'utf8')).toBe(corrupt)
     store.writeSession(session('s', 'S', NOW), 0, [turn(0, 'alpha')])
     expect(store.search('alpha', { now: NOW })).toHaveLength(1)
+    store.close()
+    stores.splice(stores.indexOf(store), 1)
+    expect(open(path).search('alpha', { now: NOW })).toHaveLength(1)
+    expect(readdirSync(dir).filter(name => name.startsWith('index.db.corrupt-'))).toEqual(backups)
+  })
+
+  it('closes a handle after failed migration and preserves a non-corrupt index', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-search-'))
+    dirs.push(dir)
+    const path = join(dir, 'index.db')
+    writeFileSync(path, 'preserved index')
+    const original = builtinSqlite()
+    const failure = Object.assign(new Error('database is locked'), { errcode: 5 })
+    let closed = false
+    class FailedMigration {
+      exec(sql: string) { if (sql.startsWith('CREATE TABLE')) throw failure }
+      prepare(): never { throw new Error('migration must fail before a statement is prepared') }
+      close() { closed = true }
+    }
+    overrideBuiltinSqlite(FailedMigration)
+    try {
+      expect(() => SessionSearchStore.open(path)).toThrow(failure)
+      expect(closed).toBe(true)
+      expect(readFileSync(path, 'utf8')).toBe('preserved index')
+      expect(readdirSync(dir)).toEqual(['index.db'])
+    } finally {
+      overrideBuiltinSqlite(original)
+    }
   })
 
   it.each(['0', '8', '9', '10'])('rebuilds an index written by schema %s', (version) => {

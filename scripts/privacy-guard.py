@@ -169,7 +169,7 @@ def destination_path(header):
 HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
-def added_lines(diff):
+def added_lines(diff, textual_paths=None):
     """Yield (path, new_line_number, text) for lines added by a unified diff.
 
     Hunk headers give the old and new line counts. Lines inside a hunk are
@@ -210,6 +210,8 @@ def added_lines(diff):
         if line.startswith("@@"):
             match = HUNK.match(line)
             if match:
+                if textual_paths is not None and path is not None:
+                    textual_paths.add(path)
                 old_left = int(match.group(1)) if match.group(1) is not None else 1
                 new_line = int(match.group(2))
                 new_left = int(match.group(3)) if match.group(3) is not None else 1
@@ -318,15 +320,20 @@ def decoded_blob_views(content):
     ]
 
 
-def new_occurrences(content, previous, terms):
+def new_occurrences(content, previous, terms, utf8_is_diffed=False):
     """Return whether any occurrence has a new position or spelling in a blob.
 
     Compare each decoding separately. A count-only comparison misses a term
     moved within a binary blob when the old and new blobs contain the same
-    number of matches.
+    number of matches. For text hunks, added_lines already checks the UTF-8
+    view: shifting an unchanged line is not a new occurrence. Other encodings
+    still need blob scanning even when attributes force Git to emit text hunks.
     """
     patterns = term_patterns(terms)
-    for current_view, previous_view in zip(decoded_blob_views(content), decoded_blob_views(previous)):
+    views = zip(decoded_blob_views(content), decoded_blob_views(previous))
+    for index, (current_view, previous_view) in enumerate(views):
+        if index == 0 and utf8_is_diffed:
+            continue
         for pattern in patterns:
             old = {(match.start(), match.end(), match.group().casefold())
                    for match in pattern.finditer(previous_view)}
@@ -350,7 +357,8 @@ def scan_pull_request(repo, base, head, title, body, terms):
     raw_changes = list(changed_blobs(repo, base, head))
     line_findings = []
     line_hit_paths = set()
-    for path, line_no, text in added_lines(diff_text(repo, base, head)):
+    textual_paths = set()
+    for path, line_no, text in added_lines(diff_text(repo, base, head), textual_paths):
         hit = first_match(text, terms)
         if hit:
             line_hit_paths.add(path)
@@ -368,7 +376,8 @@ def scan_pull_request(repo, base, head, title, body, terms):
             display_path = shown_path(path, terms)
             content = blob_bytes(repo, head_oid, display_path)
             previous = b"" if status in ("A", "C") else blob_bytes(repo, base_oid, display_path)
-            if new_occurrences(content, previous, terms) and path not in line_hit_paths:
+            utf8_is_diffed = status in ("M", "R", "T") and path in textual_paths
+            if new_occurrences(content, previous, terms, utf8_is_diffed) and path not in line_hit_paths:
                 views = decoded_blob_views(content)
                 hit = next((first_match(view, terms) for view in views if first_match(view, terms)), None)
                 if hit:

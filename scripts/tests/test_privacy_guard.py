@@ -392,6 +392,27 @@ class RepositoryScanTests(unittest.TestCase):
         head = self.commit("replace symlink with file")
         self.assertIn("file changed line 1 column 1: [redacted 11 chars]", self.scan(head, base=parent, terms=["examplehost"]))
 
+    def test_public_line_insertions_and_deletions_do_not_reintroduce_existing_text(self):
+        for text, term in (("ExampleHost", "examplehost"), ("\u00dcber", "\u00fcber")):
+            with self.subTest(term=term):
+                self.write("notes.txt", f"public\n{text}\n")
+                parent = self.commit("existing text")
+                self.write("notes.txt", f"intro\npublic\n{text}\n")
+                inserted = self.commit("insert public line")
+                self.assertEqual(self.scan(inserted, base=parent, terms=[term]), [])
+                self.write("notes.txt", f"{text}\n")
+                deleted = self.commit("delete public lines")
+                self.assertEqual(self.scan(deleted, base=inserted, terms=[term]), [])
+
+    def test_forced_text_utf16_still_uses_blob_scanning(self):
+        self.write(".gitattributes", "*.dat diff\n")
+        self.write_bytes("notes.dat", "public\n".encode("utf-16-le"))
+        parent = self.commit("force textual diff")
+        self.write_bytes("notes.dat", "public\nExampleHost\n".encode("utf-16-le"))
+        head = self.commit("add encoded text")
+        self.assertTrue(list(guard.added_lines(guard.diff_text(self.root, parent, head))))
+        self.assertTrue(self.scan(head, base=parent, terms=["examplehost"]))
+
     def test_existing_occurrence_is_allowed_but_new_occurrence_is_flagged(self):
         self.write("notes.txt", "ExampleHost\n")
         parent = self.commit("add existing occurrence")

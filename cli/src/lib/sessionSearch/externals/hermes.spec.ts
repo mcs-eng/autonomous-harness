@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { builtinSqlite, closeSqliteHandles, overrideBuiltinSqlite } from '../../sqliteBuiltin.js'
+import { hasSqliteCli } from '../../sqliteAvailability.js'
 import {
   activeProfile, argvProfile, bestContinuation, compressionTip, hermesChains, hermesHomes, hermesKind, hermesLeases,
   hermesListSql, hermesProvider, hermesRow, hermesTurnOpen, leaseHeldBy, type HermesRow, type HermesSession,
@@ -22,6 +23,7 @@ import type { ProcessView, RunningProcess, ScanContext } from './types.js'
 
 const Database = builtinSqlite()!
 type Db = InstanceType<typeof Database>
+const fixtureDbs: Db[] = []
 
 const dirs: string[] = []
 function tempDir(): string {
@@ -31,6 +33,10 @@ function tempDir(): string {
 }
 afterEach(() => {
   closeSqliteHandles()
+  // A failed assertion must release fixture writers before Windows can remove their stores.
+  for (const db of fixtureDbs.splice(0)) {
+    try { db.close() } catch { /* Already closed by the spec. */ }
+  }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -90,6 +96,7 @@ class Store {
   constructor(readonly path: string, schema = V22) {
     mkdirSync(join(path, '..'), { recursive: true })
     this.db = new Database(path, { readOnly: false })
+    fixtureDbs.push(this.db)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(schema)
     this.v22 = schema === V22
@@ -129,7 +136,10 @@ const byId = (sessions: readonly unknown[]): Map<string, HermesSession> =>
 
 const READERS: Array<[string, typeof Database | null]> = [['node:sqlite', Database], ['the sqlite3 CLI', null]]
 
-describe.each(READERS)('Hermes discovery read through %s', (_name, reader) => {
+// The sqlite3 fallback needs a CLI on PATH, which stock Windows does not provide.
+READERS.forEach(([name, reader]) => describe.skipIf(
+  process.platform === 'win32' && reader === null && !hasSqliteCli(),
+)(`Hermes discovery read through ${name}`, () => {
   beforeAll(() => { overrideBuiltinSqlite(reader) })
   afterAll(() => { overrideBuiltinSqlite(Database) })
 
@@ -346,7 +356,7 @@ describe.each(READERS)('Hermes discovery read through %s', (_name, reader) => {
     expect(await provider.busy!({ pid: 1, record: ownerRecord(join(root, 'gone.db'), id(1)) })).toBeNull()
     store.close(); old.close()
   })
-})
+}))
 
 describe('a Hermes store that cannot be read right now', () => {
   it('keeps each home\'s last list when it fails, and throws only when every home fails', async () => {
