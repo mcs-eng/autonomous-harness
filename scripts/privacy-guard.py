@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject private terms in pull request text, commit messages, and added lines.
+"""Reject private terms in pull request text, commits, paths, and changed files.
 
 The term list is never stored in this repository. Hosted scans read the
 PRIVATE_TERMS repository secret (newline- or comma-separated). Matching is
@@ -23,7 +23,7 @@ The commit-msg hook uses the same matcher. It reads $PRIVATE_TERMS_FILE,
 Term lists are newline- or comma-separated. A line whose first non-space
 character is # is a comment.
 
-A finding prints its location (title, body, commit, or file, line, and
+A finding prints its location (title, body, commit, file path, or file line and
 column) and a masked stand-in for the match that shows only its length.
 """
 import argparse
@@ -109,6 +109,16 @@ def shown_path(path, terms):
     if any(term.casefold() in lowered for term in terms if term):
         return "[redacted path]"
     return path
+
+
+def path_match(path, terms):
+    """Return the first case-insensitive term substring in a path."""
+    best = None
+    for term in terms:
+        match = re.search(re.escape(term), path, re.IGNORECASE)
+        if match and (best is None or match.start() < best[0]):
+            best = (match.start(), match.end() - match.start())
+    return None if best is None else (best[0] + 1, best[1])
 
 
 def redact(text, terms):
@@ -245,6 +255,60 @@ def diff_text(repo, base, head):
         return git_output(repo, *args, base, head)
 
 
+MAX_BINARY_BLOB_SIZE = 5 * 1024 * 1024
+
+
+def changed_blobs(repo, base, head):
+    """Yield (status, destination path, head blob id) from Git's raw diff."""
+    args = ["-c", "core.quotepath=false", "diff", "--raw", "-z", "--no-abbrev",
+            "--no-ext-diff", "--find-renames", "--find-copies-harder"]
+    try:
+        result = subprocess.run(
+            ["git", *args, f"{base}...{head}"], cwd=repo, check=False,
+            capture_output=True, timeout=120,
+        )
+        if result.returncode != 0:
+            result = subprocess.run(
+                ["git", *args, base, head], cwd=repo, check=False,
+                capture_output=True, timeout=120,
+            )
+        if result.returncode != 0:
+            raise RuntimeError("git failed")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("git failed") from exc
+    fields = result.stdout.split(b"\0")
+    i = 0
+    while i < len(fields) and fields[i]:
+        metadata = fields[i].decode("ascii", errors="replace").split()
+        i += 1
+        if len(metadata) < 5 or i >= len(fields):
+            raise RuntimeError("git failed")
+        status = metadata[4]
+        old_path = fields[i]
+        i += 1
+        path = old_path
+        if status[:1] in ("R", "C"):
+            if i >= len(fields):
+                raise RuntimeError("git failed")
+            path = fields[i]
+            i += 1
+        yield status[:1], path.decode("utf-8", errors="replace"), metadata[3]
+
+
+def blob_bytes(repo, oid):
+    """Read a bounded Git blob by object id; oversize blobs fail closed."""
+    size = git_output(repo, "cat-file", "-s", oid).strip()
+    if not size.isdigit() or int(size) > MAX_BINARY_BLOB_SIZE:
+        raise RuntimeError("git failed")
+    result = subprocess.run(
+        ["git", "cat-file", "blob", oid], cwd=repo, check=False,
+        capture_output=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("git failed")
+    return result.stdout
+
+
 def scan_pull_request(repo, base, head, title, body, terms):
     """Return location strings. Terms themselves are redacted out of each one."""
     findings = []
@@ -256,6 +320,20 @@ def scan_pull_request(repo, base, head, title, body, terms):
         hit = first_match(message, terms)
         if hit:
             findings.append(f"commit {shown_path(sha, terms)} message: {masked(hit[1])}")
+    raw_changes = list(changed_blobs(repo, base, head))
+    for status, path, oid in raw_changes:
+        if status in ("A", "R", "C"):
+            path_hit = path_match(path, terms)
+            if path_hit:
+                findings.append(f"file {shown_path(path, terms)}: {masked(path_hit[1])}")
+        if status in ("A", "M", "R", "C"):
+            content = blob_bytes(repo, oid)
+            if b"\0" in content:
+                # UTF-8 text in binary blobs is matched with Unicode
+                # case-insensitivity; undecodable bytes cannot spell a term.
+                hit = first_match(content.decode("utf-8", errors="replace"), terms)
+                if hit:
+                    findings.append(f"file {shown_path(path, terms)}: {masked(hit[1])}")
     for path, line_no, text in added_lines(diff_text(repo, base, head)):
         hit = first_match(text, terms)
         if hit:

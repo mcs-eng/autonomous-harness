@@ -164,6 +164,11 @@ class RepositoryScanTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(value)
 
+    def write_bytes(self, path, value):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(value)
+
     def commit(self, message):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", message)
@@ -200,7 +205,10 @@ class RepositoryScanTests(unittest.TestCase):
         self.write("examplehost.txt", "sampleboard\n")
         head = self.commit("public change")
         findings = self.scan(head, terms=["examplehost", "sampleboard"])
-        self.assertEqual(findings, ["file [redacted path] line 1 column 1: [redacted 11 chars]"])
+        self.assertEqual(findings, [
+            "file [redacted path]: [redacted 11 chars]",
+            "file [redacted path] line 1 column 1: [redacted 11 chars]",
+        ])
         rendered = "\n".join(findings).lower()
         self.assertNotIn("examplehost", rendered)
         self.assertNotIn("sampleboard", rendered)
@@ -234,6 +242,53 @@ class RepositoryScanTests(unittest.TestCase):
         self.write("notes.txt", "hello example\n")
         head = self.commit("update the example")
         self.assertEqual(self.scan(head, title="Public notes", body="No private names.\n"), [])
+
+    def test_added_path_only_match_is_reported_and_redacted(self):
+        self.write("docs/examplehost.txt", "public text\n")
+        head = self.commit("add public file")
+        findings = self.scan(head, terms=["examplehost"])
+        self.assertEqual(findings, ["file [redacted path]: [redacted 11 chars]"])
+        self.assertNotIn("examplehost", "\n".join(findings).lower())
+
+    def test_renamed_destination_path_match_is_reported(self):
+        self.write("old-name.txt", "public text\n")
+        parent = self.commit("add source file")
+        self.git("mv", "old-name.txt", "examplehost.txt")
+        head = self.commit("rename public file")
+        findings = self.scan(head, terms=["examplehost"], base=parent)
+        self.assertEqual(findings, ["file [redacted path]: [redacted 11 chars]"])
+
+    def test_copied_destination_path_match_is_reported(self):
+        self.write("source.txt", "same public contents\n")
+        parent = self.commit("add source file")
+        self.write("examplehost-copy.txt", "same public contents\n")
+        head = self.commit("copy public file")
+        findings = self.scan(head, terms=["examplehost"], base=parent)
+        self.assertIn("file [redacted path]: [redacted 11 chars]", findings)
+
+    def test_quoted_non_ascii_path_is_decoded_before_matching(self):
+        self.write("qüber.txt", "public text\n")
+        head = self.commit("add public file")
+        findings = self.scan(head, terms=["ÜBER"])
+        self.assertEqual(findings, ["file [redacted path]: [redacted 4 chars]"])
+
+    def test_added_and_modified_binary_blobs_are_scanned(self):
+        self.write_bytes("added.bin", b"\x00ExampleHost\xff")
+        first = self.commit("add binary")
+        findings = self.scan(first, terms=["examplehost"])
+        self.assertEqual(findings, ["file added.bin: [redacted 11 chars]"])
+
+        self.write_bytes("added.bin", b"\x00sampleboard\xff")
+        second = self.commit("modify binary")
+        findings = self.scan(second, terms=["sampleboard"], base=first)
+        self.assertEqual(findings, ["file added.bin: [redacted 11 chars]"])
+        self.assertNotIn("sampleboard", "\n".join(findings).lower())
+
+    def test_oversize_changed_blob_fails_closed(self):
+        self.write_bytes("large.bin", b"\x00" + b"x" * (guard.MAX_BINARY_BLOB_SIZE + 1))
+        head = self.commit("add large binary")
+        with self.assertRaises(RuntimeError):
+            self.scan(head)
 
 
 class CliTests(unittest.TestCase):
