@@ -63,6 +63,14 @@ class MatchTests(unittest.TestCase):
         self.assertNotIn("examplehost", rendered.lower())
 
 
+    def test_paths_hide_unicode_case_equivalents_recognized_by_the_matcher(self):
+        for path, term in (("qu\u0131x.txt", "quix"), ("qu\u0130x.txt", "quix"),
+                           ("a\u017fk.txt", "ask"), ("a\u212a.txt", "ak")):
+            with self.subTest(path=path):
+                self.assertIsNotNone(guard.path_match(path, [term]))
+                self.assertEqual(guard.shown_path(path, [term]), "[redacted path]")
+
+
 class DiffTests(unittest.TestCase):
     def test_added_lines_keep_new_file_line_numbers_and_skip_removals(self):
         diff = textwrap.dedent("""\
@@ -178,6 +186,17 @@ class RepositoryScanTests(unittest.TestCase):
         return guard.scan_pull_request(
             self.root, base or self.base, head, title, body, terms if terms is not None else FAKE_TERMS)
 
+    def run_guard(self, head, terms):
+        env = os.environ.copy()
+        env.pop("PRIVATE_TERMS_FILE", None)
+        env.update(PRIVATE_TERMS=terms, GITHUB_ACTIONS="true", PYTHONIOENCODING="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo", str(self.root),
+             "--base", self.base, "--head", head, "--title", "", "--body", ""],
+            env=env, capture_output=True, stdin=subprocess.DEVNULL, text=True,
+            encoding="utf-8", check=False,
+        )
+
     def test_match_in_each_location_and_word_boundary_on_added_lines(self):
         self.write("notes.txt", "hello example\nuses sampleboard today\n")
         self.git("add", "-A")
@@ -272,6 +291,16 @@ class RepositoryScanTests(unittest.TestCase):
         findings = self.scan(head, terms=["ÜBER"])
         self.assertEqual(findings, ["file [redacted path]: [redacted 4 chars]"])
 
+    def test_unicode_case_equivalent_path_is_redacted_in_cli_output(self):
+        path = "qu\u0131x.txt"
+        self.write(path, "public text\n")
+        head = self.commit("add public file")
+        result = self.run_guard(head, "quix")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "file [redacted path]: [redacted 4 chars]\n")
+        self.assertEqual(result.stderr, "::error::file [redacted path]: [redacted 4 chars]\n")
+        self.assertNotIn(path, combined(result))
+
     def test_added_and_modified_binary_blobs_are_scanned(self):
         self.write_bytes("added.bin", b"\x00ExampleHost\xff")
         first = self.commit("add binary")
@@ -308,6 +337,48 @@ class RepositoryScanTests(unittest.TestCase):
         head = self.commit("add UTF-16BE file")
         self.assertIn("file big.txt: [redacted 11 chars]", self.scan(head, terms=["sampleboard"]))
 
+    def test_odd_offset_utf16_blobs_are_scanned(self):
+        paths = []
+        for encoding in ("utf-16-le", "utf-16-be"):
+            for terminated in (False, True):
+                path = f"{encoding}-{terminated}.bin"
+                paths.append(path)
+                content = b"\xff" + "ExampleHost".encode(encoding)
+                self.write_bytes(path, content + (b"\x00\x00" if terminated else b""))
+        head = self.commit("add prefixed binary files")
+        self.assertEqual(self.scan(head, terms=["examplehost"]), [
+            f"file {path}: [redacted 11 chars]" for path in sorted(paths)
+        ])
+
+    def test_unchanged_utf16_occurrences_at_both_parities_are_allowed(self):
+        for encoding in ("utf-16-le", "utf-16-be"):
+            for prefix in (b"", b"\xff"):
+                with self.subTest(encoding=encoding, prefix=prefix):
+                    previous = prefix + "ExampleHost".encode(encoding) + b"\x00\x00"
+                    self.assertTrue(guard.new_occurrences(previous, b"", ["examplehost"]))
+                    self.assertFalse(guard.new_occurrences(previous + b"\xff\xff", previous, ["examplehost"]))
+
+    def test_copied_binary_and_utf16_blobs_are_new_at_the_destination(self):
+        contents = {
+            "utf8": b"\x00ExampleHost\xff",
+            "le": b"\xff" + "ExampleHost".encode("utf-16-le") + b"\x00\x00",
+            "be": b"\xff" + "ExampleHost".encode("utf-16-be") + b"\x00\x00",
+        }
+        for name, content in contents.items():
+            self.write_bytes(f"original-{name}.bin", content)
+        parent = self.commit("add original binary files")
+        self.assertEqual(self.scan(parent, base=parent, terms=["examplehost"]), [])
+        for name, content in contents.items():
+            self.write_bytes(f"copy-{name}.bin", content)
+        head = self.commit("copy binary files")
+        changes = list(guard.changed_blobs(self.root, parent, head))
+        self.assertEqual([(status, path) for status, path, *_ in changes], [
+            ("C", f"copy-{name}.bin") for name in sorted(contents)
+        ])
+        self.assertEqual(self.scan(head, base=parent, terms=["examplehost"]), [
+            f"file copy-{name}.bin: [redacted 11 chars]" for name in sorted(contents)
+        ])
+
     def test_symlink_typechange_to_file_is_scanned(self):
         try:
             (self.root / "changed").symlink_to("target")
@@ -337,6 +408,36 @@ class RepositoryScanTests(unittest.TestCase):
         head = self.commit("add large binary")
         with self.assertRaisesRegex(RuntimeError, r"\[redacted path\].*exceeded the .*byte size cap"):
             self.scan(head, terms=["examplehost"])
+
+
+    def test_path_errors_cannot_emit_workflow_commands_or_private_spellings(self):
+        def git_input(*args, input):
+            return subprocess.check_output(
+                ["git", *args], cwd=self.root, input=input, stderr=subprocess.PIPE,
+            ).decode().strip()
+
+        blob = git_input("hash-object", "-w", "--stdin",
+                         input=b"\x00" + b"x" * (guard.MAX_BINARY_BLOB_SIZE + 1))
+        # Git plumbing can represent control characters that Windows cannot check out.
+        for mode, kind, oid in (("100644", "blob", blob), ("160000", "commit", self.base)):
+            for prefix in ("public", "qu\u0131x"):
+                with self.subTest(kind=kind, prefix=prefix):
+                    path = prefix + "\r\n::warning::injected.bin"
+                    entry = f"{mode} {kind} {oid}\t{path}\0".encode("utf-8")
+                    tree = git_input("mktree", "-z", input=entry)
+                    head = self.git("commit-tree", tree, "-p", self.base, "-m", "add public entry")
+                    result = self.run_guard(head, "quix")
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(len(result.stderr.splitlines()), 1)
+                    self.assertTrue(result.stderr.startswith("privacy guard: "))
+                    self.assertNotIn("\r", result.stderr)
+                    self.assertNotIn(path, result.stderr)
+                    if prefix == "qu\u0131x":
+                        self.assertIn("[redacted path]", result.stderr)
+                        self.assertNotIn(prefix, result.stderr)
+                    else:
+                        self.assertIn("public??::warning::injected.bin", result.stderr)
 
 
 class CliTests(unittest.TestCase):

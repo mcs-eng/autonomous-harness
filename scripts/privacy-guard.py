@@ -105,8 +105,7 @@ def shown_path(path, terms):
     finding line would mark which letters of fixed words or SHAs spell a
     term, which reveals terms that are not even in the pull request.
     """
-    lowered = path.casefold()
-    if any(term.casefold() in lowered for term in terms if term):
+    if path_match(path, terms):
         return "[redacted path]"
     return path
 
@@ -312,8 +311,11 @@ def blob_bytes(repo, oid, display_path):
 
 
 def decoded_blob_views(content):
-    """Decode blob bytes in each supported encoding, tolerating malformed bytes."""
-    return [content.decode(encoding, errors="replace") for encoding in ("utf-8", "utf-16-le", "utf-16-be")]
+    """Decode supported encodings, including UTF-16 after an odd-byte header."""
+    return [content.decode("utf-8", errors="replace")] + [
+        content[offset:].decode(encoding, errors="replace")
+        for encoding in ("utf-16-le", "utf-16-be") for offset in (0, 1)
+    ]
 
 
 def new_occurrences(content, previous, terms):
@@ -365,7 +367,7 @@ def scan_pull_request(repo, base, head, title, body, terms):
         if status in ("A", "M", "R", "C", "T"):
             display_path = shown_path(path, terms)
             content = blob_bytes(repo, head_oid, display_path)
-            previous = b"" if status == "A" else blob_bytes(repo, base_oid, display_path)
+            previous = b"" if status in ("A", "C") else blob_bytes(repo, base_oid, display_path)
             if new_occurrences(content, previous, terms) and path not in line_hit_paths:
                 views = decoded_blob_views(content)
                 hit = next((first_match(view, terms) for view in views if first_match(view, terms)), None)
@@ -507,7 +509,7 @@ def main(argv=None):
     except RuntimeError as exc:
         message = str(exc)
         if "exceeded the " in message or message.startswith("submodule add at "):
-            print(f"privacy guard: {message}", file=sys.stderr)
+            print(f"privacy guard: {safe_line(message)}", file=sys.stderr)
         else:
             print("privacy guard could not read the git range", file=sys.stderr)
         return 1
