@@ -316,10 +316,22 @@ def decoded_blob_views(content):
     return [content.decode(encoding, errors="replace") for encoding in ("utf-8", "utf-16-le", "utf-16-be")]
 
 
-def occurrence_counts(content, terms):
-    """Count each term in the decoding that yields its greatest occurrence count."""
-    views = decoded_blob_views(content)
-    return [max(sum(1 for _ in pattern.finditer(view)) for view in views) for pattern in term_patterns(terms)]
+def new_occurrences(content, previous, terms):
+    """Return whether any occurrence has a new position or spelling in a blob.
+
+    Compare each decoding separately. A count-only comparison misses a term
+    moved within a binary blob when the old and new blobs contain the same
+    number of matches.
+    """
+    patterns = term_patterns(terms)
+    for current_view, previous_view in zip(decoded_blob_views(content), decoded_blob_views(previous)):
+        for pattern in patterns:
+            old = {(match.start(), match.end(), match.group().casefold())
+                   for match in pattern.finditer(previous_view)}
+            if any((match.start(), match.end(), match.group().casefold()) not in old
+                   for match in pattern.finditer(current_view)):
+                return True
+    return False
 
 
 def scan_pull_request(repo, base, head, title, body, terms):
@@ -354,9 +366,7 @@ def scan_pull_request(repo, base, head, title, body, terms):
             display_path = shown_path(path, terms)
             content = blob_bytes(repo, head_oid, display_path)
             previous = b"" if status == "A" else blob_bytes(repo, base_oid, display_path)
-            head_counts = occurrence_counts(content, terms)
-            base_counts = occurrence_counts(previous, terms)
-            if any(head > old for head, old in zip(head_counts, base_counts)) and path not in line_hit_paths:
+            if new_occurrences(content, previous, terms) and path not in line_hit_paths:
                 views = decoded_blob_views(content)
                 hit = next((first_match(view, terms) for view in views if first_match(view, terms)), None)
                 if hit:

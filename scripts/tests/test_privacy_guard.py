@@ -284,6 +284,16 @@ class RepositoryScanTests(unittest.TestCase):
         self.assertEqual(findings, ["file added.bin: [redacted 11 chars]"])
         self.assertNotIn("sampleboard", "\n".join(findings).lower())
 
+    def test_moved_binary_occurrence_is_scanned_when_count_is_unchanged(self):
+        self.write_bytes("moved.bin", b"\x00ExampleHost\xff")
+        parent = self.commit("add binary occurrence")
+        self.write_bytes("moved.bin", b"\x00\xffExampleHost")
+        head = self.commit("move binary occurrence")
+        self.assertEqual(
+            self.scan(head, terms=["examplehost"], base=parent),
+            ["file moved.bin: [redacted 11 chars]"],
+        )
+
     def test_gitattributes_binary_text_blob_is_scanned(self):
         self.write(".gitattributes", "*.step binary\n")
         self.write("shape.step", "ExampleHost\n")
