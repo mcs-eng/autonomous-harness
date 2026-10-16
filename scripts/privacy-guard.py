@@ -292,14 +292,16 @@ def changed_blobs(repo, base, head):
                 raise RuntimeError("git failed")
             path = fields[i]
             i += 1
-        yield status[:1], path.decode("utf-8", errors="replace"), metadata[3]
+        yield status[:1], path.decode("utf-8", errors="replace"), metadata[2], metadata[3], metadata[1]
 
 
-def blob_bytes(repo, oid):
+def blob_bytes(repo, oid, display_path):
     """Read a bounded Git blob by object id; oversize blobs fail closed."""
     size = git_output(repo, "cat-file", "-s", oid).strip()
-    if not size.isdigit() or int(size) > MAX_BINARY_BLOB_SIZE:
+    if not size.isdigit():
         raise RuntimeError("git failed")
+    if int(size) > MAX_BINARY_BLOB_SIZE:
+        raise RuntimeError(f"changed blob {display_path} exceeded the {MAX_BINARY_BLOB_SIZE}-byte size cap")
     result = subprocess.run(
         ["git", "cat-file", "blob", oid], cwd=repo, check=False,
         capture_output=True, timeout=120,
@@ -307,6 +309,17 @@ def blob_bytes(repo, oid):
     if result.returncode != 0:
         raise RuntimeError("git failed")
     return result.stdout
+
+
+def decoded_blob_views(content):
+    """Decode blob bytes in each supported encoding, tolerating malformed bytes."""
+    return [content.decode(encoding, errors="replace") for encoding in ("utf-8", "utf-16-le", "utf-16-be")]
+
+
+def occurrence_counts(content, terms):
+    """Count each term in the decoding that yields its greatest occurrence count."""
+    views = decoded_blob_views(content)
+    return [max(sum(1 for _ in pattern.finditer(view)) for view in views) for pattern in term_patterns(terms)]
 
 
 def scan_pull_request(repo, base, head, title, body, terms):
@@ -321,23 +334,34 @@ def scan_pull_request(repo, base, head, title, body, terms):
         if hit:
             findings.append(f"commit {shown_path(sha, terms)} message: {masked(hit[1])}")
     raw_changes = list(changed_blobs(repo, base, head))
-    for status, path, oid in raw_changes:
+    line_findings = []
+    line_hit_paths = set()
+    for path, line_no, text in added_lines(diff_text(repo, base, head)):
+        hit = first_match(text, terms)
+        if hit:
+            line_hit_paths.add(path)
+            line_findings.append(f"file {shown_path(path, terms)} line {line_no} column {hit[0]}: {masked(hit[1])}")
+    for status, path, base_oid, head_oid, head_mode in raw_changes:
         if status in ("A", "R", "C"):
             path_hit = path_match(path, terms)
             if path_hit:
                 findings.append(f"file {shown_path(path, terms)}: {masked(path_hit[1])}")
-        if status in ("A", "M", "R", "C"):
-            content = blob_bytes(repo, oid)
-            if b"\0" in content:
-                # UTF-8 text in binary blobs is matched with Unicode
-                # case-insensitivity; undecodable bytes cannot spell a term.
-                hit = first_match(content.decode("utf-8", errors="replace"), terms)
+        if head_mode == "160000":
+            if status == "A":
+                raise RuntimeError(f"submodule add at {shown_path(path, terms)} cannot be scanned")
+            continue
+        if status in ("A", "M", "R", "C", "T"):
+            display_path = shown_path(path, terms)
+            content = blob_bytes(repo, head_oid, display_path)
+            previous = b"" if status == "A" else blob_bytes(repo, base_oid, display_path)
+            head_counts = occurrence_counts(content, terms)
+            base_counts = occurrence_counts(previous, terms)
+            if any(head > old for head, old in zip(head_counts, base_counts)) and path not in line_hit_paths:
+                views = decoded_blob_views(content)
+                hit = next((first_match(view, terms) for view in views if first_match(view, terms)), None)
                 if hit:
                     findings.append(f"file {shown_path(path, terms)}: {masked(hit[1])}")
-    for path, line_no, text in added_lines(diff_text(repo, base, head)):
-        hit = first_match(text, terms)
-        if hit:
-            findings.append(f"file {shown_path(path, terms)} line {line_no} column {hit[0]}: {masked(hit[1])}")
+    findings.extend(line_findings)
     return findings
 
 
@@ -470,8 +494,12 @@ def main(argv=None):
         if args.commit_message_file:
             return run_commit_message(args)
         return run_pull_request(args)
-    except RuntimeError:
-        print("privacy guard could not read the git range", file=sys.stderr)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "exceeded the " in message or message.startswith("submodule add at "):
+            print(f"privacy guard: {message}", file=sys.stderr)
+        else:
+            print("privacy guard could not read the git range", file=sys.stderr)
         return 1
     except OSError:
         print("privacy guard could not read an input file", file=sys.stderr)

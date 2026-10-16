@@ -284,11 +284,49 @@ class RepositoryScanTests(unittest.TestCase):
         self.assertEqual(findings, ["file added.bin: [redacted 11 chars]"])
         self.assertNotIn("sampleboard", "\n".join(findings).lower())
 
+    def test_gitattributes_binary_text_blob_is_scanned(self):
+        self.write(".gitattributes", "*.step binary\n")
+        self.write("shape.step", "ExampleHost\n")
+        head = self.commit("add attributed file")
+        self.assertIn("file shape.step: [redacted 11 chars]", self.scan(head, terms=["examplehost"]))
+
+    def test_utf16_blobs_are_scanned(self):
+        self.write_bytes("little.txt", b"\xff\xfe" + "ExampleHost".encode("utf-16-le"))
+        head = self.commit("add UTF-16LE file")
+        self.assertIn("file little.txt: [redacted 11 chars]", self.scan(head, terms=["examplehost"]))
+        self.write_bytes("big.txt", "SampleBoard".encode("utf-16-be"))
+        head = self.commit("add UTF-16BE file")
+        self.assertIn("file big.txt: [redacted 11 chars]", self.scan(head, terms=["sampleboard"]))
+
+    def test_symlink_typechange_to_file_is_scanned(self):
+        try:
+            (self.root / "changed").symlink_to("target")
+        except (OSError, NotImplementedError) as exc:
+            if os.name == "nt":
+                self.skipTest(f"Windows symlink creation unavailable: {exc}")
+            raise
+        parent = self.commit("add symlink")
+        (self.root / "changed").unlink()
+        self.write("changed", "ExampleHost\n")
+        head = self.commit("replace symlink with file")
+        self.assertIn("file changed line 1 column 1: [redacted 11 chars]", self.scan(head, base=parent, terms=["examplehost"]))
+
+    def test_existing_occurrence_is_allowed_but_new_occurrence_is_flagged(self):
+        self.write("notes.txt", "ExampleHost\n")
+        parent = self.commit("add existing occurrence")
+        self.assertEqual(self.scan(parent, base=self.base, terms=["examplehost"]), [
+            "file notes.txt line 1 column 1: [redacted 11 chars]",
+        ])
+        self.write("notes.txt", "ExampleHost\nExampleHost\n")
+        head = self.commit("add another occurrence")
+        findings = self.scan(head, base=parent, terms=["examplehost"])
+        self.assertIn("file notes.txt line 2 column 1: [redacted 11 chars]", findings)
+
     def test_oversize_changed_blob_fails_closed(self):
-        self.write_bytes("large.bin", b"\x00" + b"x" * (guard.MAX_BINARY_BLOB_SIZE + 1))
+        self.write_bytes("examplehost-large.bin", b"\x00" + b"x" * (guard.MAX_BINARY_BLOB_SIZE + 1))
         head = self.commit("add large binary")
-        with self.assertRaises(RuntimeError):
-            self.scan(head)
+        with self.assertRaisesRegex(RuntimeError, r"\[redacted path\].*exceeded the .*byte size cap"):
+            self.scan(head, terms=["examplehost"])
 
 
 class CliTests(unittest.TestCase):

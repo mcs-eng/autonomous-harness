@@ -175,6 +175,7 @@ Security reports go through [SECURITY.md](SECURITY.md).
    validation. Remove credentials and private project content from logs and recordings.
    Install the local privacy commit hook with `git config core.hooksPath scripts/hooks` (it reads
    `$PRIVATE_TERMS_FILE`, `~/.config/privacy-guard/private-terms.txt`, or `~/.config/private-terms.txt`, and does nothing if none exists).
+   The pull request scanner reads changed Git blobs as UTF-8 and UTF-16LE/BE, regardless of Git's text/binary classification. Compressed content (including ZIP, Office files, and PDF streams) and commit author/committer identity are not scanned.
 4. **Review together.** A maintainer checks the change while automatic CI selects complete
    component suites from its Git diff. Native, browser, real-engine and hardware acceptance
    still need the checks relevant to the change; report those separately.
