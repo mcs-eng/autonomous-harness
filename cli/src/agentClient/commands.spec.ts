@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { addressOf, agentOrigin, AGENTS_START_AGENTS_OFF, closeCommand, EXIT, parseDuration, psCommand, showCommand, spawnRefusal, SPAWN_LIMITS, waitCommand, type ClientDeps } from './commands.js'
+import { addressOf, agentOrigin, AGENTS_START_AGENTS_OFF, CLOSE_USAGE, closeCommand, EXIT, parseDuration, PS_USAGE, psCommand, SHOW_USAGE, showCommand, spawnRefusal, SPAWN_LIMITS, WAIT_USAGE, waitCommand, type ClientDeps } from './commands.js'
 import { AgentClientError, type Daemon, type Where } from './daemon.js'
 import { Ledger, ledgerPath } from './ledger.js'
 import { writeAgentSettings } from '../lib/agentSettings.js'
@@ -144,6 +144,30 @@ describe('harness ps', () => {
     expect(h.err).toContain('Unknown option --bogus.')
     expect(await psCommand(['--help'], h.deps)).toBe(EXIT.ok)
     expect(h.out.at(-1)).toMatch(/^Usage: harness ps/)
+  })
+
+  it('pins help text and unknown-option errors for every main agent command', async () => {
+    const h = harness(new FakeDaemon())
+    const commands = [
+      { name: 'ps', usage: PS_USAGE, run: psCommand, args: [] },
+      { name: 'show', usage: SHOW_USAGE, run: showCommand, args: ['kid'] },
+      { name: 'wait', usage: WAIT_USAGE, run: waitCommand, args: ['kid'] },
+      { name: 'close', usage: CLOSE_USAGE, run: closeCommand, args: ['kid'] },
+    ] as const
+
+    for (const command of commands) {
+      h.out.length = 0
+      h.err.length = 0
+      expect(await command.run([...command.args, '--help'], h.deps), `${command.name} --help`).toBe(EXIT.ok)
+      expect(h.out).toEqual([command.usage])
+      expect(h.err).toEqual([])
+
+      h.out.length = 0
+      h.err.length = 0
+      expect(await command.run([...command.args, '--bogus'], h.deps), `${command.name} --bogus`).toBe(EXIT.usage)
+      expect(h.err).toEqual([`Unknown option --bogus.`, command.usage])
+      expect(h.out).toEqual([])
+    }
   })
 
   it('says when the daemon cannot be reached or cannot list, in words or JSON', async () => {
