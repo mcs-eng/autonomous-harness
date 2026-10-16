@@ -89,6 +89,8 @@ describe('expandDshValue', () => {
   it('expands the three variables and leaves anything else alone', () => {
     const vars = { dsh: '/i/dsh', workspace: '/w', home: '/h' }
     expect(expandDshValue('${dsh}/toolchain:${workspace}/.claude:${home}', vars)).toBe('/i/dsh/toolchain:/w/.claude:/h')
+    expect(expandDshValue('${dsh}/toolchain', { ...vars, dsh: '/i/dsh\\literal' })).toBe('/i/dsh\\literal/toolchain')
+    expect(expandDshValue('${dsh}/toolchain', { ...vars, dsh: '/i/dsh\\' })).toBe('/i/dsh\\/toolchain')
     expect(expandDshValue('$HOME and ${other}', vars)).toBe('$HOME and ${other}')
   })
 })
