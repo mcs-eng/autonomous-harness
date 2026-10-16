@@ -171,7 +171,6 @@ export async function refreshApiLaunch(
 /**
  * `refreshApiLaunch` as the models service's grid launch asks it (lib/gridLaunch.ts `answerGridLaunch`): the
  * launch as saved now and the endpoint it read, or why the API cannot be used, in the words a relaunch always gave.
- * Asynchronous because a changed URL or key revalidates the selected model against the API as saved now.
  */
 export function refreshApiFor(store: ApiConnections, deps: ApiModelDeps = {}) {
   return async (launch: GridLaunchOverride): Promise<{ override: GridLaunchOverride; apiBase?: string } | { error: string; detail: string }> => {

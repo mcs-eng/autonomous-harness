@@ -1,28 +1,4 @@
 #!/usr/bin/env bash
-# Reproducible Windows release build + unsigned distributable bundle, VERIFIED.
-#
-#   bash scripts/build-windows-release.sh
-#   ALLOW_TEST_FAILURES=1 bash scripts/build-windows-release.sh
-#
-# Produces:
-#   build/windows/x64/runner/Release/harness.exe    (the release app)
-#   dist/harness-desktop-windows-x64-<version>.zip  (unsigned bundle to hand out)
-#   dist/harness-desktop-windows-x64-<version>.zip.sha256
-#
-# and then VERIFIES the two files the way a recipient would: it copies them into
-# an unrelated directory, checks the checksum THERE, and opens the archive to
-# confirm the executable and its runtime files are inside. The checksum file
-# names the bundle by FILE NAME only, so it verifies from anywhere.
-#
-# EXIT CODES — printed as a summary, and never a stand-in for a green suite:
-#   0  analysis completed with no errors, tests green, build + bundle + verify OK
-#   1  build/packaging/verification failed, or analyze reported errors
-#   2  a bundle was produced, but analysis or tests were NOT green and the
-#      caller opted in with ALLOW_TEST_FAILURES=1
-#
-# No signing, no notarization, no upload, and no recursive deletes: staging is a
-# fresh uniquely named directory under `.toolchain/state/` that is left in place.
-#
 # Flutter cannot cross-compile to Windows — run it ON Windows 11 x64 with the
 # Visual Studio "Desktop development with C++" workload and the Windows SDK.
 set -euo pipefail
@@ -120,10 +96,6 @@ if [[ "$ANALYZE_STATUS" == "1" ]]; then
   ANALYZE_STATUS_TEXT="completed with non-error diagnostics (exit $ANALYZE_STATUS, $ANALYZE_ERRORS analyzer error(s))"
 fi
 
-# --- tests --------------------------------------------------------------------
-# Run and REPORT the real result. A failing suite is not a green suite, so by
-# default it fails the script; a host with known pre-existing failures must say
-# so explicitly with ALLOW_TEST_FAILURES=1, and then the script exits 2.
 echo "==> flutter test"
 TEST_LOG="$STATE_DIR/$STAMP-test.log"
 set +e
@@ -151,7 +123,6 @@ if [[ "$TEST_STATUS" != "0" ]]; then
   echo "warning: the test suite is NOT green ($TEST_STATUS_TEXT); building anyway because ALLOW_TEST_FAILURES=1"
 fi
 
-# --- build --------------------------------------------------------------------
 echo "==> flutter build windows --release"
 "$FLUTTER" build windows --release --build-name="${VERSION%%-*}" --dart-define=WINDOWS_BUNDLED_CLI=true
 
@@ -245,8 +216,6 @@ echo "    copied: msvcp140.dll vcruntime140.dll vcruntime140_1.dll"
 # can be read the same way a Linux one is (see lib/core/app_version.dart).
 echo "$VERSION" > "$RELEASE_DIR/version.txt"
 
-# Ship the license for this repository and the notice for the vendored xterm source compiled into the app.
-# These are the license files present for code this repository vendors directly; package-manager notices are not inferred.
 LICENSES_DIR="$RELEASE_DIR/licenses"
 mkdir -p "$LICENSES_DIR"
 if [[ ! -f "$REPO_ROOT/../LICENSE" ]]; then
@@ -260,7 +229,6 @@ fi
 cp -f "$REPO_ROOT/../LICENSE" "$RELEASE_DIR/LICENSE.txt"
 cp -f "$REPO_ROOT/third_party/xterm/LICENSE" "$LICENSES_DIR/xterm-LICENSE.txt"
 
-# --- bundle -------------------------------------------------------------------
 mkdir -p "$OUT_DIR"
 ZIP="$OUT_DIR/$BUNDLE_NAME.zip"
 rm -f "$ZIP"
@@ -292,9 +260,6 @@ fi
 CHECKSUM="$ZIP.sha256"
 ( cd "$OUT_DIR" && sha256sum "$(basename "$ZIP")" > "$(basename "$ZIP").sha256" )
 
-# --- verification in an unrelated directory -----------------------------------
-# A fresh, uniquely named staging directory; it is left in place for inspection
-# (nothing here deletes directories).
 VERIFY_DIR="$STATE_DIR/$STAMP-verify"
 EXTRACT_DIR="$STATE_DIR/$STAMP-extract"
 mkdir -p "$VERIFY_DIR" "$EXTRACT_DIR"
@@ -406,7 +371,6 @@ else
   echo "    every MSVC-family import of harness.exe and its plugin DLLs is present"
 fi
 
-# --- summary ------------------------------------------------------------------
 echo
 echo "== analysis : $ANALYZE_STATUS_TEXT"
 echo "== tests    : $TEST_STATUS_TEXT"

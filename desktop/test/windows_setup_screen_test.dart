@@ -8,17 +8,6 @@ import 'package:harness/core/models.dart';
 import 'package:harness/app_shell.dart';
 import 'package:harness/state/app_state.dart';
 
-/// The Windows setup screen's STATES, rendered.
-///
-/// A process count and a renderer log say the app started; they say nothing
-/// about whether the screen a user actually sees is honest. These render the
-/// screen for each first-run state the Windows port can be in and assert the
-/// words and the buttons — including that the failed state's button is a
-/// READ-ONLY Recheck, not an installer.
-///
-/// The readiness objects here are built by hand rather than produced by the
-/// provisioner: `windows_runtime_test.dart` covers what the provisioner
-/// DECIDES, and this file covers how those decisions look.
 void main() {
   AppNotifier notifierReady(EnvironmentReadiness readiness) {
     final app = AppNotifier(

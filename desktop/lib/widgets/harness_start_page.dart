@@ -47,7 +47,6 @@ class HarnessStartPage extends StatefulWidget {
   /// Open the Harness Store. Null hides its card (a build without one).
   final VoidCallback? onStore;
 
-  /// This fork's Continue working list, shown under the entry buttons.
   final Widget? resume;
   final ValueChanged<String>? onResourceSearch;
   @override
@@ -455,10 +454,6 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                                 220.0,
                               ),
                             );
-                        // This fork's resume list needs the height that an
-                        // empty page spends above the search, and the search
-                        // and entry buttons at their own size first; a short
-                        // or large-text window keeps upstream's layout.
                         final showResume =
                             widget.resume != null &&
                             entryConstraints.maxHeight >=

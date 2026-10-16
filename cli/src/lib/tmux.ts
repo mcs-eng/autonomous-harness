@@ -55,7 +55,6 @@ function cleanPaneTitle(title: string): string | null {
  * splits on `/` only. Every base-name read in this module must go through this helper so a row
  * parses identically on any host.
  */
-/** A drive-letter prefix in either slash dialect marks a Windows-authored path. */
 const isWindowsDialectPath = (path: string): boolean => /^[A-Za-z]:[\\/]/.test(path)
 
 function basename(path: string): string {
@@ -129,7 +128,7 @@ export function argvTokens(args: string): string[] {
         token += args[index]
         index++
       }
-      if (index < args.length) index++ // consume the closing quote
+      if (index < args.length) index++
       tokens.push(token)
     } else {
       let token = ''
@@ -177,7 +176,7 @@ function argvPrefix(args: string, nativeArgv?: readonly string[]): () => string 
         token += args[index]
         index++
       }
-      if (index < args.length) index++ // consume the closing quote
+      if (index < args.length) index++
     } else {
       while (index < args.length && !/\s/.test(args[index])) {
         token += args[index]
@@ -429,7 +428,6 @@ export function repairInteropRowFromCmdline(
     argv.pop() // one artifact: the terminating NUL of the final argv element
   }
   if (argv[0] !== '/init') return {}
-  // `/init <program> <args…>` — without the relayed program there is nothing to expose.
   if (argv.length < 2) return {}
   // WSL-interop qualification, not just an `/init` head. On a native Linux host `/init` is a real
   // program (docker-init, systemd's shim) whose cmdline can name ANY child —
@@ -1232,7 +1230,6 @@ export function bypassPermissionActiveFromArgv(
 ): boolean {
   const flags = BYPASS_PERMISSION_FLAGS[engine]
   if (!flags) return false
-  // Flattened `ps` args can never prove a bypass flag: refuse to persist state from them.
   if (!boundaryFaithful) return false
   // A named mode says exactly how much the engine approves on its own (`full` — the old
   // skip-everything flag — included); only an argv naming none falls back to the bare flag check.
@@ -1363,7 +1360,6 @@ export function resumeSessionId(engine: RegisteredSession['engine'], args: strin
   for (let index = 0; index < optionTokens.length; index++) {
     const token = optionTokens[index]
     for (const flag of spec.flags) {
-      // `--resume=<id>` spellings carry the value inside the flag token itself.
       if (token.toLowerCase() === flag.toLowerCase() && index + 1 < optionTokens.length) {
         const value = optionTokens[index + 1]
         if (spec.id.test(value)) return value

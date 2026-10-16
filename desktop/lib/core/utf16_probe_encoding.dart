@@ -7,12 +7,6 @@ import 'dart:typed_data';
 /// wide console output) or single-byte text, decided per buffer from the bytes
 /// themselves.
 ///
-/// Decoding first with a strict UTF-8 codec — the old behavior — CORRUPTED or
-/// threw on every wide buffer, and the stream error path swallowed the failure
-/// while `wsl.exe` exited 0, so discovery read an empty inventory. Sniffing on
-/// the DECODED string cannot recover that: the loss already happened. The bytes
-/// are the only reliable evidence, so they are what is inspected here.
-///
 /// Wide buffers are decoded as UTF-16LE (BOM 0xFF 0xFE stripped when present).
 /// Everything else keeps the plain single-byte mapping so non-UTF-8 junk still
 /// round-trips byte-for-byte, matching what the old latin1-style handling did.

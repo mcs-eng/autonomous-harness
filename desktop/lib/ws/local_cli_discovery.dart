@@ -128,12 +128,6 @@ class LocalMachineIdentity {
   /// its identity in the distro's home. The selected WSL identity is therefore
   /// consulted before a stale host-side file from an older prototype. The id is
   /// the CLI's either way; it is never invented here.
-  ///
-  /// A miss is not remembered forever. `LocalCliDiscovery` keeps one identity
-  /// for the life of the app, and a distro that has not written its id yet — WSL
-  /// still starting, the CLI signing in right now — used to poison that object
-  /// with a permanent null. A miss is re-read after [wslIdMissTtl], so the first
-  /// successful read is picked up by the next poll.
   Future<String?> computerId() async {
     final pinned = _normalizeComputerId(environment['ADAPTER_COMPUTER_ID']);
 

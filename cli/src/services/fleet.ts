@@ -264,8 +264,6 @@ async function routeTask(router: FleetRouter, text: string): Promise<RouteAnswer
     console.log(`[route] ${all.length} agents · weighing the first ${ranked.length} (open tiles first)`)
   }
   if (env.TASK_ROUTER === 'jev') {
-    // Jev ranks; the standard machinery below still owns the fallback. A null — no key, a timeout,
-    // a malformed answer — falls through to that stronger ranking instead of a weaker local duplicate.
     const routed = await routeTaskWithJev(
       text,
       ranked.map((agent) => ({ id: agent.id, name: agent.name, engine: agent.engine })),

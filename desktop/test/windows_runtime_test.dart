@@ -9,14 +9,6 @@ import 'package:harness/ws/local_cli_discovery.dart';
 
 import 'support/wsl_smoke.dart';
 
-/// The Windows port's own decisions, pinned where they can be pinned without a
-/// WSL2 distribution or a Harness account: the argv handed to `wsl.exe`, which
-/// distributions may be used, what counts as ready, and how each first-run
-/// state is named.
-///
-/// Nothing here claims to have RUN the CLI inside a distro — this host has no
-/// development distribution, and Docker's distributions are deliberately never
-/// touched. What is pinned is the decision and the command line.
 void main() {
   ProcessRunner fake(
     ProcessResult Function(String executable, List<String> arguments) respond,
@@ -661,7 +653,6 @@ void main() {
         (await runner.resolve(['version'])).executable,
         HarnessCliRunner.windowsMissingCliExecutable,
       );
-      // Inside the TTL the miss is remembered without another probe.
       expect(
         (await runner.resolve(['version'])).executable,
         HarnessCliRunner.windowsMissingCliExecutable,
@@ -1217,7 +1208,6 @@ void main() {
       );
 
       expect(await identity.computerId(), isNull);
-      // Inside the TTL the miss is remembered, and no distro is asked again.
       expect(await identity.computerId(), isNull);
       expect(reads, 1);
 

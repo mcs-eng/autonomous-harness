@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Shared plumbing for desktop/scripts/publish-managed-{node,tmux,grid}-runtime.sh.
-# Source it, don't execute it. Each publisher keeps only what is genuinely its
-# own: version validation, archive production and validation, and its upload loop.
-
-# publish_require_tools <command>... — every named tool must be on PATH.
 publish_require_tools() {
   for command in "$@"; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -38,9 +33,6 @@ gcs_cp() {
   gcloud "${args[@]}" "$src" "$dst"
 }
 
-# publish_init_env <metadata-path> — bucket/manifest coordinates and the temp
-# work dir. Sets GCS_BUCKET, PUBLIC_BASE, METADATA_PATH, WORK_DIR, SRC, DST in
-# the caller's shell and traps EXIT to clean the work dir up.
 publish_init_env() {
   GCS_BUCKET="${GCS_BUCKET:-s3-autonomous-upgrade-3}"
   PUBLIC_BASE="${GCS_PUBLIC_BASE_URL:-https://storage.googleapis.com/${GCS_BUCKET}}"
@@ -51,17 +43,12 @@ publish_init_env() {
   trap 'rm -rf "$WORK_DIR"' EXIT
 }
 
-# Fetch the current manifest into $SRC, starting from {} when none exists yet.
 publish_fetch_current_metadata() {
   if ! gcs_cp "gs://${GCS_BUCKET}/${METADATA_PATH}" "$SRC" 2>/dev/null; then
     printf '{}' > "$SRC"
   fi
 }
 
-# publish_merge_metadata <top-level key> — merges ${ENTRIES[@]} into the
-# manifest at $SRC and writes the result to $DST. Each entry is
-# "key|version|url|sha256|size|archive-root"; the sha256 is what the installer
-# trusts — never a checksum file fetched at install time.
 publish_merge_metadata() {
   python3 - "$SRC" "$DST" "$1" "${ENTRIES[@]}" <<'PY'
 import json, sys
@@ -92,7 +79,6 @@ with open(dst, "w") as f:
 PY
 }
 
-# Upload the merged manifest and print where it landed.
 publish_upload_metadata() {
   gcs_cp "$DST" "gs://${GCS_BUCKET}/${METADATA_PATH}" \
     'no-cache, no-store, must-revalidate' 'application/json'

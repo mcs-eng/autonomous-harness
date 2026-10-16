@@ -746,11 +746,6 @@ class _CheckRow extends StatelessWidget {
         'Ready',
       ),
       EnvironmentStepStatus.failed => (
-        // Upstream (94f9ce344) moved this row off AppColors.danger to
-        // colorScheme.error: the danger ink measures 4.40:1 on the setup
-        // panel, under the 4.5 floor the upstream contrast test enforces on
-        // every palette. The stale danger value came from a conflict
-        // resolution, not a fork decision, so upstream's choice stands.
         Theme.of(context).colorScheme.error,
         AppIcons.circleX,
         'Missing',

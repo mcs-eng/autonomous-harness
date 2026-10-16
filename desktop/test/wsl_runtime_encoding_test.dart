@@ -5,17 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/utf16_probe_encoding.dart';
 import 'package:harness/core/wsl_runtime.dart';
 
-/// Pins the review cycle-2 P2 fix at the BYTE boundary: production decodes
-/// `wsl.exe` output with [Utf16LeProbeEncoding], which sniffs the NUL
-/// alternation in the RAW bytes. The old path ran the strict UTF-8 stream
-/// codec first, so a non-ASCII distro name failed or corrupted inside the
-/// decoder and the swallowed stream error yielded an EMPTY inventory while
-/// `wsl.exe` exited 0.
-///
-/// Review cycle-3 P2 adds two pins: a BOM is decisive wide evidence on its
-/// own (a non-Latin-dominant buffer fails the NUL census but still starts
-/// with 0xFF 0xFE), and a CJK-dominant buffer with NO ASCII prefix round-trips.
-
 void main() {
   group('Utf16LeProbeEncoding (byte-level, review cycle-2 P2)', () {
     List<int> utf16le(String text) {
@@ -112,11 +101,8 @@ void main() {
     });
 
     test('a streamed strict-UTF-8 pipeline used to fail on these bytes', () {
-      // Documents the OLD failure mode: utf8.decode on a wide buffer throws
-      // (0x9f/0xc3 sequences), which the stream error handler swallowed.
       final bytes = utf16le('Ubuntu-é' + String.fromCharCode(13) + String.fromCharCode(10));
       expect(() => utf8.decode(bytes), throwsFormatException);
-      // The new decoder handles exactly those bytes.
       expect(
         const Utf16LeProbeEncoding().decoder.convert(bytes).trim(),
         'Ubuntu-é',

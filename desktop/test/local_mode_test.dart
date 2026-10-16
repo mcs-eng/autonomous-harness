@@ -14,14 +14,6 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/ws/local_cli_discovery.dart';
 import 'package:harness/ws/ws_conn.dart';
 
-/// Local mode, as this fork labels it: upstream's guest desk.
-///
-/// A signed-out desktop window opens on this computer's desk, and an account
-/// is asked for only when another machine is reached for. The fork adds two
-/// things on top: the labels ("Local mode") and, on the login screen a desktop
-/// window can still meet (a cancelled or failed sign-in, a CLI that could not
-/// answer), the way back to that desk.
-
 /// The CLI's answer to `auth status --json`, scripted; never a real process.
 class _ScriptedCli extends CliLogin {
   _ScriptedCli(this.answer);

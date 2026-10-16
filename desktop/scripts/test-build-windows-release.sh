@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Synthetic regression checks for build-windows-release.sh. No Flutter, Visual Studio, installer build, signing, upload, or publication is performed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
