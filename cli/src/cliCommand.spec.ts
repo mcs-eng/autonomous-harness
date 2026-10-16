@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { createServer, type RequestListener, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'path'
@@ -194,6 +194,46 @@ describe('CLI login/start command contract', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('Unknown command: not-a-command')
   }, ONE_RUN_TEST_MS)
+})
+
+describe('fork-specific Grid profile commands', () => {
+  it('advertises every profile command and its required set arguments in help', async () => {
+    const result = await run('--help')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('harness grid profile list    list server-owned local Grid profiles')
+    expect(result.stdout).toContain('harness grid profile set ID --label LABEL --home ABSOLUTE_PATH --grid GRID')
+    expect(result.stdout).toContain('harness grid profile remove ID')
+  }, ONE_RUN_TEST_MS)
+
+  it('parses set, list, and remove arguments through the public CLI', async () => {
+    const root = freshRoot()
+    const gridHome = join(root, 'grid home')
+    mkdirSync(gridHome)
+
+    const set = await runAsync(root, [
+      'grid', 'profile', 'set', 'node1', '--json',
+      '--label', 'Node 1 local', '--home', gridHome, '--grid', 'node1-grid',
+    ], {})
+    expect(set.status, set.stderr).toBe(0)
+    expect(JSON.parse(set.stdout)).toEqual({ profile: {
+      id: 'node1', label: 'Node 1 local', gridHome: realpathSync(gridHome), gridName: 'node1-grid',
+    } })
+
+    const list = await runAsync(root, ['grid', 'profile', 'list', '--json'], {})
+    expect(list.status, list.stderr).toBe(0)
+    expect(JSON.parse(list.stdout)).toEqual({ profiles: [{
+      id: 'node1', label: 'Node 1 local', gridHome: realpathSync(gridHome), gridName: 'node1-grid',
+    }] })
+
+    const remove = await runAsync(root, ['grid', 'profile', 'remove', 'node1', '--json'], {})
+    expect(remove.status, remove.stderr).toBe(0)
+    expect(JSON.parse(remove.stdout)).toEqual({ id: 'node1', removed: true })
+
+    const empty = await runAsync(root, ['grid', 'profile', 'list', '--json'], {})
+    expect(empty.status, empty.stderr).toBe(0)
+    expect(JSON.parse(empty.stdout)).toEqual({ profiles: [] })
+  }, 4 * ONE_RUN_TEST_MS)
 })
 
 describe('the processes this spec starts', () => {
