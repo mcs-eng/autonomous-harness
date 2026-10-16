@@ -141,6 +141,7 @@ export function loadEnvFile(file: string): void {
 
 /** Agent ids are interpolated into paths and compared against wire input — keep them boring. */
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+const AGENT_KEYS = new Set(['id', 'name', 'description', 'cwd'])
 
 export function loadAgents(file: string): AgentEntry[] {
   if (!existsSync(file)) {
@@ -162,23 +163,38 @@ export function loadAgents(file: string): AgentEntry[] {
 
   const seen = new Set<string>()
   return raw.map((entry, i) => {
-    const e = entry as Partial<AgentEntry>
     const where = `${file}[${i}]`
-    if (!e.id || !ID_RE.test(e.id)) throw new Error(`${where}: id must match ${ID_RE} (got ${JSON.stringify(e.id)})`)
-    if (seen.has(e.id)) throw new Error(`${where}: duplicate id "${e.id}"`)
-    seen.add(e.id)
-    if (!e.name?.trim()) throw new Error(`${where}: name is required — it is shown to the user`)
-    if (!e.cwd || !isAbsolute(e.cwd)) throw new Error(`${where}: cwd must be an absolute path`)
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`${where}: agent must be an object`)
+    }
+    const unknown = Object.keys(entry).find((key) => !AGENT_KEYS.has(key))
+    if (unknown) throw new Error(`${where}: unknown key "${unknown}"`)
+
+    const { id, name, description, cwd } = entry as Record<string, unknown>
+    if (typeof id !== 'string' || !ID_RE.test(id)) {
+      throw new Error(`${where}: id must match ${ID_RE} (got ${JSON.stringify(id)})`)
+    }
+    if (seen.has(id)) throw new Error(`${where}: duplicate id "${id}"`)
+    seen.add(id)
+    if (typeof name !== 'string' || !name.trim()) {
+      throw new Error(`${where}: name is required — it is shown to the user`)
+    }
+    if (description !== undefined && typeof description !== 'string') {
+      throw new Error(`${where}: description must be a string`)
+    }
+    if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd)) {
+      throw new Error(`${where}: cwd must be an absolute path`)
+    }
     // Fail at load, not at the first turn: a bad cwd would otherwise surface as a mysterious agent
     // failure minutes later, which is exactly the failure mode this provider exists to avoid.
-    if (!existsSync(e.cwd) || !statSync(e.cwd).isDirectory()) {
-      throw new Error(`${where}: cwd does not exist or is not a directory: ${e.cwd}`)
+    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+      throw new Error(`${where}: cwd does not exist or is not a directory: ${cwd}`)
     }
     // RESOLVE SYMLINKS. Claude records the fully-resolved path, and the transcript directory name is
     // derived from it — on macOS `/tmp` is a symlink to `/private/tmp`, so a configured `/tmp/x`
     // would look for `-tmp-x` while Claude wrote `-private-tmp-x`, and every history read would come
     // back empty. The conformance suite caught exactly this.
-    return { id: e.id, name: e.name.trim(), description: e.description?.trim() ?? '', cwd: realpathSync(resolve(e.cwd)) }
+    return { id, name: name.trim(), description: description?.trim() ?? '', cwd: realpathSync(resolve(cwd)) }
   })
 }
 
