@@ -129,6 +129,11 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(path, "q\u00fcnal.txt")
         self.assertEqual(guard.shown_path(path, ["Q\u00dcNAL"]), "[redacted path]")
 
+    def test_destination_paths_preserve_spaces_and_non_utf8_bytes(self):
+        self.assertEqual(guard.destination_path("+++ b/foo \t"), "foo ")
+        self.assertEqual(guard.destination_path('+++ "b/\\377.bin"'), "\udcff.bin")
+        self.assertEqual(guard.destination_path("+++ b/\udcfe.bin"), "\udcfe.bin")
+
     def test_non_ascii_terms_match_case_insensitively(self):
         self.assertTrue(guard.contains_term("Über alles", ["\u00fcber"]))
         self.assertFalse(guard.contains_term("Überhaupt", ["\u00fcber"]))
@@ -185,6 +190,31 @@ class RepositoryScanTests(unittest.TestCase):
     def scan(self, head, title="", body="", terms=None, base=None):
         return guard.scan_pull_request(
             self.root, base or self.base, head, title, body, terms if terms is not None else FAKE_TERMS)
+
+    def commit_blob_tree(self, blobs, parent=None):
+        # Build Git data directly: Windows cannot check out all legal POSIX names.
+        entries = []
+        for name, content in blobs:
+            oid = subprocess.check_output(["git", "hash-object", "-w", "--stdin"],
+                                          cwd=self.root, input=content).strip()
+            entries.append(b"100644 blob " + oid + b"\t" + name + b"\0")
+        tree = subprocess.check_output(["git", "mktree", "-z"], cwd=self.root,
+                                       input=b"".join(entries)).decode().strip()
+        args = ["git", "commit-tree", tree]
+        if parent is not None:
+            args.extend(["-p", parent])
+        return subprocess.check_output(args, cwd=self.root, input=b"fixture\n").decode().strip()
+
+    def test_text_hunks_cannot_skip_a_different_binary_path(self):
+        for binary_name, text_name in ((b"foo", b"foo "), (b"\xff.bin", b"\xfe.bin")):
+            with self.subTest(binary_name=binary_name):
+                parent = self.commit_blob_tree([
+                    (binary_name, b"\x00public\xff"), (text_name, b"public\n"),
+                ])
+                head = self.commit_blob_tree([
+                    (binary_name, b"\x00ExampleHost\xff"), (text_name, b"public\nmore\n"),
+                ], parent)
+                self.assertTrue(self.scan(head, base=parent, terms=["examplehost"]))
 
     def run_guard(self, head, terms):
         env = os.environ.copy()

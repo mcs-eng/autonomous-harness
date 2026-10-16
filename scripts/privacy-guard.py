@@ -150,13 +150,13 @@ def unquote_git_path(text):
                 out.append(_GIT_ESCAPES[nxt])
                 i += 2
                 continue
-        out.extend(ch.encode("utf-8"))
+        out.extend(ch.encode("utf-8", errors="surrogateescape"))
         i += 1
-    return out.decode("utf-8", errors="replace")
+    return out.decode("utf-8", errors="surrogateescape")
 
 
 def destination_path(header):
-    raw = header[4:].split("\t", 1)[0].strip()
+    raw = header[4:].split("\t", 1)[0]
     if raw == "/dev/null":
         return None
     if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
@@ -230,7 +230,9 @@ def git_output(repo, *args):
         raise RuntimeError("git failed")
     # Decode bytes directly. Text mode would turn a lone CR inside a line
     # into a line break and throw off the hunk line counts.
-    return result.stdout.decode("utf-8", errors="replace")
+    # Keep path identity lossless: distinct invalid UTF-8 names must not alias.
+    # safe_line replaces non-printable surrogate escapes before displaying them.
+    return result.stdout.decode("utf-8", errors="surrogateescape")
 
 
 def commit_messages(repo, base, head):
@@ -293,7 +295,7 @@ def changed_blobs(repo, base, head):
                 raise RuntimeError("git failed")
             path = fields[i]
             i += 1
-        yield status[:1], path.decode("utf-8", errors="replace"), metadata[2], metadata[3], metadata[1]
+        yield status[:1], path.decode("utf-8", errors="surrogateescape"), metadata[2], metadata[3], metadata[1]
 
 
 def blob_bytes(repo, oid, display_path):
