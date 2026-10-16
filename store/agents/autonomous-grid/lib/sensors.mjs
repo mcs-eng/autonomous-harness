@@ -44,7 +44,7 @@ export function readNvidiaSmiSensor(source, { spawnImpl = spawn, timeoutMs = 800
   return new Promise(resolve => {
     let stdout = '', stderrBytes = 0, finished = false, timer, child;
     const finish = result => { if (finished) return; finished = true; clearTimeout(timer); resolve({ ...result, observedAt: new Date().toISOString() }); };
-    const stop = error => { try { child?.kill('SIGKILL'); } catch { /* already gone */ } finish({ ok: false, error }); };
+    const stop = error => { try { child?.kill('SIGKILL'); } catch { } finish({ ok: false, error }); };
     try { child = spawnImpl(call.file, call.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }); }
     catch { finish({ ok: false, error: 'NVIDIA SSH sensor could not start.' }); return; }
     child.stdout?.setEncoding('utf8').on('data', chunk => {

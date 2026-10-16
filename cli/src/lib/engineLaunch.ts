@@ -108,7 +108,6 @@ export const FIRST_PROMPT_ARGS: Readonly<Record<AgentEngine, readonly string[] |
   grok: null,
   agy: null,
   copilot: null,
-  // `cline --tui [prompt]` starts the interactive session with a positional prompt.
   cline: ['--'],
   terminal: null,
 }

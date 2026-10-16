@@ -194,7 +194,6 @@ describe('tmux process primitives', () => {
   })
 
   it('recognises stable installed binary forms', () => {
-    // These rows assert name matching, independently of binaries on the host.
     const commands = ownership()
     expect(engineProcessMatchScore({ executable: 'devin', args: 'devin' }, 'devin', commands)).toBe(3)
     expect(engineProcessMatchScore({ executable: 'muse-bin-0.1.0-R708.1', args: 'muse-bin-0.1.0-R708.1' }, 'muse', commands)).toBe(3)
@@ -259,7 +258,6 @@ describe('tmux process primitives', () => {
     // only as part of `node_modules` in the entrypoint path. Splitting on the
     // full `nodejs\\node.exe` token shows exactly one interpreter occurrence.
     expect((fixed.args ?? '').split('nodejs\\\\node.exe').length - 1).toBe(1)
-    // And the repaired row still reaches the engine entrypoint.
     expect(
       engineProcessMatchScore(
         { executable: fixed.executable!, args: fixed.args! },
@@ -826,9 +824,7 @@ describe('tmux process primitives', () => {
   ] as const)('does not count a flag-shaped positional after `--` for %s', (engine, flag) => {
     expect(bypassPermissionActive(engine, `engine -- ${flag}`)).toBe(false)
     expect(bypassPermissionActive(engine, `engine -- prompt about ${flag}`)).toBe(false)
-    // Before the terminator it still counts.
     expect(bypassPermissionActive(engine, `engine ${flag} -- prompt`)).toBe(true)
-    // No terminator at all: unchanged behavior.
     expect(bypassPermissionActive(engine, `engine ${flag}`)).toBe(true)
   })
 
@@ -864,7 +860,6 @@ describe('tmux process primitives', () => {
 
   it('argvTokens treats \\" inside a double-quoted token as a literal quote', () => {
     expect(argvTokens('codex "say \\"hi\\" now"')).toEqual(['codex', 'say "hi" now'])
-    // Unchanged behaviour for the plain cases the matcher relies on.
     expect(argvTokens('codex "hello world" --flag')).toEqual(['codex', 'hello world', '--flag'])
     expect(argvTokens("claude 'pick --dangerously-skip-permissions' x")).toEqual(
       ['claude', 'pick --dangerously-skip-permissions', 'x'])
@@ -893,7 +888,6 @@ describe('tmux process primitives', () => {
     const joined = cmdlineArgv.map(quoteArgvElement).join(' ')
     expect(argvTokens(joined)).toEqual(cmdlineArgv)
     expect(bypassPermissionActive('codex', joined)).toBe(false)
-    // The old shape — the same argv NUL->space-joined bare — DID flip (documents the defect).
     const legacyJoin = cmdlineArgv.join(' ')
     expect(bypassPermissionActive('codex', legacyJoin)).toBe(true)
   })
@@ -972,11 +966,8 @@ describe('tmux process primitives', () => {
    */
   it('treats flattened ps args as no evidence for bypass detection', () => {
     const flattened = 'codex Explain --dangerously-bypass-approvals-and-sandbox please'
-    // The old shape (boundaryFaithful defaults true) reproduces the reviewer's flip...
     expect(bypassPermissionActive('codex', flattened)).toBe(true)
-    // ...and the sentinel-bearing form refuses it.
     expect(bypassPermissionActiveFromArgv('codex', flattened, false)).toBe(false)
-    // A faithful real launch still reads true.
     expect(bypassPermissionActiveFromArgv(
       'codex', 'codex --dangerously-bypass-approvals-and-sandbox', true,
     )).toBe(true)
@@ -989,14 +980,11 @@ describe('tmux process primitives', () => {
    * with the id as the NEXT token, and stops at a bare `--` terminator.
    */
   it('does not read a session id out of prompt text', () => {
-    // Quoted prompt argument: the flag text is inside ONE token, never a standalone flag.
     expect(resumeSessionId(
       'opencode', '"/usr/local/bin/opencode" "Explain --session ses_OTHER now"',
     )).toBeNull()
-    // After the `--` option terminator everything is positional prompt text.
     expect(resumeSessionId('opencode', 'opencode -- Explain --session ses_OTHER now')).toBeNull()
     expect(resumeSessionId('cursor', 'agent -- --resume 53d3843c-724e-47ff-ae3a-9fedfa328bba')).toBeNull()
-    // A real flag still binds.
     expect(resumeSessionId('opencode', 'opencode --session ses_05e335115ffeM05DT5hJHeN3Vp'))
       .toBe('ses_05e335115ffeM05DT5hJHeN3Vp')
   })

@@ -7990,9 +7990,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           names[shown[index].id]!,
       ];
       final toolHeight = workspaceBarControlHeight(context);
-      // Tabs close on Windows (Meta+W is taken); upstream's new
-      // DesktopWorkspaceTab owns the close cell, including the fork's
-      // pinned-close patch, so the old minimumTabWidth budget chain is gone.
+      // Tabs close on Windows (Meta+W is taken).
       final prefs = appearancePrefsStore.value.prompt;
       // Agent Messages' color: the design system's accent blue, as a mark.
       final messagesColor = grid.AppPalette.accentOnSurface;

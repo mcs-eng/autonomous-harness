@@ -27,10 +27,7 @@ const DEFAULT_TIMEOUT_MS = 8_000
 /**
  * Asks Jev to rank the offered agents for one task, and resolves null whenever
  * it cannot answer — no key, one or zero candidates, any non-2xx, malformed,
- * or non-probabilistic response, or the timeout. Null is the caller's signal to
- * fall through to the standard ranking, which sees the same candidates with
- * more signal than any local stand-in could; there is deliberately no local
- * fallback in here to maintain.
+ * or non-probabilistic response, or the timeout.
  *
  * Sends only the task and minimal candidate descriptions. Opaque option keys
  * are mapped back locally; no Harness agent id, transcript, path, history,

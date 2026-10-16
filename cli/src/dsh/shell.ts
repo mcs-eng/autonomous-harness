@@ -74,7 +74,6 @@ const BASH_NO_TTY = /^(?:\S*\/)?bash: (?:cannot set terminal process group \(-?\
  */
 export const DSH_STOP_TRAP = "trap 'exit 143' TERM"
 
-/** How long killProcessGroup waits after its SIGTERM before the SIGKILL. */
 export const KILL_GRACE_MS = 3_000
 
 /**

@@ -25,7 +25,6 @@ export const transcriptRoot: Readonly<Record<AgentEngine, (() => string) | 'stor
   commandcode: () => join(env.COMMANDCODE_HOME, 'projects'),
   claude: 'store',
   opencode: null, kilo: null, hermes: null, devin: null, terminal: null,
-  // Fork: Cline runs in its pane without Harness history, so there is no transcript to point at.
   cline: null,
 }
 export const engineKeepsTranscriptFile = (engine: AgentEngine): boolean => transcriptRoot[engine] !== null

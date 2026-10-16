@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Read mission.json, solve it, and write the verdict plus a report and a trajectory.
 import fs from 'node:fs'
 import path from 'node:path'
 import { solveMission, formatReport, trajectoryCsv, verdictFromSolve } from '../engine.mjs'

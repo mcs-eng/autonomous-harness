@@ -348,8 +348,6 @@ void main() {
 
       expect(recorder.installFlags, everyElement(isFalse));
       expect(app.environmentReadiness.isReady, isTrue);
-      // A signed-out DESKTOP window lands on the guest desk (local mode), not
-      // a login wall.
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
       await tester.pumpWidget(const SizedBox());
@@ -358,12 +356,8 @@ void main() {
   });
 }
 
-/// A window that never reaches for a real daemon.
-///
-/// A signed-out DESKTOP window (`viewer == null`) now lands on the guest desk
-/// past the daemon gate instead of stopping at a login wall — see
-/// `_continueAfterEnvironmentReady`. A unit test must not shell out to a real
-/// `harness` daemon to get there.
+/// A window that never reaches for a real daemon. A unit test must not shell
+/// out to a real `harness` daemon.
 class _GuestApp extends AppNotifier {
   _GuestApp({
     required super.config,

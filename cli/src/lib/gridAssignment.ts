@@ -267,8 +267,7 @@ export async function gridAssignmentFromEnv(
   return classifyGridAssignment(engine, env, args, trustedLaunch)
 }
 
-/** One fresh classification per process per pass; this is deliberately not an assignment cache. A process the
- *  core marked with its own launch's endpoint (a local Grid profile) is recognised on that endpoint too. */
+/** A process the core marked with its own launch's endpoint (a local Grid profile) is recognised on that endpoint too. */
 export async function gridAssignments(processes: readonly GridAssignmentProcess[]): Promise<GridAssignmentAnswer[]> {
   return Promise.all(processes.map(async process => ({ key: process.key,
     assignment: await gridAssignmentFromEnv(process.engine, process.env, process.args,

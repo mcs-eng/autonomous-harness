@@ -239,13 +239,6 @@ class HarnessCliRunner {
     }
   }
 
-  /// The CLI inside WSL2.
-  ///
-  /// A probe that found NOTHING is retried after [_wslProbeMissTtl]: "no distro
-  /// answered yet" is often transient (WSL is still starting, a distro was just
-  /// installed, `wsl --install` finished between two polls), and caching that
-  /// miss for the life of the runner is what used to force a restart before the
-  /// app could see a CLI that had just appeared. A hit is cached for good.
   Future<WslHarnessProbe?> _wslHarness() {
     return _wslProbeCache.read(() async {
       final verified = verifiedWslProbe;
@@ -466,7 +459,7 @@ class HarnessCliInvocation {
   final HarnessCliSource source;
 
   /// The WSL2 distro the CLI was found in, when [source] is
-  /// [HarnessCliSource.wsl]. Null means the default distro.
+  /// [HarnessCliSource.wsl].
   final String? wslDistro;
 
   const HarnessCliInvocation({

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Loopback studio for a Kepler workspace. Serves the pane, the mission, and the kernel.
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'

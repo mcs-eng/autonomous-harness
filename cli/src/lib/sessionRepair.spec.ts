@@ -63,9 +63,6 @@ describe('session repair', () => {
     utimesSync(file, new Date(startedAt + 10_000), new Date(startedAt + 10_000))
     const { findCorroboratedResumeSession } = await load(root)
 
-    // Concrete cross-process case: process A's flattened prompt happens to contain `--resume
-    // sess-resumed` while process B in the same cwd updates that old transcript. The store result
-    // matches the hinted id, but A does not hold B's file, so A must remain unbound.
     await expect(findCorroboratedResumeSession('claude', CWD, startedAt, 'sess-resumed', { pid: process.pid }))
       .resolves.toBeNull()
     await expect(findCorroboratedResumeSession('claude', CWD, startedAt, 'sess-from-prompt', { pid: process.pid }))

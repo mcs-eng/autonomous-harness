@@ -1,5 +1,4 @@
 #!/bin/sh
-# Exit 0 when this machine can run Kepler. One line per check.
 set -u
 fail=0
 if command -v node >/dev/null 2>&1; then

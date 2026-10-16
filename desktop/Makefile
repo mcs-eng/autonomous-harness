@@ -53,7 +53,5 @@ terminal-local-e2e:
 terminal-prod-e2e:
 	bash scripts/test-terminal-prod-e2e.sh
 
-## build-windows-release: Windows 11 x64 only — analyze, test, build the release app, and write the
-## unsigned distributable bundle + sha256 to dist/. No cross-compiling, no signing, no upload.
 build-windows-release:
 	bash scripts/build-windows-release.sh $(ARGS)
