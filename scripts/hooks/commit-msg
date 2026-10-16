@@ -11,6 +11,12 @@ if [ -z "$message_file" ]; then
   exit 1
 fi
 
+# Strip every Co-authored-by trailer (case-insensitive) so no personal email lands in a commit.
+strip_tmp="$1.strip.$$"
+grep -iv '^co-authored-by:' "$1" > "$strip_tmp" || true
+mv "$strip_tmp" "$1"
+
+
 home=${HOME:-${USERPROFILE:-}}
 terms_file=
 if [ -n "${PRIVATE_TERMS_FILE:-}" ] && [ -f "$PRIVATE_TERMS_FILE" ]; then
