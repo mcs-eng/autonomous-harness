@@ -29,7 +29,7 @@ async function prepare() {
 async function codexLaunch(target: GridLaunchOverride) {
   return buildLaunchOverrides({
     machine: () => ({ hermesSystemManaged: false }),
-    // The models service's builder, in this process: the launch is already refreshed above.
+    // Use the models service's in-process builder; the launch was refreshed above.
     gridLaunch: gridLaunchInProcess(),
     tmuxSupportsSessionEnv: async () => true,
     writeGridConfigDir: async () => { throw new Error('Unexpected config write') },

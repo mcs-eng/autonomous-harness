@@ -18,7 +18,7 @@ beforeEach(() => {
   for (const name of ['harness.json', 'AGENTS.md', 'LICENSE', 'VERSIONS', 'viewer.mjs']) {
     writeFileSync(join(root, name), 'ordinary text\r\n', { mode: 0o600 })
   }
-  // A Windows checkout cannot convey the scripts' POSIX executable bits.
+  // A Windows checkout cannot preserve POSIX executable bits for these scripts.
   for (const name of ['viewer.sh', 'toolchain/fleet']) {
     writeFileSync(join(root, name), '#!/bin/sh\r\nprintf "fixture\\n"\r\n', { mode: 0o600 })
   }
