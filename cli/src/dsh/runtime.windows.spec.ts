@@ -11,7 +11,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-it('creates every native runtime path component and rewrites native legacy skill paths', () => {
+it.runIf(process.platform === 'win32')('creates every native runtime path component and rewrites native legacy skill paths', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'native-runtime-')))
   roots.push(root)
   const workspace = join(root, 'project with spaces')

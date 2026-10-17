@@ -70,7 +70,7 @@ describe('parseVerdict', () => {
     expect(parseVerdict(JSON.stringify({ spec: 1, ready: true, updatedAt: 'yesterday' }))?.updatedAt).toBeNull()
   })
 
-  it('rejects Windows absolute artifacts while keeping Windows-style relative artifacts', () => {
+  it('rejects Windows absolute artifacts', () => {
     for (const artifact of ['C:\\outside.step', '\\outside.step', '\\\\server\\share\\outside.step']) {
       const verdict = parseVerdict(JSON.stringify({
         spec: 1, ready: true, artifact,
@@ -79,8 +79,24 @@ describe('parseVerdict', () => {
       expect(verdict?.artifact).toBeNull()
       expect(verdict?.phases[0]?.artifact).toBeNull()
     }
-    expect(parseVerdict(JSON.stringify({ spec: 1, ready: true, artifact: 'models\\part.step' }))?.artifact)
-      .toBe('models\\part.step')
+  })
+
+  it.each(['C:foo.step', 'C:../outside.step', 'c:..\\x.step'])('rejects drive-qualified artifact %s', (artifact) => {
+    const verdict = parseVerdict(JSON.stringify({
+      spec: 1, ready: true, artifact,
+      phases: [{ name: 'Build', artifact }],
+    }))
+    expect(verdict?.artifact).toBeNull()
+    expect(verdict?.phases[0]?.artifact).toBeNull()
+  })
+
+  it('normalizes Windows-style relative artifacts for viewer URLs', () => {
+    const verdict = parseVerdict(JSON.stringify({
+      spec: 1, ready: true, artifact: 'models\\part.step',
+      phases: [{ name: 'Build', artifact: 'models\\part.step' }],
+    }))
+    expect(verdict?.artifact).toBe('models/part.step')
+    expect(verdict?.phases[0]?.artifact).toBe('models/part.step')
   })
 })
 

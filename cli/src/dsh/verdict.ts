@@ -62,8 +62,8 @@ function parsePhases(raw: unknown): DshPhase[] {
 
 function cleanRelative(value: unknown): string | null {
   if (typeof value !== 'string' || !value || value.length > 1024) return null
-  if (posix.isAbsolute(value) || win32.isAbsolute(value) || value.split(/[\\/]/).some((segment) => segment === '..')) return null
-  return value
+  if (/^[A-Za-z]:/.test(value) || posix.isAbsolute(value) || win32.isAbsolute(value) || value.split(/[\\/]/).some((segment) => segment === '..')) return null
+  return value.replace(/\\/g, '/')
 }
 
 /** Reduce a verdict file to the wire shape; null when it is not a spec-1 verdict. */
