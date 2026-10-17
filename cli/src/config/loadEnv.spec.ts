@@ -65,6 +65,13 @@ describe('Harness environment loading', () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ BACKEND_WS_URL: 'ws://sandbox.invalid:8090', AUTONOMOUS_ENV: 'stag' })
   })
 
+  it('keeps an absolute DOTENV_CONFIG_PATH working', () => {
+    const root = project()
+    const result = run(root, { DOTENV_CONFIG_PATH: join(root, '.env') })
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ BACKEND_WS_URL: 'ws://sandbox.invalid:8090', AUTONOMOUS_ENV: 'stag' })
+  })
+
   it('preserves valid dotenv quoting, comments, export, colon, multiline and CRLF syntax', () => {
     const root = project()
     const file = join(root, 'syntax.env')

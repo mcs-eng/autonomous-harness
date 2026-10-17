@@ -116,7 +116,7 @@ try {
 const loadedEnvironmentFile = selectedEnvironmentFile
 
 interface EnvironmentFileValidation {
-  unknownKeyIssue?: (key: string, knownKeys: readonly string[]) => string | undefined
+  unknownKeyWarning?: (key: string, knownKeys: readonly string[]) => string | undefined
 }
 
 /** Validate only values supplied by the selected file; ambient process variables retain compatibility. */
@@ -131,13 +131,24 @@ export function validateLoadedEnvironment(
     const raw = process.env[key]
     if (raw === undefined) continue
     const line = loadedEnvironmentFile.lines.get(key) ?? 1
-    if (!Object.prototype.hasOwnProperty.call(fields, key)) {
-      const issue = options.unknownKeyIssue?.(key, knownKeys)
-      if (issue) exitWith(new EnvironmentFileError(loadedEnvironmentFile.path, `line ${line}, ${key}: ${issue}`))
+    const fieldKey = Object.prototype.hasOwnProperty.call(fields, key)
+      ? key
+      : process.platform === 'win32'
+        ? knownKeys.find((known) => known.toUpperCase() === key.toUpperCase())
+        : undefined
+    if (!fieldKey) {
+      const warning = options.unknownKeyWarning?.(key, knownKeys)
+      if (warning) {
+        console.warn(new EnvironmentFileError(
+          loadedEnvironmentFile.path,
+          `line ${line}, ${key}: ${warning}`,
+          'Harness environment file warning',
+        ).message)
+      }
       continue
     }
 
-    const field = fields[key]
+    const field = fields[fieldKey]
     const issue = field.fileIssue?.(raw)
     if (issue) exitWith(new EnvironmentFileError(loadedEnvironmentFile.path, `line ${line}, ${key}: ${issue}`))
   }

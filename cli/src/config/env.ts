@@ -402,9 +402,9 @@ function oneEditApart(left: string, right: string): boolean {
   return true
 }
 
-function unknownFileKeyIssue(key: string, knownKeys: readonly string[]): string | undefined {
-  // The file is also an intentional pass-through to child tools. Only reject a high-confidence typo
-  // of a key this boundary validates; every other variable remains untouched.
+function unknownFileKeyWarning(key: string, knownKeys: readonly string[]): string | undefined {
+  // The file is also an intentional pass-through to child tools. A likely typo is advisory only:
+  // unknown variables must remain available to the tools that own them.
   const schema = fields as Readonly<Record<string, EnvField<unknown>>>
   const normalized = key.toUpperCase()
   const suggestion = knownKeys.find((known) => schema[known].fileIssue
@@ -413,7 +413,7 @@ function unknownFileKeyIssue(key: string, knownKeys: readonly string[]): string 
 }
 
 function validateEnv(): Env {
-  validateLoadedEnvironment(fields, { unknownKeyIssue: unknownFileKeyIssue })
+  validateLoadedEnvironment(fields, { unknownKeyWarning: unknownFileKeyWarning })
   const parsed = parseEnv(fields, process.env)
 
   if (!parsed.ok) {
