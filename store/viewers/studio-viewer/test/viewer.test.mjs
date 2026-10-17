@@ -96,6 +96,41 @@ test('ignores provisional results until the success verdict commits them',async 
   assert.equal((await f.req(`/api/run?id=${second}`)).status,200);
 });
 
+test('rejects malformed publication evidence and recovers from an unreadable verdict',async t=>{
+  const f=await fixture(t),id='20260101T000000-evidence',publication={spec:1,token:'a'.repeat(32)};
+  const run=join(f.workspace,'out/runs',id),resultPath=join(run,'result.json'),markerPath=join(run,'.published.json');
+  await mkdir(run,{recursive:true});await mkdir(join(f.workspace,'.harness'));
+  await writeFile(join(f.workspace,'out/latest.json'),'[]');
+  let state=await f.state();assert.equal(state.result,null);assert.deepEqual(state.history,[]);
+  let result={id,title:'Evidence',metrics:[],engine:'test',publication:{spec:1,token:'short'}};
+  await writeFile(resultPath,JSON.stringify(result));await writeFile(join(f.workspace,'out/latest.json'),JSON.stringify(result));
+  state=await f.state();assert.equal(state.result,null);assert.deepEqual(state.history,[]);assert.equal((await f.req(`/api/run?id=${id}`)).status,404);
+  result={...result,id:'different',publication};
+  await writeFile(resultPath,JSON.stringify(result));await writeFile(join(f.workspace,'out/latest.json'),JSON.stringify(result));
+  state=await f.state();assert.equal(state.result,null);assert.deepEqual(state.history,[]);assert.equal((await f.req(`/api/run?id=${id}`)).status,404);
+  result={...result,id};
+  await writeFile(resultPath,JSON.stringify(result));await writeFile(join(f.workspace,'out/latest.json'),JSON.stringify(result));
+  await writeFile(markerPath,JSON.stringify({spec:1,id,token:'b'.repeat(32)}));
+  state=await f.state();assert.equal(state.result,null);assert.deepEqual(state.history,[]);assert.equal((await f.req(`/api/run?id=${id}`)).status,404);
+  await writeFile(markerPath,JSON.stringify({spec:1,id,token:publication.token}));
+  await writeFile(join(f.workspace,'.harness/verdict.json'),'null');
+  state=await f.state();assert.equal(state.result.id,id);assert.deepEqual(state.history.map(r=>r.id),[id]);assert.equal((await f.req(`/api/run?id=${id}`)).status,200);
+  await writeFile(join(f.workspace,'.harness/verdict.json'),'{');
+  state=await f.state();assert.equal(state.result.id,id);assert.deepEqual(state.history.map(r=>r.id),[id]);
+});
+
+test('damaged history entries do not hide the newest forty trusted runs',async t=>{
+  const f=await fixture(t),runs=join(f.workspace,'out/runs');await mkdir(runs,{recursive:true});
+  for(let i=0;i<41;i++){
+    const id=`run-${String(i).padStart(3,'0')}`,dir=join(runs,id);await mkdir(dir);
+    await writeFile(join(dir,'result.json'),JSON.stringify({id,title:id,metrics:[],engine:'test'}));
+  }
+  const bad='zz-bad',badDir=join(runs,bad),outside=join(f.root,'outside.json');
+  await mkdir(badDir);await writeFile(outside,'{}');await symlink(outside,join(badDir,'result.json'));
+  const state=await f.state(),expected=Array.from({length:40},(_,i)=>`run-${String(40-i).padStart(3,'0')}`);
+  assert.equal(state.result,null);assert.deepEqual(state.history.map(r=>r.id),expected);assert.equal((await f.req(`/api/run?id=${bad}`)).status,403);
+});
+
 test('cancellation also works when the platform cannot signal a process group',async t=>{
   const f=await fixture(t,'sleep 10');await f.run();
   const kill=process.kill;

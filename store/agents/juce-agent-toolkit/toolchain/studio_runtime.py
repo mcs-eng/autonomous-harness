@@ -15,6 +15,10 @@ import uuid
 _INVALID_PUBLICATION = object()
 
 
+class _UnarchivablePublication(ValueError):
+    """A prior success cannot be preserved, but remains untrusted without a marker."""
+
+
 def workspace():
     return Path(os.environ.get("HARNESS_WORKSPACE", os.getcwd())).resolve()
 
@@ -97,23 +101,29 @@ def _archive_current_result():
         verdict = _read_json(workspace() / ".harness/verdict.json")
     except FileNotFoundError:
         return
+    except ValueError as exc:
+        raise _UnarchivablePublication("The current studio result has invalid publication state") from exc
     if not isinstance(verdict, dict):
-        raise ValueError("The current studio result has invalid publication state")
+        raise _UnarchivablePublication("The current studio result has invalid publication state")
     if verdict.get("ready") is not True or "publication" not in verdict:
         return
     run_id = verdict.get("runId")
     artifact = verdict.get("artifact")
     if not isinstance(run_id, str) or not isinstance(artifact, str):
-        raise ValueError("The current studio result has invalid publication state")
-    result_path = contained(workspace() / artifact)
-    expected = contained(workspace() / "out/runs" / run_id / "result.json")
+        raise _UnarchivablePublication("The current studio result has invalid publication state")
+    try:
+        result_path = contained(workspace() / artifact)
+        expected = contained(workspace() / "out/runs" / run_id / "result.json")
+    except ValueError as exc:
+        raise _UnarchivablePublication("The current studio result has invalid publication state") from exc
     try:
         result = _read_json(result_path)
     except (FileNotFoundError, ValueError) as exc:
-        raise ValueError("The current studio result cannot be finalized") from exc
-    if result_path != expected or not _published(result_path, result, verdict):
-        raise ValueError("The current studio result has invalid publication state")
+        raise _UnarchivablePublication("The current studio result cannot be finalized") from exc
     publication = _publication(result)
+    if (result_path != expected or publication is None or publication is _INVALID_PUBLICATION or
+            not _published(result_path, result, verdict)):
+        raise _UnarchivablePublication("The current studio result has invalid publication state")
     marker_path = result_path.parent / ".published.json"
     marker = {"spec": 1, "id": run_id, "token": publication["token"]}
     try:
@@ -243,7 +253,10 @@ def execute(actions):
     try:
         lock = _acquire_run_lock()
         releases.callback(_release_run_lock, lock)
-        _archive_current_result()
+        try:
+            _archive_current_result()
+        except _UnarchivablePublication:
+            pass
         atomic_json(verdict_path, verdict)
         preparing_written = True
         if action not in actions:

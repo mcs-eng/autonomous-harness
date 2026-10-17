@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -179,12 +180,70 @@ class RunnerTests(unittest.TestCase):
                                             'artifact':'out/runs/missing/result.json'}))
         with self.assertRaisesRegex(ValueError,'cannot be finalized'):
             runtime._archive_current_result()
+        verdict_path.write_text(json.dumps({'ready':True,'runId':'outside','publication':publication,
+                                            'artifact':'../outside/result.json'}))
+        with self.assertRaisesRegex(ValueError,'invalid publication'):
+            runtime._archive_current_result()
+        legacy=self.workspace/'out/runs/legacy';legacy.mkdir(parents=True)
+        (legacy/'result.json').write_text(json.dumps({'id':'legacy'}))
+        verdict_path.write_text(json.dumps({'ready':True,'runId':'legacy','publication':publication,
+                                            'artifact':'out/runs/legacy/result.json'}))
+        with self.assertRaisesRegex(ValueError,'invalid publication'):
+            runtime._archive_current_result()
         other=self.workspace/'out/runs/other';other.mkdir(parents=True)
         (other/'result.json').write_text(json.dumps({'id':'other','publication':publication}))
         verdict_path.write_text(json.dumps({'ready':True,'runId':'wanted','publication':publication,
                                             'artifact':'out/runs/other/result.json'}))
         with self.assertRaisesRegex(ValueError,'invalid publication'):
             runtime._archive_current_result()
+
+    def test_missing_run_history_recovers_without_trusting_the_lost_result(self):
+        self.call()
+        verdict_path=self.workspace/'.harness/verdict.json'
+        lost=json.loads(verdict_path.read_text())
+        shutil.rmtree(self.workspace/'out/runs')
+        recovered=[]
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                code,stdout,stderr=self.invoke()
+                self.assertEqual(code,0)
+                self.assertIn('Ready: Done',stdout)
+                self.assertEqual(stderr,'')
+                verdict=json.loads(verdict_path.read_text())
+                latest=json.loads((self.workspace/'out/latest.json').read_text())
+                self.assertTrue(verdict['ready'])
+                self.assertEqual(latest['id'],verdict['runId'])
+                self.assertEqual(latest['publication'],verdict['publication'])
+                self.assertTrue((self.workspace/verdict['artifact']).is_file())
+                recovered.append(verdict['runId'])
+        trusted=[row['id'] for row in runtime.previous_runs()]
+        self.assertFalse((self.workspace/'out/runs'/lost['runId']).exists())
+        self.assertNotIn(lost['runId'],trusted)
+        self.assertEqual(set(trusted),set(recovered))
+
+    def test_corrupt_verdict_recovers_without_publishing_the_old_result(self):
+        self.call()
+        verdict_path=self.workspace/'.harness/verdict.json'
+        lost=json.loads(verdict_path.read_text())
+        lost_result=self.workspace/lost['artifact']
+        verdict_path.write_text('{')
+        recovered=[]
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                code,stdout,stderr=self.invoke()
+                self.assertEqual(code,0)
+                self.assertIn('Ready: Done',stdout)
+                self.assertEqual(stderr,'')
+                verdict=json.loads(verdict_path.read_text())
+                latest=json.loads((self.workspace/'out/latest.json').read_text())
+                self.assertTrue(verdict['ready'])
+                self.assertEqual(latest['id'],verdict['runId'])
+                self.assertEqual(latest['publication'],verdict['publication'])
+                recovered.append(verdict['runId'])
+        trusted=[row['id'] for row in runtime.previous_runs()]
+        self.assertFalse((lost_result.parent/'.published.json').exists())
+        self.assertNotIn(lost['runId'],trusted)
+        self.assertEqual(set(trusted),set(recovered))
 
     def test_unreadable_current_verdict_stops_before_replacing_it(self):
         self.call();verdict_path=self.workspace/'.harness/verdict.json';before=verdict_path.read_bytes()
