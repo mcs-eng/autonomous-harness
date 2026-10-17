@@ -107,7 +107,6 @@ describe('the core\'s side', () => {
   })
 
   it('names the twelve engines besides Claude Code, Codex and the terminal', () => {
-    // Fork: Cline is a terminal-only preview with no engine code to load (desktop/WINDOWS_QUICKSTART.md).
     expect(ENGINES.filter(isOtherEngine)).toEqual(ENGINES.filter((engine) => !['claude', 'codex', 'terminal', 'cline'].includes(engine)))
     expect(isOtherEngine('cline')).toBe(false)
     expect(OTHER_ENGINES).toHaveLength(12)

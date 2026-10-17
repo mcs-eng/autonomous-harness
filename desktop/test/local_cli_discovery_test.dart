@@ -1141,11 +1141,6 @@ void main() {
     expect(spawnCount, lessThan(6));
   });
 
-  // A daemon that signed ITSELF out (its machine was deleted from another machine, or its session
-  // expired) used to exit and refuse to start again, so respawning it could only fail. A daemon
-  // now starts signed out and serves this computer, so the supervisor brings it back and tells
-  // the window, which becomes a guest. Fork: upstream's code does this, but its copy of this
-  // test still expected supervision to stop; the expectations below follow the code.
   test(
     'startSupervising respawns a signed-out daemon and tells the caller',
     () async {

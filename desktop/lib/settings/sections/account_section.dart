@@ -29,7 +29,6 @@ class AccountSection extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Fork: the guest desk is what this fork's labels call local mode.
                 SettingRow(
                   title: 'Local mode',
                   detail: 'Not signed in. Sign in to reach your other machines',

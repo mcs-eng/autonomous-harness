@@ -714,8 +714,6 @@ void main() {
       );
 
       expect(find.text('Local · Node1 fleet · node1-a'), findsOneWidget);
-      // Fork: the account's own grid keeps upstream's heading beside a
-      // registered local fleet's.
       expect(find.text('On your machines'), findsOneWidget);
       final rows = find.widgetWithText(ModelPickerRow, 'qwen3.5:12b');
       expect(rows, findsNWidgets(2));

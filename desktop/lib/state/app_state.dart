@@ -2951,9 +2951,6 @@ class AppNotifier extends ChangeNotifier {
 
   /// A desktop window running without an account. A viewer is never a guest: it
   /// has no local daemon, so there is nothing it could show signed out.
-  ///
-  /// Fork: this is what the fork's labels call local mode (see
-  /// `desktop/WINDOWS_QUICKSTART.md`).
   bool get isGuest => viewer == null && !signedIn;
 
   int _paneFocusRequest = 0;
@@ -6380,14 +6377,6 @@ class AppNotifier extends ChangeNotifier {
     loginBrowserError = null;
   }
 
-  /// Fork: the login screen's way back to this computer without an account —
-  /// the guest desk, which this fork's labels call local mode.
-  ///
-  /// A desktop window meets the login screen only when a sign-in was cancelled
-  /// or failed, or when the CLI could not answer the startup check; upstream
-  /// leaves Sign in as the one way on from there. This asks the CLI again and
-  /// continues as a launch does: signed out, onto the guest desk; signed in
-  /// after all (a `harness login` in a terminal meanwhile), onto the account's.
   Future<void> continueWithoutAccount() async {
     if (_disposed || viewer != null || signingIn || signingOut) return;
     _invalidateAuthWork();

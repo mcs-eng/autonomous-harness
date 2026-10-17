@@ -201,14 +201,6 @@ void main() {
     },
   );
 
-  // The fork's old 'Retry after a launch check failure only checks the
-  // computer' test pinned the pre-merge contract that a finished recheck
-  // always stops on the review's Install button. Upstream deliberately
-  // changed that: a review whose whole plan installs in-app now runs unasked
-  // (see 'Retry after a launch check failure checks, then installs unasked'
-  // below), so the outdated fork test was dropped rather than kept green by
-  // fighting the new behavior. Plans that need a Terminal password still
-  // wait on the Install action.
   for (final brightness in Brightness.values) {
     testWidgets(
       'setup details and recovery text have readable contrast in ${brightness.name}',

@@ -732,8 +732,6 @@ void main() {
     expect(find.text('Pre-flight check'), findsNothing);
   });
 
-  // Fork: the startup box names the sign-in check (upstream holds the ready
-  // pre-flight screen instead), then a signed-out window opens on the desk.
   testWidgets(
     'names the sign-in check while auth resolves, then opens the desk',
     (tester) async {
@@ -768,7 +766,6 @@ void main() {
       await bootstrap;
       await tester.pump();
 
-      // A signed-out DESKTOP window lands on the desk as a guest (local mode).
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
       // …and the desk is what is on screen, not the sign-in.
@@ -819,11 +816,8 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(app.bootError, isNull);
-      // Signed out after all: the desk, as a guest, not a browser sign-in.
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
-      // Upstream's tab row offers a guest Sign in; the browser sign-in wall
-      // (its providers) stays closed.
       expect(find.text('Continue with Google'), findsNothing);
       expect(
         find.byKey(const ValueKey('swarm-sign-in-button')),
@@ -865,9 +859,7 @@ void main() {
         find.textContaining('Could not check your saved sign-in'),
         findsNothing,
       );
-      // Upstream's wall offers the providers, not one bare Sign in button.
       expect(find.text('Continue with Google'), findsOneWidget);
-      // The wall keeps the way back to this computer without an account.
       expect(
         find.byKey(const Key('use-without-account-button')),
         findsOneWidget,

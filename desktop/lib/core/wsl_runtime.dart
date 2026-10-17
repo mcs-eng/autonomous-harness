@@ -6,27 +6,11 @@ import 'utf16_probe_encoding.dart';
 import 'wsl_preferences.dart';
 import 'wsl_smoke_isolation.dart';
 
-/// The loopback port the Harness CLI daemon owns. Kept here only for the
-/// documentation comment below; the app reads the real address from AppConfig.
-///
-/// ## Why Windows runs the CLI inside WSL2
-///
-/// The CLI is a Node bundle whose managed runtime is published for `darwin-*`
-/// and `linux-*` only (see RELEASE.md), its installer is a POSIX shell script
-/// piping into `/bin/sh`, and every agent terminal it opens is a tmux pane. None
-/// of that exists on a stock Windows install, and none of it is worth
-/// reimplementing beside the one implementation the CLI already ships.
-///
 /// WSL2 gives the Windows app the same runtime the Linux desktop app gets, and
 /// Windows 11 forwards `127.0.0.1` from the Windows side into the default
 /// distro, so the app's REST and WebSocket traffic reaches the daemon with no
 /// configuration — the only thing this file has to do is RUN the CLI, which is
 /// what `wsl.exe` is for.
-///
-/// The desktop app itself stays native: this is the CLI/agent runtime, not the
-/// UI. A Windows host with no WSL2 distro is an unmet prerequisite, and every
-/// caller here reports the exact command that fixes it rather than pretending
-/// the environment is ready.
 class WslRuntime {
   final Future<ProcessResult> Function(
     String executable,
@@ -203,10 +187,7 @@ class WslRuntime {
   ///
   /// `wsl.exe` writes UTF-16LE ("wide" console output). Production decodes at
   /// the BYTE level: [Utf16LeProbeEncoding] sniffs the NUL-alternation in the
-  /// raw stream before any lossy decode can happen. The old path let the
-  /// strict UTF-8 stream codec run first, so a non-ASCII distro name (é, ü,
-  /// 任) failed or corrupted inside the decoder and the swallowed stream error
-  /// yielded an EMPTY inventory while `wsl.exe` exited 0 (review cycle-2, P2).
+  /// raw stream before any lossy decode can happen.
   ///
   /// The string-level look below is only the compatibility layer for the
   /// injected [_runProcess] seam, whose fakes hand back an already-decoded
