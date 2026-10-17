@@ -10,7 +10,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isViewerPackage, readDshManifest, type DshManifest } from './manifest.js'
-import { skillDirsIn } from './materialize.js'
+import { skillDirsIn } from './skillDirs.js'
 
 export interface CheckLine {
   level: 'ok' | 'warn' | 'fail'

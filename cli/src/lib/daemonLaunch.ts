@@ -15,6 +15,7 @@
 
 import { readFileSync, rmSync } from 'fs'
 import { PID_FILE, isAlive, readPid } from './daemonState.js'
+import { exitWithCliError } from './cliError.js'
 
 export interface LaunchDeps {
   readPid: () => number | null
@@ -138,9 +139,9 @@ export function removePidFileIf(pid: number | undefined, deps: Pick<LaunchDeps, 
 /** How a command fails, and a core that will not stay up after a failed start: say why, let go of the pid
  *  file if it is this process's, and exit. Moved out of cli.ts with the core's entry, which uses it too. */
 export const onError = (err: unknown, code = 1): never => {
-  console.error('Failed to start adapter:', err)
-  // A daemon that claimed the pid file (port bound) and then failed to finish starting must not leave
-  // that file naming a corpse — the next `harness start` would refuse on it. Only ours, though.
-  removePidFileIf(process.pid)
-  process.exit(code)
+  return exitWithCliError(err, code, () => {
+    // A daemon that claimed the pid file (port bound) and then failed to finish starting must not leave
+    // that file naming a corpse — the next `harness start` would refuse on it. Only ours, though.
+    removePidFileIf(process.pid)
+  })
 }

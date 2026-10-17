@@ -10,20 +10,10 @@ import { catalogEntry, currentDshRegistry, refreshDshRegistry } from './catalog.
 import { installDsh, removeDsh, resolveInstallSource, runDshDoctor } from './install.js'
 import { updateDsh } from './update.js'
 import { dshUpdateInfo } from './updates.js'
-import { checkDsh, formatCheck } from './check.js'
+import { dshCheckCommandUnchecked } from './checkCommand.js'
+import { dshUsage } from './usage.js'
 
-export function dshUsage(): string {
-  return `Domain-specific harnesses (a DSH turns Harness into a product for one domain — see store/README.md):
-  harness dsh list                 what is installed on this computer, and what the registry offers
-  harness dsh install <id|url|path> [--ref <ref>] [--path <folder>] [--link]
-                                   install by registry id (autonomous/typst), git URL, or local path;
-                                   --path installs one folder of that repo (store/agents/typst);
-                                   --link symlinks a local checkout instead of cloning it
-  harness dsh doctor <id>          re-run the harness's own readiness check
-  harness dsh update <id>          update a package, preserving its workspaces
-  harness dsh remove <id>          uninstall (a --link install removes only the link)
-  harness dsh check <path>         conformance check for a harness checkout (what the registry runs)`
-}
+export { dshUsage } from './usage.js'
 
 function flagValue(argv: readonly string[], flag: string): string | undefined {
   const at = argv.indexOf(flag)
@@ -102,14 +92,7 @@ export async function dshCommand(verb: string | undefined, rest: readonly string
       console.log(doctor.ok ? `${dsh.id} is ready` : `${dsh.id} is not ready`)
       return doctor.ok ? 0 : 1
     }
-    case 'check': {
-      const target = args[0] ?? '.'
-      const result = checkDsh(target)
-      console.log(formatCheck(result))
-      const name = result.manifest?.id ?? target
-      console.log(result.ok ? `${name} conforms to spec 1` : `${name} does not conform`)
-      return result.ok ? 0 : 1
-    }
+    case 'check': return dshCheckCommandUnchecked(rest)
     case 'remove': {
       const id = args[0]
       if (!id) { console.error(dshUsage()); return 1 }

@@ -108,7 +108,11 @@ describe('waitForBind', () => {
 
 describe('removePidFileIf', () => {
   beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'adapter-launch-')) })
-  afterEach(() => { rmSync(dataDir, { recursive: true, force: true }); delete process.env.ADAPTER_DATA_DIR })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    rmSync(dataDir, { recursive: true, force: true })
+    delete process.env.ADAPTER_DATA_DIR
+  })
 
   it('removes the file only when it names the given pid', async () => {
     const { removePidFileIf } = await load()
@@ -119,5 +123,21 @@ describe('removePidFileIf', () => {
     expect(removePidFileIf(undefined)).toBe(false)
     expect(removePidFileIf(777)).toBe(true)
     expect(existsSync(PID_FILE)).toBe(false)
+  })
+
+  it('reports the failure, removes its own pid file and exits with the requested code', async () => {
+    const { onError } = await load()
+    const { PID_FILE } = await import('./daemonState.js')
+    const error = new Error('broken fixture')
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code: number) => {
+      throw new Error(`process.exit ${code}`)
+    }) as never)
+    writeFileSync(PID_FILE, `${process.pid}\n`)
+
+    expect(() => onError(error, 7)).toThrow('process.exit 7')
+    expect(report).toHaveBeenCalledWith('Failed to start adapter:', error)
+    expect(existsSync(PID_FILE)).toBe(false)
+    expect(exit).toHaveBeenCalledWith(7)
   })
 })

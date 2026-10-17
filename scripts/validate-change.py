@@ -5,6 +5,7 @@ No package installs, baseline retries, publishing, or test selection is implicit
 Plans contain argv arrays, not shell strings. See docs/validation-and-release.md.
 """
 import argparse
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import math
@@ -22,6 +23,65 @@ from datetime import datetime, timezone
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+class RunLifecycle:
+    """Turn operator termination into one orderly unwind of an active run."""
+
+    def __init__(self):
+        self.signum = None
+        self._previous = {}
+        self._defer_depth = 0
+        self._raise_when_ready = False
+
+    def __enter__(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            self._previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, self._interrupt)
+        return self
+
+    def _interrupt(self, signum, _frame):
+        if self.signum is not None:
+            return
+        self.signum = signum
+        if self._defer_depth:
+            self._raise_when_ready = True
+            return
+        raise KeyboardInterrupt
+
+    @contextmanager
+    def defer_interrupts(self):
+        """Finish registering newly spawned work before unwinding it."""
+        self._defer_depth += 1
+        try:
+            yield
+        finally:
+            self._defer_depth -= 1
+            if self._defer_depth == 0 and self._raise_when_ready:
+                self._raise_when_ready = False
+                raise KeyboardInterrupt
+
+    def __exit__(self, _kind, _error, _traceback):
+        for signum, handler in self._previous.items():
+            signal.signal(signum, handler)
+
+    @property
+    def signal_name(self):
+        return signal.Signals(self.signum).name if self.signum is not None else None
+
+
+def write_json_atomic(path, value):
+    """Replace one JSON receipt only after its complete bytes reach disk."""
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def source_state(root):
@@ -101,13 +161,30 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def tool_fingerprint(command, cwd):
-    process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               stdin=subprocess.DEVNULL, start_new_session=True)
+def tool_fingerprint(command, cwd, lifecycle=None):
+    process = None
+    cleanup_error = None
     try:
+        defer = lifecycle.defer_interrupts() if lifecycle is not None else nullcontext()
+        with defer:
+            process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       stdin=subprocess.DEVNULL, start_new_session=True)
         stdout, stderr = process.communicate(timeout=30)
     finally:
-        cleanup_error = stop_group(process)
+        if process is not None:
+            cleanup_interrupted = False
+            while True:
+                try:
+                    defer = lifecycle.defer_interrupts() if lifecycle is not None else nullcontext()
+                    with defer:
+                        cleanup_error = stop_group(process)
+                    break
+                except KeyboardInterrupt:
+                    if cleanup_interrupted:
+                        raise
+                    cleanup_interrupted = True
+            if cleanup_interrupted:
+                raise KeyboardInterrupt
     if cleanup_error:
         raise ValueError(f"toolchain process cleanup failed: {cleanup_error}")
     if process.returncode:
@@ -115,7 +192,7 @@ def tool_fingerprint(command, cwd):
     return hashlib.sha256(stdout + b"\0" + stderr).hexdigest()
 
 
-def reuse_keys(plan, root):
+def reuse_keys(plan, root, lifecycle=None):
     """Opt-in evidence identity, independent of commit IDs and unrelated files.
 
     Scope selection remains explicit. Version commands must describe every tool
@@ -156,7 +233,7 @@ def reuse_keys(plan, root):
         for command in check["reuse"]["toolchain"]:
             identity = (str(cwd), tuple(command))
             if identity not in versions:
-                versions[identity] = tool_fingerprint(command, cwd)
+                versions[identity] = tool_fingerprint(command, cwd, lifecycle)
             tool_ids.append(versions[identity])
         command = check["argv"][0]
         search_path = os.pathsep.join(str(cwd / entry) for entry in os.get_exec_path())
@@ -231,7 +308,7 @@ def stop_group(process):
     return "; ".join(errors) or None
 
 
-def run_checks(plan, root, output, jobs, keys=None, reused=None):
+def run_checks(plan, root, output, jobs, keys=None, reused=None, lifecycle=None):
     keys, reused = keys or {}, reused or {}
     pending = list(plan["checks"])
     active = []
@@ -239,9 +316,10 @@ def run_checks(plan, root, output, jobs, keys=None, reused=None):
     try:
         while pending or active:
             while pending and len(active) < jobs:
-                check = pending.pop(0)
+                check = pending[0]
                 if check["name"] in reused:
                     results.append(reused[check["name"]])
+                    pending.pop(0)
                     print(f"{check['name']}: reused ({reused[check['name']]['log']})", flush=True)
                     continue
                 result = dict(check, started_at=utc_now(), status="running")
@@ -249,21 +327,31 @@ def run_checks(plan, root, output, jobs, keys=None, reused=None):
                     result["reuse_key"] = keys[check["name"]]
                 log_path = output / (check["name"] + ".log")
                 result["log"] = str(log_path)
-                log = log_path.open("wb")
                 started = time.monotonic()
+                log = None
                 try:
-                    process = subprocess.Popen(
-                        check["argv"], cwd=root / check.get("cwd", "."),
-                        stdout=log, stderr=subprocess.STDOUT,
-                        stdin=subprocess.DEVNULL, start_new_session=True,
-                    )
+                    defer = lifecycle.defer_interrupts() if lifecycle is not None else nullcontext()
+                    with defer:
+                        log = log_path.open("wb")
+                        try:
+                            process = subprocess.Popen(
+                                check["argv"], cwd=root / check.get("cwd", "."),
+                                stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True,
+                            )
+                        except OSError:
+                            log.close()
+                            raise
+                        active.append((process, log, result, started))
+                        pending.pop(0)
                 except OSError as error:
-                    log.close()
+                    if log is not None:
+                        log.close()
                     result.update(status="blocked", error=str(error), duration_seconds=0, finished_at=utc_now())
                     results.append(result)
+                    pending.pop(0)
                     print(f"{check['name']}: blocked ({error})", flush=True)
                     continue
-                active.append((process, log, result, started))
                 print(f"{check['name']}: started (limit {check['timeout_seconds']}s)", flush=True)
             for item in active[:]:
                 process, log, result, started = item
@@ -287,11 +375,18 @@ def run_checks(plan, root, output, jobs, keys=None, reused=None):
                 time.sleep(0.05)
     except KeyboardInterrupt:
         for process, log, result, started in active:
-            stop_group(process)
+            cleanup_error = stop_group(process)
             log.close()
-            result.update(status="cancelled", duration_seconds=round(time.monotonic() - started, 3), finished_at=utc_now())
+            result.update(status="cleanup_failed" if cleanup_error else "cancelled",
+                          exit_code=process.returncode,
+                          duration_seconds=round(time.monotonic() - started, 3), finished_at=utc_now())
+            if cleanup_error:
+                result["cleanup_error"] = cleanup_error
+            result["log_sha256"] = file_sha256(Path(result["log"]))
             results.append(result)
-        results.extend(dict(check, status="not_run") for check in pending)
+        recorded = {result["name"] for result in results}
+        results.extend(dict(check, status="not_run") for check in pending if check["name"] not in recorded)
+        active.clear()
     finally:
         # Also clean up owned children if writing a log/receipt or polling fails.
         for process, log, _, _ in active:
@@ -299,6 +394,30 @@ def run_checks(plan, root, output, jobs, keys=None, reused=None):
                 stop_group(process)
                 log.close()
     return results
+
+
+def cancel_receipt(receipt, plan, lifecycle):
+    receipt["status"] = "cancelled"
+    if lifecycle.signal_name:
+        receipt["signal"] = lifecycle.signal_name
+        receipt["error"] = f"Validation interrupted by {lifecycle.signal_name}."
+    recorded = {check.get("name") for check in receipt["checks"]}
+    receipt["checks"].extend(dict(check, status="not_run") for check in plan["checks"] if check["name"] not in recorded)
+
+
+def finalize_receipt(path, receipt, plan, lifecycle, started):
+    """Persist a complete receipt even when the first write is interrupted."""
+    interrupted = False
+    while True:
+        try:
+            if interrupted:
+                cancel_receipt(receipt, plan, lifecycle)
+            receipt.update(finished_at=utc_now(), duration_seconds=round(time.monotonic() - started, 3))
+            with lifecycle.defer_interrupts():
+                write_json_atomic(path, receipt)
+            return
+        except KeyboardInterrupt:
+            interrupted = True
 
 
 def main(argv=None):
@@ -315,33 +434,44 @@ def main(argv=None):
     plan = read_plan(args.plan, root)
     output = root / ".harness" / "validation" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{os.getpid()}")
     output.mkdir(parents=True)
-    receipt = dict(schema=2, started_at=utc_now(), reason=plan["reason"], source=source_state(root), checks=[])
-    started = time.monotonic()
-    free = shutil.disk_usage(root).free / 1024 ** 3
-    receipt["free_gib_before"] = round(free, 3)
-    if free < plan.get("minimum_free_gib", 2):
-        receipt.update(status="blocked", error=f"Only {free:.2f} GiB free; plan requires {plan.get('minimum_free_gib', 2)} GiB")
-        receipt["checks"] = [dict(check, status="not_run") for check in plan["checks"]]
-        print(receipt["error"], file=sys.stderr)
-    else:
-        try:
-            keys = reuse_keys(plan, root)
-            reused = reusable_checks(args.reuse, keys)
-            receipt["checks"] = run_checks(plan, root, output, args.jobs, keys, reused)
-            keys_after = reuse_keys(plan, root)
-            receipt["source_after"] = source_state(root)
-            if receipt["source"] != receipt["source_after"] or keys != keys_after:
-                receipt.update(status="source_changed", error="Source or toolchain changed during validation; results do not identify one tested environment")
-            else:
-                receipt["status"] = "passed" if all(c["status"] in {"passed", "reused"} for c in receipt["checks"]) else "failed"
-        except (ValueError, OSError, subprocess.SubprocessError) as error:
-            receipt.update(status="blocked", error=str(error))
-            if not receipt["checks"]:
-                receipt["checks"] = [dict(check, status="not_run") for check in plan["checks"]]
-    receipt.update(finished_at=utc_now(), duration_seconds=round(time.monotonic() - started, 3))
+    receipt = dict(schema=2, started_at=utc_now(), reason=plan["reason"], checks=[])
     path = output / "receipt.json"
-    path.write_text(json.dumps(receipt, indent=2) + "\n")
+    started = time.monotonic()
+    lifecycle = RunLifecycle()
+    with lifecycle:
+        try:
+            try:
+                receipt["source"] = source_state(root)
+                free = shutil.disk_usage(root).free / 1024 ** 3
+                receipt["free_gib_before"] = round(free, 3)
+                if free < plan.get("minimum_free_gib", 2):
+                    receipt.update(status="blocked", error=f"Only {free:.2f} GiB free; plan requires {plan.get('minimum_free_gib', 2)} GiB")
+                    receipt["checks"] = [dict(check, status="not_run") for check in plan["checks"]]
+                    print(receipt["error"], file=sys.stderr)
+                else:
+                    keys = reuse_keys(plan, root, lifecycle)
+                    reused = reusable_checks(args.reuse, keys)
+                    receipt["checks"] = run_checks(plan, root, output, args.jobs, keys, reused, lifecycle)
+                    if lifecycle.signum is not None:
+                        cancel_receipt(receipt, plan, lifecycle)
+                    else:
+                        keys_after = reuse_keys(plan, root, lifecycle)
+                        receipt["source_after"] = source_state(root)
+                        if receipt["source"] != receipt["source_after"] or keys != keys_after:
+                            receipt.update(status="source_changed", error="Source or toolchain changed during validation; results do not identify one tested environment")
+                        else:
+                            receipt["status"] = "passed" if all(c["status"] in {"passed", "reused"} for c in receipt["checks"]) else "failed"
+            except (ValueError, OSError, subprocess.SubprocessError) as error:
+                receipt.update(status="blocked", error=str(error))
+                if not receipt["checks"]:
+                    receipt["checks"] = [dict(check, status="not_run") for check in plan["checks"]]
+            finalize_receipt(path, receipt, plan, lifecycle, started)
+        except KeyboardInterrupt:
+            cancel_receipt(receipt, plan, lifecycle)
+            finalize_receipt(path, receipt, plan, lifecycle, started)
     print(f"{receipt['status']}: {path}")
+    if lifecycle.signum is not None:
+        return 128 + lifecycle.signum
     return 0 if receipt["status"] == "passed" else 1
 
 
