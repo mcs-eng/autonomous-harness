@@ -1,9 +1,9 @@
 import './testIsolation.js'
-import './loadEnv.js'
+import { validateLoadedEnvironment } from './loadEnv.js'
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { EnvIssue, flag, matching, maybe, maybeNumber, number, oneOf, parseEnv, text, unlessFalse, url, type EnvField, type EnvOf } from './envFields.js'
+import { EnvIssue, fileNumber, flag, matching, maybe, maybeNumber, number, oneOf, parseEnv, text, unlessFalse, url, type EnvField, type EnvOf } from './envFields.js'
 import { parseTerminalBackends } from './terminalConfig.js'
 import { adoptComputerId } from '../lib/computerIdentity.js'
 
@@ -114,14 +114,12 @@ function migrateLegacyAdapterState(): void {
   }
 }
 
-migrateLegacyAdapterState()
-
 const fields = {
   NODE_ENV: oneOf(['development', 'production', 'test'], 'development'),
   // Preferred localhost control port, also the stable name of this user's private daemon socket.
   // When another OS user holds it, Unix daemons record a separate TCP port in this user's data dir;
   // engine hooks and CLI commands use that actual port while native clients use the private socket.
-  PORT: number('18473'),
+  PORT: fileNumber('18473', { integer: true, min: 0, max: 65_535 }),
   // The loopback port `harness login` listens on for the SSO redirect. 0 (the default) takes whatever
   // the OS gives, which is right on a real computer: the browser and the listener are the same
   // loopback, so the port never has to be known in advance.
@@ -269,7 +267,7 @@ const fields = {
   // Neutral discovery interval. The legacy tmux name remains a one-release fallback.
   TERMINAL_RECONCILE_INTERVAL_MS: maybeNumber,
   // How often (ms) the reaper checks tmux panes and drops dead sessions.
-  TMUX_REAP_INTERVAL_MS: number('5000'),
+  TMUX_REAP_INTERVAL_MS: fileNumber('5000'),
   // Path to the `claude` CLI for the device turn-recap one-shot (else resolved from PATH).
   CLAUDE_PATH: maybe,
   // Path to the Cursor Agent CLI for recap one-shots (else a verified `agent`/`cursor-agent` is used).
@@ -332,21 +330,21 @@ const fields = {
   ADAPTER_UPDATE_KEY: text('cli'),
   // How often the daemon checks for a newer build (ms). The poll is a tiny no-cache metadata fetch;
   // the artifact is downloaded only when the manifest version is strictly newer.
-  ADAPTER_UPDATE_CHECK_MS: number('60000'),
+  ADAPTER_UPDATE_CHECK_MS: fileNumber('60000'),
   // The wall-clock second each check lands on, when the interval divides a minute. The desktop app
   // spawns `harness start` only around :15 (see desktop/lib/ws/local_cli_discovery.dart `inSpawnSlot`);
   // keeping the update handoff 30s away from that is what stops the two from fighting over the spawn
   // lock. Set to a negative number to keep the plain interval.
-  ADAPTER_UPDATE_SLOT_SEC: number('45'),
+  ADAPTER_UPDATE_SLOT_SEC: fileNumber('45'),
   // How long an update's download may go without a byte, and take in all, before the check gives up and
   // the next one tries again (lib/selfUpdate.ts `TransferLimits`). The manifest gets at most a minute.
-  ADAPTER_UPDATE_IDLE_MS: number('60000'),
-  ADAPTER_UPDATE_DEADLINE_MS: number('900000'),
+  ADAPTER_UPDATE_IDLE_MS: fileNumber('60000'),
+  ADAPTER_UPDATE_DEADLINE_MS: fileNumber('900000'),
   // Set 'true' to disable self-update entirely.
   ADAPTER_UPDATE_DISABLE: flag('false'),
   /** How long a daemon whose start-up failed stays up serving nothing but its updater, before it
    *  gives a clean process a turn. ~15 update slots; `0` keeps it up for ever. */
-  ADAPTER_SAFE_MODE_MS: number('900000'),
+  ADAPTER_SAFE_MODE_MS: fileNumber('900000'),
   // Install dir holding the packaged cli.js + notify.mjs that the self-updater swaps in place.
   ADAPTER_CLI_DIR: text(adapterCliDir),
   // Where the managed Node runtime lives. Read (never written) by this process: the hook command
@@ -383,7 +381,39 @@ const fields = {
 
 export type Env = EnvOf<typeof fields>
 
+function oneEditApart(left: string, right: string): boolean {
+  if (left === right || Math.abs(left.length - right.length) > 1) return false
+  if (left.length === right.length) {
+    const different: number[] = []
+    for (let i = 0; i < left.length; i++) if (left[i] !== right[i]) different.push(i)
+    if (different.length === 1) return true
+    return different.length === 2 && different[1] === different[0] + 1
+      && left[different[0]] === right[different[1]] && left[different[1]] === right[different[0]]
+  }
+
+  const [shorter, longer] = left.length < right.length ? [left, right] : [right, left]
+  let skipped = false
+  for (let small = 0, large = 0; large < longer.length; small++, large++) {
+    if (shorter[small] === longer[large]) continue
+    if (skipped) return false
+    skipped = true
+    small--
+  }
+  return true
+}
+
+function unknownFileKeyWarning(key: string, knownKeys: readonly string[]): string | undefined {
+  // The file is also an intentional pass-through to child tools. A likely typo is advisory only:
+  // unknown variables must remain available to the tools that own them.
+  const schema = fields as Readonly<Record<string, EnvField<unknown>>>
+  const normalized = key.toUpperCase()
+  const suggestion = knownKeys.find((known) => schema[known].fileIssue
+    && (known === normalized || oneEditApart(normalized, known)))
+  return suggestion ? `unknown key; did you mean ${suggestion}?` : undefined
+}
+
 function validateEnv(): Env {
+  validateLoadedEnvironment(fields, { unknownKeyWarning: unknownFileKeyWarning })
   const parsed = parseEnv(fields, process.env)
 
   if (!parsed.ok) {
@@ -407,4 +437,6 @@ function validateEnv(): Env {
   return data
 }
 
-export const env = validateEnv()
+const validatedEnv = validateEnv()
+migrateLegacyAdapterState()
+export const env = validatedEnv
