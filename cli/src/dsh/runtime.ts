@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, join, resolve } from 'node:path'
+import { basename, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { PROCESS_ENGINES, type AgentEngine } from '../engines/types.js'
 import { instructionFileOf, launchContract } from '../engines/launches.js'
@@ -33,7 +33,7 @@ export function harnessRuntimeDir(workspace: string, key: string): string {
 function ensureRuntimeDir(workspace: string, dir: string): void {
   const root = resolve(workspace)
   let path = root
-  for (const part of dir.slice(root.length + 1).split('/')) {
+  for (const part of relative(root, dir).split(sep)) {
     path = join(path, part)
     if (existsSync(path) || isLink(path)) {
       const stat = lstatSync(path)
@@ -196,7 +196,11 @@ export function prepareHarnessLaunch(dsh: InstalledDsh, workspace: string, engin
   // Spec-1 packages used their default engine's discovery paths in env. Translate the path, not
   // arbitrary engine names or source paths inside an upstream installation.
   for (const [name, value] of Object.entries(env)) {
-    env[name] = value.replaceAll(`${ws}/.claude/skills`, skillsDir).replaceAll(`${ws}/.agents/skills`, skillsDir)
+    env[name] = [...new Set([
+      `${ws}/.claude/skills`, `${ws}/.agents/skills`,
+      join(ws, '.claude', 'skills'), join(ws, '.agents', 'skills'),
+      `${join(ws, '.claude')}/skills`, `${join(ws, '.agents')}/skills`,
+    ])].reduce((current, legacy) => current.replaceAll(legacy, skillsDir), value)
   }
   const context = [
     `# ${dsh.manifest.name} (${data.id})`,

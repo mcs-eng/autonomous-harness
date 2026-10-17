@@ -89,7 +89,25 @@ describe('expandDshValue', () => {
   it('expands the three variables and leaves anything else alone', () => {
     const vars = { dsh: '/i/dsh', workspace: '/w', home: '/h' }
     expect(expandDshValue('${dsh}/toolchain:${workspace}/.claude:${home}', vars)).toBe('/i/dsh/toolchain:/w/.claude:/h')
+    expect(expandDshValue('${dsh}/toolchain', { ...vars, dsh: '/i/dsh\\literal' })).toBe('/i/dsh\\literal/toolchain')
+    expect(expandDshValue('${dsh}/toolchain', { ...vars, dsh: '/i/dsh\\' })).toBe('/i/dsh\\/toolchain')
     expect(expandDshValue('$HOME and ${other}', vars)).toBe('$HOME and ${other}')
+  })
+
+  it('expands a Windows drive path with a trailing backslash', () => {
+    expect(expandDshValue('${dsh}/tools', { dsh: 'C:\\pkg\\', workspace: '/w', home: '/h' })).toBe('C:\\pkg\\tools')
+  })
+
+  it('expands a Windows drive path written with forward slashes', () => {
+    expect(expandDshValue('${dsh}/tools', { dsh: 'C:/pkg', workspace: '/w', home: '/h' })).toBe('C:/pkg\\tools')
+  })
+
+  it('expands a Windows UNC path', () => {
+    expect(expandDshValue('${dsh}/x', { dsh: '\\\\srv\\share\\pkg', workspace: '/w', home: '/h' })).toBe('\\\\srv\\share\\pkg\\x')
+  })
+
+  it('keeps a double-forward-slash path on the POSIX branch', () => {
+    expect(expandDshValue('${dsh}/x', { dsh: '//srv/share/pkg', workspace: '/w', home: '/h' })).toBe('//srv/share/pkg/x')
   })
 })
 

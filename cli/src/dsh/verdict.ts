@@ -11,7 +11,7 @@
  */
 import chokidar, { type FSWatcher } from 'chokidar'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, posix, win32 } from 'node:path'
 
 export type DshPhaseState = 'done' | 'active' | 'pending' | 'failed'
 
@@ -62,8 +62,8 @@ function parsePhases(raw: unknown): DshPhase[] {
 
 function cleanRelative(value: unknown): string | null {
   if (typeof value !== 'string' || !value || value.length > 1024) return null
-  if (value.startsWith('/') || value.split(/[\\/]/).some((segment) => segment === '..')) return null
-  return value
+  if (/^[A-Za-z]:/.test(value) || posix.isAbsolute(value) || win32.isAbsolute(value) || value.split(/[\\/]/).some((segment) => segment === '..')) return null
+  return value.replace(/\\/g, '/')
 }
 
 /** Reduce a verdict file to the wire shape; null when it is not a spec-1 verdict. */
