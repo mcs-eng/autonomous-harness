@@ -326,6 +326,8 @@ describe('binding a running process to its session', () => {
     runtimes: [],
     primaryRuntimeKey: 'tmux:%0',
     processIdentity: { pid: 42, startMarker: '2026-10-04T10:00:00Z' },
+    // Boundary-faithful argv is the default evidence class: only it may name the session a
+    // resume reopens (review cycle-7, P1 security). Flattened text must corroborate first.
     argsBoundaryFaithful: true,
     ...over,
   }) as unknown as DiscoveredTerminalAgent

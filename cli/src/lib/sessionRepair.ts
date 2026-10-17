@@ -562,6 +562,7 @@ export async function findCorroboratedResumeSession(
   return await resumeCandidateMatchesOpenFile(found, resumeSessionId, targets) ? found : null
 }
 
+/** Evidence seam for tests: both the id and the PID-held transcript path must agree. */
 export async function resumeCandidateMatchesOpenFile(
   found: RepairedSession | null,
   resumeSessionId: string,

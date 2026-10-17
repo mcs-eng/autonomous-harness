@@ -5,6 +5,17 @@ import 'package:harness/core/wsl_runtime.dart';
 import 'package:harness/core/wsl_preferences.dart';
 import 'package:harness/core/wsl_smoke_isolation.dart';
 
+/// Verifies argv only against an explicitly selected disposable WSL fixture.
+///
+/// The unit suite injects fake process hooks, so it can never see what
+/// `wsl.exe` does to the command line it is handed — and `--` handing the
+/// remainder to the distro's default shell for a second parse round silently
+/// stripped every argument the app sent (the CLI answered the help banner with
+/// exit 0). This file runs the ACTUAL shape `buildArguments` produces against
+/// an actual distro and asserts the arguments arrive. Ordinary unit runs must
+/// never enter an account's default login shell or load its real startup files.
+/// Supply the smoke contract plus HARNESS_TEST_WSL_ARGV=1 and explicit
+/// HARNESS_TEST_WSL_DISTRO / HARNESS_TEST_WSL_USER to opt in.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final environment = Platform.environment;
