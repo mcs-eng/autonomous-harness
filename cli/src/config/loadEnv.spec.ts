@@ -24,6 +24,20 @@ function run(cwd: string, overrides: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [tsx, '--eval', script], { cwd, env: { ...childEnv, ...overrides }, encoding: 'utf8', timeout: 10_000 })
 }
 
+function runReading(cwd: string, overrides: NodeJS.ProcessEnv, read: string[]) {
+  const childEnv = { ...process.env }
+  for (const key of [...read, 'HARNESS_ENV_FILE', 'DOTENV_CONFIG_PATH']) delete childEnv[key]
+  const script = `import ${JSON.stringify(loader)}; console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(read)}.map(k => [k, process.env[k] ?? null]))));`
+  return spawnSync(process.execPath, [tsx, '--eval', script], { cwd, env: { ...childEnv, ...overrides }, encoding: 'utf8', timeout: 10_000 })
+}
+
+function expectCleanFailure(result: ReturnType<typeof run>, messages: string[]): void {
+  expect(result.status).not.toBe(0)
+  for (const message of messages) expect(result.stderr).toContain(message)
+  expect(result.stderr).not.toMatch(/node:internal|^\s+at /m)
+  expect(result.stderr.trim().split(/\r?\n/)).toHaveLength(1)
+}
+
 describe('Harness environment loading', () => {
   it('does not adopt a project .env when a user starts Harness from that folder', () => {
     const result = run(project())
@@ -46,15 +60,48 @@ describe('Harness environment loading', () => {
 
   it('keeps explicitly configured DOTENV_CONFIG_PATH working', () => {
     const root = project()
-    const result = run(root, { DOTENV_CONFIG_PATH: join(root, '.env') })
+    const result = run(root, { DOTENV_CONFIG_PATH: '.env' })
     expect(result.status, result.stderr).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({ BACKEND_WS_URL: 'ws://sandbox.invalid:8090', AUTONOMOUS_ENV: 'stag' })
   })
 
-  it('fails clearly if the explicitly selected environment file cannot be read', () => {
+  it('preserves valid dotenv quoting, comments, export, colon, multiline and CRLF syntax', () => {
+    const root = project()
+    const file = join(root, 'syntax.env')
+    writeFileSync(file, '\uFEFF# comment\r\nexport EMPTY=\r\nCOLON: value\r\nSINGLE=\' padded value \'\r\nDOUBLE="first\\nsecond"\r\nBACKTICK=`hash # stays`\r\nMULTILINE="first\r\nsecond" # comment\r\nDUPLICATE=first\r\nDUPLICATE=second\r\n')
+    const keys = ['EMPTY', 'COLON', 'SINGLE', 'DOUBLE', 'BACKTICK', 'MULTILINE', 'DUPLICATE']
+    const result = runReading(root, { HARNESS_ENV_FILE: file }, keys)
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      EMPTY: '', COLON: 'value', SINGLE: ' padded value ', DOUBLE: 'first\nsecond', BACKTICK: 'hash # stays', MULTILINE: 'first\nsecond', DUPLICATE: 'second',
+    })
+  })
+
+  it('fails with one clear line if the explicitly selected environment file is missing', () => {
     const root = project()
     const result = run(root, { HARNESS_ENV_FILE: join(root, 'missing.env') })
-    expect(result.status).not.toBe(0)
-    expect(result.stderr).toContain('Cannot read Harness environment file')
+    expectCleanFailure(result, ['Cannot read Harness environment file', 'file does not exist'])
+  })
+
+  it('rejects a directory where an environment file was required', () => {
+    const root = project()
+    expectCleanFailure(run(root, { HARNESS_ENV_FILE: root }), ['Invalid Harness environment file', 'path is not a regular file'])
+  })
+
+  it('requires HARNESS_ENV_FILE to use the documented absolute path', () => {
+    const root = project()
+    expectCleanFailure(run(root, { HARNESS_ENV_FILE: 'harness.env' }), ['HARNESS_ENV_FILE must be an absolute path'])
+  })
+
+  it.each([
+    ['an assignment without an equals sign', 'PORT 3000\n', 'line 1 is not a valid KEY=VALUE assignment'],
+    ['a bad line among valid assignments', 'PORT=3000\nthis is not an assignment\nAUTONOMOUS_ENV=prod\n', 'line 2 is not a valid KEY=VALUE assignment'],
+    ['an unclosed quote', 'PORT="3000\n', 'line 1 has a malformed or unclosed quoted value for PORT'],
+    ['text after a quoted value', 'PORT="3000" trailing\n', 'line 1 has a malformed or unclosed quoted value for PORT'],
+  ])('rejects malformed syntax: %s', (_case, contents, message) => {
+    const root = project()
+    const file = join(root, 'malformed.env')
+    writeFileSync(file, contents)
+    expectCleanFailure(run(root, { HARNESS_ENV_FILE: file }), [message])
   })
 })
