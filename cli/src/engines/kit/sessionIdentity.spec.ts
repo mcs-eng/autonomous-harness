@@ -52,7 +52,8 @@ it('keeps native I/O failure distinct from an absent run', async () => {
 })
 it('reads a header from declared fields and preserves an optional reader\'s I/O refusal', async () => {
   const headerRule = { bytes: [100], type: 'begin', id: { field: ['record', 'id'], pattern: /^id$/ }, cwd: ['record', 'cwd'] }
-  await expect(readSessionHeader(headerRule, async () => '{"type":"begin","record":{"id":"id","cwd":"/work"}}\n'))
-    .resolves.toEqual({ sessionId: 'id', cwd: '/work' })
+  const cwd = join(tmpdir(), 'work')
+  await expect(readSessionHeader(headerRule, async () => JSON.stringify({ type: 'begin', record: { id: 'id', cwd } }) + '\n'))
+    .resolves.toEqual({ sessionId: 'id', cwd })
   await expect(readSessionHeader(headerRule, async () => { throw new Error('read failed') })).rejects.toThrow('read failed')
 })

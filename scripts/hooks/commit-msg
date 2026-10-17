@@ -1,0 +1,35 @@
+#!/bin/sh
+# commit-msg hook: reject a message that contains a private term.
+# Terms come from $PRIVATE_TERMS_FILE, ~/.config/privacy-guard/private-terms.txt,
+# or ~/.config/private-terms.txt (home is $HOME, else $USERPROFILE).
+# If none exists, this hook does nothing. It never prints a term.
+set -eu
+
+message_file=${1:-}
+if [ -z "$message_file" ]; then
+  echo "commit-msg hook: message file required" >&2
+  exit 1
+fi
+
+home=${HOME:-${USERPROFILE:-}}
+terms_file=
+if [ -n "${PRIVATE_TERMS_FILE:-}" ] && [ -f "$PRIVATE_TERMS_FILE" ]; then
+  terms_file=$PRIVATE_TERMS_FILE
+elif [ -n "$home" ] && [ -f "$home/.config/privacy-guard/private-terms.txt" ]; then
+  terms_file=$home/.config/privacy-guard/private-terms.txt
+elif [ -n "$home" ] && [ -f "$home/.config/private-terms.txt" ]; then
+  terms_file=$home/.config/private-terms.txt
+else
+  exit 0
+fi
+
+root=$(git rev-parse --show-toplevel)
+# Prefer a working python3, then python, then the Windows py launcher. The
+# Windows Store stub named python3 exists but fails, so test each one.
+for candidate in python3 python py; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import sys" >/dev/null 2>&1; then
+    exec "$candidate" "$root/scripts/privacy-guard.py" --terms-file "$terms_file" --commit-message-file "$message_file"
+  fi
+done
+echo "commit-msg hook: python 3 not found" >&2
+exit 1

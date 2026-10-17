@@ -102,7 +102,7 @@ export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 
 /** An absolute folder, as a session records it. */
 export function absoluteFolder(value: unknown): string | null {
-  return typeof value === 'string' && value.startsWith('/') ? value : null
+  return typeof value === 'string' && isAbsolute(value) ? value : null
 }
 
 /** Epoch ms from seconds, milliseconds, microseconds or an ISO string; null for anything else. */

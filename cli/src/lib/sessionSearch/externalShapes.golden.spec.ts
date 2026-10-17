@@ -79,7 +79,8 @@ it('preserves external lists, exact ownership, conservative busy answers and cor
       }
       out.wrongEngine = await shapes.adoption.adoptableSession('first', 'codex', null)
       out.notFound = await shapes.adoption.adoptableSession('missing', 'claude', null)
-      result[os] = JSON.parse(JSON.stringify(out).split(root).join('<fixture>'))
+      result[os] = JSON.parse(JSON.stringify(out, (_key, value) => typeof value === 'string' && value.includes(root)
+        ? value.split(root).join('<fixture>').replaceAll('\\', '/') : value))
     }
     const text = JSON.stringify(result, null, 2) + '\n'
     expect(text).not.toContain(root)

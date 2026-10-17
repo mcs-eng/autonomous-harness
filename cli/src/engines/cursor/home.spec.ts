@@ -40,8 +40,9 @@ function transcript(id: string): string {
 
 describe('Cursor with separate config and data directories', () => {
   it('honors explicit config first, then XDG, independently of the transcript root', () => {
-    expect(cursorConfigDir({ CURSOR_CONFIG_DIR: ' /explicit ', XDG_CONFIG_HOME: '/xdg' })).toBe('/explicit')
-    expect(cursorConfigDir({ CURSOR_CONFIG_DIR: ' ', XDG_CONFIG_HOME: '/xdg' })).toBe('/xdg/cursor')
+    const explicit = join(root, 'explicit'), xdg = join(root, 'xdg')
+    expect(cursorConfigDir({ CURSOR_CONFIG_DIR: ` ${explicit} `, XDG_CONFIG_HOME: xdg })).toBe(explicit)
+    expect(cursorConfigDir({ CURSOR_CONFIG_DIR: ' ', XDG_CONFIG_HOME: xdg })).toBe(join(xdg, 'cursor'))
     expect(cursorDataDir()).toBe(data)
   })
 

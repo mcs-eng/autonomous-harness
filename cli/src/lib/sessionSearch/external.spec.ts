@@ -177,7 +177,8 @@ describe('OpenSessions', () => {
     expect(await sessions.busy({ engine: 'muse', pid: 1, record: '' })).toBe(true)
   })
 
-  it('looks at the real machine by default, and finds nothing open for engines with no owners', async () => {
+  // Default process discovery uses ps, which is unavailable on native Windows.
+  it.skipIf(process.platform === 'win32')('looks at the real machine by default, and finds nothing open for engines with no owners', async () => {
     const sessions = new OpenSessions({ providers: [{ engine: 'pi', scan: async () => [], owners: async (view) => {
       const me = (await view.list()).find((row) => row.pid === process.pid)
       return me ? [{ sessionId: 'me', pid: me.pid, record: '' }] : []
@@ -255,7 +256,8 @@ describe('stopSessionOwner', () => {
     expect(await foregroundJob(process.pid)).toBeNull()
   })
 
-  it('stops a real process, and writes the terminal back to a real file', async () => {
+  // This integration fixture uses sleep and POSIX signals, unavailable on native Windows.
+  it.skipIf(process.platform === 'win32')('stops a real process, and writes the terminal back to a real file', async () => {
     const { spawn } = await import('node:child_process')
     const child = spawn('sleep', ['30'], { stdio: 'ignore' })
     const exited = new Promise((resolve) => child.on('exit', resolve))
@@ -271,7 +273,8 @@ describe('stopSessionOwner', () => {
     await expect(writeTty(join(dir, 'missing', 'tty'), 'x')).rejects.toThrow()
   })
 
-  it("stops a process that is not this one's child, as a terminal's never is", async () => {
+  // Orphaning a process through /bin/sh and stopping it uses POSIX process semantics.
+  it.skipIf(process.platform === 'win32')("stops a process that is not this one's child, as a terminal's never is", async () => {
     const { execFileSync } = await import('node:child_process')
     const pid = Number(execFileSync('/bin/sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!']).toString().trim())
     expect(await stopSessionOwner({ pid, tty: null })).toBe(true)
