@@ -657,3 +657,25 @@ commands, drive paths passed directly to Node's ESM loader, and locked-file
 cleanup in other fixtures. The remaining failures were not individually
 baselined or all proven Windows-only; this focused change does not claim a green
 full Windows CLI suite.
+
+## October 17 upstream sync batch 1
+
+This source snapshot incorporates upstream `0130b6c18` (96 commits since the
+`ecf8097ac` merge base) on fork main `9cd20975`. It takes the CLI's usage
+split (`cliUsage.ts`), the engine-command catalog (`engineCommands.ts`), the
+short-lived-command fast path, daemon-state reachability text, the per-user
+shell probe, Codex profile handling in launch overrides, the named-agent
+relaunch contract, the pull-request attribution line for harnesses another
+agent started, device-ack core, and the desktop's model search, swarm search,
+theme and settings-section updates.
+
+The Windows contracts hold: WSL distro and account selection, account-free
+local mode, the Projects sidebar and Continue Working, local Grid profile
+routing (`local:` / `trustedBaseUrl` — the usage text keeps the grid profile
+verbs), WebView2 embedded viewers, Ctrl+C copy-when-selected, and USERPROFILE
+test isolation. The workspace tab keeps the fork's visible close control
+because Meta+W opens Widgets on Windows, alongside upstream's Agent Messages
+removal. The three launch goldens are re-recorded on hosted Linux CI (a
+Windows recording writes Windows paths into them); `launch-argv` keeps
+upstream's override records, whose former call order its spec pins on purpose.
+This is a source change; it does not update an installed desktop or daemon.

@@ -84,6 +84,47 @@ own reviewed change.
   real-account compatibility or persistent-state downgrade safety. Preserve the complete
   known-good bundle; binary rollback and state rollback require separate evidence.
 
+## Re-recording the launch goldens on Linux
+
+The three launch fixtures (`launch-argv`, `launch-shapes` and `dsh-launch-shapes`
+under `cli/src/engines/__fixtures__`) must be recorded on Linux; a Windows recording
+writes Windows paths into them. When a sync conflicts on them, record on hosted
+Linux CI (the PR #47 recipe):
+
+1. On a temporary branch on top of the resolved merge, set the three record switches
+   in the `cli-tests` job of `.github/workflows/ci.yml` (`RECORD_LAUNCH_GOLDEN=1`,
+   `RECORD_LAUNCH_SHAPES_GOLDEN=1`, `RECORD_DSH_LAUNCH_SHAPES_GOLDEN=1`) and add a
+   step after the test run that base64-prints the three fixture files.
+2. Run `gh workflow run ci.yml --ref <tmp> -f scope=cli`.
+3. Decode the base64 blocks from the `cli-tests` shard logs and write them over the
+   fixtures on the sync branch.
+4. Delete the temporary branch, local and remote.
+
+`launch-argv` keeps upstream's override records, whose former call order its spec
+pins on purpose. Never commit a golden recorded on the Windows host.
+
+## Evidence snapshot: 2026-10-17
+
+Batch 1 (this pass). The inspected fork main was `f730448ac`; upstream main was
+`acbfb09ed`. Their common base is unchanged: `ecf8097ac` (469 upstream commits
+ahead at inspection). The cut is `0130b6c18`, 96 upstream commits past the base
+on upstream's first-parent history; it stops before the sign-in flow rework that
+conflicts with account-free local mode and excludes the measurement PRs.
+
+The batch integrated on `kimi/sync-upstream-0130b6c18` (merge commit `a598ae44a`,
+golden re-record `957977ebc`, main-merge follow-up and a second re-record on top
+of main `9cd20975`). Nine paths conflicted; all are resolved in the branch. The
+three launch goldens were re-recorded on hosted Linux CI per the recipe above
+(two temporary `kimi/tmp-record-goldens` branches, `scope=cli` dispatch runs;
+the second after the #68 reland merged into main). Validation on Windows 11:
+CLI `tsc --noEmit` exit 0; focused Vitest on the conflicted CLI areas compared by
+test identity against the same run at the base — one upstream-new
+pull-request-line test is red natively on Windows (its settings-path mock uses a
+POSIX literal), the inherited class; `flutter analyze` 0 errors with the issue
+set identical to the base (5 unused-import warnings, 48 info lints); `git diff
+--check` exit 0; privacy gate exit 0 on the head, title and body. Hosted Ubuntu
+CI is the full-suite authority; a merge commit retains the upstream parent.
+
 ## Evidence snapshot: 2026-10-06
 
 The inspected fork main was `786133139dc5ff41388db5899f841e87374cc02c` (PR #40, same tree as
