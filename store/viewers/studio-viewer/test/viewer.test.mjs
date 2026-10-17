@@ -78,6 +78,24 @@ test('records successful history, reads chosen runs, ignores incomplete results'
   await writeFile(join(f.workspace,'out/latest.json'),'unfinished');assert.equal((await f.req('/api/state')).status,500);
 });
 
+test('ignores provisional results until the success verdict commits them',async t=>{
+  const f=await fixture(t),first='20260101T000000-first',second='20260101T000001-second';
+  const firstPublication={spec:1,token:'1'.repeat(32)},secondPublication={spec:1,token:'2'.repeat(32)};
+  const firstResult={id:first,title:'First',metrics:[],engine:'test',publication:firstPublication};
+  const secondResult={id:second,title:'Second',metrics:[],engine:'test',publication:secondPublication};
+  await mkdir(join(f.workspace,'out/runs',first),{recursive:true});await mkdir(join(f.workspace,'out/runs',second));await mkdir(join(f.workspace,'.harness'));
+  await writeFile(join(f.workspace,'out/runs',first,'result.json'),JSON.stringify(firstResult));
+  await writeFile(join(f.workspace,'out/runs',first,'.published.json'),JSON.stringify({spec:1,id:first,token:firstPublication.token}));
+  await writeFile(join(f.workspace,'out/runs',second,'result.json'),JSON.stringify(secondResult));
+  await writeFile(join(f.workspace,'out/latest.json'),JSON.stringify(secondResult));
+  await writeFile(join(f.workspace,'.harness/verdict.json'),JSON.stringify({spec:1,ready:false,runId:second,publication:secondPublication}));
+  let state=await f.state();assert.equal(state.result.id,first);assert.deepEqual(state.history.map(r=>r.id),[first]);
+  assert.equal((await f.req(`/api/run?id=${second}`)).status,404);assert.equal((await f.req(`/api/run?id=${first}`)).status,200);
+  await writeFile(join(f.workspace,'.harness/verdict.json'),JSON.stringify({spec:1,ready:true,runId:second,publication:secondPublication,artifact:`out/runs/${second}/result.json`}));
+  state=await f.state();assert.equal(state.result.id,second);assert.deepEqual(state.history.map(r=>r.id),[second,first]);
+  assert.equal((await f.req(`/api/run?id=${second}`)).status,200);
+});
+
 test('cancellation also works when the platform cannot signal a process group',async t=>{
   const f=await fixture(t,'sleep 10');await f.run();
   const kill=process.kill;

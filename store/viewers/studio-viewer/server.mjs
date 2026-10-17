@@ -50,6 +50,32 @@ function revision(project) { return createHash('sha256').update(JSON.stringify(p
 async function optionalJSON(root, path, fallback) {
   try { return await jsonFile(root, path); } catch (e) { if (e.code === 'ENOENT') return fallback; throw e; }
 }
+function publication(result) {
+  if (!result || typeof result!=='object' || Array.isArray(result)) return false;
+  if (!Object.hasOwn(result,'publication')) return null;
+  const value=result.publication;
+  return value && value.spec===1 && typeof value.token==='string' && /^[a-f0-9]{32}$/.test(value.token) ? value:false;
+}
+function samePublication(left,right) {return !!left && !!right && left.spec===right.spec && left.token===right.token;}
+async function publicationVerdict(root) {
+  try {const value=await jsonFile(root,'.harness/verdict.json');return value && typeof value==='object' ? value:{};}
+  catch {return {};}
+}
+async function publishedResult(root,id,verdict) {
+  if (!/^[a-zA-Z0-9-]+$/.test(id??'')) return null;
+  const path=`out/runs/${id}/result.json`;
+  let result;
+  try {result=await jsonFile(root,path);}
+  catch(error) {if(error.code==='ENOENT' || error instanceof SyntaxError)return null;throw error;}
+  const identity=publication(result);
+  if (identity===null) return result;
+  if (!identity || result.id!==id) return null;
+  if (verdict.ready===true && verdict.runId===id && verdict.artifact===path && samePublication(verdict.publication,identity)) return result;
+  try {
+    const marker=await jsonFile(root,`out/runs/${id}/.published.json`);
+    return marker.spec===1 && marker.id===id && marker.token===identity.token ? result:null;
+  } catch {return null;}
+}
 
 export async function createStudio({workspace, packageDir, port = 0, jobTimeout = 900000}) {
   workspace = await realpath(workspace);
@@ -61,17 +87,23 @@ export async function createStudio({workspace, packageDir, port = 0, jobTimeout 
   let starting = false;
   const project = async () => jsonFile(workspace, 'studio.json');
   const readState = async () => {
-    const p = await project();
-    const result = await optionalJSON(workspace, 'out/latest.json', null);
-    const history = [];
+    const p = await project(),verdict=await publicationVerdict(workspace);
+    let result = await optionalJSON(workspace, 'out/latest.json', null);
+    const runs = [];
     let entries = [];
     try { entries = await readdir(await confined(workspace, 'out/runs')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-    for (const id of entries.sort().reverse().slice(0,40)) {
+    for (const id of entries.sort().reverse()) {
       try {
-        const r = await jsonFile(workspace, `out/runs/${id}/result.json`);
-        history.push({id, title:r.title, engine:r.engine, createdAt:r.createdAt, metrics:r.metrics, action:r.action});
+        const r = await publishedResult(workspace,id,verdict);
+        if(r)runs.push(r);
       } catch { /* An in-progress or damaged result never hides previous runs. */ }
+      if(runs.length===40)break;
     }
+    if (result && publication(result)!==null) {
+      const canonical=await publishedResult(workspace,result.id,verdict);
+      result=canonical && samePublication(publication(result),publication(canonical)) ? canonical:(runs[0]??null);
+    }
+    const history=runs.map(r=>({id:r.id,title:r.title,engine:r.engine,createdAt:r.createdAt,metrics:r.metrics,action:r.action}));
     return {config, project:p, revision:revision(p), result, history, job};
   };
   const endChild = () => {
@@ -101,7 +133,9 @@ export async function createStudio({workspace, packageDir, port = 0, jobTimeout 
       if (req.method === 'GET' && path === '/api/run') {
         const id = url.searchParams.get('id');
         if (!/^[a-zA-Z0-9-]+$/.test(id ?? '')) throw new Problem(400, 'Choose a run from the history.');
-        return send(200, await jsonFile(workspace, `out/runs/${id}/result.json`));
+        const result=await publishedResult(workspace,id,await publicationVerdict(workspace));
+        if(!result)throw new Problem(404,'This run is incomplete.');
+        return send(200,result);
       }
       if (req.method === 'POST' && path === '/api/cancel') {
         if (!child) throw new Problem(409, 'There is no run to stop.');
