@@ -276,6 +276,10 @@ jobs:
         shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      RECORD_LAUNCH_GOLDEN: '1'
+      RECORD_LAUNCH_SHAPES_GOLDEN: '1'
+      RECORD_DSH_LAUNCH_SHAPES_GOLDEN: '1'
     defaults:
       run:
         working-directory: cli
@@ -296,6 +300,15 @@ jobs:
         run: npx vitest list --config vitest.ci.config.ts --filesOnly --json="$RUNNER_TEMP/inventory-${{ matrix.shard }}.json"
       - name: Run default-suite shard
         run: npx vitest run --config vitest.ci.config.ts --shard=${{ matrix.shard }}/4 --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/result-${{ matrix.shard }}.json"
+      - name: Print re-recorded golden fixtures
+        if: ${{ !cancelled() }}
+        run: |
+          for f in src/engines/__fixtures__/launch-argv.golden.json src/engines/__fixtures__/launch-shapes.golden.json src/engines/__fixtures__/dsh-launch-shapes.golden.json; do
+            echo "GOLDEN-BEGIN $f"
+            base64 -w0 "$f" || true
+            echo
+            echo "GOLDEN-END $f"
+          done
       - name: Preserve inventory and test results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
