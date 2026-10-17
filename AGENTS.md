@@ -83,3 +83,5 @@ These notes describe upstream's workflow. Fork permissions and the requested sta
   Avoid starting candidates while implementation is still changing. The release
   automatically reuses matching Desktop build inputs/version and otherwise builds
   normally; unrelated CLI, firmware or documentation merges do not force a rebuild.
+
+Commits must never contain Co-authored-by trailers or any personal email; check `git log -1 --format=%B` before pushing.
