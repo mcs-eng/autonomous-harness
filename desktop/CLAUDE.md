@@ -317,13 +317,20 @@ Experimental switches are account state. `AppNotifier.experimentalFeatures` bind
 identifies the account, clears on sign-out/account change, and rejects stale responses. It uses
 `/api/experimental-settings`, refreshes on account invalidations and a 30-second fallback poll, and
 shows changes only after server acknowledgement. Do not restore the old unscoped local keys at startup.
-Agent Messages (docs/design/2026-10-10-agent-messages.md) replaced Swarm collaboration: its
-flag is per tab, not an Experimental switch — `GET /api/agent-messages` and
-`PATCH /api/agent-messages/tabs/:tabId` through the CLI like the desk, read after sign-in, after a
-toggle, on `desk_changed`, the desk safety-net poll and the backend coming back; a 404 (an older CLI
-or backend) offers no 💬 at all, and the 💬 waits for the first answer (`agentMessagesOffered`, which
-also needs a desk tab). Traffic arrives as `messages_changed` — but a daemon sends that only to its
-own computer's windows, so `AgentMessagesRemoteWatch` reads the last messages of each tab that is on
+Agent Messages (docs/design/2026-10-10-agent-messages.md) replaced Swarm collaboration. Whether
+agents may message is the account's Experimental switch (`agent_messages`, off by default; each
+daemon keeps a copy for its agents), not a tab's: the tab's own 💬 beside its × was easy to hit by
+mistake and turned the tab off, failing a waiting message (owner, 2026-10-12), so the tab, its
+menu, File and ⇧⌘P have no on/off. So are the other two things agents may do with Harness,
+starting agents (`agents_start_agents`) and the pull request line (`agent_pull_request_line`):
+they were each computer's Settings ▸ Agents until the owner made all three account experiments,
+off for all (2026-10-12). The app reads `GET /api/agent-messages` through
+the CLI like the desk only to learn that the daemon and backend have Agent Messages — once the desk
+is joined, from the desk safety-net poll until one has answered, and when the backend comes back;
+each tab's `enabled` in the answer is not read. A 404 (an older CLI or backend) offers no Show
+Agent Messages (`agentMessagesOffered`, which also needs a desk tab). Traffic arrives as
+`messages_changed` — but a daemon sends that only to its own computer's windows, so
+`AgentMessagesRemoteWatch` reads the last messages of each desk tab with two or more harnesses
 from its other machines every 15 s while the window is in front. A tab's log is the
 `agent_messages` `history` request to every daemon with a pane in it, merged by message id. The creature switch opens the account's
 `ZooController` collection; disabling it hides the creature without deleting eggs, individuals or progress.
@@ -346,8 +353,11 @@ closes. Idle-only closes retain the daemon's activity guard; newly active work g
 of the remaining sessions. Failures identify confirmed stops separately from uncertain ones
 and default to Keep open. Close pane / Close Tab dismisses the captured views through the
 normal recently-closed history path without another stop request; unconfirmed sessions may
-still be running, and their views in other tabs remain open. Previously queued daemon close
-plans remain compatible. Layout cleanup, moving panes, switching tabs, and sign-out retain
+still be running, and their views in other tabs remain open. A session reviewed before its
+engine bound a conversation (Codex's first seconds) that has bound one since is the same session
+(`Agent.continuesSession`): its Stop names the reviewed identity, no conversation, and the daemon
+decides (CLI `closeAgentService.ts` `matches`); another conversation once one was bound is a
+change. Previously queued daemon close plans remain compatible. Layout cleanup, moving panes, switching tabs, and sign-out retain
 their view-only behavior. Older daemons retain their existing behavior until updated.
 
 `HarnessMonitor` supplies the global running-harness count without process sampling
@@ -446,12 +456,13 @@ add a kind there, not at the call site.
 - The [workspace status bar](design/workspace-status-bar.md) places system-font tabs and global actions at the top,
   with harness, machine and installed local model counts plus subscription allowance remaining at the bottom left and focused machine/repo/branch/PR at the bottom right.
   Tabs center their name/status group and show no shortcut hint (Command changes nothing on
-  them). Hovering a tab shows Agent Messages' 💬 — grey off, accent blue on — just
-  left of ×; while its agents message, the status slot shows an animated 💬 for 10 s instead
-  (`lib/agent_messages/`, `AgentMessagesController` on `AppNotifier.agentMessages`, its own
-  notifier so traffic never rebuilds the workspace; `MessagingMark`; `SwarmTabButton` mirrors
-  it natively). At rest the name has the whole tab; hovered, it moves left only as far as 💬
-  and × need. Tab and pane close
+  them). Hovering a tab shows only its ×. Agent Messages has nothing on a tab: no 💬 (it was
+  easy to hit by mistake and turned the tab off, owner 2026-10-12; Settings ▸ Experimental holds
+  the account's switch) and no traffic, so its status slot keeps its own status (messages arrive when they
+  arrive). A tab's log is its menu's and File's Show Agent Messages (`lib/agent_messages/`,
+  `AgentMessagesController` on `AppNotifier.agentMessages`, its own notifier so traffic never
+  rebuilds the workspace; `SwarmTabButton` mirrors the tab natively).
+  At rest the name has the whole tab; hovered, it moves left only as far as × needs. Tab and pane close
   marks are small and quiet, with larger click targets. Terminal panes end with matching
   plain-text agent/model selectors and close at every width. Hovering the right
   or bottom edge reveals its split icon; zoom stays in commands, menus and keyboard
@@ -460,7 +471,7 @@ add a kind there, not at the call site.
   percentages. Automatic names use the strongest shared harness type,
   project, or machine, preferring traits that distinguish tabs and excluding dependent viewers.
   The context follows a viewer's owner and uses the compact project label, never a worktree path
-  or marker. User-renamed tabs always retain their saved name. Customize Harness → Status
+  or marker. User-renamed tabs always retain their saved name. Appearance → Status
   selects shell-inspired text or Powerline themes; the focused PR label uses that same theme.
   The single focused PR reader is `state/workspace_pull_request.dart`.
 - `lib/theme/app_theme.dart` (`AppColors`, `AppTheme.terminalLight/terminalDark`) is a set of
@@ -664,6 +675,19 @@ add a kind there, not at the call site.
   right. Appearance and Terminal both use it; a pane that invents its own row shape is the bug.
   Controls come from `shared/widgets/` too (`AppSelectField`, `AppIconButton`) — raw Material
   `DropdownButton`/`IconButton` do not match anything else in the app.
+  **Settings holds settings only** (owner, 2026-10-11): Account alone at the top, then General
+  (Appearance — the `customize` row, which opens the Appearance panel over the workspace —
+  Notifications, Keyboard shortcuts), Agents (Connectors, Usage), Labs (Experimental) and
+  Help (About, Debug in dev builds). A thing is managed where it lives: the Autonomous robots —
+  Wi-Fi code pairing, Revoke, Still companion — in the Devices tab (`devices/wifi_robots.dart`);
+  the account's computers, phones and apps, each device's code, Remove (a computer: sign out AND
+  delete its machine record), History… and Show in this window in the Machines picker
+  (`state/machine_devices.dart`, `widgets/machine_picker_extras.dart`). A way in from outside the
+  workspace asks for Machines with `AppNotifier.requestMachines` (`openMachines` in
+  `widgets/new_device_notice.dart`). What agents may do with Harness is in Experimental, the
+  account's (owner, 2026-10-12): Settings ▸ Agents, which read and wrote this computer's daemon,
+  is gone. An experiment an older backend does not name is shown off and unavailable, never a
+  failed read (`ExperimentalFeaturesStore._apply`).
 - **The log is written to files, and Settings ▸ Debug reads them back** (`lib/logging/`,
   `settings/sections/debug_*.dart`). `appLog` (`app-YYYYMMDD.log`) is the narrative — `app`, `ws`,
   `api`, `flutter` — and `cliLog` (`cli-YYYYMMDD.log`) is a transcript of every child process, both

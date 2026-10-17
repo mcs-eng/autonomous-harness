@@ -42,7 +42,9 @@ export const SERVICE_RUNNERS: ReadonlyMap<string, () => Promise<Runner>> = new M
   ['handoff', async () => (await import('./services/handoffProcess.js')).runHandoffService],
   ['connectors', async () => (await import('./services/connectorsProcess.js')).runConnectorsService],
   ['recaps', async () => (await import('./services/recapsProcess.js')).runRecapsService],
+  ['agentCleanup', async () => (await import('./services/agentCleanupProcess.js')).runAgentCleanupService],
   ['store', async () => (await import('./services/storeProcess.js')).runStoreService],
+  // In the edge host since 2026-10-12; alone in a process of its own when a master from before starts it on this build.
   ['messages', async () => (await import('./services/messagesProcess.js')).runMessagesService],
   ['sharing', async () => (await import('./services/sharingProcess.js')).runSharingService],
   ['orchestrator', async () => (await import('./services/orchestratorProcess.js')).runOrchestratorService],

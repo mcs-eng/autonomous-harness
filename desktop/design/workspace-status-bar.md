@@ -25,7 +25,7 @@ tooltip, and the row's last control is the account's. While this computer
 holds no account that is **Sign in**, the only control in the row with a word
 and a fill; it opens the sign-in over the workspace. Signed in, the same place
 is the account's initial in a circle, and a click opens a short menu: who is
-signed in, then Add Phone (until the account has a phone), Customize Harness,
+signed in, then Add Phone, Appearance,
 Notifications, Settings and Sign out, each opening what the app already has.
 Nothing is drawn between the icons and the account control; `controlGap`
 separates them. A narrow window drops Devices first; the account control
@@ -120,29 +120,25 @@ shared 10-point upper corners, 8-point outward lower shoulders and 6-point top
 inset. Keep space after `+` available for dragging the window. Scroll overflow
 and reveal the selected tab on keyboard navigation. Narrow viewports can show
 smaller tabs while preserving their controls.
-Windows tabs reserve three cells for a visible `x` close control because the OS
-uses Meta-W for Widgets. It closes the tab's views and keeps its harnesses running.
-Other targets keep no reserved close-button space; the right accessory reveals ×
-on hover. Hovering a tab reveals Agent Messages' 💬 and × at its right, 💬 just
-left of × ([Agent Messages](../../docs/design/2026-10-10-agent-messages.md)); its
-status stays. Tabs show no shortcut hint, and holding Command changes nothing on
-them. At rest a tab shows only its name and status. While its agents message each
-other, the status slot shows 💬 in Agent Messages' color (the accent blue,
-`AppPalette.accentOnSurface`), mirrored every half second, for 10 seconds after
-the last message, then the tab's status again. The hover 💬 is grey while off and
-in that color while on; its tooltip says what a click does ("Agent messages off ·
-click to turn on", "Agent messages on · click to turn off", "Agents messaging ·
-click to turn off"), and a click toggles that tab's flag at once, going back —
-with a notice — if the backend refuses. Only a tab the desk holds has a 💬 (not
-the Store, Devices, Companions, an orchestrator or a draft tab), and only once the
-daemon and backend have answered for Agent Messages; an older CLI or backend shows
-none. Hovering never changes the tab width. At rest the name and status have the
-whole tab, so a 128-point tab shows an ordinary name whole beside its status;
-hovered, a name that would run into 💬 and × moves left only as far as they need,
-then gives up its tail. × and 💬 are 16-point-wide, 32-point-tall targets with a
-3-point dead gap between them. The tab's menu and File carry Agent Messages (a
-checkmark) and Show Agent Messages beside Rename Tab and Close Tab. Cmd-W,
-remapped shortcuts, native menu access, and middle-click closing remain available.
+Windows tabs reserve space for an always-visible × close control because the OS
+uses Meta-W for Widgets. On other targets, hovering a tab reveals × at its right;
+its status stays. Tabs show no shortcut hint, and holding Command changes nothing
+on them. A tab shows nothing of
+[Agent Messages](../../docs/design/2026-10-10-agent-messages.md), at rest or
+hovered: traffic between its agents shows nothing on it, since messages arrive
+when they arrive, and there is no on/off on the tab. Its 💬 beside × was easy to
+hit by mistake and turned the tab off, failing a message that was waiting
+(owner, 2026-10-12); whether agents in the same tab may message each other is
+now one switch of the account, Settings ▸ Experimental, off by default. Hovering never
+changes the tab width. At rest on other targets, the name and status have the
+whole tab, so a 128-point tab shows an ordinary name whole beside its status; hovered, a name
+that would run into × moves left only as far as it needs, then gives up its
+tail. × is a 20-point-wide, 32-point-tall target. The tab's menu and File carry
+Show Agent Messages beside Rename Tab and Close Tab, only for a tab the desk
+holds (not the Store, Devices, Companions, an orchestrator or a draft tab) and
+only once the daemon and backend have answered for Agent Messages; an older CLI
+or backend shows none. Cmd-W, remapped
+shortcuts, native menu access, and middle-click closing remain available.
 Preserve reorder, rename, keyboard focus, and terminal sessions. Cmd-T opens a
 tab. Cmd-O opens the shared picker with `#` for projects; Cmd-P opens it directly
 on harnesses. Cmd-Shift-P opens commands (`>`). The projects list has
@@ -484,7 +480,7 @@ system SF Mono face at 18 pt; the dialog itself follows the selected terminal
 font, size and palette. The same suite checks narrow windows, enlarged text,
 alternate palettes, and retained keyboard focus when appearance changes.
 
-Customize Harness → Status offers twelve saved themes, grouped into Minimal
+Appearance → Status offers twelve saved themes, grouped into Minimal
 and Powerline, with a preview of the same sample pane beneath each choice.
 Selection covers only the name row. Tab and Shift-Tab move between choices;
 Enter or Space selects, scrolls the choice into view, and saves it. The selected

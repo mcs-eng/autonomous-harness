@@ -9,7 +9,7 @@ harnesses, wait for them, read their answers and close them:
 | Tool | What it does |
 |---|---|
 | `harness_list` | the harnesses here: state, who started each, what each is about |
-| `harness_start` | start an agent on a task in a folder, by name |
+| `harness_start` | start an agent on a task in a folder or a new project, by name |
 | `harness_wait` | wait until harnesses stop working |
 | `harness_read` | a harness's last ask and its answer |
 | `harness_close` | close a harness you started |
@@ -24,6 +24,9 @@ Harness itself (macOS or Linux; no account needed for harnesses on this computer
 curl -fsSL https://harness.autonomous.ai/cli/install.sh | bash
 harness start
 ```
+
+On Linux the installer installs tmux and curl with apt-get, which asks for your password (or run
+`sudo apt-get install -y tmux curl` first).
 
 Then add the server to your client, for example:
 

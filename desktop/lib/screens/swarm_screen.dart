@@ -13,7 +13,6 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart' show TerminalTheme;
 
-import '../agent_messages/agent_messages.dart';
 import '../agent_messages/agent_messages_view.dart';
 import '../core/runtime_platform.dart';
 import '../api/api_client.dart';
@@ -32,7 +31,7 @@ import '../widgets/resting_section.dart'
     show confirmStopInUse, confirmSwitchAnyway;
 import '../widgets/session_close_dialog.dart';
 import '../notify/system_notifications.dart';
-import '../settings/sections/account_device_detail.dart';
+import '../widgets/account_device_detail.dart';
 import '../settings/settings_screen.dart';
 import '../settings/settings_section.dart';
 import 'login_screen.dart' show showSignInSheet;
@@ -116,7 +115,9 @@ import '../widgets/new_agent_dialog.dart';
 import '../widgets/box_chrome.dart';
 import '../widgets/new_harness_form.dart';
 import '../widgets/desktop_chrome.dart';
+import '../widgets/account_device_history.dart';
 import '../widgets/desktop_search_panel.dart';
+import '../widgets/machine_picker_extras.dart';
 import '../widgets/desktop_workspace_tab.dart';
 import '../widgets/open_harness_intent.dart';
 import '../widgets/project_sidebar.dart';
@@ -890,6 +891,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       return;
     }
     _routeIsCurrent = current;
+    if (current) _maybeOpenMachinesRequest();
     if (!current &&
         (_search != null ||
             _daemonOverlay != null ||
@@ -1938,6 +1940,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       'reduceMotion': _reduceMotion,
       'activeId': app.activeSwarmId,
       'searchTooltip': _commandTooltip('Open Harness', 'harnesses.list'),
+      'addPhoneTooltip': _addPhoneTooltip,
       'storeTooltip': _commandTooltip('Explore Harness Store', 'app.store'),
       'devicesVisible': app.devicesEnabled,
       // The row's last control: Sign in, or whose account this is.
@@ -2161,23 +2164,15 @@ class _SwarmScreenState extends State<SwarmScreen> {
                 activity,
                 color: activityInk(activity),
               ),
-            // Agent Messages' 💬; absent where a tab has none
-            // (AppNotifier.agentMessagesOffered). Flowing only while on.
-            if (app.agentMessagesOffered(swarm.id)) ...{
-              'agentMessages': app.agentMessages.isOn(swarm.id),
-              'agentMessagesFlowing':
-                  app.agentMessages.stateOf(swarm.id) ==
-                  TabMessagesState.flowing,
-            },
+            // The tab menu's Show Agent Messages; absent where a tab has no
+            // log (AppNotifier.agentMessagesOffered). Nothing of Agent
+            // Messages shows on the tab itself.
+            if (app.agentMessagesOffered(swarm.id))
+              'canShowAgentMessages': true,
           },
       ],
-      // Agent Messages' color: the 💬 while on, and a tab's status slot while
-      // its agents message. The design system's one accent, blue, as a mark.
-      'agentMessagesInk': grid.AppPalette.accentOnSurface.toARGB32(),
-      // The File menu's Agent Messages checkmark, for the active tab.
-      'activeAgentMessages': app.agentMessagesOffered(app.activeSwarmId)
-          ? app.agentMessages.isOn(app.activeSwarmId)
-          : null,
+      // File's Show Agent Messages, for the active tab.
+      'canShowAgentMessages': app.agentMessagesOffered(app.activeSwarmId),
     };
     final encoded = jsonEncode(payload);
     if (encoded == _nativeState) return;
@@ -2502,15 +2497,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
         if (args['id'] is String) unawaited(_rename(args['id']));
       case 'renameActive':
         unawaited(_rename(app.activeSwarmId));
-      case 'toggleAgentMessages':
-        // From a tab's 💬 or its menu (with its id), or the File menu (the
-        // active tab).
-        unawaited(
-          _toggleAgentMessages(
-            args['id'] is String ? args['id'] as String : app.activeSwarmId,
-          ),
-        );
       case 'showAgentMessages':
+        // From a tab's menu (with its id), or the File menu (the active tab).
         unawaited(
           _showAgentMessages(
             args['id'] is String ? args['id'] as String : app.activeSwarmId,
@@ -2664,7 +2652,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
           'new',
           'rename',
           'renameActive',
-          'toggleAgentMessages',
           'showAgentMessages',
           'commands',
           'notifications',
@@ -2711,6 +2698,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       await action();
     } finally {
       _dialogOpen = false;
+      _maybeOpenMachinesRequest();
       if (mounted) {
         _canvasFocus.descendantsAreFocusable = _search == null;
         if (_search == null &&
@@ -2774,16 +2762,15 @@ class _SwarmScreenState extends State<SwarmScreen> {
       if (await choose(error: error) != 'close_view' || !mounted) return false;
       // This only dismisses the captured views. It neither retries Stop nor
       // treats a lost reply as proof that the session stopped. A replaced
-      // session must not inherit a choice made for the old one.
+      // session must not inherit a choice made for the old one; one that
+      // only bound its first conversation since the review is not replaced.
       return targets.every((target) {
         final current = app
             .stateOf(target.$1)
             ?.agents
             .where((agent) => agent.id == target.$2.id)
             .firstOrNull;
-        return current == null ||
-            (current.createdAt == target.$2.createdAt &&
-                current.sessionId == target.$2.sessionId);
+        return current == null || current.continuesSession(target.$2);
       });
     }
 
@@ -2861,19 +2848,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
     );
     if (name != null) app.renameSwarm(id, name);
   });
-
-  /// Turn Agent Messages on or off for [id]. The 💬 follows at once and goes
-  /// back if the backend does not take it — and then says so where the click
-  /// was, since a 💬 that quietly flips back reads as a click that missed.
-  Future<void> _toggleAgentMessages(String id) async {
-    if (!app.agentMessagesOffered(id)) return;
-    if (await app.agentMessages.toggle(id) || !mounted) return;
-    final failure = app.agentMessages.failureFor(id);
-    if (failure == null) return;
-    ScaffoldMessenger.maybeOf(context)
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(failure)));
-  }
 
   /// [id]'s Agent Messages log.
   Future<void> _showAgentMessages(String id) => _dialog(() async {
@@ -3080,43 +3054,17 @@ class _SwarmScreenState extends State<SwarmScreen> {
   /// Sign in: the sign-in screen, over the desk (`showSignInSheet`).
   Future<void> _signIn() => _dialog(() => showSignInSheet(context, app));
 
-  /// Whether the account has a phone already, as last read: Add Phone leaves
-  /// the menu then. Unknown shows it.
-  bool? _accountHasPhone;
-  String? _accountPhoneOwner;
-
-  Future<void> _readAccountPhone() async {
-    // No daemon to ask under test, and a request that never ends.
-    if (kUnderTest || app.isGuest) return;
-    final owner = app.currentUser?.email;
-    try {
-      final devices = await app.loadDevices();
-      if (!mounted || devices == null) return;
-      _accountHasPhone = devices.devices.any(
-        (device) => !device.isMachine && !device.self,
-      );
-      _accountPhoneOwner = owner;
-    } catch (_) {
-      // Unread, the row stays: it costs nothing to offer.
-    }
-  }
-
   /// The avatar's menu (`widgets/account_menu.dart`). Its rows open what the
   /// app already has, once the menu itself has closed: a [_dialog] made from
   /// inside one is refused.
   Future<void> _showAccountMenu() async {
     final user = app.currentUser;
-    final hasPhone =
-        _accountPhoneOwner == user?.email && _accountHasPhone == true;
-    // For the next opening: this one must not change under the pointer.
-    unawaited(_readAccountPhone());
     AccountMenuChoice? choice;
     await _dialog(() async {
       choice = await showAccountMenu(
         context,
         name: user?.name ?? '',
         email: user?.email ?? '',
-        showAddPhone: !hasPhone,
         topInset: _native ? 0 : _tabBarHeight,
       );
     });
@@ -3124,7 +3072,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
     switch (choice) {
       case AccountMenuChoice.addPhone:
         await _addPhone();
-        unawaited(_readAccountPhone());
       case AccountMenuChoice.customize:
         await _customize();
       case AccountMenuChoice.notifications:
@@ -3158,8 +3105,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     // (its "Sign in…") must not bring the card back once it closes, so the
     // offer is dropped on the way out too.
     app.dropPhoneOffer();
-    // "Manage devices…" pops the dialog and asks for Settings, but this
-    // [_dialog] is still open until the pop lands — a [_settings] made from
+    // "Manage devices…" pops the dialog and asks for Machines, but this
+    // [_dialog] is still open until the pop lands — a picker opened from
     // the callback would be refused. So it is remembered, and opened after.
     var manageDevices = false;
     try {
@@ -3176,7 +3123,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       app.dropPhoneOffer();
     }
     if (manageDevices && mounted) {
-      await _settings(SettingsSection.accountDevices);
+      await _openMachines(phones: true, toggle: false);
     }
   }
 
@@ -3197,17 +3144,130 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
   }
 
-  Future<void> _openMachines({String? initialMachineId}) async {
+  /// Machines: the account's computers, and its phones and apps.
+  ///
+  /// [devicePub] selects that device once the account's list has been read, [phones] the first
+  /// phone or app. [review] false is the picker opening on its own (a machine asking to be linked):
+  /// nobody chose to look at the list, so it marks no new device seen. [toggle] false keeps a
+  /// Machines picker that is already open rather than closing it, as a deep link wants.
+  Future<void> _openMachines({
+    String? initialMachineId,
+    String? devicePub,
+    bool phones = false,
+    bool review = true,
+    bool toggle = true,
+  }) async {
     _browserMachineSetupHandled = true;
     _onboarding.acknowledge(OnboardingStep.machines);
-    _openResourcePicker('@');
-    if (initialMachineId != null && _search?.isMachineMode == true) {
-      final index = _search!.rows.indexWhere(
+    if (toggle || _search?.isMachineMode != true) _openResourcePicker('@');
+    final search = _search;
+    if (search == null || !search.isMachineMode) return;
+    if (!review) search.machineDevices?.markSeen = false;
+    if (initialMachineId != null) {
+      final index = search.rows.indexWhere(
         (row) => row.machineId == initialMachineId,
       );
-      if (index >= 0) _search!.move(index - _search!.cursor);
+      if (index >= 0) search.move(index - search.cursor);
+    }
+    if (devicePub != null || phones) {
+      _selectDeviceWhenListed(search, pub: devicePub, phones: phones);
     }
   }
+
+  /// Selects a device in Machines as soon as the account's list has it: the list is read when
+  /// the picker opens, so a deep link usually arrives before its row does.
+  void _selectDeviceWhenListed(
+    SwarmSearchController search, {
+    String? pub,
+    bool phones = false,
+  }) {
+    var done = false, selecting = false;
+    bool attempt() {
+      // Selecting notifies this same listener: the second call is that, not news.
+      selecting = true;
+      try {
+        return pub != null
+            ? search.selectDevice(pub)
+            : search.selectFirstPhone();
+      } finally {
+        selecting = false;
+      }
+    }
+
+    if (attempt()) return;
+    late final VoidCallback listener;
+    listener = () {
+      if (done || selecting) return;
+      if (_search != search || !search.isMachineMode) {
+        done = true;
+      } else if (attempt() || search.machineDevices?.loaded == true) {
+        done = true;
+      }
+      if (done) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_search == search) search.removeListener(listener);
+        });
+      }
+    };
+    search.addListener(listener);
+  }
+
+  /// A way in from outside the workspace (a device band, a review line under a password prompt)
+  /// asked for Machines ([AppNotifier.requestMachines]): opened once nothing else holds the window.
+  void _maybeOpenMachinesRequest() {
+    if (app.machinesRequest == null ||
+        !mounted ||
+        _dialogOpen ||
+        _spokenPaletteOpen ||
+        !_routeIsCurrent) {
+      return;
+    }
+    final request = app.takeMachinesRequest()!;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        _openMachines(
+          devicePub: request.devicePub,
+          phones: request.phones,
+          toggle: false,
+        ),
+      );
+    });
+  }
+
+  /// What the Machines picker needs from the workspace for its dialogs and Add Phone.
+  MachinePickerHooks get _machinePickerHooks => MachinePickerHooks(
+    confirm: (title, detail, action) async {
+      _pickerModalChanged(true);
+      try {
+        return await confirmDeviceAction(
+          context,
+          title,
+          detail,
+          action,
+          destructive: true,
+        );
+      } finally {
+        _pickerModalChanged(false);
+        if (mounted && _search != null) _focusSearch();
+      }
+    },
+    onHistory: () async {
+      _pickerModalChanged(true);
+      try {
+        await showAccountDeviceHistory(context, app);
+      } finally {
+        _pickerModalChanged(false);
+        if (mounted && _search != null) _focusSearch();
+      }
+    },
+    onAddPhone: kIsWeb
+        ? null
+        : () {
+            _closeSearch(restoreFocus: false);
+            unawaited(_addPhone());
+          },
+  );
 
   void _openResourcePicker(String prefix) {
     dismissTransientMenus();
@@ -6097,7 +6157,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
       return;
     }
     if (choice.destination.isModel) return;
-    if (_search!.setupLayout && choice.destination.isMachine) {
+    if (_search!.setupLayout &&
+        (choice.destination.isMachine || choice.destination.isAccountDevice)) {
       final index = _search!.rows.indexWhere(
         (row) => row.id == choice.destination.id,
       );
@@ -6221,6 +6282,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       onRefocus: _focusSearch,
       previewBuilder: preview,
       showsBack: widget.chrome?.pickerShowsBack ?? false,
+      machineHooks: _machinePickerHooks,
     );
     final scoped = Semantics(
       scopesRoute: true,
@@ -6633,7 +6695,10 @@ class _SwarmScreenState extends State<SwarmScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
         app.acknowledgeMachineLinkRequest(machine.machine.machineId);
-        await _openMachines(initialMachineId: machine.machine.machineId);
+        await _openMachines(
+          initialMachineId: machine.machine.machineId,
+          review: false,
+        );
       }
       // Keep the prompt's identity until the picker closes. Otherwise Escape
       // would immediately reopen it on the next workspace update.
@@ -6748,6 +6813,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           initialMachineId: selected?.needsLink == true
               ? selected!.machine.machineId
               : null,
+          review: false,
         ),
       );
     });
@@ -6839,8 +6905,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
       'pane.focus_$i': () => app.focusPaneByIndex(i - 1),
     'navigation.commands': _showSearchCommands,
     'agent_messages.show': () => _showAgentMessages(app.activeSwarmId),
-    'agent_messages.toggle': () =>
-        unawaited(_toggleAgentMessages(app.activeSwarmId)),
     'app.customize': () => unawaited(_customize()),
     'pane.toggle_shading': () => unawaited(
       appearancePrefsStore.setShadeInactivePanes(
@@ -7076,7 +7140,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
       ?mode('keyboard.quick_start', 'Quick start', 'Four steps into real work'),
       ?mode('keyboard.practice', 'Keyboard practice', 'Try every shortcut'),
       ?mode('keyboard.open_config', 'Edit keybindings', 'keybindings.jsonc'),
-      ?mode('app.customize', 'Customize Harness', 'Prompt · colors · fonts'),
+      ?mode(
+        'app.customize',
+        'Appearance',
+        'Status · colors · wallpaper · fonts',
+      ),
       ?mode('app.settings', 'Settings', ''),
     ];
   }
@@ -7099,10 +7167,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
               : command.id == 'agent.restart' &&
                     isTerminalEngine(_focusedAgent?.engine)
               ? 'Restart Terminal'
-              : command.id == 'agent_messages.toggle'
-              ? app.agentMessages.isOn(app.activeSwarmId)
-                    ? 'Agent Messages: turn off for this tab'
-                    : 'Agent Messages: turn on for this tab'
               : command.label,
           detail: command.group.label,
           swarmId: null,
@@ -7121,7 +7185,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
             swarmId: null,
             current: false,
             commandId: '$_settingsCommand${section.name}',
-            searchFields: ['settings', 'preferences', section.name],
+            searchFields: [
+              'settings',
+              'preferences',
+              section.name,
+              ...section.keywords,
+            ],
           ),
   ];
 
@@ -7150,6 +7219,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       children: [
         _searchButton(theme),
         _notificationsButton(theme),
+        _addPhoneButton(theme),
         if (app.devicesEnabled) _devicesButton(context),
         WorkspaceStoreButton(
           key: const ValueKey('swarm-store-button'),
@@ -7167,6 +7237,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     builder: (context, _) {
       grid.AppTheme.watch(context);
       _maybeLink();
+      _maybeOpenMachinesRequest();
       _scheduleWelcomeComposer();
       if (app.panes.isEmpty) {
         WidgetsBinding.instance.addPostFrameCallback(
@@ -7992,8 +8063,6 @@ class _SwarmScreenState extends State<SwarmScreen> {
       final toolHeight = workspaceBarControlHeight(context);
       // Tabs close on Windows (Meta+W is taken).
       final prefs = appearancePrefsStore.value.prompt;
-      // Agent Messages' color: the design system's accent blue, as a mark.
-      final messagesColor = grid.AppPalette.accentOnSurface;
       final storeWidth = math.min(
         WorkspaceStoreButton.widthOf(context),
         // Keep one complete tab revealable; the optional Store label truncates
@@ -8009,16 +8078,24 @@ class _SwarmScreenState extends State<SwarmScreen> {
       // Devices only where Store keeps its full width beside it. A narrow
       // window drops it from the bar first; Harness Store still opens it.
       final devicesWidth = WorkspaceStoreButton.widthOf(context, devices: true);
-      final showDevices =
-          app.devicesEnabled &&
-          constraints.maxWidth - cell.width * 22 - accountWidth >=
-              WorkspaceStoreButton.widthOf(context) + devicesWidth;
-      // Search, notifications, Devices, Store and the account — none of it
-      // here when the title bar holds them.
+      final room =
+          constraints.maxWidth -
+          cell.width * 22 -
+          accountWidth -
+          WorkspaceStoreButton.widthOf(context);
+      final showDevices = app.devicesEnabled && room >= devicesWidth;
+      // Add Phone likewise, and it goes before Devices: a phone is added once,
+      // and the account menu, the Harness menu and `> add phone` still open it.
+      final addPhoneWidth = cell.width * 4;
+      final showAddPhone =
+          room >= addPhoneWidth + (showDevices ? devicesWidth : 0);
+      // Search, notifications, Add Phone, Devices, Store and the account —
+      // none of it here when the title bar holds them.
       final actionsWidth = _titleBarActions
           ? 0.0
           : storeWidth +
                 cell.width * 8 +
+                (showAddPhone ? addPhoneWidth : 0) +
                 (showDevices ? devicesWidth : 0) +
                 accountWidth;
       final leadingWidth = chrome?.leadingWidth(context) ?? 0.0;
@@ -8116,22 +8193,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
                               unawaited(app.requestCloseSwarm(swarm.id));
                             }
                           },
-                          // Only the tab listens to Agent Messages: its traffic
-                          // must not rebuild the workspace.
-                          child: ListenableBuilder(
-                            listenable: app.agentMessages,
-                            builder: (context, _) {
-                              // While its agents message, the status slot
-                              // shows 💬 in place of the tab's status, and
-                              // the tooltip and screen readers say so.
-                              final messaging =
-                                  app.agentMessagesOffered(swarm.id) &&
-                                  app.agentMessages.stateOf(swarm.id) ==
-                                      TabMessagesState.flowing;
-                              final status = [
-                                if (messaging) agentsMessagingLabel,
-                                ?activity?.label,
-                              ];
+                          child: Builder(
+                            builder: (context) {
                               final nameHint = workspaceTabTooltip(
                                 labels[index],
                                 swarm.name,
@@ -8139,21 +8202,21 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                     DesktopWorkspaceTab.naturalWidth(
                                       context,
                                       labels[index],
-                                      hasActivity:
-                                          activity != null || messaging,
+                                      hasActivity: activity != null,
                                     ) >
                                     _tabWidths[index],
                               );
-                              final tabHint = [?nameHint, ...status].join('\n');
+                              final tabHint = [
+                                ?nameHint,
+                                ?activity?.label,
+                              ].join('\n');
                               return DesktopWorkspaceTab(
                                 id: swarm.id,
                                 onRename: () => _rename(swarm.id),
                                 label: labels[index],
                                 selected: selected,
                                 tooltip: tabHint.isEmpty ? null : tabHint,
-                                activityLabel: status.isEmpty
-                                    ? null
-                                    : status.join(', '),
+                                activityLabel: activity?.label,
                                 onSelect: _shortcutsEnabled
                                     ? () => app.selectSwarm(swarm.id)
                                     : null,
@@ -8162,27 +8225,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                         app.requestCloseSwarm(swarm.id),
                                       )
                                     : null,
-                                agentMessages:
-                                    app.agentMessagesOffered(swarm.id)
-                                    ? app.agentMessages.stateOf(swarm.id)
-                                    : null,
-                                onToggleAgentMessages: _shortcutsEnabled
-                                    ? () => unawaited(
-                                        _toggleAgentMessages(swarm.id),
-                                      )
-                                    : null,
-                                messagesColor: messagesColor,
-                                activity: messaging
-                                    ? tabStatus(
-                                        (visible) => MessagingMark(
-                                          key: ValueKey(
-                                            'tab-messaging:${swarm.id}',
-                                          ),
-                                          color: messagesColor,
-                                          visible: visible,
-                                        ),
-                                      )
-                                    : activity == null || activity.mark.isEmpty
+                                activity:
+                                    activity == null || activity.mark.isEmpty
                                     ? null
                                     : tabStatus(
                                         (visible) => ActivityMark(
@@ -8222,6 +8266,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
               if (!_titleBarActions) ...[
                 _searchButton(theme),
                 _notificationsButton(theme),
+                if (showAddPhone) _addPhoneButton(theme),
                 if (showDevices) _devicesButton(context),
                 WorkspaceStoreButton(
                   key: const ValueKey('swarm-store-button'),
@@ -8270,6 +8315,31 @@ class _SwarmScreenState extends State<SwarmScreen> {
       height: workspaceBarControlHeight(context),
       child: Icon(
         AppIcons.search,
+        size: 16,
+        color: theme.foreground.withValues(
+          alpha: !_shortcutsEnabled
+              ? .28
+              : emphasized
+              ? 1
+              : .75,
+        ),
+      ),
+    ),
+  );
+
+  String get _addPhoneTooltip => _commandTooltip('Add Phone', 'app.add_phone');
+
+  /// Harness ▸ Add Phone…, as a glyph just before Devices ([_addPhone]).
+  Widget _addPhoneButton(TerminalTheme theme) => WorkspaceBarControl(
+    key: const ValueKey('swarm-add-phone-button'),
+    label: 'Add Phone',
+    tooltip: _addPhoneTooltip,
+    onPressed: _shortcutsEnabled ? () => unawaited(_addPhone()) : null,
+    builder: (context, emphasized) => SizedBox(
+      width: workspaceBarCellSizeOf(context).width * 4,
+      height: workspaceBarControlHeight(context),
+      child: Icon(
+        AppIcons.smartphoneNfc,
         size: 16,
         color: theme.foreground.withValues(
           alpha: !_shortcutsEnabled
