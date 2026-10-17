@@ -69,6 +69,35 @@ describe('parseVerdict', () => {
     expect(parseVerdict(JSON.stringify({ spec: 1, ready: true, artifact: '/abs.step' }))?.artifact).toBeNull()
     expect(parseVerdict(JSON.stringify({ spec: 1, ready: true, updatedAt: 'yesterday' }))?.updatedAt).toBeNull()
   })
+
+  it('rejects Windows absolute artifacts', () => {
+    for (const artifact of ['C:\\outside.step', '\\outside.step', '\\\\server\\share\\outside.step']) {
+      const verdict = parseVerdict(JSON.stringify({
+        spec: 1, ready: true, artifact,
+        phases: [{ name: 'Build', artifact }],
+      }))
+      expect(verdict?.artifact).toBeNull()
+      expect(verdict?.phases[0]?.artifact).toBeNull()
+    }
+  })
+
+  it.each(['C:foo.step', 'C:../outside.step', 'c:..\\x.step'])('rejects drive-qualified artifact %s', (artifact) => {
+    const verdict = parseVerdict(JSON.stringify({
+      spec: 1, ready: true, artifact,
+      phases: [{ name: 'Build', artifact }],
+    }))
+    expect(verdict?.artifact).toBeNull()
+    expect(verdict?.phases[0]?.artifact).toBeNull()
+  })
+
+  it('normalizes Windows-style relative artifacts for viewer URLs', () => {
+    const verdict = parseVerdict(JSON.stringify({
+      spec: 1, ready: true, artifact: 'models\\part.step',
+      phases: [{ name: 'Build', artifact: 'models\\part.step' }],
+    }))
+    expect(verdict?.artifact).toBe('models/part.step')
+    expect(verdict?.phases[0]?.artifact).toBe('models/part.step')
+  })
 })
 
 describe('DshVerdictWatcher', () => {
@@ -219,9 +248,11 @@ describe('DshVerdictWatcher, event by event', () => {
   it('logs, and watches nothing, when the verdict directory cannot be made', () => {
     writeFileSync(join(workspace, 'plain-file'), '')
     const logs: string[] = []
+    const verdictDir = join(workspace, 'plain-file', '.harness')
+    const escapedVerdictDir = verdictDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     watcher = new DshVerdictWatcher({ onChange: () => undefined, log: (line) => logs.push(line) })
-    watcher.watch('a', join(workspace, 'plain-file', '.harness', 'verdict.json'))
-    expect(logs).toEqual([expect.stringMatching(/^\[dsh\] verdict dir .*plain-file\/\.harness could not be created · ENOTDIR/)])
+    watcher.watch('a', join(verdictDir, 'verdict.json'))
+    expect(logs).toEqual([expect.stringMatching(new RegExp(`^\\[dsh\\] verdict dir ${escapedVerdictDir} could not be created · ENOTDIR`))])
     expect(watcher.current('a')).toBeNull()
     // and with no log at all, still no throw
     new DshVerdictWatcher({ onChange: () => undefined }).watch('b', join(workspace, 'plain-file', 'x', 'verdict.json'))

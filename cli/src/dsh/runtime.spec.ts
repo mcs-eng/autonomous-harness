@@ -56,7 +56,7 @@ describe('portable harness adapters', () => {
     const bootstrap = engine === 'claude' ? 'CLAUDE.md' : 'AGENTS.md'
     expect(readFileSync(join(ws, bootstrap), 'utf8')).toContain(HARNESS_BOOTSTRAP)
     expect(readFileSync(launch.env.HARNESS_CONTEXT_FILE!, 'utf8')).toContain('# Make a drawing')
-    expect(readFileSync(launch.env.HARNESS_CONTEXT_FILE!, 'utf8')).toContain(join(launch.env.HARNESS_SKILLS_DIR!, 'draw/SKILL.md'))
+    expect(readFileSync(launch.env.HARNESS_CONTEXT_FILE!, 'utf8')).toContain(JSON.stringify(join(launch.env.HARNESS_SKILLS_DIR!, 'draw/SKILL.md')))
     expect(readlinkSync(join(launch.env.HARNESS_SKILLS_DIR!, 'draw'))).toBe(join(pkg.realDir, 'skills/draw'))
     expect(launch.env).toMatchObject({ HARNESS_DSH: pkg.id, HARNESS_DSH_DIR: pkg.realDir, HARNESS_WORKSPACE: ws,
       TOOLCHAIN: join(pkg.realDir, 'tools'), OLD_SKILLS: launch.env.HARNESS_SKILLS_DIR, OTHER_SKILLS: launch.env.HARNESS_SKILLS_DIR })

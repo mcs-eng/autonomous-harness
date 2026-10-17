@@ -181,9 +181,13 @@ export interface DshVars {
 /** Expand `${dsh}`, `${workspace}` and `${home}`; anything else is left exactly as written. */
 export function expandDshValue(value: string, vars: DshVars): string {
   const home = vars.home ?? homedir()
-  return value.replace(/\$\{(dsh|workspace|home)\}/g, (_, name: string) => (
-    name === 'dsh' ? vars.dsh : name === 'workspace' ? vars.workspace : home
-  ))
+  return value.replace(/\$\{(dsh|workspace|home)\}(\/)?/g, (_, name: string, slash: string | undefined) => {
+    const path = name === 'dsh' ? vars.dsh : name === 'workspace' ? vars.workspace : home
+    const windows = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path)
+    const separator = windows ? '\\' : '/'
+    const trimmed = windows ? path.replace(/[\\/]+$/, '') : path.replace(/\/+$/, '')
+    return slash ? `${trimmed}${separator}` : path
+  })
 }
 
 /** Which tier the manifest declares, by what it ships — the desktop shows this on the tile. */
