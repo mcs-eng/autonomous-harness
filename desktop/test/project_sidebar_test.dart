@@ -578,7 +578,6 @@ void main() {
     app.dispose();
   });
 
-  // Fork: the sidebar's machine tree gave way to upstream's Machines Manager.
   testWidgets('Machines and Show machines open the machine list', (
     tester,
   ) async {
@@ -606,7 +605,6 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  // Fork: local mode is upstream's guest desk, labelled, with its way out.
   testWidgets('local mode is labelled, with sign-in, only without an account', (
     tester,
   ) async {
@@ -628,8 +626,6 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  // Fork: the machine tree was where an agent was dragged onto the grid; the
-  // project rows carry that now, and only for a session that can fill a tile.
   testWidgets('only a session with a terminal can be dragged', (tester) async {
     final app = projectApp();
     addTearDown(app.dispose);

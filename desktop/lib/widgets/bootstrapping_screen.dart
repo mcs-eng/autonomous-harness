@@ -8,10 +8,6 @@ import 'desktop_chrome.dart';
 ///
 /// Current and recent messages come from bootstrap itself. Startup has no
 /// measurable total, so its activity indicator never invents a percentage.
-///
-/// Fork: a startup check that failed (the saved sign-in could not be read) is
-/// shown as the current line with a Try again button instead of the activity
-/// indicator, rather than assuming the person signed out.
 class BootstrappingScreen extends StatefulWidget {
   const BootstrappingScreen({
     super.key,

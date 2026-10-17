@@ -1,11 +1,3 @@
-// Two-body mission kernel for the Kepler studio.
-//
-// Heliocentric positions use J2000 Keplerian elements (Standish / JPL approximate
-// elements) advanced only in mean anomaly. That is a concept ephemeris: no
-// perturbations, no Earth-Moon split, no light-time. Lambert transfers are the
-// universal-variable solution (one revolution, short or long way). Nothing here
-// is a navigation product.
-
 export const AU_KM = 149597870.7
 export const MU_SUN = 1.32712440018e11 // km^3/s^2
 export const DAY_S = 86400
@@ -396,7 +388,6 @@ export function orbitBurn(bodyId, altitudeKm, vInf) {
   }
 }
 
-/** Lead angle of `target` ahead of `origin`, 0..360°, prograde about +Z. */
 export function phaseAhead(origin, target) {
   const a = Math.atan2(origin.y, origin.x)
   const b = Math.atan2(target.y, target.x)
@@ -511,7 +502,6 @@ function solveLeg(leg, ref, samples, findings) {
     tof = h.tofSeconds
     if (tof > 15 * 365.25 * DAY_S) throw new Error(`${ref}: time of flight is over 15 years; this solver is one revolution`)
     arrive = new Date(depart.getTime() + tof * 1000)
-    // Idealized coplanar ellipse in the departure body's plane, starting prograde.
     const radial = unit(departState.r)
     const normal = unit(cross(departState.r, departState.v))
     const pro = unit(cross(normal, radial))

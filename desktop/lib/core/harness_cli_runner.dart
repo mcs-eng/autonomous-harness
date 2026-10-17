@@ -239,8 +239,6 @@ class HarnessCliRunner {
     }
   }
 
-  /// The CLI inside WSL2.
-  ///
   /// A probe that found NOTHING is retried after [_wslProbeMissTtl]: "no distro
   /// answered yet" is often transient (WSL is still starting, a distro was just
   /// installed, `wsl --install` finished between two polls), and caching that

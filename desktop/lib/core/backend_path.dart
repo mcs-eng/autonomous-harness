@@ -1,22 +1,5 @@
 /// Turns a path the GUI's native picker produced into a path the CLI can open.
 ///
-/// ## Why this exists
-///
-/// On macOS and Linux the app and its CLI share one filesystem, so a path from
-/// the native folder panel is already the right answer. On Windows that is not
-/// true: the CLI usually runs INSIDE a WSL2 distribution (see `wsl_runtime.dart`),
-/// and `C:\work\project` names no directory in that distribution at all. A
-/// dialog that opened the Windows picker would hand the CLI a cwd it cannot
-/// chdir into, and the agent would fail to start in the very folder the user
-/// watched themselves select.
-///
-/// So "this is my computer" (connectivity) and "this machine shares my
-/// filesystem" (paths) are two different questions, and only the second one
-/// decides whether a native picker is useful. Where they differ, the app browses
-/// the backend's own filesystem over the daemon's `fs_list_dir` RPC — and, when
-/// a path still arrives in GUI form, converts it here or REFUSES it. A refusal
-/// with a sentence is better than a path the CLI will fail on later.
-///
 /// The conversion is deliberately bounded and explicit:
 ///
 /// * a POSIX path is already backend-native and passes through;

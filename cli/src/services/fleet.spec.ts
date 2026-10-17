@@ -310,9 +310,6 @@ describe('⌘K: which agent a typed task belongs to', () => {
 })
 
 describe('⌘K with TASK_ROUTER=jev: Jev ranks, the standard ranker owns the fallback', () => {
-  // The service layer's side of the Jev opt-in: the lib's HTTP call is covered in
-  // lib/jevRouter.spec.ts; here the wiring — the env gate, the ordering and dedupe, the
-  // `via: 'jev'` answer, and the fallthrough on a null from the router.
   function jevCore() {
     return fakeCore({
       agents: {

@@ -108,7 +108,6 @@ void main() {
           kHarnessPickerHint,
         );
         expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
-        // This fork lists existing sessions under the entry buttons.
         expect(find.text('Continue working'), findsOneWidget);
         final fieldRect = tester.getRect(field);
         final createRect = tester.getRect(create);
@@ -119,7 +118,6 @@ void main() {
         expect(openRect.top, greaterThan(fieldRect.bottom));
         expect(openRect.left, closeTo(fieldRect.left, 1));
         expect(createRect.left, greaterThan(openRect.right));
-        // The project sidebar can sit beside the workspace in this fork.
         final workspace = tester.getRect(
           find.byKey(ValueKey('harness-start:${app.activeSwarmId}')),
         );

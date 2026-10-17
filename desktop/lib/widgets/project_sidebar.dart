@@ -92,9 +92,6 @@ class _ProjectSidebarState extends State<ProjectSidebar> {
                             ),
                           ),
                         ),
-                        // Upstream's Machines Manager: every machine, its state,
-                        // and link, rename, password and delete. The fork's own
-                        // machine tree gave way to it with the 2026-09-23 sync.
                         AppIconButton(
                           key: const ValueKey('project-sidebar-machines'),
                           icon: AppIcons.server,
@@ -788,9 +785,6 @@ class _DragChip extends StatelessWidget {
   }
 }
 
-/// Fork: the sidebar's statement that this window runs without an account —
-/// upstream's guest desk, which the fork calls local mode — and its way to the
-/// other machines.
 class _LocalModeLine extends StatelessWidget {
   const _LocalModeLine({required this.onSignIn});
 

@@ -179,10 +179,6 @@ class LoginScreen extends StatelessWidget {
                                   _Action(
                                     notifier: notifier,
                                     waiting: waiting,
-                                    // Fork: the wall a desktop window can meet (a
-                                    // cancelled or failed sign-in) offers this
-                                    // computer again. Not the sheet over the desk,
-                                    // whose X already goes back to it.
                                     offerLocalMode:
                                         onClose == null &&
                                         notifier.viewer == null,
@@ -493,10 +489,6 @@ class _ActionState extends State<_Action> {
           ),
           if (widget.offerLocalMode) ...[
             const SizedBox(height: 16),
-            // Fork: the other door, back to this computer's desk without an
-            // account (local mode). Not a second filled button: one primary
-            // action per card, and the quiet weight says what this is — this
-            // computer's agents with no relay, not a rival to signing in.
             TextButton(
               key: const Key('use-without-account-button'),
               onPressed: notifier.continueWithoutAccount,

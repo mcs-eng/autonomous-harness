@@ -2782,8 +2782,6 @@ class _TerminalHeader extends StatelessWidget {
     ].join('\n');
     // Reserve space for the pane-local model selector.
     // Engines without a picker keep their existing header width.
-    // Upstream's PaneHeaderTextButton/PaneHeaderActions chrome is built to
-    // carry the picker in a compact header; the old blanket hide is gone.
     final showModelPicker = modelPickerSupports(session.engineId);
     // Both text selectors keep their natural width until the title has yielded.
     final pickerWidth =

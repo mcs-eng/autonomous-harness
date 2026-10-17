@@ -46,7 +46,7 @@ export function localGridId(stdout: string, gridName: string): string | null {
       const row = rows.find((item) => item?.grid === gridName || item?.name === gridName)
       return typeof row?.id === 'string' && row.id.trim() ? row.id.trim() : null
     }
-  } catch { /* text fallback */ }
+  } catch { }
   for (const line of stdout.split(/\r?\n/)) {
     const [name, id] = line.split('\t')
     if (name?.trim() === gridName && id?.trim()) return id.trim()
