@@ -15,18 +15,45 @@
  */
 import { fileURLToPath } from 'node:url'
 
+const scriptPath = fileURLToPath(import.meta.url)
 const [, , command, name] = process.argv
 if (command === '__harnessd') {
   // This file is the bundle: the master starts the core from it, as cli.ts's own `SCRIPT_PATH` names it
   // for a master started from the sources, and itself and the services from the lean bundle it carries.
-  (await import('./masterProcess.js')).startMasterFromBundle(fileURLToPath(import.meta.url))
+  (await import('./masterProcess.js')).startMasterFromBundle(scriptPath)
 } else if (command === '__harnessd-probe') {
   process.exitCode = (await import('./masterProcess.js')).probeThisMaster()
 } else if (command === '__service') {
   await (await import('./serviceProcess.js')).startServiceProcess(name)
 } else if (command === '__run') {
   // The core: started the one way it is started from the lean bundle too (coreProcess.ts), on cli.js.
-  (await import('./coreProcess.js')).startCoreProcess(fileURLToPath(import.meta.url))
+  (await import('./coreProcess.js')).startCoreProcess(scriptPath)
 } else {
-  await import('./cli.js')
+  const { fastCliRoute } = await import('./entryRoute.js')
+  await import('./config/loadEnv.js')
+  const route = fastCliRoute(process.argv)
+  if (!route) {
+    await import('./cli.js')
+  } else if (route.kind === 'local-update-noop') {
+    const { VERSION } = await import('./version.js')
+    const { isLocalDevBuild } = await import('./lib/versionKind.js')
+    if (!scriptPath.endsWith('.ts') && !isLocalDevBuild(VERSION)) {
+      await import('./cli.js')
+    } else {
+      const { initializeCli } = await import('./cliInitialization.js')
+      initializeCli(scriptPath)
+      const { localUpdateNoop } = await import('./lib/localUpdateNoop.js')
+      localUpdateNoop(scriptPath, VERSION, false)
+      process.exit(0)
+    }
+  } else {
+    const { initializeCli } = await import('./cliInitialization.js')
+    initializeCli(scriptPath)
+    if (route.kind === 'help') {
+      const { usage } = await import('./cliUsage.js')
+      usage()
+    } else {
+      process.exitCode = (await import('./dsh/checkCommand.js')).dshCheckCommand(route.argv)
+    }
+  }
 }

@@ -1,11 +1,14 @@
 /** Prepare a harness workspace independently of the selected agent. Templates and init belong to
  * the harness; instructions and skills are bound per session by runtime.ts after preparation. */
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstalledDsh } from './installed.js'
 import { dshAccountEnv, type DshAccount } from './launch.js'
 import { dshSupportedEngines } from './manifest.js'
 import { runDshCommand } from './shell.js'
+import { skillDirsIn } from './skillDirs.js'
+
+export { skillDirsIn } from './skillDirs.js'
 
 export interface MaterializeResult {
   /** Files and links this call created. */
@@ -16,23 +19,6 @@ export interface MaterializeResult {
   warnings: string[]
   /** Output of the init command, when it ran. */
   initLines: string[]
-}
-
-/** Subdirectories of `dir` that carry a SKILL.md, or `dir` itself when it is a single skill. */
-export function skillDirsIn(dir: string): string[] {
-  if (existsSync(join(dir, 'SKILL.md'))) return [dir]
-  let entries: string[]
-  try {
-    entries = readdirSync(dir)
-  } catch {
-    return []
-  }
-  return entries
-    .map((name) => join(dir, name))
-    .filter((path) => {
-      try { return statSync(path).isDirectory() && existsSync(join(path, 'SKILL.md')) } catch { return false }
-    })
-    .sort()
 }
 
 function ensureDir(path: string): void {

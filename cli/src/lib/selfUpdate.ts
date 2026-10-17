@@ -20,6 +20,9 @@ import { join } from 'path'
 import { SpawnLockBusyError, describeSpawnLockFailure } from './daemonSpawnLock.js'
 import { managedNodePath } from './nodeRuntime.js'
 import { patientDeadline } from './patientExec.js'
+import { isLocalDevBuild } from './versionKind.js'
+
+export { isLocalDevBuild } from './versionKind.js'
 
 export interface FileRef {
   url: string
@@ -110,13 +113,6 @@ export function semverGt(a: string, b: string): boolean {
   if (!x || !y) return false
   for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]
   return false
-}
-
-/** A build made from a working tree rather than downloaded from the release channel: the
- *  `<published-core>-dev.<sha>[.dirty]` label that scripts/lib/build-label.sh stamps on every local
- *  install, plus the `0.0.0-dev` sentinel version.ts falls back to. */
-export function isLocalDevBuild(version: string): boolean {
-  return /^\d+\.\d+\.\d+-dev(\.|$)/.test(version.trim())
 }
 
 /**
