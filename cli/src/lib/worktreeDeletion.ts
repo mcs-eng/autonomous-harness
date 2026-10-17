@@ -78,14 +78,17 @@ export async function inspectWorktree(s: RegisteredSession, sessions: readonly R
   }
   const main = dirname(common)
   if (within(root, main)) throw new Error('The main project is inside this folder. It cannot be deleted here.')
-  const worktrees = (await git(main, ['worktree', 'list', '--porcelain', '-z'])).split('\0\0')
-  const listed = worktrees.find(block => block.split('\0').includes('worktree ' + root))
+  const worktrees = await Promise.all((await git(main, ['worktree', 'list', '--porcelain', '-z'])).split('\0\0').map(async block => {
+    const rawPath = block.split('\0').find(line => line.startsWith('worktree '))?.slice(9)
+    const path = rawPath ? await realpath(rawPath).catch(() => resolve(rawPath)) : null
+    return { block, path }
+  }))
+  const listed = worktrees.find(worktree => worktree.path === root)?.block
   if (!listed || listed.split('\0').some(line => line === 'locked' || line.startsWith('locked ') || line.startsWith('prunable'))) {
     throw new Error('This worktree is locked or no longer registered. It cannot be deleted here.')
   }
-  for (const block of worktrees) {
-    const path = block.split('\0').find(line => line.startsWith('worktree '))?.slice(9)
-    if (path && path !== root && within(root, await realpath(path).catch(() => resolve(path)))) {
+  for (const worktree of worktrees) {
+    if (worktree.path && worktree.path !== root && within(root, worktree.path)) {
       throw new Error('Another Git worktree is inside this folder. It cannot be removed here.')
     }
   }
