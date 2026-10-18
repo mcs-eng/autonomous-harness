@@ -104,6 +104,13 @@ describe('the environment, as env.ts reads it', () => {
     expect(loaded.processEnv).toEqual({ PORT: '' })
   })
 
+  it('accepts the digit each boolean already read as meant: 0 for a flag, 1 for a default-on flag', () => {
+    const loaded = load({}, 'DISABLE_HOOK_INSTALL=0\nADAPTER_UPDATE_DISABLE=0\nRECAP_WITHOUT_DEVICE=1\n', ['ADAPTER_UPDATE_DISABLE'])
+    expect(loaded.status, loaded.stderr).toBe(0)
+    expect(loaded.env).toMatchObject({ DISABLE_HOOK_INSTALL: false, RECAP_WITHOUT_DEVICE: true })
+    expect(loaded.processEnv).toEqual({ ADAPTER_UPDATE_DISABLE: '0' })
+  })
+
   it('keeps typo-like pass-through keys and their values without blocking startup', () => {
     const loaded = load({}, 'SORT=asc\nPORTS=1,2\nPOST=x\n', ['SORT', 'PORTS', 'POST'])
     expect(loaded.status, loaded.stderr).toBe(0)
@@ -134,7 +141,9 @@ describe('the environment, as env.ts reads it', () => {
     ['an out-of-range port', 'PORT=70000\n', ['PORT', 'expected a value of at most 65535']],
     ['a fractional port', 'PORT=12.5\n', ['PORT', 'expected an integer']],
     ['an invalid flag', 'DISABLE_HOOK_INSTALL=maybe\n', ['DISABLE_HOOK_INSTALL', 'expected "true" or "false"']],
-    ['an invalid default-on flag', 'RECAP_WITHOUT_DEVICE=1\n', ['RECAP_WITHOUT_DEVICE', 'expected "true" or "false"']],
+    ['an upper-case flag', 'DISABLE_HOOK_INSTALL=TRUE\n', ['DISABLE_HOOK_INSTALL', 'expected "true" or "false"']],
+    ['a flag of 1, which reads as off', 'DISABLE_HOOK_INSTALL=1\n', ['DISABLE_HOOK_INSTALL', '1 is read as false for this key']],
+    ['a default-on flag of 0, which reads as on', 'RECAP_WITHOUT_DEVICE=0\n', ['RECAP_WITHOUT_DEVICE', '0 is read as true for this key']],
     ['an invalid optional number', 'TERMINAL_RECONCILE_INTERVAL_MS=soon\n', ['TERMINAL_RECONCILE_INTERVAL_MS', 'expected a finite number']],
     ['an invalid ref', 'HARNESS_STORE_REF=not a ref!\n', ['HARNESS_STORE_REF', 'value has an invalid format']],
     ['an invalid URL', 'HARNESS_STORE_CATALOG_URL=not-a-url\n', ['HARNESS_STORE_CATALOG_URL', 'expected a valid URL']],

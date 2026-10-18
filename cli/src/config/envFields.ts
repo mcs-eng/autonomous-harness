@@ -54,15 +54,23 @@ export const maybeNumber: EnvField<number | undefined> = checked(
   (raw) => raw === undefined ? undefined : Number(raw),
   numberIssue,
 )
+/** The file check for a boolean: `true`, `false`, or the digit that already reads as what it says
+ *  ([kept]). The other digit ([misread]) reads as its opposite, so it is refused, not kept. */
+function booleanIssue(kept: string, misread: string, misreadAs: string): (raw: string) => string | undefined {
+  return (raw) => {
+    if (raw === 'true' || raw === 'false' || raw === kept) return undefined
+    return raw === misread ? `expected "true" or "false"; ${misread} is read as ${misreadAs} for this key` : 'expected "true" or "false"'
+  }
+}
 /** True only for `true`, [fallback] when unset. */
 export const flag = (fallback: 'true' | 'false'): EnvField<boolean> => checked(
   (raw) => (raw ?? fallback) === 'true',
-  (raw) => raw === 'true' || raw === 'false' ? undefined : 'expected "true" or "false"',
+  booleanIssue('0', '1', 'false'),
 )
 /** True for anything but `false`: on unless turned off. */
 export const unlessFalse: EnvField<boolean> = checked(
   (raw) => raw !== 'false',
-  (raw) => raw === 'true' || raw === 'false' ? undefined : 'expected "true" or "false"',
+  booleanIssue('1', '0', 'true'),
 )
 /** One of [values], [fallback] when unset; anything else is an issue. */
 export function oneOf<const T extends string>(values: readonly T[], fallback: T): EnvField<T> {
