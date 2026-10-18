@@ -406,9 +406,11 @@ function unknownFileKeyWarning(key: string, knownKeys: readonly string[]): strin
   // The file is also an intentional pass-through to child tools. A likely typo is advisory only:
   // unknown variables must remain available to the tools that own them.
   const schema = fields as Readonly<Record<string, EnvField<unknown>>>
+  // One edit from a short key is often a real word of another tool's (SORT for PORT), so a suggestion
+  // also needs the same first letter: slips there are rare.
   const normalized = key.toUpperCase()
   const suggestion = knownKeys.find((known) => schema[known].fileIssue
-    && (known === normalized || oneEditApart(normalized, known)))
+    && (known === normalized || (normalized[0] === known[0] && oneEditApart(normalized, known))))
   return suggestion ? `unknown key; did you mean ${suggestion}?` : undefined
 }
 

@@ -151,6 +151,13 @@ describe('the environment, as env.ts reads it', () => {
     expectFileFailure(contents, messages)
   })
 
+  it('suggests no typed key for a word one edit away with a different first letter', () => {
+    const loaded = load({}, 'SORT=asc\n', ['SORT'])
+    expect(loaded.status, loaded.stderr).toBe(0)
+    expect(loaded.processEnv).toEqual({ SORT: 'asc' })
+    expect(loaded.stderr).not.toContain('did you mean')
+  })
+
   it('warns about a likely misspelling without rejecting or changing it', () => {
     const loaded = load({}, 'PORTT=18473\n', ['PORTT'])
     expect(loaded.status, loaded.stderr).toBe(0)
