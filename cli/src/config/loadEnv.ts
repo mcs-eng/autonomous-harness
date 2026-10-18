@@ -1,6 +1,6 @@
 import { config, parse, populate } from 'dotenv'
 import { readFileSync, statSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import type { EnvField } from './envFields.js'
 
 // Harness is started from users' projects. Their .env belongs to the project, not to the daemon:
@@ -81,9 +81,6 @@ function readSelectedEnvironmentFile(): LoadedEnvironmentFile | null {
     return null
   }
 
-  if (harnessFile && !isAbsolute(harnessFile)) {
-    throw new EnvironmentFileError(harnessFile, 'HARNESS_ENV_FILE must be an absolute path')
-  }
 
   try {
     if (!statSync(path).isFile()) throw new EnvironmentFileError(path, 'path is not a regular file')

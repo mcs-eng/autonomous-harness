@@ -95,10 +95,17 @@ describe('Harness environment loading', () => {
     expectCleanFailure(run(root, { HARNESS_ENV_FILE: root }), ['Invalid Harness environment file', 'path is not a regular file'])
   })
 
-  it('requires HARNESS_ENV_FILE to use the documented absolute path', () => {
+  it('resolves a relative HARNESS_ENV_FILE against the current folder, as DOTENV_CONFIG_PATH is', () => {
     const root = project()
-    expectCleanFailure(run(root, { HARNESS_ENV_FILE: 'harness.env' }), ['HARNESS_ENV_FILE must be an absolute path'])
-  })
+    mkdirSync(join(root, 'config'))
+    writeFileSync(join(root, 'config', 'harness.env'), 'BACKEND_WS_URL=ws://relative.invalid:8090\n')
+    for (const selector of ['HARNESS_ENV_FILE', 'DOTENV_CONFIG_PATH']) {
+      const result = run(root, { [selector]: join('config', 'harness.env') })
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({ BACKEND_WS_URL: 'ws://relative.invalid:8090' })
+    }
+    expectCleanFailure(run(root, { HARNESS_ENV_FILE: 'missing.env' }), [join(root, 'missing.env'), 'file does not exist'])
+  }, 20_000)
 
   it.each([
     ['an assignment without an equals sign', 'PORT 3000\n', 'line 1 is not a valid KEY=VALUE assignment'],
