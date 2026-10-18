@@ -657,3 +657,14 @@ commands, drive paths passed directly to Node's ESM loader, and locked-file
 cleanup in other fixtures. The remaining failures were not individually
 baselined or all proven Windows-only; this focused change does not claim a green
 full Windows CLI suite.
+
+## October 18 Harness environment file checks
+
+When `HARNESS_ENV_FILE` or `DOTENV_CONFIG_PATH` selects an environment file, the
+CLI now checks it before start-up and exits with one line naming the file, line and
+reason for a malformed line, an unclosed quote, a UTF-16 file, or an unusable value
+for a validated key such as `PORT`; a blank value means unset, and an unknown key
+that looks like a misspelled validated key only warns. This is a fork-local change to
+upstream-owned files in `cli/src/config`, not part of the Windows port. Upstream
+has no equivalent as of the 2026-10-12 sync (upstream `ecf8097ac`) or at upstream
+`acbfb09`.
