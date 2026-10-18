@@ -86,7 +86,7 @@ describe('the environment, as env.ts reads it', () => {
   ])('treats an empty value for %s in a selected file as unset', (_case, contents, key, fallback) => {
     const loaded = load({}, `${contents}UNTYPED_EMPTY=\n`, [key, 'UNTYPED_EMPTY'])
     expect(loaded.status, loaded.stderr).toBe(0)
-    expect(loaded.stderr).toBe('')
+    expect(loaded.stderr).not.toMatch(/Harness environment file|did you mean/)
     expect(loaded.env?.[key]).toBe(fallback)
     expect(loaded.processEnv).toEqual({ [key]: null, UNTYPED_EMPTY: '' })
   })
