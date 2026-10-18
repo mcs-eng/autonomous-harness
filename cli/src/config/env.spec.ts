@@ -74,6 +74,36 @@ describe('the environment, as env.ts reads it', () => {
     expect(loaded.processEnv).toEqual({ THIRD_PARTY_SETTING: 'value' })
   })
 
+  it.each([
+    ['a flag', 'DISABLE_HOOK_INSTALL=\n', 'DISABLE_HOOK_INSTALL', false],
+    ['a quoted empty flag', 'DISABLE_HOOK_INSTALL=""\n', 'DISABLE_HOOK_INSTALL', false],
+    ['a default-on flag', 'RECAP_WITHOUT_DEVICE=\n', 'RECAP_WITHOUT_DEVICE', true],
+    ['a pattern', 'HARNESS_STORE_REF=\n', 'HARNESS_STORE_REF', null],
+    ['a URL', 'HARNESS_STORE_CATALOG_URL=\n', 'HARNESS_STORE_CATALOG_URL', null],
+    ['a port', 'PORT=\n', 'PORT', 18473],
+    ['a quoted empty port', 'PORT=""\n', 'PORT', 18473],
+    ['an optional number', 'TERMINAL_RECONCILE_INTERVAL_MS=\n', 'TERMINAL_RECONCILE_INTERVAL_MS', null],
+  ])('treats an empty value for %s in a selected file as unset', (_case, contents, key, fallback) => {
+    const loaded = load({}, `${contents}UNTYPED_EMPTY=\n`, [key, 'UNTYPED_EMPTY'])
+    expect(loaded.status, loaded.stderr).toBe(0)
+    expect(loaded.stderr).toBe('')
+    expect(loaded.env?.[key]).toBe(fallback)
+    expect(loaded.processEnv).toEqual({ [key]: null, UNTYPED_EMPTY: '' })
+  })
+
+  it('treats empty number settings in a selected file as their defaults, not 0', () => {
+    const loaded = load({}, 'TMUX_REAP_INTERVAL_MS=\nADAPTER_SAFE_MODE_MS=\nADAPTER_UPDATE_DISABLE=\n', ['TMUX_REAP_INTERVAL_MS', 'ADAPTER_SAFE_MODE_MS', 'ADAPTER_UPDATE_DISABLE'])
+    expect(loaded.status, loaded.stderr).toBe(0)
+    expect(loaded.processEnv).toEqual({ TMUX_REAP_INTERVAL_MS: null, ADAPTER_SAFE_MODE_MS: null, ADAPTER_UPDATE_DISABLE: null })
+  })
+
+  it('keeps an exported empty value as it always read', () => {
+    const loaded = load({ PORT: '' }, 'PORT=9123\n', ['PORT'])
+    expect(loaded.status, loaded.stderr).toBe(0)
+    expect(loaded.env?.PORT).toBe(0)
+    expect(loaded.processEnv).toEqual({ PORT: '' })
+  })
+
   it('keeps typo-like pass-through keys and their values without blocking startup', () => {
     const loaded = load({}, 'SORT=asc\nPORTS=1,2\nPOST=x\n', ['SORT', 'PORTS', 'POST'])
     expect(loaded.status, loaded.stderr).toBe(0)

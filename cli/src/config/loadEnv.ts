@@ -149,7 +149,15 @@ export function validateLoadedEnvironment(
     }
 
     const field = fields[fieldKey]
-    const issue = field.fileIssue?.(raw)
+    if (!field.fileIssue) continue
+    // A blank typed value (`KEY=` or `KEY=""`) is a template placeholder: it means unset, as it did
+    // before validation for every kind but numbers, which read it as 0. Removing it lets this process
+    // and the children that inherit its environment use the default.
+    if (raw === '') {
+      delete process.env[key]
+      continue
+    }
+    const issue = field.fileIssue(raw)
     if (issue) exitWith(new EnvironmentFileError(loadedEnvironmentFile.path, `line ${line}, ${key}: ${issue}`))
   }
 }
