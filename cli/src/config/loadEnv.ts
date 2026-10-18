@@ -84,7 +84,12 @@ function readSelectedEnvironmentFile(): LoadedEnvironmentFile | null {
 
   try {
     if (!statSync(path).isFile()) throw new EnvironmentFileError(path, 'path is not a regular file')
-    const parsed = parseStrict(path, readFileSync(path, 'utf8'))
+    const bytes = readFileSync(path)
+    // Windows editors can save as UTF-16, which dotenv reads as no assignments at all.
+    if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
+      throw new EnvironmentFileError(path, 'file is UTF-16; save it as UTF-8')
+    }
+    const parsed = parseStrict(path, bytes.toString('utf8'))
     const appliedKeys = new Set(Object.keys(parsed.values).filter((key) => !Object.prototype.hasOwnProperty.call(process.env, key)))
     populate(process.env, parsed.values, { override: false })
     return { path: parsed.path, lines: parsed.lines, appliedKeys }

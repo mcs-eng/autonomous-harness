@@ -108,6 +108,16 @@ describe('Harness environment loading', () => {
   }, 20_000)
 
   it.each([
+    ['little-endian', Buffer.from('﻿PORT=9007\r\n', 'utf16le')],
+    ['big-endian', Buffer.from('﻿PORT=9007\r\n', 'utf16le').swap16()],
+  ])('names a %s UTF-16 file as the wrong encoding', (_order, contents) => {
+    const root = project()
+    const file = join(root, 'utf16.env')
+    writeFileSync(file, contents)
+    expectCleanFailure(run(root, { HARNESS_ENV_FILE: file }), ['file is UTF-16; save it as UTF-8'])
+  })
+
+  it.each([
     ['an assignment without an equals sign', 'PORT 3000\n', 'line 1 is not a valid KEY=VALUE assignment'],
     ['a bad line among valid assignments', 'PORT=3000\nthis is not an assignment\nAUTONOMOUS_ENV=prod\n', 'line 2 is not a valid KEY=VALUE assignment'],
     ['an unclosed quote', 'PORT="3000\n', 'line 1 has a malformed or unclosed quoted value for PORT'],
