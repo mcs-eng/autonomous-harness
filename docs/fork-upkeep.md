@@ -113,16 +113,34 @@ conflicts with account-free local mode and excludes the measurement PRs.
 
 The batch integrated on `kimi/sync-upstream-0130b6c18` (merge commit `a598ae44a`,
 golden re-record `957977ebc`, main-merge follow-up and a second re-record on top
-of main `9cd20975`). Nine paths conflicted; all are resolved in the branch. The
-three launch goldens were re-recorded on hosted Linux CI per the recipe above
-(two temporary `kimi/tmp-record-goldens` branches, `scope=cli` dispatch runs;
-the second after the #68 reland merged into main). Validation on Windows 11:
+of main `9cd20975`). Nine paths conflicted, resolved as follows:
+
+- `cli/src/engines/__fixtures__/launch-shapes.golden.json`,
+  `launch-argv.golden.json`, `dsh-launch-shapes.golden.json` — re-recorded on
+  hosted Linux CI per the recipe above (two temporary
+  `kimi/tmp-record-goldens` branches, `scope=cli` dispatch runs; the second
+  after the #68 reland merged into main). `launch-argv` keeps upstream's
+  override records; `launch-shapes` keeps the fork recording (`e749fe0f`).
+- `cli/src/cli.ts` / `cli/src/cliUsage.ts` — upstream deleted `usage()` from
+  `cli.ts`; the fork's wording lived in `cliUsage.ts`, so upstream's newer
+  wording was merged into it.
+- `cli/src/lib/daemonState.ts`, `cli/src/lib/engineBin.ts` — import unions
+  (both sides added imports).
+- `cli/src/engines/launchOverrides.spec.ts`,
+  `desktop/design/workspace-status-bar.md`,
+  `desktop/lib/widgets/desktop_workspace_tab.dart` — saved resolutions from
+  the sync worktree applied (Windows close control kept alongside upstream's
+  Agent Messages removal).
+
+Validation on Windows 11:
 CLI `tsc --noEmit` exit 0; focused Vitest on the conflicted CLI areas compared by
 test identity against the same run at the base — one upstream-new
 pull-request-line test is red natively on Windows (its settings-path mock uses a
 POSIX literal), the inherited class; `flutter analyze` 0 errors with the issue
 set identical to the base (5 unused-import warnings, 48 info lints); `git diff
---check` exit 0; privacy gate exit 0 on the head, title and body. Hosted Ubuntu
+--check` exit 0. The privacy gate flags one upstream-carried term in this batch
+(upstream's own public content; see the gate's upstream-carried exemption that
+landed as PR #69). Hosted Ubuntu
 CI is the full-suite authority; a merge commit retains the upstream parent.
 
 ## Evidence snapshot: 2026-10-06
