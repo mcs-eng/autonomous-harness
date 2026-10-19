@@ -121,7 +121,8 @@ inset. Keep space after `+` available for dragging the window. Scroll overflow
 and reveal the selected tab on keyboard navigation. Narrow viewports can show
 smaller tabs while preserving their controls.
 Windows tabs reserve space for an always-visible × close control because the OS
-uses Meta-W for Widgets. On other targets, hovering a tab reveals × at its right;
+uses Meta-W for Widgets. It closes the tab's views and keeps its harnesses running.
+On other targets, hovering a tab reveals × at its right;
 its status stays. Tabs show no shortcut hint, and holding Command changes nothing
 on them. A tab shows nothing of
 [Agent Messages](../../docs/design/2026-10-10-agent-messages.md), at rest or
