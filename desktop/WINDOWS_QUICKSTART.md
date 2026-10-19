@@ -678,4 +678,11 @@ because Meta+W opens Widgets on Windows, alongside upstream's Agent Messages
 removal. The three launch goldens are re-recorded on hosted Linux CI (a
 Windows recording writes Windows paths into them); `launch-argv` keeps
 upstream's override records, whose former call order its spec pins on purpose.
+
+One upstream behavior change to know in local mode: what agents may do
+(`agents-start-agents`, `pull-request-line`, `agent-messages`) is now an
+experiment of the signed-in account, each off by default (Settings ▸
+Experimental, or `harness settings`). Signed out, the local desk still runs,
+but changing one of these returns a sign-in prompt instead of a local toggle —
+the fork adopts this as upstream designed it.
 This is a source change; it does not update an installed desktop or daemon.
