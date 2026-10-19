@@ -25,6 +25,18 @@ character is # is a comment.
 
 A finding prints its location (title, body, commit, file path, or file line and
 column) and a masked stand-in for the match that shows only its length.
+
+With --upstream-ref, a line finding is suppressed when the blamed commit that
+introduced the line is an ancestor of that ref and the flagged line is still
+present verbatim in the ref's version of the file. This exempts content the
+pull request carries from the named upstream history (for a fork, upstream's
+own public commits) without weakening any other check: PR text, commit
+messages, paths, binary findings, and fork-authored lines are never exempted,
+and an unresolvable ref fails the scan. A textual file whose only added-line
+hits are carried is not re-reported by the per-file blob re-scan, which would
+otherwise repeat the same finding. The ref must name a commit the scanner can
+read; the hosted workflow fetches the fork's upstream main into one as pure
+git data.
 """
 import argparse
 import os
@@ -345,8 +357,64 @@ def new_occurrences(content, previous, terms, utf8_is_diffed=False):
     return False
 
 
-def scan_pull_request(repo, base, head, title, body, terms):
+def line_origin_commit(repo, head, path, line_no):
+    """Return the commit that last touched line line_no of path at head, or None."""
+    result = subprocess.run(
+        ["git", "blame", "--line-porcelain", "-L", f"{line_no},{line_no}",
+         head, "--", path],
+        cwd=repo, check=False, capture_output=True, timeout=120,
+    )
+    if result.returncode != 0:
+        return None
+    first = result.stdout.split(b"\n", 1)[0].split()
+    if not first:
+        return None
+    sha = first[0].decode("ascii", errors="replace")
+    if not sha or set(sha) == {"0"}:
+        return None
+    return sha
+
+
+def is_ancestor(repo, ancestor, ref):
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, ref],
+        cwd=repo, check=False, capture_output=True, timeout=120,
+    )
+    return result.returncode == 0
+
+
+def ref_file_lines(repo, ref, path):
+    """Return the set of text lines in ref's version of path, or None if absent."""
+    result = subprocess.run(
+        ["git", "show", f"{ref}:{path}"],
+        cwd=repo, check=False, capture_output=True, timeout=120,
+    )
+    if result.returncode != 0:
+        return None
+    return set(result.stdout.decode("utf-8", errors="replace").splitlines())
+
+
+def carried_by_upstream(repo, head, path, line_no, text, upstream_ref, cache):
+    """Whether the flagged line is carried verbatim from upstream history.
+
+    True only when the blame origin of the line is an ancestor of upstream_ref
+    and the exact line still exists in upstream_ref's version of the file. Any
+    doubt (no blame, no ancestry, line rewritten or removed upstream) is False.
+    """
+    origin = line_origin_commit(repo, head, path, line_no)
+    if origin is None or not is_ancestor(repo, origin, upstream_ref):
+        return False
+    if path not in cache:
+        cache[path] = ref_file_lines(repo, upstream_ref, path)
+    upstream_lines = cache[path]
+    if upstream_lines is None:
+        return False
+    return text.rstrip("\r\n") in upstream_lines
+
+
+def scan_pull_request(repo, base, head, title, body, terms, upstream_ref=None):
     """Return location strings. Terms themselves are redacted out of each one."""
+    carried_cache = {}
     findings = []
     for label, text in (("PR title", title or ""), ("PR body", body or "")):
         hit = first_match(text, terms)
@@ -359,12 +427,21 @@ def scan_pull_request(repo, base, head, title, body, terms):
     raw_changes = list(changed_blobs(repo, base, head))
     line_findings = []
     line_hit_paths = set()
+    carried_paths = set()
     textual_paths = set()
     for path, line_no, text in added_lines(diff_text(repo, base, head), textual_paths):
         hit = first_match(text, terms)
         if hit:
+            if upstream_ref is not None and carried_by_upstream(
+                    repo, head, path, line_no, text, upstream_ref, carried_cache):
+                carried_paths.add(path)
+                continue
             line_hit_paths.add(path)
             line_findings.append(f"file {shown_path(path, terms)} line {line_no} column {hit[0]}: {masked(hit[1])}")
+    # A textual path whose only added-line hits were upstream-carried would be
+    # re-reported verbatim by the per-file blob re-scan below; skip it there.
+    # Binary paths are never in textual_paths, so their blob findings stay.
+    line_hit_paths |= carried_paths & textual_paths
     for status, path, base_oid, head_oid, head_mode in raw_changes:
         if status in ("A", "R", "C"):
             path_hit = path_match(path, terms)
@@ -490,7 +567,18 @@ def run_pull_request(args):
         return 1
     title = pull_request_text(args, args.title, args.title_file, "PR_TITLE")
     body = pull_request_text(args, args.body, args.body_file, "PR_BODY")
-    findings = scan_pull_request(args.repo, base, head, title, body, terms)
+    upstream_ref = args.upstream_ref
+    if upstream_ref:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{upstream_ref}^{{commit}}"],
+            cwd=args.repo, check=False, capture_output=True, timeout=120,
+        )
+        if resolved.returncode != 0:
+            print("privacy guard: upstream ref does not resolve; failing closed",
+                  file=sys.stderr)
+            return 1
+    findings = scan_pull_request(args.repo, base, head, title, body, terms,
+                                 upstream_ref=upstream_ref or None)
     return emit(findings)
 
 
@@ -508,6 +596,9 @@ def parse_args(argv):
     parser.add_argument("--title-file", help="file containing the pull request title")
     parser.add_argument("--body-file", help="file containing the pull request body")
     parser.add_argument("--repo", default=".", help="repository to scan")
+    parser.add_argument("--upstream-ref",
+                        help="commit ref (fetched upstream history); lines carried "
+                             "verbatim from it are exempt from line findings")
     return parser.parse_args(argv)
 
 
