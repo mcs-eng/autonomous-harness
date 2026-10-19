@@ -604,6 +604,64 @@ class UpstreamCarriedTests(unittest.TestCase):
         self.assertIn("failing closed", result.stderr)
         self.assertNotIn("examplehost", combined(result).lower())
 
+    def test_cli_upstream_ref_exempts_carried_line(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        result = self.run_guard(["--head", head, "--title", "", "--body", "",
+                                 "--upstream-ref", carried])
+        self.assertEqual(result.returncode, 0, combined(result))
+        self.assertNotIn("examplehost", combined(result).lower())
+        self.write("notes.txt", "hello examplehost\n")
+        fork = self.commit("fork change")
+        result = self.run_guard(["--head", fork, "--title", "", "--body", "",
+                                 "--upstream-ref", carried])
+        self.assertEqual(result.returncode, 1)
+
+    def test_carried_line_does_not_hide_utf16_tail(self):
+        pad = ("x" * 99 + "\n") * 90  # > 8000 NUL-free bytes: git treats it as text
+        tail = "sampleboard\n".encode("utf-16-le")
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write_bytes("carried.txt", b"hello examplehost\n" + pad.encode() + tail)
+        head = self.commit("fork appends a utf16 tail")
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.txt: [redacted 11 chars]"])
+
+    def test_ancestry_check_decides_when_line_text_exists_upstream(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write("carried.txt", "hello examplehost\nhello examplehost\n")
+        head = self.commit("fork duplicates an upstream line")
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.txt line 2 column 7: [redacted 11 chars]"])
+
+    def test_conflict_resolution_line_is_not_exempted(self):
+        self.write("lines.txt", "one\ntwo\nthree\n")
+        self.git("checkout", "-q", "-b", "upstream-work")
+        self.write("lines.txt", "one\ntwo upstream\nthree\n")
+        upstream = self.commit("upstream edits line two")
+        self.git("checkout", "-q", "main")
+        self.write("lines.txt", "one\ntwo main\nthree\n")
+        self.commit("fork edits line two")
+        subprocess.run(["git", "merge", "--no-edit", upstream], cwd=self.root,
+                       check=False, capture_output=True)
+        self.write("lines.txt", "one\ntwo resolved examplehost\nthree\n")
+        head = self.commit("resolve with a private term")
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream)), 1)
+
+    def test_file_deleted_upstream_is_not_exempted(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.git("checkout", "-q", "upstream-work")
+        self.git("rm", "-q", "carried.txt")
+        upstream_tip = self.commit("upstream deletes the file")
+        self.git("checkout", "-q", "main")
+        head = self.merge_upstream(carried)
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream_tip)), 1)
+
 
 class CliTests(unittest.TestCase):
     def setUp(self):

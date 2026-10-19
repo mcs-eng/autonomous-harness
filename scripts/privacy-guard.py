@@ -31,12 +31,12 @@ introduced the line is an ancestor of that ref and the flagged line is still
 present verbatim in the ref's version of the file. This exempts content the
 pull request carries from the named upstream history (for a fork, upstream's
 own public commits) without weakening any other check: PR text, commit
-messages, paths, binary findings, and fork-authored lines are never exempted,
-and an unresolvable ref fails the scan. A textual file whose only added-line
-hits are carried is not re-reported by the per-file blob re-scan, which would
-otherwise repeat the same finding. The ref must name a commit the scanner can
-read; the hosted workflow fetches the fork's upstream main into one as pure
-git data.
+messages, paths, binary findings, other encodings of the same file, and
+fork-authored lines are never exempted, and an unresolvable ref fails the
+scan. Carried lines exempt only the UTF-8 view of a textual file in the
+per-file re-scan, never the whole file. The ref must name a commit the
+scanner can read; the hosted workflow fetches the fork's upstream main into
+one as pure git data.
 """
 import argparse
 import os
@@ -359,11 +359,14 @@ def new_occurrences(content, previous, terms, utf8_is_diffed=False):
 
 def line_origin_commit(repo, head, path, line_no):
     """Return the commit that last touched line line_no of path at head, or None."""
-    result = subprocess.run(
-        ["git", "blame", "--line-porcelain", "-L", f"{line_no},{line_no}",
-         head, "--", path],
-        cwd=repo, check=False, capture_output=True, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "blame", "--line-porcelain", "-L", f"{line_no},{line_no}",
+             head, "--", path],
+            cwd=repo, check=False, capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if result.returncode != 0:
         return None
     first = result.stdout.split(b"\n", 1)[0].split()
@@ -376,19 +379,25 @@ def line_origin_commit(repo, head, path, line_no):
 
 
 def is_ancestor(repo, ancestor, ref):
-    result = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", ancestor, ref],
-        cwd=repo, check=False, capture_output=True, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, ref],
+            cwd=repo, check=False, capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return result.returncode == 0
 
 
 def ref_file_lines(repo, ref, path):
     """Return the set of text lines in ref's version of path, or None if absent."""
-    result = subprocess.run(
-        ["git", "show", f"{ref}:{path}"],
-        cwd=repo, check=False, capture_output=True, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=repo, check=False, capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if result.returncode != 0:
         return None
     return set(result.stdout.decode("utf-8", errors="replace").splitlines())
@@ -438,10 +447,10 @@ def scan_pull_request(repo, base, head, title, body, terms, upstream_ref=None):
                 continue
             line_hit_paths.add(path)
             line_findings.append(f"file {shown_path(path, terms)} line {line_no} column {hit[0]}: {masked(hit[1])}")
-    # A textual path whose only added-line hits were upstream-carried would be
-    # re-reported verbatim by the per-file blob re-scan below; skip it there.
-    # Binary paths are never in textual_paths, so their blob findings stay.
-    line_hit_paths |= carried_paths & textual_paths
+    # A path stays in the full-file scan below even when its only added-line
+    # hits were carried: the carried lines only exempt the UTF-8 view of a
+    # textual file, never its other encodings.
+    carried_only = carried_paths - line_hit_paths
     for status, path, base_oid, head_oid, head_mode in raw_changes:
         if status in ("A", "R", "C"):
             path_hit = path_match(path, terms)
@@ -455,9 +464,12 @@ def scan_pull_request(repo, base, head, title, body, terms, upstream_ref=None):
             display_path = shown_path(path, terms)
             content = blob_bytes(repo, head_oid, display_path)
             previous = b"" if status in ("A", "C") else blob_bytes(repo, base_oid, display_path)
-            utf8_is_diffed = status in ("M", "R", "T") and path in textual_paths
+            utf8_is_diffed = path in textual_paths and (
+                status in ("M", "R", "T") or path in carried_only)
             if new_occurrences(content, previous, terms, utf8_is_diffed) and path not in line_hit_paths:
                 views = decoded_blob_views(content)
+                if utf8_is_diffed:
+                    views = views[1:]
                 hit = next((first_match(view, terms) for view in views if first_match(view, terms)), None)
                 if hit:
                     findings.append(f"file {shown_path(path, terms)}: {masked(hit[1])}")
