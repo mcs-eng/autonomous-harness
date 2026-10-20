@@ -48,7 +48,11 @@ jobs:
   scan:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Upstream sync pull requests carry hundreds of commits and thousands of
+    # files, and scan time grows with the range. A timed-out scan reports
+    # nothing, so size the cap for the largest sync batch rather than an
+    # ordinary pull request.
+    timeout-minutes: 45
     steps:
       # pull_request_target checks out the base branch, which is trusted.
       - uses: actions/checkout@v7
