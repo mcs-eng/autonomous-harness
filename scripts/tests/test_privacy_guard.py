@@ -491,6 +491,178 @@ class RepositoryScanTests(unittest.TestCase):
                         self.assertIn("public??::warning::injected.bin", result.stderr)
 
 
+class UpstreamCarriedTests(unittest.TestCase):
+    """--upstream-ref exempts only lines carried verbatim from upstream history."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "fixture@example.test")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "commit.gpgsign", "false")
+        self.write("README.md", "hello example\n")
+        self.base = self.commit("base")
+
+    def git(self, *args):
+        return subprocess.check_output(["git", *args], cwd=self.root,
+                                       stderr=subprocess.PIPE, text=True).strip()
+
+    def write(self, path, value):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(value)
+
+    def write_bytes(self, path, value):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(value)
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def upstream_commit_adding(self, message="upstream adds carried text"):
+        self.git("checkout", "-q", "-b", "upstream-work")
+        carried = self.commit(message)
+        self.git("checkout", "-q", "main")
+        return carried
+
+    def merge_upstream(self, ref):
+        self.git("merge", "--no-edit", "-q", ref)
+        return self.git("rev-parse", "HEAD")
+
+    def scan(self, head, terms=None, upstream_ref=None, title="", body=""):
+        return guard.scan_pull_request(
+            self.root, self.base, head, title, body,
+            terms if terms is not None else FAKE_TERMS, upstream_ref=upstream_ref)
+
+    def run_guard(self, args):
+        env = os.environ.copy()
+        env.pop("PRIVATE_TERMS_FILE", None)
+        env.update(PRIVATE_TERMS=",".join(FAKE_TERMS), GITHUB_ACTIONS="true",
+                   PYTHONIOENCODING="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo", str(self.root),
+             "--base", self.base, *args],
+            env=env, capture_output=True, stdin=subprocess.DEVNULL, text=True,
+            encoding="utf-8", check=False,
+        )
+
+    def test_line_carried_from_upstream_is_suppressed_only_with_the_ref(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        flagged = self.scan(head)
+        self.assertEqual(flagged, ["file carried.txt line 1 column 7: [redacted 11 chars]"])
+        self.assertEqual(self.scan(head, upstream_ref=carried), [])
+
+    def test_pr_text_and_commit_messages_are_never_exempted(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        findings = self.scan(head, upstream_ref=carried,
+                             title="hosting on ExampleHost", body="see sampleboard")
+        self.assertEqual(findings, [
+            "PR title: [redacted 11 chars]",
+            "PR body: [redacted 11 chars]",
+        ])
+
+    def test_fork_modified_line_is_not_exempted(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write("carried.txt", "hello examplehost today\n")
+        head = self.commit("fork rewords the carried line")
+        self.assertEqual(len(self.scan(head, upstream_ref=carried)), 1)
+
+    def test_line_removed_upstream_is_not_exempted(self):
+        self.write("carried.txt", "hello examplehost\nkeep me\n")
+        carried = self.upstream_commit_adding()
+        self.git("checkout", "-q", "upstream-work")
+        self.write("carried.txt", "keep me\n")
+        upstream_tip = self.commit("upstream drops the line")
+        self.git("checkout", "-q", "main")
+        head = self.merge_upstream(carried)
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream_tip)), 1)
+
+    def test_carried_binary_blob_is_not_exempted(self):
+        self.write_bytes("carried.bin", "hello examplehost\n".encode("utf-16-le"))
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.bin: [redacted 11 chars]"])
+
+    def test_missing_upstream_ref_fails_closed(self):
+        self.write("notes.txt", "hello examplehost\n")
+        head = self.commit("public change")
+        result = self.run_guard(["--head", head, "--title", "", "--body", "",
+                                 "--upstream-ref", "refs/data/nope"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failing closed", result.stderr)
+        self.assertNotIn("examplehost", combined(result).lower())
+
+    def test_cli_upstream_ref_exempts_carried_line(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        result = self.run_guard(["--head", head, "--title", "", "--body", "",
+                                 "--upstream-ref", carried])
+        self.assertEqual(result.returncode, 0, combined(result))
+        self.assertNotIn("examplehost", combined(result).lower())
+        self.write("notes.txt", "hello examplehost\n")
+        fork = self.commit("fork change")
+        result = self.run_guard(["--head", fork, "--title", "", "--body", "",
+                                 "--upstream-ref", carried])
+        self.assertEqual(result.returncode, 1)
+
+    def test_carried_line_does_not_hide_utf16_tail(self):
+        pad = ("x" * 99 + "\n") * 90  # > 8000 NUL-free bytes: git treats it as text
+        tail = "sampleboard\n".encode("utf-16-le")
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write_bytes("carried.txt", b"hello examplehost\n" + pad.encode() + tail)
+        head = self.commit("fork appends a utf16 tail")
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.txt: [redacted 11 chars]"])
+
+    def test_ancestry_check_decides_when_line_text_exists_upstream(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write("carried.txt", "hello examplehost\nhello examplehost\n")
+        head = self.commit("fork duplicates an upstream line")
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.txt line 2 column 7: [redacted 11 chars]"])
+
+    def test_conflict_resolution_line_is_not_exempted(self):
+        self.write("lines.txt", "one\ntwo\nthree\n")
+        self.git("checkout", "-q", "-b", "upstream-work")
+        self.write("lines.txt", "one\ntwo upstream\nthree\n")
+        upstream = self.commit("upstream edits line two")
+        self.git("checkout", "-q", "main")
+        self.write("lines.txt", "one\ntwo main\nthree\n")
+        self.commit("fork edits line two")
+        subprocess.run(["git", "merge", "--no-edit", upstream], cwd=self.root,
+                       check=False, capture_output=True)
+        self.write("lines.txt", "one\ntwo resolved examplehost\nthree\n")
+        head = self.commit("resolve with a private term")
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream)), 1)
+
+    def test_file_deleted_upstream_is_not_exempted(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.git("checkout", "-q", "upstream-work")
+        self.git("rm", "-q", "carried.txt")
+        upstream_tip = self.commit("upstream deletes the file")
+        self.git("checkout", "-q", "main")
+        head = self.merge_upstream(carried)
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream_tip)), 1)
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
