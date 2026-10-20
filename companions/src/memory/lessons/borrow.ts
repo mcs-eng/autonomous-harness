@@ -24,7 +24,8 @@
  */
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { mangleClaudeProjectDir } from '../../../../cli/src/lib/claudeProject.js'
+import { discovery as claudeDiscovery } from '../../../../cli/src/engines/claude/discoveryContract.js'
+import { projectDirectoryName } from '../../../../cli/src/engines/kit/projectFolder.js'
 import { guardLesson, slug, type DistillWhy } from './distill.js'
 import { untrusted } from '../../shared/guard.js'
 import type { LessonRecord, LessonStore } from './store.js'
@@ -245,6 +246,13 @@ export function readHermesSkills(hermesHome: string, now: number): BorrowCandida
 }
 
 // ── Claude Code ─────────────────────────────────────────────────────────────────────────────────────
+
+/** Use the same project folder rule as Claude transcript discovery. */
+export function mangleClaudeProjectDir(folder: string): string {
+  const rule = claudeDiscovery.projectFolder
+  if (!rule) throw new Error('Claude discovery contract is missing its projectFolder rule')
+  return projectDirectoryName(rule, folder)
+}
 
 /** The memory folder names a project folder has: its path mangled, and its real path mangled. */
 function claudeKeys(folder: string): string[] {
