@@ -11,6 +11,7 @@ import type { FleetEvent } from '../cable/machineFleet.js'
 import type { RegisteredSession } from '../lib/registry.js'
 import { fakeCore } from '../testing/fakeCore.js'
 import type { Fleet, FleetDeps } from './fleet.js'
+import type { DevicesDeps } from './devices.js'
 
 const seen = vi.hoisted(() => ({
   host: null as unknown as CableHostWiring,
@@ -49,10 +50,16 @@ vi.mock('../cable/cableFleet.js', async (real) => {
     questionClose = recorder('questionClose')
     turnStarted = recorder('turnStarted')
     turnStep = recorder('turnStep')
+    turnReply = recorder('turnReply')
     turnDone = recorder('turnDone')
+    turnStats = recorder('turnStats')
     summary = recorder('summary')
     turnError = recorder('turnError')
     petsChanged = recorder('petsChanged')
+    wants = true
+    connected = true
+    get isConnected() { return this.connected }
+    wantsStats() { return this.wants }
     petDial = () => ({ supported: false, held: [] as string[], sending: null })
     setSettings = vi.fn(async (id: string, _patch: unknown) => (id === 'usb' ? { ok: true } : { ok: false, error: 'That device is not plugged into this computer.' }))
   }
@@ -113,6 +120,9 @@ vi.mock('../lib/voiceRouter.js', () => ({
   routeVoiceTask: vi.fn(),
 }))
 
+const jevMade = vi.hoisted(() => vi.fn())
+vi.mock('../lib/jev/jevClient.js', async (orig) => ({ ...(await orig<object>()), createJevDecide: (...a: unknown[]) => { jevMade(...a); return async () => { throw new Error('no jev here') } } }))
+
 const { startDevices } = await import('./devices.js')
 
 let dataDir: string
@@ -129,7 +139,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; testDialPort?: string } = {}) {
+function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; testDialPort?: string; readUsage?: DevicesDeps['readUsage']; now?: () => number; decideTier?: DevicesDeps['decideTier'] | null } = {}) {
   const core = over.core ?? fakeCore({ dataDir })
   const ports: CorePorts = emptyPorts()
   const onExit = vi.fn()
@@ -139,6 +149,9 @@ function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolea
     dialSerials: ['E2E'],
     testDialPort: over.testDialPort,
     cableDisabled: over.cableDisabled,
+    readUsage: over.readUsage,
+    now: over.now,
+    decideTier: over.decideTier === null ? undefined : over.decideTier ?? (async () => ({ tier: 'alert', by: 'test', detail: '', ms: 0 })),
     faults: new Set(over.faults ?? []),
     log: (line) => { logs.push(line) },
     onExit,
@@ -361,7 +374,106 @@ describe('what the windows say, reaching the dial', () => {
     port.desk(['a2', 'a1'], false)
     port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'done' } })
     port.card({ type: 'commander_event', agentId: 'a9', payload: { kind: 'summary', text: 'done', subagent: true } })
-    expect(calls('summary')).toEqual([['a1', 'fixed it', 'done', true, false], ['a1', 'done', 'done', false, false], ['a9', 'done', 'done', false, true]])
+    await vi.waitFor(() => expect(calls('summary')).toHaveLength(3))
+    // The one that asked the decider lands last: the other two never wait.
+    expect(calls('summary')).toEqual([['a1', 'fixed it', 'done', 'silent', undefined, false], ['a9', 'done', 'done', 'silent', undefined, true], ['a1', 'done', 'done', 'alert', undefined, false]])
+  })
+
+  describe('a summary\'s tier', () => {
+    afterEach(() => { delete process.env.HARNESS_NOTIFY_SMART })
+    it('builds the default decider without Jev when HARNESS_NOTIFY_SMART is 0, and with it otherwise', () => {
+      process.env.HARNESS_NOTIFY_SMART = '0'
+      start({ decideTier: null })
+      expect(jevMade).not.toHaveBeenCalled()
+      delete process.env.HARNESS_NOTIFY_SMART
+      start({ decideTier: null })
+      expect(jevMade).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the next turn behind a recap still waiting on the decider', async () => {
+      vi.useFakeTimers()
+      try {
+        const decideTier = vi.fn(() => new Promise<{ tier: 'alert'; by: string; detail: string; ms: number }>((r) => setTimeout(() => r({ tier: 'alert', by: 't', detail: '', ms: 0 }), 500)))
+        const { port } = start({ decideTier })
+        port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'done', text: 'done' } })
+        port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'done', recap: 'r' } })
+        port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'processing', text: 'next' } })
+        await vi.advanceTimersByTimeAsync(100)
+        expect(seen.cable.calls.map(([n]) => n).filter((n) => n === 'summary' || n === 'turnStarted')).toEqual([])
+        await vi.advanceTimersByTimeAsync(600)
+        expect(seen.cable.calls.map(([n]) => n).filter((n) => n === 'summary' || n === 'turnStarted')).toEqual(['summary', 'turnStarted'])
+      } finally { vi.useRealTimers() }
+    })
+
+    it('does not let a sub-agent\'s summary use up the main turn\'s numbers, and times a restarted turn afresh', async () => {
+      const decideTier = vi.fn(async (_i: { durationS: number | null }) => ({ tier: 'alert' as const, by: 't', detail: '', ms: 0 }))
+      const { port } = start({ decideTier })
+      const card = (kind: string, extra = {}) => port.card({ type: 'commander_event', agentId: 'a1', payload: { kind, text: 'x', ...extra } })
+      vi.useFakeTimers({ toFake: ['Date'] })
+      try {
+        vi.setSystemTime(0); card('processing')
+        vi.setSystemTime(60_000); card('done')
+        card('summary', { subagent: true })
+        card('summary', { recap: 'first' })
+        await vi.waitFor(() => expect(calls('summary')).toHaveLength(2))
+        vi.setSystemTime(100_000); card('processing')
+        await vi.waitFor(() => expect(calls('turnStarted')).toHaveLength(2))
+        vi.setSystemTime(110_000); card('done')
+        await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(2))
+        card('summary', { recap: 'second' })
+        await vi.waitFor(() => expect(decideTier).toHaveBeenCalledTimes(2))
+      } finally { vi.useRealTimers() }
+      expect(decideTier.mock.calls.map(([i]) => i.durationS)).toEqual([60, 10])
+    })
+
+    const summaryCalls = () => calls('summary')
+    it('is silent without asking Jev when the agent is on screen or the turn was a sub-agent\'s', () => {
+      const decideTier = vi.fn()
+      const { port } = start({ decideTier })
+      port.desk(['a1'], true)
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'done' } })
+      port.card({ type: 'commander_event', agentId: 'a9', payload: { kind: 'summary', text: 'done', subagent: true } })
+      expect(summaryCalls()).toEqual([['a1', 'done', 'done', 'silent', undefined, false], ['a9', 'done', 'done', 'silent', undefined, true]])
+      expect(decideTier).not.toHaveBeenCalled()
+    })
+
+    it('never asks the decider while no device is connected, and still draws the tile', () => {
+      const decideTier = vi.fn()
+      const { port } = start({ decideTier })
+      ;(seen.cable as unknown as { connected: boolean }).connected = false
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'done', recap: 'fixed it' } })
+      expect(decideTier).not.toHaveBeenCalled()
+      expect(summaryCalls()).toEqual([['a1', 'fixed it', 'done', 'silent', undefined, false]])
+    })
+
+    it('tells the decider a failed cloud summary failed, and logs rule decisions with the day\'s count', async () => {
+      const decideTier = vi.fn(async () => ({ tier: 'alert' as const, by: 't', detail: '', ms: 0 }))
+      const { port } = start({ decideTier })
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'x', recap: 'r', failed: true } })
+      await vi.waitFor(() => expect(decideTier).toHaveBeenCalledWith(expect.objectContaining({ failed: true })))
+      port.desk(['a2'], true)
+      port.card({ type: 'commander_event', agentId: 'a2', payload: { kind: 'summary', text: 'x' } })
+      port.card({ type: 'commander_event', agentId: 'a2', payload: { kind: 'error', text: 'boom' } })
+      expect(logs.some((l) => /notify · .* · silent · rule:onScreen · onScreen · 0ms/.test(l))).toBe(true)
+      expect(logs.some((l) => /notify · .* · alert · rule:failed/.test(l))).toBe(true)
+      expect(logs.some((l) => /notify · day \d{4}-\d\d-\d\d · alert 1 · list 0 · silent 1/.test(l))).toBe(true)
+    })
+
+    it('is the decider\'s, asked with the duration and stats of the turn that just ended', async () => {
+      const decideTier = vi.fn(async () => ({ tier: 'list' as const, by: 'test', detail: '', ms: 0 }))
+      const { port } = start({ decideTier })
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(1_000_000)
+        port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'processing', text: 'go' } })
+        vi.setSystemTime(1_000_000 + 95_000)
+        port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'done', text: 'done' } })
+      } finally { vi.useRealTimers() }
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'done', recap: 'fixed it' } })
+      await vi.waitFor(() => expect(summaryCalls()).toHaveLength(1))
+      expect(decideTier).toHaveBeenCalledWith(expect.objectContaining({ recap: 'fixed it', durationS: 95, onScreen: false, subagent: false }))
+      expect(summaryCalls()[0].slice(0, 4)).toEqual(['a1', 'fixed it', 'done', 'list'])
+    })
   })
 
   it('passes the tabs, the unread rows, the window\'s focus and what it saw', () => {
@@ -401,10 +513,297 @@ describe('what the windows say, reaching the dial', () => {
     expect(seen.cable.calls.slice(1)).toEqual([['turnStep', ['a1', 'Read · cableSession.ts']], ['turnStarted', ['a1', 'Working', 'Reading the spec']]])
   })
 
-  it('hands the dial the whole answer a summary card carries', () => {
+  describe('the reply streaming to the dial', () => {
+    const reply = (port: DevicesPort, update: string, agentId = 'a1') =>
+      port.card({ type: 'commander_event', agentId, payload: { kind: 'reply_text', update } })
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('sends at most once per 750 ms per agent, with a trailing send of the last text', async () => {
+      const { port } = start()
+      reply(port, 'one')                                   // t=0: sent at once
+      await vi.advanceTimersByTimeAsync(100); reply(port, 'two')
+      await vi.advanceTimersByTimeAsync(100); reply(port, 'three')
+      expect(calls('turnReply')).toEqual([['a1', 'one']])
+      await vi.advanceTimersByTimeAsync(550)               // t=750: the trailing send, with the 200 ms text
+      expect(calls('turnReply')).toEqual([['a1', 'one'], ['a1', 'three']])
+      await vi.advanceTimersByTimeAsync(150); reply(port, 'four')   // t=900
+      await vi.advanceTimersByTimeAsync(599)
+      expect(calls('turnReply')).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(1)                 // t=1500
+      expect(calls('turnReply')).toEqual([['a1', 'one'], ['a1', 'three'], ['a1', 'four']])
+      await vi.advanceTimersByTimeAsync(5000)              // nothing piles up
+      expect(calls('turnReply')).toHaveLength(3)
+    })
+
+    it('throttles each agent on its own', async () => {
+      const { port } = start()
+      reply(port, 'a', 'a1'); reply(port, 'b', 'a2')
+      expect(calls('turnReply')).toEqual([['a1', 'a'], ['a2', 'b']])
+    })
+
+    it('flushes the last unsent text before the turn ends, and sends nothing after', async () => {
+      const { port } = start()
+      reply(port, 'one')
+      await vi.advanceTimersByTimeAsync(500); reply(port, 'two')
+      await vi.advanceTimersByTimeAsync(500)               // t=1000: the trailing send went at 750
+      reply(port, 'three')
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'done', text: 'done' } })
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(seen.cable.calls.slice(1).map(([name, args]) => [name, ...(name === 'turnReply' ? [args[1]] : [])]))
+        .toEqual([['turnReply', 'one'], ['turnReply', 'two'], ['turnReply', 'three'], ['turnDone']])
+    })
+
+    it('ignores an empty update, ends quietly with nothing waiting, and forgets a deleted agent\'s pending text', async () => {
+      const { port } = start()
+      reply(port, '')
+      reply(port, 'one')
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'done', text: 'done' } })   // nothing pending
+      reply(port, 'two'); reply(port, 'three')
+      port.card({ type: 'agent_deleted', payload: { agentId: 'a1' } })
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(calls('turnReply')).toEqual([['a1', 'one'], ['a1', 'two']])
+    })
+
+    it('sends nothing after stop(), even with a send pending', async () => {
+      const { port } = start()
+      reply(port, 'one'); reply(port, 'two')
+      await port.stop()
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(calls('turnReply')).toEqual([['a1', 'one']])
+    })
+
+    it('throttles on the injected monotonic clock, not the wall clock', async () => {
+      let mono = 1000
+      const { port } = start({ now: () => mono })
+      reply(port, 'one')
+      vi.setSystemTime(Date.now() + 10 * 60_000)   // the wall clock jumps; the monotonic one does not
+      reply(port, 'two')
+      expect(calls('turnReply')).toEqual([['a1', 'one']])
+      mono += 750; vi.setSystemTime(Date.now() - 20 * 60_000); reply(port, 'three')
+      expect(calls('turnReply')).toEqual([['a1', 'one'], ['a1', 'three']])
+    })
+
+    it('drops a pending send when a new turn starts', async () => {
+      const { port } = start()
+      reply(port, 'one'); reply(port, 'two')
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'turn_started' } })
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(calls('turnReply')).toEqual([['a1', 'one']])
+    })
+
+    it('keeps the streamed text for the working screen\'s first activity read', async () => {
+      const { port } = start()
+      reply(port, 'streamed so far')
+      expect(await seen.host.activitySnapshot!('a1')).toEqual(null)
+    })
+  })
+
+  it('sums a turn\'s shell results and tells the dial before the turn ends', () => {
+    const { port } = start()
+    const ran = (id: string, command: string, outputTail: string) =>
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'tool_end', id, tool: 'Bash', command, isError: false, outputTail } })
+    ran('t1', 'git commit -m x', '[main abc] x')
+    ran('t2', 'npm test', 'Tests: 44 passed')
+    port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'tool_end' } })
+    port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'tool_end', id: 't3', command: 'ls', isError: true } })
+    port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'done', text: 'done' } })
+    port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'done', text: 'done' } })
+    expect(seen.cable.calls.slice(1).map(([name]) => name)).toEqual(['turnStats', 'turnDone', 'turnDone'])
+    expect(calls('turnStats')).toEqual([['a1', { testsPassed: 44, testsFailed: 0, commits: 1 }]])
+  })
+
+  describe('a turn\'s tokens', () => {
+    const ev = (port: DevicesPort, payload: object) => port.card({ type: 'commander_event', agentId: 'a1', payload })
+    const readings = (...values: Array<{ input?: number; cached?: number; output?: number } | null>) => {
+      const queue = [...values]
+      return vi.fn(async (_id: string) => queue.shift() ?? null)
+    }
+    const turn = async (readUsage: DevicesDeps['readUsage'], tool = false) => {
+      const { port } = start({ readUsage })
+      ev(port, { kind: 'turn_started' })
+      if (tool) {
+        ev(port, { kind: 'tool_end', id: 't1', tool: 'Bash', command: 'git commit -m x', isError: false, outputTail: '[main abc] x' })
+        ev(port, { kind: 'tool_end', id: 't2', tool: 'Bash', command: 'npm test', isError: false, outputTail: 'Tests: 44 passed' })
+      }
+      ev(port, { kind: 'done', text: 'done' })
+      return port
+    }
+    const stats = () => calls('turnStats').map(([, f]) => f)
+
+    it('sends the difference of the two readings before the turn ends, merged with tests and commits', async () => {
+      const read = readings({ input: 1000, cached: 0, output: 200 }, { input: 43900, cached: 0, output: 18700 })
+      await turn(read, true)
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([{ testsPassed: 44, testsFailed: 0, commits: 1, tokensIn: 42900, tokensOut: 18500 }])
+      expect(seen.cable.calls.slice(1).map(([name]) => name)).toEqual(['turnStats', 'turnDone'])
+      expect(read).toHaveBeenCalledWith('a1')
+    })
+
+    it('counts input without cache reads: (input - cached) difference', async () => {
+      await turn(readings({ input: 1_200_000, cached: 1_150_000, output: 1000 }, { input: 2_500_000, cached: 2_410_000, output: 6000 }))
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([{ tokensIn: 40_000, tokensOut: 5000 }])
+    })
+
+    it('omits tokensIn, keeping tokensOut, when cached is unknown', async () => {
+      await turn(readings({ input: 1_200_000, output: 10 }, { input: 2_500_000, cached: 2_410_000, output: 30 }))
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([{ tokensOut: 20 }])
+    })
+
+    it.each([
+      ['the start reading is missing', [null, { input: 5, cached: 0, output: 5 }]],
+      ['the done reading is missing', [{ input: 5, cached: 0, output: 5 }, null]],
+      ['a difference is negative', [{ input: 100, cached: 0, output: 100 }, { input: 50, cached: 0, output: 50 }]],
+      ['a difference is over 50 000 000', [{ input: 0, cached: 0, output: 0 }, { input: 50_000_001, cached: 0, output: 50_000_001 }]],
+    ] as const)('omits the fields when %s', async (_name, values) => {
+      await turn(readings(...values))
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([])
+    })
+
+    it('omits only the field whose difference is out of range', async () => {
+      await turn(readings({ input: 0, cached: 0, output: 100 }, { input: 7, cached: 0, output: 50 }))
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([{ tokensIn: 7 }])
+    })
+
+    it('reads the core\'s fresh usage by default, and none when the core has none', async () => {
+      const usageFresh = vi.fn()
+        .mockResolvedValueOnce({ inputTokens: 10, cachedTokens: 0, outputTokens: 1 })
+        .mockResolvedValueOnce({ inputTokens: 30, cachedTokens: 0, outputTokens: 5 })
+      const { port } = start({ core: { ...fakeCore({ dataDir }), usageFresh } })
+      ev(port, { kind: 'turn_started' })
+      ev(port, { kind: 'done', text: 'done' })
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([{ tokensIn: 20, tokensOut: 4 }])
+      const bare = start()
+      ev(bare.port, { kind: 'turn_started' })
+      ev(bare.port, { kind: 'done', text: 'done' })
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([])  // a new dial session: its own calls
+    })
+
+    it('omits the fields when a reading throws, and still ends the turn', async () => {
+      await turn(vi.fn(async () => { throw new Error('transcript gone') }))
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([])
+    })
+
+    it('omits the fields for an agent whose usage is unknown or remote (null)', async () => {
+      await turn(readings(null, null))
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([])
+    })
+
+    it('does not hold the turn\'s end past 2 s for a slow done reading', async () => {
+      vi.useFakeTimers()
+      try {
+        let n = 0
+        const slow = vi.fn((_id: string) => (++n === 1 ? Promise.resolve({ input: 1, cached: 0, output: 1 }) : new Promise<{ input: number; cached: number; output: number }>((resolve) => setTimeout(() => resolve({ input: 9, cached: 0, output: 9 }), 2500))))
+        await turn(slow, true)
+        await vi.advanceTimersByTimeAsync(1999)
+        expect(calls('turnDone')).toHaveLength(0)
+        await vi.advanceTimersByTimeAsync(2)
+        expect(calls('turnDone')).toHaveLength(1)
+        expect(stats()).toEqual([{ testsPassed: 44, testsFailed: 0, commits: 1 }])
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(calls('turnStats')).toHaveLength(1)
+      } finally { vi.useRealTimers() }
+    })
+
+    it('drops the start reading when the turn errors, so the next turn starts clean', async () => {
+      const read = readings({ input: 1, cached: 0, output: 1 }, { input: 9, cached: 0, output: 9 })
+      const { port } = start({ readUsage: read })
+      ev(port, { kind: 'turn_started' })
+      ev(port, { kind: 'error', text: 'boom' })
+      ev(port, { kind: 'done', text: 'done' })
+      await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+      expect(stats()).toEqual([])
+      expect(read).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps a card that follows a delayed done behind it', async () => {
+      const { port } = start({ readUsage: readings({ input: 1, cached: 0, output: 1 }, { input: 2, cached: 0, output: 2 }) })
+      ev(port, { kind: 'turn_started' })
+      ev(port, { kind: 'done', text: 'done' })
+      ev(port, { kind: 'processing', text: 'Working' })
+      await vi.waitFor(() => expect(calls('turnStarted')).toHaveLength(1))
+      expect(seen.cable.calls.slice(1).map(([name]) => name)).toEqual(['turnStats', 'turnDone', 'turnStarted'])
+    })
+
+    it('keeps a question, its close and a step behind a delayed done, in order', async () => {
+      let finish!: (r: { input: number; cached: number; output: number }) => void
+      let n = 0
+      const slow = vi.fn((_id: string) => (++n === 1 ? Promise.resolve({ input: 1, cached: 0, output: 1 })
+        : new Promise<{ input: number; cached: number; output: number }>((resolve) => { finish = resolve })))
+      const { port } = start({ readUsage: slow })
+      ev(port, { kind: 'turn_started' })
+      ev(port, { kind: 'done', text: 'done' })
+      port.card({ type: 'commander_question', agentId: 'a1', payload: { requestId: 'r1', questions: [] } })
+      port.card({ type: 'commander_question_close', agentId: 'a1', payload: { requestId: 'r1' } })
+      ev(port, { kind: 'tool', text: 'Read', recap: '/work/a.ts' })
+      seen.fleet!.events!({ kind: 'question', agentId: 'a1', requestId: 'r2', questions: [] } as never)
+      seen.fleet!.events!({ kind: 'questionClosed', agentId: 'a1', requestId: 'r2' } as never)
+      port.card({ type: 'commander_question', agentId: 'other', payload: { requestId: 'r9', questions: [] } })
+      expect(seen.cable.calls.slice(1).map(([name]) => name)).toEqual(['question'])  // another agent is not held
+      finish({ input: 2, cached: 0, output: 2 })
+      await vi.waitFor(() => expect(calls('questionClose')).toHaveLength(2))
+      expect(seen.cable.calls.slice(1).map(([name]) => name)).toEqual(['question', 'turnStats', 'turnDone', 'question', 'questionClose', 'turnStep', 'question', 'questionClose'])
+    })
+
+    it('keeps the queue alive when a queued dispatch throws', async () => {
+      const { port } = start({ readUsage: readings({ input: 1, cached: 0, output: 1 }, { input: 2, cached: 0, output: 2 }) })
+      ev(port, { kind: 'turn_started' })
+      ev(port, { kind: 'done', text: 'done' })
+      const fake = seen.cable as unknown as Record<string, unknown>
+      fake.turnStarted = () => { throw new Error('port gone') }
+      ev(port, { kind: 'processing', text: 'Working' })
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      fake.turnStarted = (...args: unknown[]) => { seen.cable.calls.push(['turnStarted', args]); return Promise.resolve() }
+      ev(port, { kind: 'turn_started' })
+      ev(port, { kind: 'done', text: 'again' })
+      port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'processing', text: 'Next' } })
+      await vi.waitFor(() => expect(calls('turnStarted')).toHaveLength(1))
+    })
+
+    it('reads no tokens, and sends done at once, when no connected dial asks for turn stats', () => {
+      const read = readings({ input: 1, cached: 0, output: 1 }, { input: 2, cached: 0, output: 2 })
+      const { port } = start({ readUsage: read })
+      ;(seen.cable as unknown as { wants: boolean }).wants = false
+      ev(port, { kind: 'turn_started' })
+      ev(port, { kind: 'done', text: 'done' })
+      expect(calls('turnDone')).toHaveLength(1)
+      expect(read).not.toHaveBeenCalled()
+    })
+  })
+
+  it('drops a turn\'s stats when it ends in an error, so the next turn starts clean', () => {
+    const { port } = start()
+    const ev = (payload: object) => port.card({ type: 'commander_event', agentId: 'a1', payload })
+    ev({ kind: 'tool_end', id: 't1', tool: 'Bash', command: 'git commit -m x', isError: false, outputTail: '[main abc] x' })
+    ev({ kind: 'error', text: 'boom' })
+    ev({ kind: 'processing', text: 'Working' })
+    ev({ kind: 'done', text: 'done' })
+    expect(calls('turnStats')).toEqual([])
+  })
+
+  it('drops the stats a turn left behind when the next turn starts', async () => {
+    const { port } = start()
+    const ev = (payload: object) => port.card({ type: 'commander_event', agentId: 'a1', payload })
+    ev({ kind: 'tool_end', id: 't1', tool: 'Bash', command: 'git commit -m x', isError: false, outputTail: '[main abc] x' })
+    ev({ kind: 'turn_started' })
+    ev({ kind: 'done', text: 'done' })
+    await vi.waitFor(() => expect(calls('turnDone')).toHaveLength(1))
+    expect(calls('turnStats')).toEqual([])
+  })
+
+  it('hands the dial the whole answer a summary card carries', async () => {
     const { port } = start()
     port.card({ type: 'commander_event', agentId: 'a1', payload: { kind: 'summary', text: 'b', recap: 'r', fullText: 'the whole answer' } })
-    expect(seen.cable.calls.slice(1)).toEqual([['summary', ['a1', 'r', 'b', false, false, 'the whole answer']]])
+    await vi.waitFor(() => expect(calls('summary')).toHaveLength(1))
+    expect(seen.cable.calls.slice(1)).toEqual([['summary', ['a1', 'r', 'b', 'alert', 'the whole answer', false]]])
   })
 
   it('forgets an agent\'s latest sentence when its processing card has none, and when the agent goes', async () => {
@@ -453,7 +852,7 @@ describe('what the windows say, reaching the dial', () => {
 })
 
 describe('the other machines\' cards', () => {
-  it('reach the dial through the same calls as this computer\'s', () => {
+  it('reach the dial through the same calls as this computer\'s', async () => {
     start()
     const tell = seen.fleet!.events!
     tell({ machineId: 'm2', kind: 'state', state: 'ready' })
@@ -462,8 +861,9 @@ describe('the other machines\' cards', () => {
     tell({ machineId: 'm2', kind: 'processing', agentId: 'b1', text: 'go', recap: '' })
     tell({ machineId: 'm2', kind: 'summary', agentId: 'b1', text: 'done', recap: 'fixed', subagent: true })
     tell({ machineId: 'm2', kind: 'summary', agentId: 'b1', text: 'done', recap: '' })
+    await vi.waitFor(() => expect(calls('summary')).toHaveLength(2))
     expect(seen.cable.calls.map(([name]) => name)).toEqual(['start', 'syncMachines', 'questionClose', 'question', 'turnStarted', 'summary', 'summary'])
-    expect(calls('summary')).toEqual([['b1', 'fixed', 'done', false, true], ['b1', 'done', 'done', false, false]])
+    expect(calls('summary')).toEqual([['b1', 'fixed', 'done', 'silent', undefined, true], ['b1', 'done', 'done', 'alert', undefined, false]])
   })
 })
 
@@ -507,6 +907,16 @@ describe('⌘K, the Wi-Fi device\'s borrowed walk, the voice router and stopping
     expect(await port.stepFocus('next', 'a1')).toEqual(expect.objectContaining({ agentId: 'a2' }))
     port.scroll('down', 0, 0)
     expect(vi.mocked(core.clients.sendLocal).mock.calls.map(([frame]) => frame.type)).toEqual(['dial_focus', 'dial_scroll'])
+  })
+
+  it('walk the cloud harnesses on the desk too, where the core offers them', async () => {
+    const { core, port } = start()
+    port.desk(['a1', 'cloud_1'], true)
+    port.swarms({ active: 't1', swarms: [{ id: 't1', name: 'Tab', agentIds: ['a1', 'cloud_1'], panes: 2 }], tiles: [] })
+    vi.mocked(core.agents.advertised).mockReturnValue([{ agentId: 'a1', registeredAt: 1, engine: 'claude' }] as RegisteredSession[])
+    core.agents.cloud = () => [{ agentId: 'cloud_1', registeredAt: 2, engine: 'fo' }] as unknown as RegisteredSession[]
+    seen.fleet!.fail = true
+    expect(await port.stepFocus('next', 'a1')).toEqual(expect.objectContaining({ agentId: 'cloud_1' }))
   })
 
   it('tell the voice router the engines here and whether a device watches, and stop everything', async () => {

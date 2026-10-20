@@ -19,13 +19,14 @@ import { env } from '../config/env.js'
 import type { AppSwarms } from '../cable/cableSession.js'
 import type { RecentTurn } from '../cable/cableHost.js'
 import type { UnreadNotification } from '../lib/notificationRead.js'
+import { validUsage } from '../lib/agentUsageWire.js'
 import { AGENT_ACTIONS_OFF, DAEMON_UNKNOWN, DELIVERIES_OFF, emptyPorts, resolveAgent, TERMINALS_OFF, type CoreApi, type CorePorts, type DevicesPort, type ForkResult, type ServiceRequests, type VoiceRouteReply, type WindowFocus } from '../core/api.js'
 import type { RegisteredSession } from '../lib/registry.js'
 import type { RuntimeModelOption } from '../lib/runtimeProfile.js'
 import { accountLink } from './accountLink.js'
 import { startDevices, type DevicesDeps } from './devices.js'
 import { runServiceProcess, type CoreConnection, type ServiceProcess, type ServiceProcessOptions } from './process.js'
-import { processCoreApi } from './processCoreApi.js'
+import { processCoreApi, UNASKED } from './processCoreApi.js'
 import { harnessdEnv } from '../lib/harnessdEnv.js'
 
 /** An agent as the core lists it for the dial: with the name the apps show and the model it runs. */
@@ -143,6 +144,9 @@ export function runDevicesService(options: DevicesServiceOptions): ServiceProces
         const text = (await ask('activityText', { agentId })).text
         return typeof text === 'string' && text ? { text } : null
       },
+      // Whether harnesses work is asked by Agent Messages alone.
+      activity: UNASKED.activity,
+      summaries: UNASKED.summaries,
       // The devices make no agent of their own and show no harness's viewer.
       ...AGENT_ACTIONS_OFF,
     },
@@ -183,6 +187,10 @@ export function runDevicesService(options: DevicesServiceOptions): ServiceProces
         tell('dialWatching', { watching })
       },
       windows: () => {},
+    },
+    usageFresh: async (agentId) => {
+      const usage = (await ask('usageFresh', { agentId }).catch((): Record<string, unknown> => ({}))).usage
+      return validUsage(usage) ? usage : null
     },
     daemon: DAEMON_UNKNOWN,
     // The Wi-Fi device beside the dials has a link of its own (services/wifiProcess.ts).

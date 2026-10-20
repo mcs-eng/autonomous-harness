@@ -94,6 +94,13 @@ The same terminal process, heartbeat and project must survive. This is a quick
 integration check, followed by a fresh final image test. It does not establish
 physical laptop suspend, radio, audio or battery behavior.
 
+`checks=sign-in` reuses a verified image and installs the candidate OS launcher,
+onboarding script and exact-source TUI into a disposable BIOS installation. It
+checks that the real network form runs before the TUI, connecting Ethernet opens
+required sign-in, workspace shortcuts stay gated and Wi-Fi settings can return
+to sign-in. The receipt identifies the base image and each candidate file. This
+does not exercise a live account, physical Wi-Fi radio or a complete new image.
+
 The focused sleep test uses QEMU standard VGA (`bochs-drm`), whose pinned LTS
 driver implements display suspend/resume. The normal install tests retain
 `virtio-vga`. Preview 4's Virtio display resumed with a working guest and terminal
@@ -359,7 +366,9 @@ so their layout and pane references survive reconnects without a cloud account.
 Signed in (`HARNESS_TUI_DESK_SIGNED_IN=sync`), this computer's windows join the
 account's shared tabs, as the desktop app's do at sign-in, under the names the
 app shows. On sign-out the harnesses running on this computer stay in their
-windows; another machine's go with the account. An older hn reads `off` alone. These settings are confined to
+windows; another machine's go with the account. An older hn reads `off` alone. A
+screen unit that sets `HARNESS_TUI_DESK_SIGNED_IN` keeps its value; the VM tests,
+whose computers share one account, set it `off`. These settings are confined to
 the OS launcher; ordinary hn installs are unchanged.
 
 The installed system keeps hn's standard status bar. Super+u records an update
@@ -371,7 +380,10 @@ daemon counts: one serving beside it is stopped first, and activation fails unle
 unit's daemon answers afterward. The CLI starts and stops the daemon through that unit
 on Harness OS (`cli/src/lib/platformDaemon.ts`), so a sign-in or sign-out cannot move it
 outside systemd. Never `systemctl stop` the unit: every pane's scope is PartOf it.
-Failure restores the previous
+The core alone ends its own stop after 2.5 s, as a master would end it, and the unit
+stops waiting after 10 s. The new screen counts once `hn-screen.service`'s own client
+runs the selected binary, whichever hn server answers: an hn started over SSH before the
+screen leaves `hn-list-clients` empty. Failure restores the previous
 selection. `harness updates rollback` restores the previous runtime and holds
 rejected versions until a newer release arrives. Ordinary macOS/Linux hn is unchanged.
 

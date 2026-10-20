@@ -118,6 +118,14 @@ describe('what the devices ask of the core', () => {
     })
   })
 
+  it('lists the cloud harnesses after this computer\'s agents, as the dial lists agents', async () => {
+    const row = { agentId: 'cloud_1', engine: 'fo', displayName: 'haircut', registeredAt: 1 } as unknown as RegisteredSession
+    const core = fakeCore({ agents: { cloud: () => [row] } })
+    const devices = createDevicesLink({ core, notify: () => true, call: vi.fn(), state: () => STATE })
+    vi.mocked(core.agents.advertised).mockReturnValue([{ agentId: 'a1', engine: 'claude' } as RegisteredSession])
+    expect(((await devices.answer('view', {})) as { agents: Array<{ agentId: string }> }).agents.map((agent) => agent.agentId)).toEqual(['a1', 'cloud_1'])
+  })
+
   it('is the core\'s own doors and the sign-in, asked when they need them', async () => {
     const { core, devices } = link()
     vi.mocked(core.agents.activityText).mockResolvedValue('Reading')
@@ -131,6 +139,10 @@ describe('what the devices ask of the core', () => {
     expect(await devices.answer('activitySnapshot', { agentId: 'a1' })).toEqual({ activity: null })
     core.agents.activitySnapshot = vi.fn(async () => ({ text: 'Working', elapsedSeconds: 931 }))
     expect(await devices.answer('activitySnapshot', { agentId: 'a1' })).toEqual({ activity: { text: 'Working', elapsedSeconds: 931 } })
+    expect(await devices.answer('usageFresh', { agentId: 'a1' })).toEqual({ usage: null })
+    core.usageFresh = vi.fn(async () => ({ inputTokens: 3 }) as never)
+    expect(await devices.answer('usageFresh', { agentId: 'a1' })).toEqual({ usage: { inputTokens: 3 } })
+    expect(core.usageFresh).toHaveBeenCalledWith('a1')
     expect(await devices.answer('recent', { agentId: 'a1', n: 2 })).toEqual({ turns: [{ recap: 'done' }] })
     expect(core.turns.recent).toHaveBeenLastCalledWith('a1', 2)
     await devices.answer('recent', { agentId: 7 })

@@ -169,9 +169,8 @@ typedef struct {
     char name[CABLE_NAME_MAX];
     int  agents;          // how many agents it holds — drawn as a count, never as members
     // How many TILES it holds, of any kind: agents, shells, viewers. A tab with a terminal and no
-    // agent has agents=0 and panes=1, and the difference is what keeps it in the switcher — see
-    // swarm_picker_rebuild(). A daemon too old to send it reports panes==agents, which is the old
-    // behaviour exactly.
+    // agent has agents=0 and panes=1; the switcher leaves it out (ui_swarms_replace). A daemon too
+    // old to send it reports panes==agents, which is the old behaviour exactly.
     int  panes;
 } cable_swarm_t;
 
@@ -210,6 +209,7 @@ typedef struct {
     // Local display bookkeeping. Incoming snapshots never supply these values.
     bool read_on_dial;
     uint32_t display_revision;
+    uint32_t received_ms; // ms() when the row was filed; rows expire 6 h later (notice_expire)
 } cable_notif_t;
 
 bool cable_client_notification_read(const char *agent_id, const char *read_token);

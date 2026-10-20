@@ -13,6 +13,12 @@ import 'model_manager_controller.dart';
 /// Between a shared model's name and the machine serving it, in its row's title.
 const modelMachineSeparator = ' · ';
 
+/// What a shared model's second line says: the machine serving it, and the grid it serves on.
+String servedOn(String machine, String? grid) => [
+  if (machine.isNotEmpty) machine,
+  if (grid != null && grid.isNotEmpty) grid,
+].join(modelMachineSeparator);
+
 enum ModelSearchSection {
   subscriptions('Subscriptions'),
   apis('APIs'),
@@ -44,6 +50,7 @@ class ModelSearchEntry {
     this.controller,
     this.own = false,
     this.localProfile = false,
+    this.elsewhere = false,
     this.gridModel,
     this.sharedBy,
   });
@@ -62,6 +69,10 @@ class ModelSearchEntry {
 
   /// A configured local route belongs in the local section without granting host control.
   final bool localProfile;
+
+  /// Served by another machine — one of yours, or one shared with you. Its row is listed under
+  /// Shared with you even when it is [own], and keeps the controls an own model has.
+  final bool elsewhere;
   final GridModel? gridModel;
   final String? sharedBy;
 
@@ -71,7 +82,7 @@ class ModelSearchEntry {
       ? ModelSearchSection.apis
       : isDownload
       ? ModelSearchSection.catalog
-      : own || localProfile
+      : (own && !elsewhere) || localProfile
       ? ModelSearchSection.local
       : ModelSearchSection.shared;
 
@@ -302,33 +313,41 @@ class ModelSearchCatalog extends ChangeNotifier {
           continue;
         }
         final words = sectionWords(section);
+        // Your models are this computer's. A model another machine serves — on your own grid too —
+        // is shared with you, named with that machine and its grid (owner, 2026-10-18: Muse-Glimmer,
+        // served by another machine on the account's grid, read as if it were on this one).
+        final here = section.own && identical(owner, manager);
+        final machine = owner?.machine?.machine.displayName ?? model.node;
         discovered.add(
           ModelSearchEntry(
             id: id,
-            name: model.id,
+            // Shown without its quant, as hn shows it; found, and switched onto, by its id.
+            name: withoutQuant(model.id),
             source: section.source == 'local'
                 ? [
                     'Local',
                     section.label ?? section.name,
                     ?section.profileId,
                   ].join(' · ')
-                : section.own
-                ? 'On your machines'
-                : 'Shared · ${section.name}',
-            node: owner?.machine?.machine.displayName ?? model.node,
+                : here
+                ? 'On this computer'
+                : 'Shared · ${gridModel.grid}',
+            node: machine,
             searchAliases: [
+              model.id,
               model.node,
-              if (section.own || section.source == 'local') 'local',
+              if (here || section.source == 'local') 'local',
               ?section.label,
               ?section.profileId,
             ],
             own: section.own,
             localProfile: section.source == 'local',
+            elsewhere: !here,
             controller: owner,
             gridModel: gridModel,
-            sharedBy: section.own || section.source == 'local'
+            sharedBy: here || section.source == 'local'
                 ? null
-                : model.node,
+                : servedOn(machine, gridModel.grid),
             status:
                 offlineRowNote(model) ??
                 words.sentence ??
@@ -376,14 +395,17 @@ class ModelSearchCatalog extends ChangeNotifier {
     // model on one machine need it to be told apart.
     final named = <String, int>{};
     for (final (:owner, :model) in local) {
-      final key = '${identityHashCode(owner)}:${model.name.toLowerCase()}';
+      final key = '${identityHashCode(owner)}:${model.shownName.toLowerCase()}';
       named[key] = (named[key] ?? 0) + 1;
     }
     bool twin(ModelManagerController owner, LocalModel model) =>
-        (named['${identityHashCode(owner)}:${model.name.toLowerCase()}'] ?? 0) >
+        (named['${identityHashCode(owner)}:${model.shownName.toLowerCase()}'] ??
+            0) >
         1;
     final all = [
       for (final (:owner, :model) in local)
+        // Another machine's — one of yours, or one shared with you — is listed as shared, under
+        // its machine and the grid it serves on, as a model found on a grid is.
         ModelSearchEntry(
           id: _managedRowIds.putIfAbsent(
             _managedKey(owner, model),
@@ -393,14 +415,21 @@ class ModelSearchCatalog extends ChangeNotifier {
           ),
           name: model.name.isEmpty || twin(owner, model)
               ? model.displayName
-              : model.name,
+              : model.shownName,
           source: 'Local',
           node: owner.machine?.machine.displayName,
           status: localStatus(model, controller: owner),
           local: model,
           own: true,
+          elsewhere: !identical(owner, manager),
           controller: owner,
           gridModel: served[_managedKey(owner, model)],
+          sharedBy: identical(owner, manager)
+              ? null
+              : servedOn(
+                  owner.machine?.machine.displayName ?? '',
+                  served[_managedKey(owner, model)]?.grid,
+                ),
           searchAliases: [
             ?owner.machine?.machine.hostname,
             ?model.quantization,

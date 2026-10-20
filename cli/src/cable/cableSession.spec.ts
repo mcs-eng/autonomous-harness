@@ -22,6 +22,8 @@ class LoopbackPort implements CablePort {
   isOpen = true
   /** Everything the daemon wrote, decoded back into messages. */
   readonly sent: Array<Record<string, unknown>> = []
+  /** The `seq` of each frame in `sent` (taken off the message, so exact-match specs need not know it); undefined = none. */
+  readonly seqs: Array<number | undefined> = []
   /** The raw bytes of every frame written, so a test can assert the 8 KB cap holds. */
   readonly frames: Uint8Array[] = []
   /** Payloads of every pet slice (CableType.Pet) the daemon wrote. */
@@ -39,7 +41,9 @@ class LoopbackPort implements CablePort {
     this.frames.push(bytes)
     this.decoder.feed(Buffer.from(bytes), (frame) => {
       if (frame.type === CableType.Json) {
-        this.sent.push(JSON.parse(Buffer.from(frame.payload).toString('utf8')) as Record<string, unknown>)
+        const { seq, ...message } = JSON.parse(Buffer.from(frame.payload).toString('utf8')) as Record<string, unknown>
+        this.sent.push(message)
+        this.seqs.push(seq as number | undefined)
       }
       if (frame.type === CableType.Pet) this.petSlices.push(Buffer.from(frame.payload))
     })
@@ -57,6 +61,9 @@ class LoopbackPort implements CablePort {
   say(msg: Record<string, unknown>): void {
     this.onData(Buffer.from(encodeCableFrame(CableType.Json, Buffer.from(JSON.stringify(msg), 'utf8'))))
   }
+
+  /** Bytes that are not (all) a frame, as the dial's boot ROM or panic handler writes them. */
+  raw(bytes: Buffer): void { this.onData(bytes) }
 
   pcm(bytes: Buffer): void {
     this.onData(Buffer.from(encodeCableFrame(CableType.Pcm, bytes)))
@@ -646,7 +653,7 @@ describe('cable session', () => {
     await session.stop()
   })
 
-  it('carries the optional screenTurned flag of a Pro, and never invents it', async () => {
+  it('drops a screenTurned from an older Pro firmware and still parses the settings', async () => {
     const seen: any[] = []
     const { session, port } = await connect(makeHost({ onDialStatus: (s) => seen.push(s) }))
     const base = {
@@ -654,20 +661,41 @@ describe('cable session', () => {
       focusFace: false, scrollReversed: false, round: false, voiceLang: 'en',
     }
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', board: 'pro', proto: 3, settings: { ...base, screenTurned: true } })
-    await vi.waitFor(() => expect(seen.at(-1)?.settings?.screenTurned).toBe(true))
-
-    // Round dials and Pro 0.1.0 never send it: the object still parses and the field stays absent.
-    port.say({ t: 'settings.state', ok: true, settings: base })
     await vi.waitFor(() => expect(seen.at(-1)?.settings?.brightness).toBe(80))
     expect(seen.at(-1).settings).not.toHaveProperty('screenTurned')
+    await session.stop()
+  })
 
-    // A non-boolean is refused whole, like the other flags.
-    port.say({ t: 'settings.state', ok: true, settings: { ...base, brightness: 10, screenTurned: 'yes' } })
+  it('carries the optional uiSkin of a Pro, drops only an unknown skin, and sends it', async () => {
+    const seen: any[] = []
+    const { session, port } = await connect(makeHost({ onDialStatus: (s) => seen.push(s) }))
+    const base = {
+      brightness: 80, character: 0, face: 720, muted: false, quiet: false, straightTitle: false,
+      focusFace: false, scrollReversed: false, round: false, voiceLang: 'en',
+    }
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', board: 'pro', proto: 3, settings: { ...base, uiSkin: 'console' } })
+    await vi.waitFor(() => expect(seen.at(-1)?.settings?.uiSkin).toBe('console'))
+    port.say({ t: 'settings.state', ok: true, settings: { ...base, brightness: 10, uiSkin: 'neon' } })
     await settle()
-    expect(seen.at(-1).settings.brightness).toBe(80)
+    await vi.waitFor(() => expect(seen.at(-1).settings.brightness).toBe(10))
+    expect(seen.at(-1).settings.uiSkin).toBeUndefined()
+    await session.setSettings({ uiSkin: 'console' })
+    expect(port.sent.at(-1)).toEqual({ t: 'settings.set', uiSkin: 'console' })
+    await session.stop()
+  })
 
-    await session.setSettings({ screenTurned: false })
-    expect(port.sent.at(-1)).toEqual({ t: 'settings.set', screenTurned: false })
+  it('refuses a uiSkin patch when the device never reported a uiSkin', async () => {
+    const { session, port } = await connect(makeHost({}))
+    const base = {
+      brightness: 80, character: 0, face: 720, muted: false, quiet: false, straightTitle: false,
+      focusFace: false, scrollReversed: false, round: false, voiceLang: 'en',
+    }
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', board: 'pro', proto: 3, settings: base })
+    await settle()
+    const before = port.sent.length
+    expect(await session.setSettings({ uiSkin: 'console' })).toBe(false)
+    expect(port.sent.length).toBe(before)
+    expect(await session.setSettings({ brightness: 10 })).toBe(true)
     await session.stop()
   })
 
@@ -2021,7 +2049,7 @@ describe('cable session', () => {
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
 
     await session.summary('a1', 'recap one', 'body one')
-    await session.summary('a2', 'recap two', 'body two', true)
+    await session.summary('a2', 'recap two', 'body two', 'list')
 
     const sent = port.sent.filter((m) => m.t === 'summary' && !m.restore)
     // Absent, not false, on the ordinary path: firmware that predates the flag must keep notifying
@@ -2031,10 +2059,18 @@ describe('cable session', () => {
     expect(sent.find((m) => m.agentId === 'a2')).toMatchObject({ quiet: true, recap: 'recap two' })
 
     // A sub-agent's turn: silent — no beep, no drawer row — and the recap still travels.
-    await session.summary('a1', 'recap three', 'body three', false, true)
+    await session.summary('a1', 'recap three', 'body three', 'silent', undefined, true)
     const silent = port.sent.filter((m) => m.t === 'summary' && m.agentId === 'a1').pop()
     expect(silent).toMatchObject({ silent: true, recap: 'recap three' })
     expect(silent).not.toHaveProperty('quiet')
+  })
+
+  it('sends the tier, with quiet for list and silent for silent, and neither for alert', async () => {
+    const { session, port } = await connect(makeHost({}))
+    port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+    for (const tier of ['alert', 'list', 'silent'] as const) await session.summary('a1', `r ${tier}`, 'b', tier)
+    const sent = port.sent.filter((m) => m.t === 'summary' && !m.restore)
+    expect(sent.map((m) => [m.tier, m.quiet, m.silent])).toEqual([['alert', undefined, undefined], ['list', true, undefined], ['silent', undefined, true]])
   })
 
   it('redraws a reattached dial with what each agent was last doing', async () => {
@@ -3019,6 +3055,81 @@ describe('hello capabilities', () => {
     })
   }
 
+  it('numbers every frame to a Pro with seq, restarting at each welcome; a round dial gets none', async () => {
+    const { session, port } = await connect(richHost())
+    try {
+      port.say({ ...PRO_HELLO })
+      await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
+      await session.turnDone('a1')
+      expect(port.sent[0].t).toBe('welcome')
+      expect(port.seqs).toEqual(port.seqs.map((_, i) => i))   // 0 on the welcome, then 1, 2, ... with no hole
+      port.say({ ...PRO_HELLO })   // the keepalive hello: a new welcome, the count starts over
+      await vi.waitFor(() => expect(port.sent.filter((m) => m.t === 'welcome')).toHaveLength(2))
+      expect(port.seqs[port.sent.findLastIndex((m) => m.t === 'welcome')]).toBe(0)
+      port.sent.length = 0
+      port.seqs.length = 0
+      port.say({ t: 'hello', product: 'harness', mac: 'cc:dd', hw: 'round' })   // another device, no board
+      await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
+      expect(port.seqs.every((q) => q === undefined)).toBe(true)
+    } finally { await session.stop() }
+  })
+
+  it('advertises resync in the welcome of a Pro only', async () => {
+    const { session, port } = await connect(richHost())
+    try {
+      port.say({ ...PRO_HELLO })
+      await vi.waitFor(() => expect(ofType(port, 'welcome')).toHaveLength(1))
+      expect(ofType(port, 'welcome')[0].features).toContain('resync')
+      port.sent.length = 0
+      port.say({ t: 'hello', product: 'harness', mac: 'cc:dd', hw: 'round' })
+      await vi.waitFor(() => expect(ofType(port, 'welcome')).toHaveLength(1))
+      expect(ofType(port, 'welcome')[0].features).not.toContain('resync')
+    } finally { await session.stop() }
+  })
+
+  it('answers resync with machines, swarms, agents, notices and open questions, at most once per 2 s', async () => {
+    const { session, port } = await connect(richHost())
+    try {
+      port.say({ ...PRO_HELLO })
+      await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
+      await session.question('a1', 'q1', [{ key: 'k', q: 'Ship it?', options: ['yes', 'no'] }])
+      await session.question('a2', 'q2', [{ key: 'k', q: 'Closed?', options: ['yes'] }])
+      await session.questionClose('a2', 'q2')
+      port.sent.length = 0
+      port.say({ t: 'resync' })
+      await vi.waitFor(() => expect(port.types()).toContain('question'))
+      const types = port.types()
+      for (const t of ['machines.begin', 'swarms', 'agents.begin', 'agents.end', 'notif.replace']) expect(types).toContain(t)
+      expect(ofType(port, 'question')).toMatchObject([{ agentId: 'a1', id: 'q1' }])   // the closed one is not resent
+      port.sent.length = 0
+      port.say({ t: 'resync' })
+      await settle()
+      expect(port.sent).toEqual([])   // inside the window
+    } finally { await session.stop() }
+  })
+
+  it('sends turn.stats only to a stats: turn-v1 device, and only when there is something to say', async () => {
+    const { session, port } = await connect(richHost())
+    try {
+      port.say({ ...PRO_HELLO, stats: 'turn-v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
+      port.sent.length = 0
+      await session.turnStats('a', {})
+      expect(port.sent).toEqual([])
+      await session.turnStats('a', { commits: 1 })
+      expect(port.sent.map((m) => JSON.stringify(m))).toEqual(['{"t":"turn.stats","agentId":"a","commits":1}'])
+      port.sent.length = 0
+      await session.turnStats('a', { tokensIn: 5, tokensOut: 7 })
+      expect(port.sent.map((m) => JSON.stringify(m))).toEqual(['{"t":"turn.stats","agentId":"a","tokensIn":5,"tokensOut":7}'])
+      port.sent.length = 0
+      port.say({ ...PRO_HELLO })   // a later hello that does not name it switches it off again
+      await vi.waitFor(() => expect(port.types()).toContain('welcome'))
+      port.sent.length = 0
+      await session.turnStats('a', { commits: 1 })
+      expect(port.sent).toEqual([])
+    } finally { await session.stop() }
+  })
+
   it('round hello gets no Pro fields', async () => {
     const { session, port } = await connect(richHost())
     try {
@@ -3028,7 +3139,7 @@ describe('hello capabilities', () => {
       // A turn with prose and tool cards, a summary carrying the whole answer, and a library request.
       await session.turnStarted('a1', 'Processing', 'Looking at the spec first')
       await session.turnStep('a1', 'Read · cableSession.ts')
-      await session.summary('a1', 'r', 'b', false, false, answer)
+      await session.summary('a1', 'r', 'b', 'alert', answer)
       port.say({ t: 'player.library.get', offset: 0, request: 1 }); await settle()
       await session.syncSwarms(true)
 
@@ -3036,7 +3147,7 @@ describe('hello capabilities', () => {
       expect(port.sent.map((m) => JSON.stringify(m))).toEqual([
         '{"t":"turn.started","agentId":"a1","text":"Processing"}',
         '{"t":"turn.activity","agentId":"a1","text":"Working"}',
-        '{"t":"summary","agentId":"a1","name":"Fix login screen","engine":"claude","machine":"","recap":"r","text":"b"}',
+        '{"t":"summary","agentId":"a1","name":"Fix login screen","engine":"claude","machine":"","recap":"r","text":"b","tier":"alert"}',
         '{"t":"swarms","selected":"t1","items":[{"id":"t1","name":"Tab 1","agents":2,"panes":2},{"id":"t2","name":"Tab 2","agents":1,"panes":1}],"tiles":[]}',
       ])
     } finally { await session.stop() }
@@ -3082,6 +3193,32 @@ describe('hello capabilities', () => {
         { t: 'turn.activity', agentId: 'a1', text: 'Working', action: 'Reading the spec', elapsedSeconds: 931 },
         { t: 'turn.activity', agentId: 'a1', text: '', step: 'Read · cableSession.ts' },
       ])
+    } finally { await session.stop() }
+  })
+
+  it('turnReply sends the streamed paragraph as action to a steps-v1 device, clipped to a codepoint boundary', async () => {
+    const { session, port } = await connect(richHost())
+    try {
+      port.say(PRO_HELLO)
+      await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
+      port.sent.length = 0
+      await session.turnReply('a1', 'Reading the spec')
+      await session.turnReply('a1', 'é'.repeat(250))
+      expect(port.sent[0]).toEqual({ t: 'turn.activity', agentId: 'a1', text: '', action: 'Reading the spec' })
+      const action = port.sent[1].action as string
+      expect(Buffer.byteLength(action, 'utf8')).toBeLessThanOrEqual(188)
+      expect(action).toMatch(/^é+\u2026$/)
+    } finally { await session.stop() }
+  })
+
+  it('turnReply tells a round device nothing', async () => {
+    const { session, port } = await connect(richHost())
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+      await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
+      port.sent.length = 0
+      await session.turnReply('a1', 'Reading the spec')
+      expect(port.sent).toEqual([])
     } finally { await session.stop() }
   })
 
@@ -3138,7 +3275,7 @@ describe('hello capabilities', () => {
     try {
       port.say(PRO_HELLO)
       await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
-      await session.summary('a1', 'r', 'x'.repeat(7_900), false, false, 'y'.repeat(1_000))
+      await session.summary('a1', 'r', 'x'.repeat(7_900), 'alert', 'y'.repeat(1_000))
       const frame = ofType(port, 'summary').at(-1)!
       expect(frame.text).toBe('x'.repeat(7_900))
       expect(frame).not.toHaveProperty('full')
@@ -3190,7 +3327,7 @@ describe('hello capabilities', () => {
     try {
       port.say(PRO_HELLO)
       await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
-      await session.summary('a1', 'Kết quả', 'Kết quả', false, false, answer)
+      await session.summary('a1', 'Kết quả', 'Kết quả', 'alert', answer)
       const frame = ofType(port, 'summary').at(-1) as { full: string }
       expect(frame.full.length).toBeLessThanOrEqual(1200)
       expect(Buffer.byteLength(frame.full)).toBeLessThanOrEqual(3600)
@@ -3370,7 +3507,7 @@ describe('hello capabilities', () => {
       await session.questionClose('session-0', 'q1')
       await session.syncPlayerLibrary(true)
       expect(statusOf('session-0')).toBe('working')        // answered: the turn goes on
-      await session.summary('session-0', 'Sub done.', 'Sub done.', false, true)
+      await session.summary('session-0', 'Sub done.', 'Sub done.', 'silent', undefined, true)
       await session.syncPlayerLibrary(true)
       expect(statusOf('session-0')).toBe('working')        // a sub-agent's end is not the turn's
       await session.turnDone('session-0')
@@ -3411,5 +3548,47 @@ describe('hello capabilities', () => {
       expect(port.sent[0].features).not.toContain('player.library')
       expect(port.types()).not.toContain('player.library')
     } finally { await session.stop() }
+  })
+
+  describe('link counters in the dial log', () => {
+    const linkLines = (log: DialLog) => readFileSync(log.currentPath, 'utf8').split('\n').filter((l) => l.includes('[daemon] link'))
+
+    it('logs bytes and frames both ways at close, and keeps the printable text of non-frame bytes', async () => {
+      const log = tmpLog()
+      const { session, port } = await connect(makeHost(), log)
+      try {
+        port.say({ t: 'hello', product: 'harness', fw: '0.1.0', proto: 1, mac: 'aa:bb' })
+        await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+        port.raw(Buffer.concat([Buffer.from('Guru Meditation Error: Core 0 panic\x00\x01ab\x02'), Buffer.from([0xa5])]))
+        port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })   // a frame after the noise still decodes
+        await settle()
+        await port.close('unplugged')
+        await log.flush()
+      } finally { await session.stop() }
+      const [line] = linkLines(log)
+      const sentBytes = port.frames.reduce((n, f) => n + f.length, 0)
+      expect(line).toContain('link at close')
+      expect(line).toContain(`tx ${sentBytes} B in ${port.frames.length} frames`)
+      expect(line).toMatch(/rx \d+ B in 2 frames/)
+      expect(line).toMatch(/discarded \d+ B/)
+      expect(line).toContain('non-frame text: Guru Meditation Error: Core 0 panic')
+      expect(line).not.toContain('ab')   // a two-character run is not text worth keeping
+    })
+
+    it('logs once a minute while connected, and caps the text at 200 characters', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const log = tmpLog()
+      const { session, port } = await connect(makeHost(), log)
+      try {
+        port.say({ t: 'hello', product: 'harness', fw: '0.1.0', proto: 1, mac: 'aa:bb' })
+        await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+        port.raw(Buffer.from('x'.repeat(500) + '\n'))
+        vi.setSystemTime(Date.now() + 61_000)
+        await vi.waitFor(async () => { await log.flush(); expect(linkLines(log).length).toBeGreaterThan(0) }, NEXT_TICKS)
+      } finally { vi.useRealTimers(); await session.stop() }
+      const [line] = linkLines(log)
+      expect(line).toMatch(/\] link · tx \d+ B in \d+ frames · rx \d+ B in 1 frames/)
+      expect(line.split('non-frame text: ')[1]).toHaveLength(200)
+    })
   })
 })

@@ -30,6 +30,9 @@ module.exports = {
         destination: 'https://harness.autonomous.ai/:path*',
         permanent: true,
       })),
+      // The front door is the Hub (owner, 2026-10-13); the workspace moved to /web. Temporary, so a
+      // browser does not cache it. `hn view` links (/?machine=…&agent=…) still open the viewer here.
+      { source: '/', missing: [{ type: 'query', key: 'machine' }], destination: '/hub', permanent: false },
       { source: '/install', destination: '/download', permanent: true },
       { source: '/explore', destination: '/hub', permanent: true },
       { source: '/explore/:id', destination: '/hub/:id', permanent: true },
@@ -64,7 +67,9 @@ module.exports = {
         // Older desktop builds consume snapshots without following redirects.
         { source: '/explore/:id/snapshot', destination: '/hub/:id/snapshot' },
         { source: '/explore/:id/download', destination: '/hub/:id/download' },
+        // `/` reaches here only as an `hn view` link; everything else there redirects to the Hub.
         { source: '/', destination: '/harness-web/index.html' },
+        { source: '/web', destination: '/harness-web/index.html' },
         { source: '/s/:id', destination: '/harness-web/index.html' },
         { source: '/auth/callback', destination: '/harness-web/index.html' },
         // Local website previews use the SSO service's native loopback callback.
@@ -106,6 +111,14 @@ module.exports = {
         ],
       })),
       {
+        // The MCP registry domain-auth file: served exactly as written, never cached or rewritten.
+        source: '/.well-known/mcp-registry-auth',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store, no-transform' },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+        ],
+      },
+      {
         source: '/os/latest',
         // Cache the GitHub lookup on the server, never the release redirect in a browser or CDN.
         headers: [{ key: 'Cache-Control', value: 'no-store, max-age=0' }],
@@ -127,7 +140,7 @@ module.exports = {
           { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
         ],
       },
-      ...['/', '/s/:id', '/auth/callback', '/callback', '/harness-web', '/harness-web/index.html', '/harness-web/release.json'].map((source) => ({
+      ...['/', '/web', '/s/:id', '/auth/callback', '/callback', '/harness-web', '/harness-web/index.html', '/harness-web/release.json'].map((source) => ({
         source,
         headers: [
           { key: 'Cache-Control', value: 'no-store' },

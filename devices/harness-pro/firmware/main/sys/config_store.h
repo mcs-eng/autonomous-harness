@@ -1,6 +1,6 @@
 // The device's own settings, in NVS.
 //
-// Local display, sound, gesture, voice-language and screen-lock preferences. Everything this file
+// Local display, sound and voice-language preferences. Everything this file
 // used to hold — the WiFi networks, the backend URL, the device
 // token, the SDS provisioning blob, the E2EE identity and its pinned peers, the last-selected machine —
 // existed so the device could find a network and prove who it was to a backend. A cable answers both, and
@@ -24,10 +24,6 @@ void    config_save_brightness(uint8_t level);
 bool config_load_muted(void);
 bool config_save_muted(bool muted);
 
-// The screen turned 180 degrees. `fallback` is the answer when nothing was saved (the build's default).
-bool config_load_turn(bool fallback);
-bool config_save_turn(bool turned);
-
 // The voice language the device captures in. The daemon PROPOSES one from the computer's locale on every
 // `welcome`; once the user has picked here, this wins — the person holding the device may well speak
 // something other than the laptop is set to.
@@ -35,12 +31,3 @@ void config_load_voicelang(char *out, size_t cap);
 // Pro uses the same en/vi choice for its built-in interface. False means the
 // preference was not durably saved; leave a retry available in the picker.
 bool config_save_voicelang(const char *lang);
-
-// Screen lock: a 3x3 pattern, stored as a short digit string.
-bool config_lock_enabled(void);
-bool config_check_lock(const char *pattern);
-void config_set_lock(const char *pattern);
-void config_clear_lock(void);
-
-// Factory reset: forget all of the above.
-bool config_clear_all(void);

@@ -34,10 +34,25 @@ enum SettingsSection {
     ],
   ),
   notifications(AppIcons.bell, 'Notifications'),
+  privacy(AppIcons.shieldCheck, 'Privacy'),
   shortcuts(AppIcons.keyboard, 'Keyboard shortcuts'),
   connectors(AppIcons.plug, 'Connectors'),
   usage(AppIcons.chartNoAxesColumn, 'Usage'),
-  experimental(AppIcons.flaskConical, 'Experimental'),
+  routing(
+    AppIcons.slidersHorizontal,
+    'Routing',
+    keywords: ['models', 'quota', 'jev', 'super tab', 'lead'],
+  ),
+  tabInvites(
+    AppIcons.users,
+    'Tab invites',
+    keywords: ['invite', 'shared tab', 'trust'],
+  ),
+  experimental(
+    AppIcons.flaskConical,
+    'Experimental',
+    keywords: kIsWeb ? [] : ['privacy', 'sharing', 'product usage data'],
+  ),
   about(AppIcons.info, 'About'),
   debug(AppIcons.bug, 'Debug');
 
@@ -94,6 +109,7 @@ List<SettingsGroup> settingsGroupsFor({required bool debugSurface}) {
   bool visible(SettingsSection section) =>
       // This computer's own: the services its agents use.
       (!kIsWeb || section != SettingsSection.connectors) &&
+      (kIsWeb || section != SettingsSection.privacy) &&
       (debugSurface || !_kDeveloperSections.contains(section));
   return [
     for (final group in _kSettingsGroups)
@@ -118,6 +134,7 @@ const _kSettingsGroups = [
     // work — and NOT inside it, which is where the alert switch started. A sound is not a look,
     // and somebody turning one off does not think to look under Appearance for it.
     SettingsSection.notifications,
+    SettingsSection.privacy,
     SettingsSection.shortcuts,
   ]),
   // What agents may do with Harness is the account's: Labs ▸ Experimental (owner, 2026-10-12).
@@ -127,8 +144,13 @@ const _kSettingsGroups = [
     // What the agents on this machine have spent. It carries the switches that decide which logs
     // are read at all — the pane is off until somebody sets it.
     SettingsSection.usage,
+    // Which models a Super Tab's Lead may pick, and how it weighs them: the account's default.
+    SettingsSection.routing,
   ]),
-  SettingsGroup('Labs', [SettingsSection.experimental]),
+  SettingsGroup('Labs', [
+    SettingsSection.tabInvites,
+    SettingsSection.experimental,
+  ]),
   // Debug, in builds that have it, beside the version a report has to name.
   SettingsGroup('Help', [SettingsSection.about, SettingsSection.debug]),
 ];

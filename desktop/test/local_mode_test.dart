@@ -7,7 +7,6 @@ import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_login.dart';
 import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/config.dart';
-import 'package:harness/screens/login_screen.dart';
 import 'package:harness/settings/sections/account_section.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
@@ -177,102 +176,8 @@ Widget _host(AppNotifier app, Widget Function() child) => MaterialApp(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('the login screen\'s way back to this computer', () {
-    test(
-      'a signed-out CLI lands on the guest desk, with no profile read',
-      () async {
-        final app = _Notifier(
-          discovery: _ReadyDiscovery(),
-          cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
-        );
-        addTearDown(app.dispose);
-        // Where a cancelled sign-in leaves a desktop window.
-        app.status = AppStatus.unauthenticated;
-
-        await app.continueWithoutAccount();
-
-        expect(app.status, AppStatus.authenticated);
-        expect(app.isGuest, isTrue);
-        expect(app.currentUser, isNull);
-        expect(app.profileReads.meCalls, 0);
-        expect(app.refreshes, 1);
-      },
-    );
-
-    test('a CLI that signed in meanwhile lands on the account desk', () async {
-      final app = _Notifier(
-        discovery: _ReadyDiscovery(),
-        cli: _ScriptedCli(const CliAuthStatus(loggedIn: true)),
-      );
-      addTearDown(app.dispose);
-      app.status = AppStatus.unauthenticated;
-
-      await app.continueWithoutAccount();
-
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isFalse);
-      expect(app.profileReads.meCalls, 1);
-    });
-
-    testWidgets('the wall offers it, and the tap opens the desk', (
-      tester,
-    ) async {
-      grid.AppTheme.brightness.value = Brightness.light;
-      final app = _Notifier(
-        discovery: _ReadyDiscovery(),
-        cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
-      );
-      var disposed = false;
-      addTearDown(() { if (!disposed) app.dispose(); });
-      app.status = AppStatus.unauthenticated;
-
-      await tester.pumpWidget(_host(app, () => LoginScreen(notifier: app)));
-
-      final door = find.byKey(const Key('use-without-account-button'));
-      expect(door, findsOneWidget);
-      expect(find.text('Use this computer without an account'), findsOneWidget);
-      await tester.ensureVisible(door);
-      await tester.pump();
-      await tester.tap(door);
-      // Not pumpAndSettle: the fleet diagram on this screen animates for as
-      // long as it is shown, so the frame never settles. Pump until the boot
-      // lands, bounded.
-      for (var i = 0; i < 40 && app.status != AppStatus.authenticated; i++) {
-        await tester.pump(const Duration(milliseconds: 50));
-      }
-
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
-      // The stub supervisor's timer would otherwise still be pending when the
-      // fake clock is checked at the end of this test.
-      app.discovery.supervision?.cancel();
-      await tester.pumpWidget(const SizedBox());
-      app.dispose();
-      disposed = true;
-      await tester.pump();
-    });
-
-    testWidgets('the sheet over the desk does not repeat it', (tester) async {
-      grid.AppTheme.brightness.value = Brightness.light;
-      final app = _Notifier(
-        discovery: _ReadyDiscovery(),
-        cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
-      );
-      addTearDown(app.dispose);
-
-      // The sheet is the screen with a close button; its X is the way back.
-      await tester.pumpWidget(
-        _host(app, () => LoginScreen(notifier: app, onClose: () {})),
-      );
-
-      expect(find.byKey(const Key('login-close-button')), findsOneWidget);
-      expect(find.byKey(const Key('use-without-account-button')), findsNothing);
-      await tester.pumpWidget(const SizedBox());
-    });
-  });
-
   test(
-    'signing out keeps a desktop window on its desk, in local mode',
+    'signing out keeps the daemon state local',
     () async {
       final cli = _ScriptedCli(const CliAuthStatus(loggedIn: true));
       final app = _Notifier(discovery: _ReadyDiscovery(), cli: cli)

@@ -11,10 +11,12 @@ import { baseNode } from '../harnessd/baseNode.js'
 import { env } from '../config/env.js'
 import { launchContract, launchField } from '../engines/launches.js'
 import { startupFunctions, startupNeedsScript, startupRuns } from '../engines/kit/launchStartup.js'
+import { screenArgs, screenEnvPrefix, screenPrelude } from '../engines/kit/launchScreen.js'
 import { isTerminalEngine, type AgentEngine } from '../engines/types.js'
 import { isOpencodeV2 } from '../engines/opencode/contract.js'
 import { binaryOnPath, resolveBinaryOnPath } from './binaryOnPath.js'
 import { engineBin } from './engineBin.js'
+import { launchModelArgs, type LaunchModel } from './launchModel.js'
 import { engineInstallPaths, npmEnginePrefix, type EngineInstallRecipe } from './engineInstall.js'
 import { engineLabel } from './agentNames.js'
 import { GRID_NO_UPDATE_CHECK_VAR, gridBinaryPath } from './gridBinary.js'
@@ -23,6 +25,7 @@ import { managedNodePath } from './nodeRuntime.js'
 import { RAISE_OPEN_FILES_SH } from './openFiles.js'
 import { ENGINE_EXIT_PANE_OPTION } from './engineExitOption.js'
 import { shellSingleQuote } from './shellQuote.js'
+import { browserPrelude } from './browserShim.js'
 import { currentUserShell } from './userShell.js'
 import { harnessPaneOwner } from './harnessSessionLabel.js'
 
@@ -226,6 +229,11 @@ export interface LaunchCommandOptions {
    */
   firstPrompt?: string
   /**
+   * The model and effort this session runs on, as flags of that session alone (lib/launchModel.ts). A launch option
+   * like `firstPrompt`: never written to the registry row, so a relaunch is the engine's own again.
+   */
+  launchModel?: LaunchModel
+  /**
    * Terminal only: print the tile's banner before the first prompt — the wordmark, where this pane
    * is, that an agent typed here becomes the tile, and `harness remote`. Every NEW terminal tile
    * gets it (`agent_create`); a pane rebuilt by restore or restart is not a new tile and names
@@ -317,7 +325,11 @@ export const LAUNCH_RESUME_FLAG: Readonly<Partial<Record<AgentEngine, string[]>>
   cursor: ['--resume'],
   opencode: ['--session'],
   kilo: ['--session'],
-  pi: ['--session'],
+  // Not `--session`: Pi writes a session's file only once its first reply lands, and `--session <id>`
+  // with no file answers "No session found matching" and exits, so a Pi nobody had written to yet died
+  // on a model switch or a restart. `--session-id` opens that project's session when it exists and
+  // creates it under the same id when it does not (Pi 1.0 `createSessionManager`).
+  pi: ['--session-id'],
   hermes: ['--resume'],
   commandcode: ['--resume'],
   muse: ['resume'],
@@ -383,7 +395,10 @@ export function buildEngineCommandArgv(engine: AgentEngine, opts: LaunchCommandO
   if (!resumeIsSubcommand && resumeFlag && sessionArg) {
     argv.push(...resumeFlag, sessionArg, ...(fork?.after ?? []))
   }
+  // Ahead of the extra arguments, so a grid's or a harness's own value for the same key is the one that holds.
+  argv.push(...screenArgs(launchContract(engine)))
   if (opts.extraArgs?.length) argv.push(...opts.extraArgs)
+  if (opts.launchModel) argv.push(...launchModelArgs(engine, opts.launchModel))
   if (opts.firstPrompt) argv.push(...firstPromptArgs(engine, opts.firstPrompt))
   return argv
 }
@@ -566,7 +581,9 @@ export function buildEngineLaunchArgv(
   // An engine whose declared startup runs in the script gets one even where the daemon has no login shell.
   const interactive = interactiveEngineShell(shell)
     ?? (opts.native || startupNeedsScript(launchContract(engine)) ? { path: posixRunner(), args: ['-c'], label: 'shell' } : null)
-  if (!interactive) return command
+  // No shell to run a script in (no SHELL, and the account's own shell is not an absolute path): the screen's
+  // variables still reach the engine, through env.
+  if (!interactive) return [...screenEnvPrefix(launchContract(engine)), ...command]
   const enginePrelude = engineFallbackPrelude(engine, interactive.path, tmuxBinary)
   // The clear comes FIRST, before the install as well as before the engine. An installer is a child
   // of this shell and inherits what it inherits: `npm` is not going to spend someone's Anthropic key,
@@ -575,7 +592,11 @@ export function buildEngineLaunchArgv(
   // Then the grid's PATH entry at the FRONT (its dir holds only `grid`), and — for a DSH agent — Harness's
   // Node at the END, only when the shell found none. The two never meet: one prepends, one appends.
   const nativeEnv = Object.entries(opts.native?.environment ?? {}).map(([key, value]) => `export ${key}=${shellSingleQuote(value)}\n`).join('')
-  const prelude = enginePrelude + clearEnvPrelude(opts.clearEnv) + clearEnvPrelude(opts.native?.clearEnvironment) + nativeEnv + gridPanePrelude(gridBinary) + noDevtoolsPrelude() + (opts.harnessNode ? harnessNodePrelude(runtimeNode) : '')
+  // The screen's variables come after the rc files and the native ones, so neither a profile nor an adopted
+  // environment chooses the other screen (facets/launch.ts `ScreenContract`). The shell the pane falls back to keeps
+  // them, so an engine typed there afterwards runs on the same screen.
+  const prelude = enginePrelude + clearEnvPrelude(opts.clearEnv) + clearEnvPrelude(opts.native?.clearEnvironment) + nativeEnv
+    + screenPrelude(launchContract(engine)) + gridPanePrelude(gridBinary) + browserPrelude() + noDevtoolsPrelude() + (opts.harnessNode ? harnessNodePrelude(runtimeNode) : '')
   // rc files (notably nvm) call getcwd() before running this command. Start the shell in a safe
   // directory and enter the selected workspace only after those files have loaded: an IDE can replace
   // a workspace inode between the desktop picker resolving it and tmux spawning the pane.
@@ -882,7 +903,7 @@ export function buildTerminalLaunchArgv(
   // The prelude is a POSIX script. For a shell that is not POSIX, /bin/sh runs it and then execs the
   // person's shell, which loads its own startup files as it always does.
   const interpreter = isPosixShell(path) ? path : '/bin/sh'
-  return [interpreter, '-c', RAISE_OPEN_FILES_SH + clearEnvPrelude(opts.clearEnv) + cwdPrelude + hintPrelude + 'shift\nexec "$@"', 'harness-terminal', opts.cwd ?? '', path, ...loginArgs]
+  return [interpreter, '-c', RAISE_OPEN_FILES_SH + clearEnvPrelude(opts.clearEnv) + browserPrelude() + cwdPrelude + hintPrelude + 'shift\nexec "$@"', 'harness-terminal', opts.cwd ?? '', path, ...loginArgs]
 }
 
 /**
@@ -999,9 +1020,14 @@ function engineProbeScript(runtimeNode: string, probeArgs: readonly string[] | u
  * runtime's bin directory for this pane only. This is portable across macOS and Linux and avoids an
  * interactive/root package-manager install in an agent launch.
  */
+/** Harness's own Node folders. An npm engine run through them (`npm install -g` without a prefix) lands here. */
+export function npmRuntimeBins(runtimeNode: string = managedNodePath()): string[] {
+  return [...new Set([dirname(runtimeNode), dirname(baseNode(process.execPath))])]
+}
+
 function npmRuntimePrelude(recipe: EngineInstallRecipe, runtimeNode: string, required = false): string {
   if (!recipe.executable.npmGlobal) return ''
-  const bins = [...new Set([dirname(runtimeNode), dirname(baseNode(process.execPath))])]
+  const bins = npmRuntimeBins(runtimeNode)
     .map(shellSingleQuote)
     .join(' ')
   return [
@@ -1517,6 +1543,18 @@ async function unsupportedPermissionFlag(
   if (!flag) return null
   const support = await commandSupportsFlagInInteractiveShell(engineBin(engine), flag, shell)
   return support === 'unsupported' ? flag : null
+}
+
+/**
+ * The first flag of a launch model (lib/launchModel.ts) that the engine on disk does not list in its `--help`, or null.
+ * It reads the help the way the permission gate does, through the same probe and cache, so a Claude Code too old for
+ * `--model` or `--effort` is refused before a pane exists instead of printing its help in one. `unknown` never refuses.
+ */
+export async function unsupportedLaunchModelFlag(engine: AgentEngine, launchModel: LaunchModel, shell: string | undefined = undefined): Promise<string | null> {
+  for (const flag of launchModelArgs(engine, launchModel).filter((arg) => arg.startsWith('--'))) {
+    if (await commandSupportsFlagInInteractiveShell(engineBin(engine), flag, shell) === 'unsupported') return flag
+  }
+  return null
 }
 
 /**

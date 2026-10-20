@@ -12,10 +12,10 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
    `data`, the DLLs, and `harness-cli` together. Do not run it inside the ZIP.
 3. Open `Release/harness.exe`. The preview is unsigned; Windows may warn about an
    unknown publisher. Review the source and checksum before deciding to run it.
-4. Follow the setup screen. Without a saved sign-in, Harness opens on this
-   computer in [local mode](#local-mode-no-account). To reach your other
-   machines, select **Sign in** at the foot of the projects sidebar or in
-   **Settings → Account**, and finish in your browser.
+4. Follow the setup screen, then sign in on the required sign-in page and
+   finish in your browser. Without a sign-in the Desktop does not open a
+   workspace; see [Local mode](#local-mode-no-account) for what still runs
+   on this computer without an account (the daemon and the WSL CLI).
 5. Create a project and agent. Install and authenticate the coding agent in the
    selected development distribution if its engine is missing. Prefer native Linux
    agent installations; WSL interop discovery is also supported.
@@ -309,28 +309,31 @@ separate from the dashboard and can be skipped to continue with the installed ve
 
 ## Local mode (no account)
 
-Without a saved sign-in, Harness opens on this computer's own desk: local mode,
-upstream's guest desk. The daemon runs on this computer's own id, never dials the
-Harness backend, and lists this computer as its one machine. Everything on this
-PC works as it does when signed in: create agents, attach terminals, switch panes.
+The daemon side of local mode is unchanged: without a saved sign-in it runs
+on this computer's own id, never dials the Harness backend, and lists this
+computer as its one machine. From a WSL terminal, `harness start` without a
+saved sign-in runs that daemon, and `harness status` reads `this computer only
+(not signed in)`.
+
+The Desktop app, however, now requires sign-in (upstream #1276, adopted in the
+October 20 sync batch): a signed-out launch, a session that ends while the app
+is open, and **Sign out** all return the window to the required sign-in page.
+There is no account-free desk on the Desktop any more; what this guide shows
+for the desk, the projects sidebar and Settings is what a signed-in window
+sees. Until you sign in, **Settings → Account** says **Local mode** and offers
+**Sign in**.
 
 What needs the account stays off until you sign in: other machines, linking,
 shared harnesses, the shared desk, the signed-in profile, and the
 agent-settings switches (`agents-start-agents`, `pull-request-line`,
-`agent-messages`). Those three are experiments of the account: in local mode
-they stay off, and `harness settings` answers with a sign-in prompt instead of
-changing them. The foot of the
-projects sidebar and **Settings → Account** say **Local mode** and offer
-**Sign in**; linking another machine asks for the sign-in too. If a sign-in is
-cancelled or fails, the sign-in screen offers **Use this computer without an
-account** to return to the desk.
+`agent-messages`). Those three are experiments of the account: signed out, they
+stay off, and `harness settings` answers with a sign-in prompt instead of
+changing them; linking another machine asks for the sign-in too.
 
 **Sign out** in **Settings → Account** runs `harness logout`, which clears this
 computer's saved sign-in and restarts a running daemon signed out, for this
-computer only. The window stays on the desk in local mode: this computer's tiles
-stay, and the other machines' tiles leave. A session that ends while the app is
-open does the same and says so. From a WSL terminal, `harness start` without a saved sign-in runs the
-same daemon, and `harness status` reads `this computer only (not signed in)`.
+computer only. The window returns to the required sign-in page; the daemon
+behind it is the local one above.
 
 ## Preview limitations and recovery
 
@@ -691,5 +694,37 @@ One upstream behavior change to know in local mode: what agents may do
 experiment of the signed-in account, each off by default (Settings ▸
 Experimental, or `harness settings`). Signed out, the local desk still runs,
 but changing one of these returns a sign-in prompt instead of a local toggle —
-the fork adopts this as upstream designed it.
+the fork adopts this as upstream designed it. (Superseded by the October 20
+batch 2 entry below: the Desktop now requires sign-in, so a signed-out
+window shows the sign-in page instead of the local desk.)
+This is a source change; it does not update an installed desktop or daemon.
+
+
+## October 20 upstream sync batch 2
+
+This source snapshot incorporates upstream `dd16a4bba` (476 commits since the
+`0130b6c18` batch-1 cut) on fork main `2f9722a3f` as a true merge, with 18
+conflicts resolved under the fork's union principle: the grid fleet
+(`trustedBaseUrl`, local grid profiles, the Pi `-e` extension evidence), the
+Windows webview/tab contract (visible tab close, WebView2 viewers, Ctrl+C
+copy-when-selected), the Projects sidebar, and the CLI usage modularization all
+stay, while upstream semantics that supersede fork behavior are adopted.
+
+The one visible behavior change is upstream #1276: sign-in is now required at
+the Desktop login wall. The wall no longer offers **Use this computer without
+an account**; a cancelled or failed sign-in leaves the sign-in screen up. A
+signed-out launch, an ended session and **Sign out** all return the window
+to the required sign-in page, and the account-free desk button is gone.
+Account-free local operation remains only in the daemon and the WSL CLI
+(see *Local mode* above); **Settings → Account** still says **Local mode** and offers **Sign in**. The login tests that drove the removed button went with it, and the
+wall's tests now pin the mandatory sign-in step.
+
+Also in this batch: `harness --help` opens with upstream's agent pointer
+(**An agent? Run: harness help agents** — the curated agent screen that
+command prints stays one command away, so the fast `--help` route keeps clear
+of the full command graph), the tab bar's hold-Command shortcut label is
+back alongside the Windows visible close control, and the three launch goldens
+are re-recorded on hosted Linux CI (a Windows recording writes Windows paths
+into them); `launch-argv` keeps upstream's override records, whose former call
+order its spec pins on purpose.
 This is a source change; it does not update an installed desktop or daemon.

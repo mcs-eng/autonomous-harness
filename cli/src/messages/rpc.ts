@@ -4,11 +4,18 @@
  * send` reaches its own daemon the same way.
  */
 import { randomBytes } from 'node:crypto'
+import { env } from '../config/env.js'
+import { localCredentialHeaders } from '../lib/localCredential.js'
 import { existsSync } from 'node:fs'
 import { WebSocket } from 'ws'
 import { localSocketPath } from '../lib/localSocket.js'
 import { NOT_RUNNING, pidIn, unreachableText } from '../lib/unreachable.js'
 import { MessageError } from './model.js'
+
+/** The machine answered, and its answer was a refusal: told apart from a machine that could not be asked, so that a
+ *  forwarded request's refusal (sharedTabs.ts `addHarness`) reaches the person as that machine said it rather than as
+ *  a machine away. */
+export class RefusedError extends MessageError {}
 
 export interface RpcTarget { port: number; machineId: string; dataDir?: string; signal?: AbortSignal }
 export type Rpc = (target: RpcTarget, payload: Record<string, unknown>, timeoutMs?: number) => Promise<Record<string, unknown>>
@@ -17,7 +24,7 @@ export const messagesRpc: Rpc = (target, payload, timeoutMs = 20_000) => new Pro
   const socketPath = target.dataDir ? localSocketPath(target.dataDir, target.port) : null
   const ws = socketPath && existsSync(socketPath)
     ? new WebSocket(`ws+unix://${socketPath}:/api/local-ws`)
-    : new WebSocket(`ws://127.0.0.1:${target.port}/api/local-ws`)
+    : new WebSocket(`ws://127.0.0.1:${target.port}/api/local-ws`, { headers: localCredentialHeaders(target.dataDir ?? env.ADAPTER_DATA_DIR) })
   const requestId = randomBytes(16).toString('hex')
   let finished = false, selected = false
   const finish = (error: Error | null, value?: Record<string, unknown>): void => {
@@ -44,7 +51,7 @@ export const messagesRpc: Rpc = (target, payload, timeoutMs = 20_000) => new Pro
         ws.send(JSON.stringify({ type: 'agent_messages', payload: { ...payload, requestId } }))
       }
       if (frame.type === 'agent_messages_result' && frame.payload?.requestId === requestId) {
-        if (frame.payload.error) finish(new MessageError(String(frame.payload.error), String(frame.payload.detail ?? frame.payload.error)))
+        if (frame.payload.error) finish(new RefusedError(String(frame.payload.error), String(frame.payload.detail ?? frame.payload.error)))
         else finish(null, frame.payload)
       }
     } catch { finish(new MessageError('INVALID_RESPONSE', 'The daemon answered something that is not a message reply.')) }

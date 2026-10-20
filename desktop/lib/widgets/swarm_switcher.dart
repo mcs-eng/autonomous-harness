@@ -88,6 +88,7 @@ class _SwarmHistoryState extends State<_SwarmHistory> {
         insetPadding: const EdgeInsets.all(20),
         backgroundColor: Colors.transparent,
         elevation: 0,
+        shape: DesktopChrome.bareDialogShape,
         child: SizedBox(
           width: 680,
           height: 480,
@@ -171,6 +172,7 @@ class SwarmSearchKeys extends StatelessWidget {
     this.onNewAgent,
     this.onCommands,
     this.onRefocus,
+    this.onDelete,
     this.previewControls,
     this.desktop = false,
     required this.child,
@@ -186,6 +188,9 @@ class SwarmSearchKeys extends StatelessWidget {
   final VoidCallback? onNewAgent;
   final VoidCallback? onCommands;
   final VoidCallback? onRefocus;
+
+  /// Delete Harness for the selected row (`picker.delete`), when it is one.
+  final ValueChanged<SwarmDestination>? onDelete;
   final SearchPreviewControls? previewControls;
   final bool desktop;
   final Widget child;
@@ -277,6 +282,13 @@ class SwarmSearchKeys extends StatelessWidget {
               'picker.preview_down': () => run(() => search.scrollPreview(1)),
               'picker.preview_page_up': () => run(() => search.page(-1)),
               'picker.preview_page_down': () => run(() => search.page(1)),
+              if (onDelete != null)
+                'picker.delete': () => run(() {
+                  if (search.selected case final row?
+                      when row.agentId != null && row.machineId != null) {
+                    onDelete!(row);
+                  }
+                }),
             },
             'picker.cancel': dismiss,
             'picker.complete': () => complete(true),
@@ -1217,8 +1229,14 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                       padding: const EdgeInsets.symmetric(vertical: 2),
                       child: Material(
                         key: ValueKey('swarm-search-line:${row.id}'),
+                        // Blue while the list has the keys; a quiet fill while the row's actions
+                        // beside it have them, so it still says whose actions those are. Dropping
+                        // it left only the pointer's hover tint, which read as a second colour of
+                        // selection (owner, 2026-10-15).
                         color: highlighted
                             ? DesktopChrome.activeSelection
+                            : selected && search.managing
+                            ? grid.AppSurface.selectedFill
                             : Colors.transparent,
                         borderRadius: BorderRadius.circular(10),
                         child: tile,
@@ -1884,9 +1902,8 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                 ],
                 Expanded(
                   child: subscriptionAccount != null
-                      // A subscription names its provider, and the account after it in the quieter
-                      // colour: "Anthropic  315df1", not one run of text where the account reads
-                      // as part of the name.
+                      // Keep the provider distinct from its email. Both must fit the available
+                      // width: an email can be much longer than the old short account key.
                       ? Row(
                           children: [
                             Flexible(
@@ -1899,11 +1916,14 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            SearchResultText(
-                              subscriptionAccount.account,
-                              key: ValueKey('model-row-account:${row.id}'),
-                              matches: matches.where((match) => match.title),
-                              style: DesktopChrome.text(color: muted),
+                            Flexible(
+                              flex: 2,
+                              child: SearchResultText(
+                                subscriptionAccount.account,
+                                key: ValueKey('model-row-account:${row.id}'),
+                                matches: matches.where((match) => match.title),
+                                style: DesktopChrome.text(color: muted),
+                              ),
                             ),
                           ],
                         )

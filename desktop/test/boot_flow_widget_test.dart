@@ -6,8 +6,10 @@ import 'package:flutter/services.dart';
 
 import 'dart:async';
 
+import 'package:harness/api/api_client.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_login.dart';
+import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/bootstrap/setup_progress.dart';
 import 'package:harness/core/config.dart';
@@ -95,6 +97,29 @@ class _ControlledCliLogin extends CliLogin {
     calls++;
     return status.future;
   }
+}
+
+class _OnboardingCliLogin extends _FakeCliLogin {
+  final completed = Completer<void>();
+
+  @override
+  Future<void> login({
+    required void Function(String) onAuthorizeUrl,
+    SignInProvider? provider,
+  }) => completed.future;
+}
+
+class _OnboardingApi extends ApiClient {
+  _OnboardingApi() : super(config: AppConfig.dev, session: AuthSession());
+
+  @override
+  Future<Map<String, dynamic>?> me() async => null;
+
+  @override
+  Future<Map<String, dynamic>?> desk() async => null;
+
+  @override
+  Future<Map<String, dynamic>?> daemonDevices() async => null;
 }
 
 class _BrokenConfigStore extends ConfigStore {
@@ -232,9 +257,7 @@ void main() {
 
       await app.bootstrap();
 
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
+      // Local state prepares behind the required desktop sign-in page.
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
       expect(app.config.apiBaseUrl, ConfigStore.defaultBaseUrl);
@@ -262,9 +285,7 @@ void main() {
       expect(provisioner.called, isTrue);
       expect(app.environmentReadiness.isReady, isTrue);
       // Reached the login check rather than getting stuck on preparingEnvironment.
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
+      // Local state prepares behind the required desktop sign-in page.
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
     },
@@ -524,9 +545,7 @@ void main() {
       // what lets the provisioner skip the already-`ready` harness step during the recheck.
       expect(provisioner.resumeFromCalls.last, same(stuck));
       expect(app.environmentReadiness.isReady, isTrue);
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
+      // Local state prepares behind the required desktop sign-in page.
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
       expect(storage.values['environment_setup_version'], isNull);
@@ -688,7 +707,7 @@ void main() {
 
     // The card leads with what the app does for you, not with its own name —
     // the wordmark left when the screen stopped being a logo over a button.
-    expect(find.text('Your agents, wherever they run'), findsOneWidget);
+    expect(find.byKey(const Key('sign-in-step-title')), findsOneWidget);
     expect(find.text('Continue with Google'), findsOneWidget);
     expect(find.text('Continue with Apple'), findsOneWidget);
   });
@@ -768,8 +787,10 @@ void main() {
 
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
-      // …and the desk is what is on screen, not the sign-in.
-      expect(find.text('Continue with Google'), findsNothing);
+      // The local state is ready behind the mandatory sign-in page.
+      expect(find.byType(SignInStep), findsOneWidget);
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.byType(SwarmScreen), findsNothing);
       app.dispose();
     },
   );
@@ -818,10 +839,14 @@ void main() {
       expect(app.bootError, isNull);
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
-      expect(find.text('Continue with Google'), findsNothing);
+      // Upstream #1276 (this batch): a signed-out result lands on the mandatory
+      // sign-in step over the ready guest state, not the old in-desk sign-in
+      // button.
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.byType(SignInStep), findsOneWidget);
       expect(
         find.byKey(const ValueKey('swarm-sign-in-button')),
-        findsOneWidget,
+        findsNothing,
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();
@@ -860,9 +885,12 @@ void main() {
         findsNothing,
       );
       expect(find.text('Continue with Google'), findsOneWidget);
+      // Upstream #1276 (this batch): sign-in is required at the login wall, so
+      // the wall offers no account-free way back to the desk.
+      expect(find.byType(SignInStep), findsOneWidget);
       expect(
         find.byKey(const Key('use-without-account-button')),
-        findsOneWidget,
+        findsNothing,
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();
@@ -974,13 +1002,12 @@ void main() {
       await tester.tap(find.text('Install 1 tool'));
       await tester.pump();
       expect(provisioner.installCalls, [true]);
-      // A signed-out DESKTOP window lands on the desk as a guest: everything on this
-      // computer is served by the daemon over the loopback, and the sign-in is a sheet
-      // raised when the person reaches for another machine.
+      // Local state prepares behind the required desktop sign-in page.
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
-      // …on the desk, not in front of it.
-      expect(find.text('Continue with Google'), findsNothing);
+      expect(find.byType(SignInStep), findsOneWidget);
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.byType(SwarmScreen), findsNothing);
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
@@ -1776,10 +1803,10 @@ void main() {
   // tour is the only screen of an unattended install, and hands over by
   // itself once setup and the downloads beside it are done, at the end of the
   // slide on screen. Not signed in, it hands over to the sign-in step
-  // (2026-10-11), and Skip there opens Harness.
+  // (2026-10-12), which requires an account before opening Harness.
   testWidgets(
-    'a fresh install runs under the tour, then offers a sign-in, and Skip '
-    'opens Harness',
+    'a fresh install runs under the tour, then requires sign-in before '
+    'opening Harness',
     (tester) async {
       final missing = EnvironmentReadiness(
         steps: {
@@ -1798,11 +1825,12 @@ void main() {
         mode: EnvironmentSetupMode.automatic,
       );
       final gate = Completer<void>();
+      final login = _OnboardingCliLogin();
       final app = _GuestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: ConfigStore(storage: _FakeKeyValueStore()),
-        cliLogin: _FakeCliLogin(loggedIn: false),
+        cliLogin: login,
         environmentProvisioner: _GatedInstallProvisioner(missing, ready, gate),
       );
       // What the agent downloads report while they run.
@@ -1861,11 +1889,24 @@ void main() {
       await tester.pump(const Duration(minutes: 5));
       expect(find.byType(SignInStep), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('sign-in-step-skip')));
+      expect(find.text('Skip'), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await chord(tester, LogicalKeyboardKey.keyN);
+      await tester.pump();
+      expect(find.text('Workspace reached'), findsNothing);
+
+      app.api = _OnboardingApi();
+      await tester.tap(find.byKey(const Key('login-continue-google')));
+      await tester.pump();
+      expect(find.byType(SignInStep), findsOneWidget);
+      expect(find.text('Workspace reached'), findsNothing);
+      login.completed.complete();
+      await tester.pump();
+      await tester.pump();
       await tester.pump();
       expect(find.byType(SignInStep), findsNothing);
       expect(find.text('Workspace reached'), findsOneWidget);
-      expect(app.isGuest, isTrue);
+      expect(app.signedIn, isTrue);
 
       await tester.pumpWidget(const SizedBox());
       app.dispose();

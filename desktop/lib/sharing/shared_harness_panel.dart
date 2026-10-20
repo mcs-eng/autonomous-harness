@@ -7,6 +7,7 @@ import 'package:harness/terminal/terminal_text.dart';
 
 import '../core/models.dart';
 import '../logging/app_log.dart';
+import '../measurement/hub_usage.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
 import '../state/terminal_pane.dart';
@@ -15,6 +16,8 @@ import '../terminal/terminal_session.dart';
 import '../widgets/terminal_panel.dart';
 import '../ws/ws_conn.dart';
 import '../viewer/observer_relay_codec.dart';
+import '../agent_messages/pane_shared_chips.dart';
+import '../agent_messages/shared_tab_placement.dart' show plainSharedText;
 import 'harness_comments.dart';
 import 'shared_harness_bar.dart';
 import 'shared_terminal_watch.dart';
@@ -32,15 +35,19 @@ class SharedHarnessPanel extends StatefulWidget {
     this.link = false,
     this.linkEnvironment,
     this.onSignIn,
+    this.onUsage,
   });
   final AppNotifier notifier;
   final TerminalPane pane;
   final SharedHarness grant;
   final bool hasAccess, visible;
-  final VoidCallback onClose;
+  final VoidCallback? onClose;
   final bool link;
   final String? linkEnvironment;
   final VoidCallback? onSignIn;
+
+  /// A shared link's clicks, for its page to count; the workspace's own shared panes pass none.
+  final ValueChanged<SharedAction>? onUsage;
   @override
   State<SharedHarnessPanel> createState() => _SharedHarnessPanelState();
 }
@@ -61,6 +68,9 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
   /// noticed left the person looking at a terminal they cannot type into
   /// (owner, 2026-09-18: "chỉ thấy màn hình terminal").
   bool _viewerChosen = false;
+
+  /// Counted once per panel: the harness drew a live viewer, not only a terminal.
+  bool _viewerShown = false;
   String _lastViewerState = '';
   int _generation = 0;
   bool _commentsSelected = false, _commentsOpened = false;
@@ -186,7 +196,7 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
       unawaited(_connection.connect());
     } else {
       _ended = true;
-      _failure = 'Access removed or invitation expired.';
+      _failure = 'Sharing ended';
     }
   }
 
@@ -221,6 +231,10 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
             '${payload['message'] != null ? ' · ${payload['message']}' : ''}',
       );
     }
+    if (next != null && _image == null && !_viewerShown) {
+      _viewerShown = true;
+      widget.onUsage?.call(SharedAction.viewerShown);
+    }
     setState(() {
       if (next != null) {
         if (_image == null && !_viewerChosen) _viewerSelected = true;
@@ -247,7 +261,7 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
   void didUpdateWidget(SharedHarnessPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!widget.hasAccess && !_ended) {
-      _end('Access removed or invitation expired.');
+      _end('Sharing ended');
     } else if (widget.hasAccess &&
         (!oldWidget.hasAccess ||
             widget.grant.id != oldWidget.grant.id ||
@@ -275,6 +289,7 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
   }
 
   void _retry() {
+    widget.onUsage?.call(SharedAction.retry);
     _closeSession();
     _ended = false;
     _failure = null;
@@ -282,10 +297,13 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
     setState(_start);
   }
 
-  void _toggleComments() => setState(() {
-    _commentsSelected = !_commentsSelected;
-    _commentsOpened = true;
-  });
+  void _toggleComments() {
+    if (!_commentsSelected) widget.onUsage?.call(SharedAction.commentsOpen);
+    setState(() {
+      _commentsSelected = !_commentsSelected;
+      _commentsOpened = true;
+    });
+  }
 
   void _selectViewer(bool viewer) => setState(() {
     _viewerChosen = true;
@@ -293,9 +311,11 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
   });
 
   String? get _detail {
+    // The owner's name is another account's string: plain, one line.
+    final owner = widget.pane.sharedOwnerName;
     final parts = [
       widget.grant.engine,
-      widget.pane.sharedOwnerName,
+      if (owner != null) plainSharedText(owner),
     ].whereType<String>().where((part) => part.isNotEmpty);
     return parts.isEmpty ? null : parts.join(' · ');
   }
@@ -309,7 +329,9 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
       connected: _status == ConnectionStatus.connected,
       terminalStopped: _watch.stopped,
     );
-    final notice = _failure ?? status.notice;
+    // The bar already says "Sharing ended"; the notice repeats nothing.
+    final failure = _failure == status.label ? null : _failure;
+    final notice = failure ?? status.notice;
     return LayoutBuilder(
       builder: (context, size) {
         final commentsBeside = size.maxWidth >= _commentsBesideWidth;
@@ -332,6 +354,12 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
               viewerSelected: _hasViewer && !split ? _viewerSelected : null,
               onSelectViewer: _selectViewer,
               onRetry: _ended && widget.hasAccess ? _retry : null,
+              onRemove: _ended && !widget.hasAccess ? widget.onClose : null,
+              leader: sharedPaneChipState(
+                widget.notifier,
+                widget.pane.machineId,
+                widget.grant.agentId,
+              ).leader,
             ),
             if (notice != null) SharedHarnessNotice(notice),
             Expanded(
@@ -406,10 +434,16 @@ class _SharedHarnessPanelState extends State<SharedHarnessPanel> {
     child: HarnessComments(
       updates: _commentUpdates,
       onSignIn: widget.onSignIn,
-      manage: (action, payload) => _connection.request(
-        'observer_$action',
-        payload: {'agentId': widget.grant.agentId, ...payload},
-      ),
+      manage: (action, payload) async {
+        final answer = await _connection.request(
+          'observer_$action',
+          payload: {'agentId': widget.grant.agentId, ...payload},
+        );
+        if (action == 'comment_post') {
+          widget.onUsage?.call(SharedAction.commentPost);
+        }
+        return answer;
+      },
     ),
   );
 }

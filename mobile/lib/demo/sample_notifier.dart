@@ -72,6 +72,13 @@ class SampleApiClient extends ApiClient {
   @override
   Future<Map<String, dynamic>?> me() async => null;
 
+  /// Set up a device, in the sample: a ticket no backend ever sees (the device is a stand-in too).
+  @override
+  Future<Map<String, dynamic>> boxTicket() async => {
+    'ticket': 'sample-ticket',
+    'expiresIn': 600,
+  };
+
   @override
   Future<List<Machine>> machines() async => machinesOnFile();
 
@@ -186,6 +193,25 @@ class SampleNotifier extends AppNotifier {
   @override
   Future<String?> unlinkMachine(String machineId) async =>
       'Sample computers stay linked.';
+
+  // Settings ▸ Computers offers these on every computer, the sample's too. Its computers come back
+  // from [SampleApiClient.machines] on every refresh, so a rename or a removal would last until the
+  // next one — said instead, the way [unlinkMachine] says it.
+
+  @override
+  Future<String?> renameMachine(String machineId, String name) async =>
+      'Sample computers keep their names.';
+
+  @override
+  Future<String?> deleteMachine(String machineId) async =>
+      'Sample computers stay on the account.';
+
+  /// Always reached, as [reloadMachineData] says: nothing to ask again.
+  @override
+  Future<String?> retryMachine(String machineId) async {
+    notifyListeners();
+    return null;
+  }
 
   @override
   void dispose() {

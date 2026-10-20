@@ -54,7 +54,7 @@ that process. A process per risk, not per feature (`SERVICE_HOSTS` in `src/harne
 | `engine-claude`, `engine-codex` | history, live parsers, runtime profiles, screens, submission readings, model control, question navigation and Codex's app-server connection (`src/engines/worker/`) | engine behavior outside core; snapshots and revocable model- and question-control grants | on demand |
 | `search` | search | native `node:sqlite`, the index's memory | always |
 | `viewers` | viewers, store | the viewer servers, the remote viewer streams and rendered surfaces, minutes-long installs | on demand |
-| `edge` | workspaces, usage, monitor, projects, handoff, recaps, windowNames, shell, connectors, agentCleanup, messages | light pure-JS services: isolated from the core, not from each other | always |
+| `edge` | workspaces, usage, monitor, projects, handoff, recaps, windowNames, shell, connectors, sharedMachines, agentCleanup, messages, osDevice | light pure-JS services: isolated from the core, not from each other | always |
 | `gateway` | gateway | network, crypto and pure-JS WebRTC: the attack surface | on demand |
 | `models` | models | grid's installs, downloads and commands | on demand |
 | `devices` | devices, wifi | the dials' serial ports, the fleet's lane, the voice router's worker, the Wi-Fi device | on demand |
@@ -62,6 +62,7 @@ that process. A process per risk, not per feature (`SERVICE_HOSTS` in `src/harne
 | `sharing` | sharing | an experiment: Share | on demand |
 | `memory` | memory | an experiment: Memories across machines | on demand |
 | `router` | router | an experiment: where ⌘B sends a task, decided by Jev | on demand |
+| `cloud` | cloud | an experiment: cloud agents (Fo, Devin Cloud, Cursor Cloud), harnesses on their makers' servers | on demand |
 
 A fault in one of the edge host's services can cost the others in it, never the core. Every service in
 `KNOWN_SERVICES` runs out of the core's process by default, unless `HARNESSD_SERVICES` names a subset, by
@@ -100,7 +101,8 @@ master too old to run it starts it beside itself, still in its own process (`src
   with the master's token, reconnecting after core restarts. `<host>.crash` and `<host>.leak`, or a
   service's own, crash or leak the whole process: it is one process.
 - `src/core/serviceLinks.ts` is the core's side: it routes those requests to the process, answers
-  `SERVICE_UNAVAILABLE` while it is down, and holds what the service must not miss.
+  `SERVICE_UNAVAILABLE` while it is down, and holds what the service must not miss. The Store's requests
+  (`waitsThroughRestart`) wait for its process to come back instead, bounded as a first start's wait is.
 - `src/services/searchProcess.ts` is the example to copy. `e2e/serviceProcesses.e2e.ts` is the proof
   to copy: killed, hung (SIGSTOP), leaking, crashing on every start.
 - A port the core calls asynchronously, answered when it is read, can be a request to the process: the
@@ -152,8 +154,15 @@ master too old to run it starts it beside itself, still in its own process (`src
 - A service that graduates from an experiment keeps the same questions to the core and is answered by a link of its
   own, for what it uses alone, never by the experiments' hooks: Agent Messages in the edge host
   (`src/core/messagesLink.ts`, `MESSAGES_QUERIES` in `src/core/api.ts`) is shown the agents, told how this daemon is
-  reached and whether it is signed in, reads the account's tabs and nothing else of the backend, sends the windows
-  its log's change notice and nothing else, and hears `desk_changed`. It never creates an agent, stops a turn or
+  reached and whether it is signed in, calls the backend only through `MESSAGES_BACKEND_ROUTES` (the account's tabs, and shared tabs' shares, rosters,
+  invitations, members and moves), sends the windows its log's change notice and nothing else, and hears
+  `desk_changed`. It holds no credential: the core signs each backend call, and the gateway signs and seals shared
+  tabs' rosters and frames (`core.account.tabKey`, asked as `tab_key`) and holds their sockets (`tab_relay`).
+  `account` reads the account signed in here, and `observers` tells the core that a roster changed, which it hands to
+  Share, so that a removed member stops watching at once. A core from before `account` answers `UNKNOWN_QUERY`, and
+  shared tabs are then unavailable while the rest runs. Between the owner's computers it answers `tab_pub`, `tab_pin`,
+  `tab_pin_changed` and `tab_keychange` (`src/messages/service.ts`), only from another computer of the same account.
+  It never creates an agent, stops a turn or
   watches a terminal. Off for the account (Settings ▸ Experimental, off by default), or signed out, it runs no
   timer: the core wakes it when its copy of the switch changes (`MessagesPort.settingsChanged`, from
   `createAgentSettingsSync` in `src/core/experiments.ts`), so does a watch on the setting's file when there is one
@@ -223,11 +232,11 @@ like any other. Named in `HARNESSD_SERVICES`, it starts with the others.
 
 ## Experiments
 
-An experiment (the orchestrator, Share, memory, the router) is a service that costs nothing until it is on: its own
-process, which the master starts only when the core asks for it (`want`), when one of its requests arrives or, as the
-core starts, when its saved state is in the data folder. Off, nothing of it runs or is loaded anywhere; one failing
-costs its own process and nothing else. `e2e/experiments.e2e.ts` proves it: off, on by request, on by saved state,
-killed, hung and crashing on every start.
+An experiment (the orchestrator, Share, memory, the router, cloud agents) is a service that costs nothing until it is
+on: its own process, which the master starts only when the core asks for it (`want`), when one of its requests arrives
+or, as the core starts, when its saved state is in the data folder. Off, nothing of it runs or is loaded anywhere; one
+failing costs its own process and nothing else. `e2e/experiments.e2e.ts` proves it: off, on by request, on by saved
+state, killed, hung and crashing on every start.
 
 Agent Messages was one until 2026-10-12: a process of its own on every computer it was on, 62 MiB resident at idle for
 a few MiB of messaging. It is a service in the edge host now (above), off costing nothing there.
@@ -249,7 +258,11 @@ To add one:
 4. Its start for the core's own process, in `services/inline.ts`, and one line in `core/main.ts` that starts
    it there when `HARNESSD_SERVICES` keeps it in (`serviceHost.serve`, or `start` with a port).
 
-Removing one is deleting those. A port the core calls in line (the orchestrator's `roleOf`) is answered
+Removing one is deleting those. Cloud agents (`src/services/cloud.ts`, `src/cloud/`) show an experiment that owns
+agents with no pane: it tells the core its harnesses and their questions through `core.cloud` (asked over its link
+out of process, `core/experimentQueries.ts`), and the core lists them, shows their questions and hands a New Harness,
+words, an answer, a rename and Stop Harness for one to its port (`core/agents/cloud.ts`, `core/cloudLink.ts`). A port member is
+never called `stop`: the service host reads that as stopping the service. A port the core calls in line (the orchestrator's `roleOf`) is answered
 from what the process last reported (`src/core/orchestratorLink.ts`), as the viewers' are. Agent Messages
 (`src/services/messages.ts`) shows the rest: whether one of its typed deliveries may still be written, which
 the core asks as it writes it, is reported for a few seconds at a time, so a process that stops reporting

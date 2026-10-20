@@ -41,6 +41,8 @@ Widget _host(
                   id: tab.id,
                   label: tab.id,
                   selected: index == 0,
+                  showShortcuts: const AlwaysStoppedAnimation(false),
+                  shortcutHint: '⌘${index + 1}',
                   onSelect: () {},
                   onClose: () => onClose?.call(tab.id),
                   activityLabel: tab.working ? 'Working' : null,
@@ -106,19 +108,31 @@ void main() {
         findsNothing,
       );
       expect(_status('app'), findsOneWidget, reason: 'hover keeps the status');
-      expect(find.text('⌘1'), findsNothing, reason: 'tabs show no shortcut');
+      expect(find.text('⌘1'), findsNothing, reason: 'Command is not held');
       expect(
         tester.getRect(_label('app')),
         title,
         reason: 'a name with room never moves',
       );
       final close = tester.getRect(_close('app'));
-      expect(close.size, const Size(DesktopWorkspaceTab.closeWidth, 32));
+      expect(close.size, const Size.square(DesktopWorkspaceTab.closeWidth));
       expect(
         tester.getRect(_tab('app')).right - close.right,
         grid.AppDesktop.tabCloseInset,
         reason: '× keeps its inset inside the curved body',
       );
+      // As the pane's ×: one gap above, below and to the body's right side.
+      final tab = tester.getRect(_tab('app'));
+      final above = close.top - (tab.top + grid.AppDesktop.tabTopInset);
+      expect(tab.bottom - close.bottom, above);
+      expect(tab.right - grid.AppDesktop.tabShoulder - close.right, above);
+      // Full ink at rest, as the pane's × (AppIcons.closeInk).
+      final ink = tester
+          .widget<IconButton>(_close('app'))
+          .style!
+          .foregroundColor!
+          .resolve(<WidgetState>{})!;
+      expect(ink.a, 1);
       await tester.tap(_close('app'));
       await tester.pump();
       expect(closed, ['app']);

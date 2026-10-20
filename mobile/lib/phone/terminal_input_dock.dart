@@ -32,8 +32,11 @@ class TerminalInputDock extends StatefulWidget {
     required this.session,
     required this.keyboardUp,
     required this.onDismiss,
+    this.onClearPrompt,
+    this.onPaste,
     this.onPickImage,
     this.onTakePhoto,
+    this.onPickFile,
     this.questionOpen = false,
     this.hints = const [],
   });
@@ -52,8 +55,16 @@ class TerminalInputDock extends StatefulWidget {
 
   /// `⌄` on the key bar: puts the keyboard away.
   final VoidCallback onDismiss;
+
+  /// `clear` and `paste` on the key bar — see [TerminalKeyBar.onClearPrompt]
+  /// and [TerminalKeyBar.onPaste].
+  final VoidCallback? onClearPrompt;
+  final VoidCallback? onPaste;
   final VoidCallback? onPickImage;
   final VoidCallback? onTakePhoto;
+
+  /// Any other file — see [TerminalKeyBar.onPickFile].
+  final VoidCallback? onPickFile;
 
   /// How long the row takes to open or close, matched to the software
   /// keyboard's own slide: iOS animates its keyboard over 250ms and Android
@@ -121,9 +132,15 @@ class _TerminalInputDockState extends State<TerminalInputDock>
         enabled: widget.session.acceptsInput,
         onPromptEdited: widget.session.resetInputBuffer,
         onDismissKeyboard: widget.onDismiss,
+        onClearPrompt: widget.onClearPrompt,
+        onPaste: widget.onPaste,
         onPickImage: widget.onPickImage,
         onTakePhoto: widget.onTakePhoto,
+        onPickFile: widget.onPickFile,
         questionOpen: widget.questionOpen,
+        // An agent's prompt takes `↵`; a plain shell does not — see
+        // [TerminalKeyBar.enginePrompt].
+        enginePrompt: widget.session.engineId != 'terminal',
         hints: widget.hints,
         ctrlArmed: widget.session.controlArmed,
         onArmCtrl: widget.session.armControl,

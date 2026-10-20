@@ -36,12 +36,19 @@ static bool same(const char *a, const char *b) { return a && b && !strcmp(a, b);
 
 void pod_model_reset(pod_model_t *m) { memset(m, 0, sizeof *m); }
 
+static uint32_t (*s_random)(void);
+void pod_model_random(uint32_t (*rnd)(void)) { s_random = rnd; }
+
 // The model's own idea of "now": the newest now_ms any feed or the renderer has shown it. It only moves forward
 // (by signed difference, so it survives the uint32 wrap), and lets every reader apply the same stale rule.
+static void unread_expire(pod_model_t *m);
+static int unread_idx(const pod_model_t *m, const char *agent);
+static void unread_drop(pod_model_t *m, int i);
 void pod_model_clock(pod_model_t *m, uint32_t now_ms) {
     if (!m->clock_set || (int32_t)(now_ms - m->clock_ms) > 0) {
         m->clock_ms = now_ms;
         m->clock_set = true;
+        unread_expire(m);   // every tick that moves the clock
     }
 }
 
@@ -129,10 +136,13 @@ static int make_room(pod_model_t *m, const rank_t *newcomer) {
 }
 
 // ── change detection ─────────────────────────────────────────────────────────────────────────────────
-// These feeds run on the cable_link task (6 KB stack): a pod_agent_t is ~2.7 KB (recap[]), so a feed must not
+// These feeds run on the cable_link task (12 KB stack, the parser takes ~7 of it): a pod_agent_t is ~2.7 KB (recap[]), so a feed must not
 // hold a copy of one to see whether it changed anything. It takes a 64-bit FNV-1a signature of the agent's
 // visible fields before and after instead. Left out: seen, lib_seen, src and age_s (sweep bookkeeping that is
 // never a visible change); event_ms only when `with_event` is false (a fresh stamp alone is not one).
+// A fresh slot (already zeroed): the turn stats are unknown, not zero.
+static void init_agent(pod_agent_t *a) { a->tests_passed = a->tests_failed = a->commits = a->tokens_in = a->tokens_out = -1; a->step_total = -1; }
+
 static uint64_t fnv_bytes(uint64_t h, const void *p, size_t n) {
     const unsigned char *b = p;
     while (n--) h = (h ^ *b++) * 1099511628211ull;
@@ -148,7 +158,13 @@ static uint64_t agent_sig(const pod_agent_t *a, bool with_event) {
     h = fnv_str(h, a->activity);
     h = fnv_str(h, a->verb);
     h = fnv_bytes(h, &a->step_count, sizeof a->step_count);
-    for (int i = 0; i < a->step_count; i++) h = fnv_str(h, a->steps[i]);
+    for (int i = 0; i < a->step_count; i++) { h = fnv_str(h, a->steps[i]); h = fnv_bytes(h, &a->step_at_s[i], sizeof a->step_at_s[i]); }
+    h = fnv_bytes(h, &a->failed, sizeof a->failed);
+    h = fnv_bytes(h, &a->tests_passed, sizeof a->tests_passed);
+    h = fnv_bytes(h, &a->tests_failed, sizeof a->tests_failed);
+    h = fnv_bytes(h, &a->commits, sizeof a->commits);
+    h = fnv_bytes(h, &a->tokens_in, sizeof a->tokens_in);
+    h = fnv_bytes(h, &a->tokens_out, sizeof a->tokens_out);
     h = fnv_str(h, a->question);
     h = fnv_bytes(h, &a->state, sizeof a->state);
     h = fnv_bytes(h, &a->since_ms, sizeof a->since_ms);
@@ -187,6 +203,7 @@ void pod_model_agent(pod_model_t *m, const char *id, const char *name, const cha
         i = m->agent_count++;
         memset(&m->agents[i], 0, sizeof m->agents[i]);
         m->agents[i].age_s = -1;
+        init_agent(&m->agents[i]);
         copy_str(m->agents[i].id, sizeof m->agents[i].id, id);
         m->revision++;
     }
@@ -227,22 +244,32 @@ static pod_state_t state_of_status(const char *status) {
 }
 
 // A sentence the agent has moved on from joins the turn's steps (newest first, no repeats, the oldest falls off).
+// Each keeps the seconds into the turn it arrived at (0xFFFF when no turn.started was seen: a rebuilt list has no times).
 static void drop_step(pod_agent_t *a, int at) {
-    for (int i = at; i + 1 < a->step_count; i++) memcpy(a->steps[i], a->steps[i + 1], POD_STEP_BYTES);
+    for (int i = at; i + 1 < a->step_count; i++) {
+        memcpy(a->steps[i], a->steps[i + 1], POD_STEP_BYTES);
+        a->step_at_s[i] = a->step_at_s[i + 1];
+    }
     a->step_count--;
 }
-static void push_step(pod_agent_t *a, const char *old) {
+static void push_step(pod_agent_t *a, const char *old, uint32_t now_ms) {
     if (!old[0]) return;
     char cut[POD_STEP_BYTES];
     copy_str(cut, sizeof cut, old);
     for (int i = 0; i < a->step_count; i++) if (!strcmp(a->steps[i], cut)) { drop_step(a, i); break; }
-    if (a->step_count == POD_STEPS_MAX) a->step_count--;
-    for (int i = a->step_count; i > 0; i--) memcpy(a->steps[i], a->steps[i - 1], POD_STEP_BYTES);
+    if (a->step_count == POD_STEPS_MAX) { a->step_count--; }
+    for (int i = a->step_count; i > 0; i--) {
+        memcpy(a->steps[i], a->steps[i - 1], POD_STEP_BYTES);
+        a->step_at_s[i] = a->step_at_s[i - 1];
+    }
     memcpy(a->steps[0], cut, sizeof cut);
+    const uint32_t s = (now_ms - a->since_ms) / 1000;   // unsigned: the clock wraps
+    a->step_at_s[0] = !a->turn_started ? 0xFFFF : s > 0xFFFE ? 0xFFFE : (uint16_t)s;
     a->step_count++;
+    if (a->step_total >= 0 && a->step_total < INT16_MAX) a->step_total++;
 }
 
-static void set_state(pod_agent_t *a, pod_state_t s, uint32_t now_ms);
+static void set_state(pod_model_t *m, pod_agent_t *a, pod_state_t s, uint32_t now_ms);
 
 void pod_model_library_row(pod_model_t *m, const char *id, const char *name, const char *engine, const char *machine,
                            const char *status, int32_t age_s, uint32_t now_ms) {
@@ -255,6 +282,7 @@ void pod_model_library_row(pod_model_t *m, const char *id, const char *name, con
         if (make_room(m, &r) < 0) return;
         i = m->agent_count++;
         memset(&m->agents[i], 0, sizeof m->agents[i]);
+        init_agent(&m->agents[i]);
         copy_str(m->agents[i].id, sizeof m->agents[i].id, id);
         m->revision++;
     }
@@ -272,7 +300,7 @@ void pod_model_library_row(pod_model_t *m, const char *id, const char *name, con
     if (before != agent_sig(a, true)) m->revision++;
     if (event_ok(a, now_ms) && status && sweep_applies(a, st)) {
         uint64_t was = agent_sig(a, false);   // a fresh stamp alone is not a visible change
-        set_state(a, st, now_ms);
+        set_state(m, a, st, now_ms);
         if (was != agent_sig(a, false)) m->revision++;
     }
 }
@@ -308,6 +336,7 @@ static void sync_meta_members(pod_model_t *m, const char *const *agent_ids[], co
                 i = m->agent_count++;
                 memset(&m->agents[i], 0, sizeof m->agents[i]);
                 m->agents[i].age_s = -1;
+                init_agent(&m->agents[i]);
                 m->agents[i].state = POD_OFFLINE;
                 copy_str(m->agents[i].id, sizeof m->agents[i].id, agent_ids[t][k]);
                 copy_str(m->agents[i].name, sizeof m->agents[i].name, mm->name);
@@ -335,8 +364,8 @@ void pod_model_swarms(pod_model_t *m, const cable_swarm_t *items, const char *co
 void pod_model_swarms_meta(pod_model_t *m, const cable_swarm_t *items, const char *const *agent_ids[],
                            const uint8_t agent_id_counts[], int n, const char *selected,
                            const cable_tile_t *tiles, int tile_count, const pod_member_meta_t (*meta)[POD_PANES_MAX]) {
-    // ~9.7 KB: far over the cable_link task's 6 KB stack, so it is file-static. Every model feed is single-writer
-    // (the cable task, under display_lock), so one scratch is never used by two callers at once.
+    // ~9.7 KB: far over the cable_link task's 12 KB stack, so it is file-static. Every model feed is single-writer
+    // (the cable task, under pro_app_lock), so one scratch is never used by two callers at once.
     static EXT_RAM_BSS_ATTR pod_tab_t nt[POD_TABS_MAX];
     memset(nt, 0, sizeof nt);
     if (n < 0 || !items) n = 0;
@@ -345,19 +374,26 @@ void pod_model_swarms_meta(pod_model_t *m, const cable_swarm_t *items, const cha
     if (tile_count < 0 || !tiles) tile_count = 0;
     if (tile_count > POD_PANES_MAX) tile_count = POD_PANES_MAX;
 
-    int sel = 0;
+    int sel = -1;
     for (int i = 0; i < n; i++)
         if (same(items[i].id, selected)) { sel = i; break; }
+    if (sel < 0) sel = 0;
 
+    // A tab with no agent (only shells or viewers, or nothing at all) is not shown: nothing on the Pod can drive it.
+    int out = 0, nsel_out = -1;
     for (int i = 0; i < n; i++) {
-        pod_tab_t *t = &nt[i];
+        int ids = (agent_ids && agent_id_counts && agent_ids[i]) ? agent_id_counts[i] : 0;
+        bool has_agent = items[i].agents > 0 || ids > 0;
+        if (i == sel) for (int k = 0; k < tile_count && !has_agent; k++) if (tiles[k].agent_id[0]) has_agent = true;
+        if (!has_agent) continue;
+        if (i == sel) nsel_out = out;
+        pod_tab_t *t = &nt[out++];
         copy_str(t->id, sizeof t->id, items[i].id);
         copy_str(t->name, sizeof t->name, items[i].name);
         int panes = items[i].panes < 0 ? 0 : items[i].panes > 255 ? 255 : items[i].panes;
         t->panes = (uint8_t)panes;
         for (int k = 0; k < POD_PANES_MAX; k++) t->agent[k] = -1;
 
-        int ids = (agent_ids && agent_id_counts && agent_ids[i]) ? agent_id_counts[i] : 0;
         if (ids > 0) {
             if (ids > POD_PANES_MAX) ids = POD_PANES_MAX;
             t->members_known = true;
@@ -394,10 +430,11 @@ void pod_model_swarms_meta(pod_model_t *m, const cable_swarm_t *items, const cha
         }
     }
 
-    uint8_t nsel = (uint8_t)sel;
-    if (n != m->tab_count || nsel != m->selected || memcmp(nt, m->tabs, sizeof nt)) {
+    // The window's tab hidden here: selected points past the list, so no tab is marked current.
+    uint8_t nsel = (uint8_t)(nsel_out >= 0 ? nsel_out : out);
+    if (out != m->tab_count || nsel != m->selected || memcmp(nt, m->tabs, sizeof nt)) {
         memcpy(m->tabs, nt, sizeof nt);
-        m->tab_count = (uint8_t)n;
+        m->tab_count = (uint8_t)out;
         m->selected = nsel;
         m->revision++;
     }
@@ -412,10 +449,21 @@ static pod_agent_t *fresh_agent(pod_model_t *m, const char *id, uint32_t now_ms)
     return &m->agents[i];
 }
 
-static void set_state(pod_agent_t *a, pod_state_t s, uint32_t now_ms) {
+static void set_state(pod_model_t *m, pod_agent_t *a, pod_state_t s, uint32_t now_ms) {
     if (s == POD_WORKING && a->state != POD_WORKING) a->since_ms = now_ms;
-    if (s != POD_ASKING) a->question[0] = 0;
-    if (s != POD_WORKING) { a->activity[0] = 0; a->verb[0] = 0; a->step_count = 0; }
+    if (s != POD_ASKING) {
+        a->question[0] = 0;
+        if (a->state == POD_ASKING) {   // the question is over, however: its toast entry is stale
+            int u = unread_idx(m, a->id);
+            if (u >= 0 && m->unread[u].ask) unread_drop(m, u);
+        }
+    }
+    if (s == POD_WORKING && a->state != POD_WORKING && a->state != POD_ASKING) {   // a new turn without a turn.started
+        a->failed = false;
+        a->step_total = -1;
+        a->work_alt = s_random && (s_random() & 1u);   // chef or builder, for the whole turn
+    }
+    if (s != POD_WORKING) { a->activity[0] = 0; a->verb[0] = 0; a->step_count = 0; a->turn_started = false; }
     // A task starting or ending is news; idle <-> done <-> offline from a sweep (a machine back, a boot's first look) is not.
     bool busy_now = s == POD_WORKING || s == POD_ASKING, busy_was = a->state == POD_WORKING || a->state == POD_ASKING;
     if (a->state != s && (busy_now || busy_was)) { a->act_ms = now_ms; a->has_act = true; }
@@ -434,7 +482,7 @@ void pod_model_library_status(pod_model_t *m, const char *id, const char *status
     else s = POD_IDLE;   // idle, failed, paused, offline, anything new
     if (!sweep_applies(a, s)) return;
     uint64_t before = agent_sig(a, true);
-    set_state(a, s, now_ms);
+    set_state(m, a, s, now_ms);
     if (before != agent_sig(a, true)) m->revision++;
 }
 
@@ -445,15 +493,19 @@ void pod_model_turn(pod_model_t *m, const char *id, const char *kind, const char
     const bool was_busy = a->state == POD_WORKING || a->state == POD_ASKING;
     a->sent = false;   // the daemon speaks for the turn now
     if (!strcmp(kind, "started")) {
-        set_state(a, POD_WORKING, now_ms);
+        set_state(m, a, POD_WORKING, now_ms);
         a->since_ms = now_ms;
         a->elapsed_s = 0;
         a->activity[0] = 0;
         a->verb[0] = 0;
         a->step_count = 0;
+        a->step_total = 0;
+        a->turn_started = true;
+        a->failed = false;
+        a->tests_passed = a->tests_failed = a->commits = a->tokens_in = a->tokens_out = -1;
     } else if (!strcmp(kind, "verb")) {
         if (a->state == POD_ASKING) return;
-        set_state(a, POD_WORKING, now_ms);
+        set_state(m, a, POD_WORKING, now_ms);
         // Same rule as the sentence: an empty read says nothing. The word keeps its text, not its dots.
         if (text && *text) {
             char w[POD_VERB_BYTES + 8];
@@ -468,13 +520,13 @@ void pod_model_turn(pod_model_t *m, const char *id, const char *kind, const char
         }
     } else if (!strcmp(kind, "activity")) {
         if (a->state == POD_ASKING) return;   // only turn.started or question.close ends a question
-        set_state(a, POD_WORKING, now_ms);
+        set_state(m, a, POD_WORKING, now_ms);
         // An empty read says nothing: the daemon sends turn.activity with no text when the terminal shows no footer
         // (every ~3 s, and right after each turn.started heartbeat), and a missing reading is not "no activity". Only
         // a text replaces the line; a new turn (started) or a state change away from working is what clears it.
         // Blanking here made the body text appear with the heartbeat and vanish ~40 ms later, every 3-5 s.
         if (text && *text) {
-            if (strcmp(text, a->activity)) push_step(a, a->activity);
+            if (strcmp(text, a->activity)) push_step(a, a->activity, now_ms);
             copy_str(a->activity, sizeof a->activity, text);
             a->activity_cut = strlen(text) >= sizeof a->activity;
             for (int i = 0; i < a->step_count; i++) if (!strcmp(a->steps[i], a->activity)) { drop_step(a, i); break; }
@@ -484,11 +536,12 @@ void pod_model_turn(pod_model_t *m, const char *id, const char *kind, const char
         // A tool the turn just started ("Read · pod_model.c"): the newest grey line. A turn of tool calls and no
         // prose had nothing else to show, and the body stayed empty through all of it.
         if (a->state == POD_ASKING) return;
-        if (text && *text) { set_state(a, POD_WORKING, now_ms); push_step(a, text); }
+        if (text && *text) { set_state(m, a, POD_WORKING, now_ms); push_step(a, text, now_ms); }
     } else if (!strcmp(kind, "done")) {
-        set_state(a, POD_DONE, now_ms);
+        set_state(m, a, POD_DONE, now_ms);
     } else if (!strcmp(kind, "error")) {
-        set_state(a, POD_IDLE, now_ms);
+        set_state(m, a, POD_IDLE, now_ms);
+        a->failed = true;
     }
     // A task's clock: only an event inside a turn. A stray done for an idle agent (the daemon's focus read, a replay)
     // is not a task, and stamping it put agents with no turn at the top of Recent (owner, 2026-10-11).
@@ -497,6 +550,19 @@ void pod_model_turn(pod_model_t *m, const char *id, const char *kind, const char
                                !strcmp(kind, "step") || !strcmp(kind, "done") || !strcmp(kind, "error"))) {
         a->act_ms = now_ms; a->has_act = true;
     }
+    if (before != agent_sig(a, true)) m->revision++;
+}
+
+void pod_model_turn_stats(pod_model_t *m, const char *id, int32_t passed, int32_t failed, int32_t commits, int32_t tokens_in, int32_t tokens_out) {
+    int i = find_idx(m, id);
+    if (i < 0) return;
+    pod_agent_t *a = &m->agents[i];
+    uint64_t before = agent_sig(a, true);
+    if (passed >= 0) a->tests_passed = passed;
+    if (failed >= 0) a->tests_failed = failed;
+    if (commits >= 0) a->commits = commits;
+    if (tokens_in >= 0) a->tokens_in = tokens_in;
+    if (tokens_out >= 0) a->tokens_out = tokens_out;
     if (before != agent_sig(a, true)) m->revision++;
 }
 
@@ -511,7 +577,6 @@ void pod_model_question(pod_model_t *m, const char *id, const char *text) {
     a->sent = false;
     a->state = POD_ASKING;
     a->activity[0] = 0;
-    a->step_count = 0;
     copy_str(a->question, sizeof a->question, text);
     if (before != agent_sig(a, true)) m->revision++;
 }
@@ -521,6 +586,8 @@ void pod_model_question_close(pod_model_t *m, const char *id) {
     if (i < 0 || m->agents[i].state != POD_ASKING) return;
     m->agents[i].state = POD_WORKING;
     m->agents[i].question[0] = 0;
+    int u = unread_idx(m, id);
+    if (u >= 0 && m->unread[u].ask) unread_drop(m, u);   // answered: its toast entry is stale
     m->revision++;
 }
 
@@ -606,6 +673,9 @@ void pod_model_recap(pod_model_t *m, const char *id, const char *recap, bool res
 void pod_model_link(pod_model_t *m, bool up) {
     if (m->linked == up) return;
     m->linked = up;
+    if (!up)   // a drop forgets every open question (pro_app clears them): the daemon re-sends what is still owed
+        for (int i = m->unread_count - 1; i >= 0; i--)
+            if (m->unread[i].ask) unread_drop(m, i);
     m->revision++;
 }
 
@@ -615,7 +685,7 @@ void pod_model_sent(pod_model_t *m, const char *id, uint32_t now_ms) {
     if (i < 0) return;
     pod_agent_t *a = &m->agents[i];
     uint64_t before = agent_sig(a, true);
-    if (a->state != POD_WORKING) { set_state(a, POD_WORKING, now_ms); a->elapsed_s = 0; }
+    if (a->state != POD_WORKING) { set_state(m, a, POD_WORKING, now_ms); a->elapsed_s = 0; }
     a->sent = true;
     a->sent_ms = now_ms;
     if (before != agent_sig(a, true)) m->revision++;
@@ -701,6 +771,12 @@ static void unread_drop(pod_model_t *m, int i) {
     m->revision++;
 }
 
+// An entry older than POD_UNREAD_TTL_MS since receipt goes; the signed difference survives the uint32 wrap.
+static void unread_expire(pod_model_t *m) {
+    for (int i = m->unread_count - 1; i >= 0; i--)
+        if ((int32_t)(m->clock_ms - m->unread[i].at_ms) >= (int32_t)POD_UNREAD_TTL_MS) unread_drop(m, i);
+}
+
 void pod_model_unread_add(pod_model_t *m, const char *agent, const char *name, const char *text, int32_t elapsed_s, uint32_t now_ms) {
     if (!agent || !*agent || strnlen(agent, ID_MAX) >= ID_MAX) return;
     pod_model_clock(m, now_ms);
@@ -715,8 +791,26 @@ void pod_model_unread_add(pod_model_t *m, const char *agent, const char *name, c
     pod_copy_str(u->text, sizeof u->text, text);
     u->at_ms = now_ms;
     u->elapsed_s = elapsed_s;
+    const pod_agent_t *a = pod_model_find(m, agent);
+    u->kind = a && a->failed ? POD_UNREAD_FAILED : POD_UNREAD_FINISHED;
     m->unread_count++;
     m->revision++;
+}
+
+void pod_model_unread_ask(pod_model_t *m, const char *agent, const char *name, const char *text, uint32_t now_ms) {
+    pod_model_unread_add(m, agent, name, text, -1, now_ms);
+    int i = unread_idx(m, agent);
+    if (i >= 0) m->unread[i].ask = true;
+}
+
+int pod_notice_count(const pod_model_t *m) {
+    int n = 0;
+    for (int i = 0; i < m->agent_count; i++) n += pod_model_eff(m, &m->agents[i]) == POD_ASKING;
+    for (int i = 0; i < m->unread_count; i++) {
+        const pod_agent_t *ag = pod_model_find(m, m->unread[i].agent);
+        n += !(ag && pod_model_eff(m, ag) == POD_ASKING);   // an asking agent is listed by its question; its entry waits
+    }
+    return n;
 }
 
 void pod_model_unread_clear(pod_model_t *m) {

@@ -1,6 +1,9 @@
 import 'core/app_version.dart';
 
 import 'dart:async';
+
+import 'measurement/product_runtime_health.dart';
+
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
@@ -13,6 +16,8 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 import 'core/crash_log.dart';
 import 'core/desktop_window.dart';
 import 'core/linux_app_image.dart';
+import 'settings/settings_screen.dart';
+import 'settings/settings_section.dart';
 import 'screens/login_screen.dart';
 import 'state/app_state.dart';
 import 'stats/stats_lifecycle.dart';
@@ -30,6 +35,7 @@ import 'widgets/flash_firmware_dialog.dart';
 import 'widgets/linux_menu_bar.dart';
 import 'widgets/setup_tour.dart';
 import 'widgets/sign_in_step.dart';
+import 'widgets/transient_menus.dart';
 import 'core/startup.dart';
 import 'logging/app_log.dart';
 import 'logging/install.dart';
@@ -37,6 +43,7 @@ import 'shortcuts/app_keymap.dart';
 import 'shortcuts/keyboard_practice.dart';
 import 'widgets/shortcuts_sheet.dart';
 import 'widgets/new_device_notice.dart';
+import 'widgets/shared_tab_notice.dart';
 import 'widgets/update_notice.dart';
 import 'widgets/window_chrome.dart';
 import 'sharing/shared_agent_location.dart';
@@ -72,6 +79,7 @@ Future<void> startHarness({
   /// [TerminalTransportPlugin]); the desktop passes none.
   TerminalTransportPluginFactory? transportPlugins,
 }) async {
+  if (!kIsWeb) ProductRuntimeHealth.launched();
   // Share links and OAuth own the browser URL. Flutter's default hash routing would
   // erase the share's pinned identity on the first navigation or window resize.
   if (kIsWeb) setUrlStrategy(null);
@@ -235,6 +243,7 @@ class _RootShellState extends ConsumerState<RootShell>
   @override
   Future<AppExitResponse> didRequestAppExit() async {
     final app = ref.read(appStateProvider);
+    app.productRuntimeHealth?.cleanExit();
     // A sign-in still waiting on the browser or a phone ends with the app: its
     // CLI would otherwise wait on, holding the lock the next sign-in needs.
     if (app.canCancelLogin) app.cancelLogin();
@@ -246,7 +255,7 @@ class _RootShellState extends ConsumerState<RootShell>
         onTimeout: () {},
       );
     } finally {
-      flushAppLog();
+      flushAppLog(durable: true);
     }
     return AppExitResponse.exit;
   }
@@ -263,6 +272,18 @@ class _RootShellState extends ConsumerState<RootShell>
   Future<void> runAppMenuAction(String action) async {
     if (!mounted) return;
     switch (action) {
+      case 'settings':
+        final app = ref.read(appStateProvider);
+        await _menuDialog(
+          () => showSettingsScreen(
+            context,
+            app,
+            initialSection: kIsWeb
+                ? SettingsSection.privacy
+                : SettingsSection.experimental,
+            source: 'setup_menu',
+          ),
+        );
       case 'checkForUpdates':
         final app = ref.read(appStateProvider);
         await _menuDialog(() => checkForUpdatesAndShowResult(context, app));
@@ -309,6 +330,9 @@ class _RootShellState extends ConsumerState<RootShell>
     // Reserve before the first frame too: held menu shortcuts can arrive
     // before the new dialog has changed the route's current state.
     _menuDialogOpen = true;
+    // An open dropdown is an overlay above every route: close it, or its rows
+    // stay live over the dialog (Sign out behind Check for Updates).
+    dismissTransientMenus();
     try {
       await action();
     } finally {
@@ -371,8 +395,8 @@ class _RootShellState extends ConsumerState<RootShell>
         // whatever the status says meanwhile, until the tour opens Harness.
         final touring = app.setupTourShowing;
         if (touring) screen = SetupTourScreen(app: app);
-        // Then, once: a computer new to Harness with no account is offered one
-        // before its first workspace.
+        // Every signed-out desktop launch requires an account before opening
+        // the workspace, including computers that already have Harness.
         final signInStep = !touring && app.signInStepShowing;
         if (signInStep) screen = SignInStepScreen(app: app);
         // Preserve the fragment pin while dialogs navigate; an OAuth callback can restore it later.
@@ -393,7 +417,10 @@ class _RootShellState extends ConsumerState<RootShell>
         // three buttons beside it, which is the one strip of this window that
         // must stay reachable.
         // Device bands, most urgent first: a removal (red before neutral), a key that joined and left,
-        // a new device, a held computer id. The mobile app stacks them in the same order.
+        // a new device, a held computer id. The mobile app stacks them in the same order. They are
+        // the workspace's: a shared harness (`/s/…`, web only) is someone's session, not the place
+        // to review your own devices.
+        final deviceBands = home && shared == null;
         return Column(
           children: [
             // The app's commands as a menu strip (Linux only; macOS carries
@@ -406,14 +433,21 @@ class _RootShellState extends ConsumerState<RootShell>
                 app.status != AppStatus.checkingEnvironment &&
                 app.status != AppStatus.preparingEnvironment)
               UpdateNotice(notifier: app),
-            if (app.visibleDeviceRemovals.isNotEmpty && home)
+            if (app.visibleDeviceRemovals.isNotEmpty && deviceBands)
               DeviceRemovalNoticeBand(notifier: app),
-            if (app.departedDevices.isNotEmpty && home)
+            if (app.departedDevices.isNotEmpty && deviceBands)
               DeviceDepartedNoticeBand(notifier: app),
-            if (app.newDevices.isNotEmpty && home)
+            if (app.newDevices.isNotEmpty && deviceBands)
               NewDeviceNotice(notifier: app),
-            if (app.deviceConflict != null && home)
+            if (app.deviceConflict != null && deviceBands)
               DeviceConflictNoticeBand(notifier: app),
+            if (deviceBands)
+              ListenableBuilder(
+                listenable: app.sharedTabs,
+                builder: (_, _) => SharedTabNotice.hasWork(app)
+                    ? SharedTabNotice(notifier: app)
+                    : const SizedBox.shrink(),
+              ),
             Expanded(child: framed),
           ],
         );

@@ -1,25 +1,87 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RegisteredSession } from '../lib/registry.js'
 import { fakeCore } from '../testing/fakeCore.js'
-import { answerExperimentQuery, createForExperiment } from './experimentQueries.js'
+import { answerExperimentQuery, createForExperiment, creationForExperiment } from './experimentQueries.js'
 
 const agent = (agentId: string) => ({ agentId, sessionId: `s-${agentId}`, engine: 'claude', cwd: '/w' }) as RegisteredSession
 const experiments = new Set(['orchestrator'])
 
+describe('the cloud agents\' doors', () => {
+  it('are the cloud service\'s alone, and carry its harnesses and questions to the core', async () => {
+    const cloud = { publish: vi.fn(), ask: vi.fn(), unask: vi.fn() }
+    const core = fakeCore({ cloud })
+    const both = new Set(['orchestrator', 'cloud'])
+    expect(await answerExperimentQuery(core, both, 'cloud', 'cloud_publish', { harnesses: [{ agentId: 'cloud_1' }] })).toEqual({})
+    expect(cloud.publish).toHaveBeenLastCalledWith([{ agentId: 'cloud_1' }])
+    await answerExperimentQuery(core, both, 'cloud', 'cloud_publish', { harnesses: 'x' })
+    expect(cloud.publish).toHaveBeenLastCalledWith([])
+    await answerExperimentQuery(core, both, 'cloud', 'cloud_ask', { agentId: 'cloud_1', questionId: 'cloud_q_1', requestId: 'the-link-s-own', question: { text: 'Which?', choices: [] } })
+    expect(cloud.ask).toHaveBeenCalledWith('cloud_1', 'cloud_q_1', { text: 'Which?', choices: [] })
+    await answerExperimentQuery(core, both, 'cloud', 'cloud_ask', {})
+    expect(cloud.ask).toHaveBeenLastCalledWith('', '', {})
+    await answerExperimentQuery(core, both, 'cloud', 'cloud_unask', { agentId: 'cloud_1', questionId: 'cloud_q_1' })
+    expect(cloud.unask).toHaveBeenCalledWith('cloud_1', 'cloud_q_1')
+    expect(await answerExperimentQuery(core, both, 'orchestrator', 'cloud_publish', {})).toEqual({ error: 'NOT_CLOUD' })
+    expect(await answerExperimentQuery(fakeCore(), both, 'cloud', 'cloud_publish', {})).toEqual({ error: 'NOT_CLOUD' })
+  })
+})
+
 describe('what an experiment in its own process may ask of the core', () => {
+  it('reads exact creation observations without treating an unavailable provider as an absent launch', async () => {
+    const id = 'creation-fixture-1234'
+    const known = { creationId: id, state: 'cancelled' as const }
+    const core = fakeCore({ agents: { creationStatus: async () => known } })
+    expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'creation_status', { creationId: id })).toEqual({ observation: known })
+    expect(await answerExperimentQuery(fakeCore(), experiments, 'orchestrator', 'creation_status', {})).toEqual({ observation: null })
+    expect(await creationForExperiment(null, id)).toBeNull()
+    const read = vi.fn(async (input, _asker, reply) => { reply({ ...input, state: 'created', agent: { id: 'native', private: 'not projected' } }) })
+    expect(await creationForExperiment(read, 'invalid')).toBeNull()
+    expect(read).not.toHaveBeenCalled()
+    expect(await creationForExperiment(read, id)).toEqual({ creationId: id, state: 'created', agentId: 'native' })
+    expect(await creationForExperiment(async () => {}, id)).toBeNull()
+    expect(await creationForExperiment(async () => { throw new Error('Disk unavailable') }, id)).toBeNull()
+    expect(await creationForExperiment(async (input, _asker, reply) => { reply({ ...input, state: 'cancelled' }) }, id)).toEqual(known)
+    expect(await creationForExperiment(async (_, _asker, reply) => { reply({ creationId: 'other', state: 'cancelled' }) }, id)).toBeNull()
+    expect(await creationForExperiment(async (input, _asker, reply) => { reply({ ...input, state: 'unavailable', createdAgentId: 'closed-native' }) }, id))
+      .toEqual({ creationId: id, state: 'created', agentId: 'closed-native' })
+    expect(await creationForExperiment(async (input, _asker, reply) => { reply({ ...input, state: 'unavailable' }) }, id)).toBeNull()
+  })
+  it('requires fresh native stop evidence, including when a core is older', async () => {
+    const core = fakeCore({ agents: { stopped: async id => id === 'stopped' } })
+    expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'stopped', { agentId: 'stopped' })).toEqual({ stopped: true })
+    expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'stopped', { agentId: 'live' })).toEqual({ stopped: false })
+    expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'stopped', {})).toEqual({ stopped: false })
+    expect(await answerExperimentQuery(fakeCore(), experiments, 'orchestrator', 'stopped', { agentId: 'unknown' })).toEqual({ stopped: false })
+  })
+
+  it('bounds native observation queries and keeps an older core unavailable', async () => {
+    const cursor = { epoch: 'fixture-observation-epoch', sequence: 0 }
+    const page = { cursor, observations: [], gap: false }, nativeTurns = vi.fn(async () => page)
+    const core = fakeCore({ transcripts: { nativeTurns } })
+    expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'native_turns', { agentId: 'native' })).toEqual({ page })
+    expect(nativeTurns).toHaveBeenLastCalledWith('native', undefined)
+    expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'native_turns', { agentId: 'native', cursor })).toEqual({ page })
+    expect(nativeTurns).toHaveBeenLastCalledWith('native', cursor)
+    for (const payload of [{}, { agentId: 'native', cursor: null }, { agentId: 'native', cursor: { ...cursor, sequence: -1 } }]) {
+      expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'native_turns', payload)).toEqual({ error: 'INVALID_REQUEST' })
+    }
+    expect(await answerExperimentQuery(fakeCore(), experiments, 'orchestrator', 'native_turns', { agentId: 'native' })).toEqual({ page: null })
+  })
+
   it('shows the live agents as the apps are shown them: name, terminal and harness', async () => {
     const core = fakeCore({
       agents: {
         live: () => [agent('a1'), agent('a2')],
         displayName: (session) => `name of ${session.agentId}`,
         terminalAvailable: (agentId) => agentId === 'a1',
+        runtimeProfile: session => session.agentId === 'a1' ? 'runtime-v1:a1:claude:opus@high' : null,
         dsh: (session) => (session.agentId === 'a1' ? { viewerUrl: 'http://127.0.0.1:1/' } as never : null),
       },
     })
     expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'shown', {})).toEqual({
       agents: [
-        { ...agent('a1'), displayName: 'name of a1', terminalAvailable: true, dshContext: { viewerUrl: 'http://127.0.0.1:1/' } },
-        { ...agent('a2'), displayName: 'name of a2', terminalAvailable: false, dshContext: null },
+        { ...agent('a1'), displayName: 'name of a1', terminalAvailable: true, selectedModel: 'runtime-v1:a1:claude:opus@high', dshContext: { viewerUrl: 'http://127.0.0.1:1/' } },
+        { ...agent('a2'), displayName: 'name of a2', terminalAvailable: false, selectedModel: null, dshContext: null },
       ],
     })
   })
@@ -81,6 +143,19 @@ describe('what an experiment in its own process may ask of the core', () => {
     expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'observer_key', {})).toEqual({ error: 'not a welcome to an observer' })
     publicKey.mockRejectedValueOnce('odd')
     expect(await answerExperimentQuery(core, experiments, 'orchestrator', 'observer_key', { op: 'public' })).toEqual({ error: 'odd' })
+  })
+
+  it('tells Share which account is signed in here, which its tabs\' observers are derived for, and no other experiment', async () => {
+    const identity = vi.fn(async (): Promise<{ accountId: string; email: string } | null> => ({ accountId: 'u-bob', email: 'bob@x.io' }))
+    const core = fakeCore({ account: { identity } })
+    const withShare = new Set(['orchestrator', 'sharing'])
+    expect(await answerExperimentQuery(core, withShare, 'sharing', 'account', {})).toEqual({ accountId: 'u-bob', email: 'bob@x.io' })
+    identity.mockResolvedValueOnce(null)
+    expect(await answerExperimentQuery(core, withShare, 'sharing', 'account', {})).toEqual({ error: 'ACCOUNT_UNAVAILABLE' })
+    // Any other service's `account` is its own link's to answer: models asks it for the grid name.
+    expect(await answerExperimentQuery(core, withShare, 'orchestrator', 'account', {})).toBeNull()
+    expect(await answerExperimentQuery(core, withShare, 'models', 'account', {})).toBeNull()
+    expect(identity).toHaveBeenCalledTimes(2)
   })
 
   it('sends Share\'s sealed frame to one of its observers, and nothing that is not one', async () => {

@@ -9,21 +9,23 @@
 
 #include "app/pro_app.h"
 #include "app/pro_touch.h"
+#include "pro_app_api.h"
 #include "board.h"
 #include "ptt_pro.h"
 #include "board_i2c.h"
 #include "cable/pro_cable.h"
+#include "pod/pod_model.h"
 #include "app/pro_voice.h"
 #include "audio/audio_capture.h"
 #include "config_store.h"
 #include "last_words.h"
 #include "power.h"
 #include "pro_display.h"
-#include "pro_turn.h"
 #include "ram_telemetry.h"
 #include "sys/fw_update.h"
 
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -46,10 +48,10 @@ void app_main(void)
     // picks its I2C address) is done by hand inside pro_display_init(), before its driver opens.
     if (!board_i2c_get()) ESP_LOGE(TAG, "shared I2C bus did not come up; touch will stay off");
 
-    pro_turn_set(config_load_turn(pro_turn_build_default()));   // before the first frame and the first touch
     pro_display_init();
     pro_voice_init();    // the PSRAM ring and the microphone, while the heap is unfragmented
     audio_beep_init();   // the ES8311 speaker for the notification beep
+    pod_model_random(esp_random);   // each turn draws the chef or the builder (pod_agent_t.work_alt)
     pro_app_start();     // the render task; Pod shows "Connecting" until the daemon says hello
     pro_touch_start();
     // The side button, after the microphone and the app are up (as the round firmware started its button after the
@@ -62,10 +64,10 @@ void app_main(void)
     pro_cable_start();
     ram_telemetry_checkpoint("app_ready");
 
-    // A freshly installed image is confirmed by fw_confirm_* (sys/fw_update.h): never before the first frame, then at the first
-    // cable session (pro_cable) or at 60 s up, whichever comes first. One that never paints is reverted at once.
+    // A freshly installed image is confirmed by fw_confirm_* (sys/fw_update.h): never before the first frame, then after
+    // 60 s up with a 30 s cable session (or 180 s up without). One that never paints is reverted at once.
     if (pro_app_wait_first_frame(10000)) {
-        if (fw_confirm_frame_painted()) pro_app_note_update();
+        fw_confirm_frame_painted();
         while (fw_confirm_pending()) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             if (fw_confirm_tick((uint32_t)(esp_timer_get_time() / 1000))) pro_app_note_update();

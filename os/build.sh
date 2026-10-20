@@ -16,6 +16,9 @@ BUILD_DIR=${HARNESS_OS_BUILD_DIR:-$OS_DIR/work}
 RUNTIME_DIR=${HARNESS_OS_RUNTIME_DIR:-$OS_DIR/work/runtime}
 COMPOSITOR_DIR=${HARNESS_OS_COMPOSITOR_DIR:-$OS_DIR/work/compositor}
 PLATFORM=${HARNESS_OS_PLATFORM:-pc}
+# Two compressors keep a developer machine usable; CI passes all of its runner's CPUs.
+SQUASHFS_PROCESSORS=${HARNESS_OS_SQUASHFS_PROCESSORS:-2}
+[[ $SQUASHFS_PROCESSORS =~ ^[1-9][0-9]*$ ]] || { echo 'HARNESS_OS_SQUASHFS_PROCESSORS must be a positive number.' >&2; exit 1; }
 [[ $PLATFORM == pc || $PLATFORM == apple-t2 ]] || { echo 'Unknown OS boot platform.' >&2; exit 1; }
 [[ -s "$RUNTIME_DIR/source.json" && -x "$RUNTIME_DIR/harness-tui" ]] || {
     echo 'Build the OS runtimes first with make -C os runtime on x86_64 Linux.' >&2
@@ -72,6 +75,11 @@ if [[ $PLATFORM == pc ]]; then
     --output "$PROFILE/airootfs/usr/share/harness-os/hardware/nvidia"
 fi
 cp -a live/. "$PROFILE/airootfs/"
+# A testing USB: what it installs keeps its logs on disk across restarts (installer.py KEEP_LOGS).
+if [[ ${HARNESS_OS_KEEP_LOGS:-} == 1 ]]; then
+    mkdir -p "$PROFILE/airootfs/etc/harness-os"
+    touch "$PROFILE/airootfs/etc/harness-os/keep-logs"
+fi
 mkdir -p "$PROFILE/airootfs/root" "$PROFILE/airootfs/etc/pacman.d/hooks"
 cp tools/customize-live.sh "$PROFILE/airootfs/root/setup-live.sh"
 cat > "$PROFILE/airootfs/etc/pacman.d/hooks/99-harness-live.hook" <<'EOF'
@@ -93,7 +101,7 @@ iso_application="Harness: boot into hn"
 iso_version="$VERSION"
 airootfs_image_type="squashfs"
 # Match the measured compression profile and bound builder CPU/cache use.
-airootfs_image_tool_options=("-comp" "zstd" "-Xcompression-level" "19" "-b" "1M" "-processors" "2" "-mem" "1G")
+airootfs_image_tool_options=("-comp" "zstd" "-Xcompression-level" "19" "-b" "1M" "-processors" "$SQUASHFS_PROCESSORS" "-mem" "1G")
 file_permissions=(
   ["/root"]="0:0:750"
 )

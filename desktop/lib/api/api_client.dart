@@ -2,23 +2,35 @@ import 'dart:collection';
 
 import 'package:dio/dio.dart';
 
+import '../agent_messages/tab_settings.dart' show AgentMessageLeader;
 import '../auth/auth_session.dart';
 import '../core/config.dart';
 import '../core/models.dart';
 import '../core/test_run.dart';
 import '../logging/http_log.dart';
+import '../measurement/product_report_failure.dart';
+import '../measurement/product_health_contract.dart';
 import '../viewer/device_ack.dart';
 import '../viewer/device_log.dart';
-import '../viewer/device_log_sync.dart' show DeviceLogAppendAnswer, DeviceLogFetched;
+import '../viewer/device_log_sync.dart'
+    show DeviceLogAppendAnswer, DeviceLogFetched;
 import '../ws/local_daemon_transport.dart';
 import 'access_token_source.dart';
 import 'bearer_auth_interceptor.dart';
 
 /// Rows and freshness from one response, even when requests overlap.
 class MachineInventory extends UnmodifiableListView<Machine> {
-  MachineInventory(super.source, {required this.isStale});
+  MachineInventory(
+    super.source, {
+    required this.isStale,
+    this.toAdd = const [],
+  });
 
   final bool isStale;
+
+  /// Machines shared with this account's domain and not added yet: listed under Add machine, where one
+  /// click adds it (backend routes/machineShares.ts).
+  final List<Machine> toAdd;
 }
 
 /// Control-plane REST client.
@@ -106,7 +118,124 @@ class ApiClient {
     return dio;
   }
 
+  /// The header the local CLI's report proxy answers with: the revision of
+  /// the counter names it forwards (cli/src/lib/appProductUsageReport.ts).
+  static const usageVocabularyHeader = 'x-harness-usage-vocabulary';
+
+  /// [usageVocabularyHeader]'s value, or 1 — the names every proxy knows —
+  /// from a CLI that predates it (or the backend, which never sends it).
+  static int usageVocabulary(Headers headers) {
+    final values = headers[usageVocabularyHeader];
+    final value = int.tryParse(
+      values == null || values.isEmpty ? '' : values.first,
+    );
+    return value != null && value > 1 ? value : 1;
+  }
+
   // -- auth (proxied by the local CLI — no credential on this leg) --
+  /// [onVocabulary] hears [usageVocabulary] from every answer, a refusal
+  /// included; a request that got no answer says nothing.
+  Future<Map<String, dynamic>> productUsageReport(
+    Map<String, dynamic> report, {
+    void Function(int vocabulary)? onVocabulary,
+  }) async {
+    try {
+      final response = await _dio.post(
+        '/api/product-usage/report',
+        data: report,
+        options: Options(
+          headers: {'x-adapter-local': '1'},
+          receiveTimeout: const Duration(seconds: 5),
+          sendTimeout: const Duration(seconds: 5),
+        ),
+      );
+      onVocabulary?.call(usageVocabulary(response.headers));
+      final body = response.data;
+      if (response.statusCode != 200 ||
+          body is! Map ||
+          body['success'] != true ||
+          body['data'] is! Map) {
+        throw ProductReportFailure.http(
+          response.statusCode,
+          body is Map && body['error'] is Map
+              ? (body['error'] as Map)['code']
+              : null,
+        );
+      }
+      return Map<String, dynamic>.from(body['data'] as Map);
+    } on DioException catch (error) {
+      throw ProductReportFailure(switch (error.type) {
+        DioExceptionType.connectionTimeout ||
+        DioExceptionType.sendTimeout ||
+        DioExceptionType.receiveTimeout =>
+          ProductHealthMeasure.reportFailureTimeout,
+        DioExceptionType.connectionError =>
+          ProductHealthMeasure.reportFailureUnreachable,
+        _ => ProductHealthMeasure.reportFailureOther,
+      });
+    }
+  }
+
+  Future<void> productUsageFeedback(String answer, String receipt) async {
+    final response = await _dio.post(
+      '/api/product-usage/feedback',
+      data: {'answer': answer, 'id': receipt},
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    final result = unwrapApiResponse(response);
+    if (result is! Map || result['accepted'] != true) {
+      throw StateError('Feedback was not accepted');
+    }
+  }
+
+  Future<Map<String, dynamic>> productUsageSettings({bool? enabled}) async {
+    final response = enabled == null
+        ? await _dio.get(
+            '/api/product-usage/settings',
+            options: Options(receiveTimeout: const Duration(seconds: 5)),
+          )
+        : await _dio.post(
+            '/api/product-usage/settings',
+            data: {'enabled': enabled},
+            options: Options(headers: {'x-adapter-local': '1'}),
+          );
+    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
+  }
+
+  // -- the phone half of a sign-in (backend routes/qrSignIn.ts): approving a device that says its code aloud
+  //    (a lamp, #1410). Natively the daemon passes these through with this computer's session; a viewer
+  //    sends them with its own. --
+
+  /// What is asking to sign in with [code]: its name, kind, network and status.
+  Future<Map<String, dynamic>> signInLookup(String code) async {
+    final res = await _dio.post(
+      '/api/auth/qr/lookup',
+      data: {'code': code},
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    return Map<String, dynamic>.from(unwrapApiResponse(res) as Map);
+  }
+
+  Future<void> approveSignIn(String code) async {
+    unwrapApiResponse(
+      await _dio.post(
+        '/api/auth/qr/approve',
+        data: {'code': code},
+        options: Options(headers: {'x-adapter-local': '1'}),
+      ),
+    );
+  }
+
+  Future<void> denySignIn(String code) async {
+    unwrapApiResponse(
+      await _dio.post(
+        '/api/auth/qr/deny',
+        data: {'code': code},
+        options: Options(headers: {'x-adapter-local': '1'}),
+      ),
+    );
+  }
+
   Future<Map<String, dynamic>?> me() async {
     final res = await _dio.get('/api/auth/me');
     return unwrapApiResponse(res) as Map<String, dynamic>?;
@@ -146,6 +275,26 @@ class ApiClient {
     final res = await _dio.get('/api/agent-messages');
     if (res.statusCode == 404) return null;
     return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
+  /// A desk tab's Agent Messages settings (backend PATCH /api/agent-messages/tabs/:tabId): [leader]
+  /// sets it, [clearLeader] removes it. Answers `{tabId, enabled, leader, revision}`; a refusal
+  /// (400 `INVALID_LEADER` "Choose a harness in this tab.") throws [ApiException].
+  Future<Map<String, dynamic>> setAgentMessageTab(
+    String tabId, {
+    bool? enabled,
+    AgentMessageLeader? leader,
+    bool clearLeader = false,
+  }) async {
+    final res = await _dio.patch(
+      '/api/agent-messages/tabs/${Uri.encodeComponent(tabId)}',
+      data: {
+        'enabled': ?enabled,
+        if (leader != null) 'leader': leader.toJson() else if (clearLeader) 'leader': null,
+      },
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    return Map<String, dynamic>.from(unwrapApiResponse(res) as Map);
   }
 
   // -- account-wide Experimental preferences --
@@ -270,11 +419,16 @@ class ApiClient {
   /// [self]: this app's own key, which the backend counts as used just now (an older one ignores it).
   Future<DeviceLogFetched?> deviceKeys(int since, {String? self}) async {
     try {
-      final res = await _dio.get('/api/device-keys', queryParameters: {'since': since, 'self': ?self});
+      final res = await _dio.get(
+        '/api/device-keys',
+        queryParameters: {'since': since, 'self': ?self},
+      );
       if (res.statusCode != 200) return null;
       final data = unwrapApiResponse(res);
       if (data is! Map) return null;
-      final acct = data['acct'], head = DevLogHead.fromJson(data['head']), entries = data['entries'];
+      final acct = data['acct'],
+          head = DevLogHead.fromJson(data['head']),
+          entries = data['entries'];
       if (acct is! String || head == null || entries is! List) return null;
       return (acct: acct, head: head, entries: entries.cast<Object?>());
     } catch (_) {
@@ -286,14 +440,19 @@ class ApiClient {
   /// reached; a refusal comes back as its code (`STALE_HEAD` with the current head).
   Future<DeviceLogAppendAnswer?> appendDeviceKey(DevLogEntry entry) async {
     try {
-      final res = await _dio.post('/api/device-keys', data: {'entry': entry.toJson()});
+      final res = await _dio.post(
+        '/api/device-keys',
+        data: {'entry': entry.toJson()},
+      );
       final body = res.data;
       if (body is! Map) return null;
       final data = body['data'];
       final head = data is Map ? DevLogHead.fromJson(data['head']) : null;
       if (res.statusCode == 200) return (head: head, error: null);
       final error = body['error'];
-      final code = error is Map && error['code'] is String ? error['code'] as String : 'HTTP_${res.statusCode}';
+      final code = error is Map && error['code'] is String
+          ? error['code'] as String
+          : 'HTTP_${res.statusCode}';
       return (head: head, error: code);
     } catch (_) {
       return null;
@@ -324,7 +483,10 @@ class ApiClient {
   /// devices. False when the backend did not keep it (or predates it).
   Future<bool> postDeviceAck(DevAck ack) async {
     try {
-      final res = await _dio.post('/api/device-keys/acks', data: {'ack': ack.toJson()});
+      final res = await _dio.post(
+        '/api/device-keys/acks',
+        data: {'ack': ack.toJson()},
+      );
       return res.statusCode == 200;
     } catch (_) {
       return false;
@@ -342,7 +504,8 @@ class ApiClient {
       return {
         if (seen is Map)
           for (final e in seen.entries)
-            if (e.key is String && e.value is int) e.key as String: e.value as int,
+            if (e.key is String && e.value is int)
+              e.key as String: e.value as int,
       };
     } catch (_) {
       return const {};
@@ -357,7 +520,9 @@ class ApiClient {
     try {
       final res = await _dio.get('/api/devices');
       final data = res.data;
-      return res.statusCode == 200 && data is Map<String, dynamic> ? data : null;
+      return res.statusCode == 200 && data is Map<String, dynamic>
+          ? data
+          : null;
     } catch (_) {
       return null;
     }
@@ -374,7 +539,9 @@ class ApiClient {
       );
       if (res.statusCode == 200) return null;
       final data = res.data;
-      return data is Map && data['error'] is String ? data['error'] as String : 'HTTP_${res.statusCode}';
+      return data is Map && data['error'] is String
+          ? data['error'] as String
+          : 'HTTP_${res.statusCode}';
     } catch (_) {
       return 'UNAVAILABLE';
     }
@@ -398,11 +565,21 @@ class ApiClient {
   /// list. [confirm]: "It's mine" for the one device named — the daemon shares it with the account's
   /// other devices (one that predates it ignores the field and only marks it seen). False when the
   /// daemon predates the route (an old one answers a `pubs` body with an error).
-  Future<bool> daemonDismissDevices({String? pub, List<String>? pubs, bool baseline = false, bool confirm = false}) async {
+  Future<bool> daemonDismissDevices({
+    String? pub,
+    List<String>? pubs,
+    bool baseline = false,
+    bool confirm = false,
+  }) async {
     try {
       final res = await _dio.post(
         '/api/devices/dismiss',
-        data: {'pub': ?pub, 'pubs': ?pubs, if (baseline) 'baseline': true, if (confirm) 'confirm': true},
+        data: {
+          'pub': ?pub,
+          'pubs': ?pubs,
+          if (baseline) 'baseline': true,
+          if (confirm) 'confirm': true,
+        },
         options: Options(headers: {'x-adapter-local': '1'}),
       );
       return res.statusCode == 200;
@@ -415,7 +592,10 @@ class ApiClient {
   /// does it, for the list whose [head] (`{seq, hash}`) the preview showed. Null when the daemon could
   /// not read a valid list; `{'error': 'LOG_CHANGED'}` when the list is not the one that was previewed;
   /// `{'error': 'OTHER_ACCOUNT'}` when it is another account's than the one this computer is signed in to.
-  Future<Map<String, dynamic>?> daemonRebaselineDevices({required bool confirm, Map<String, Object?>? head}) async {
+  Future<Map<String, dynamic>?> daemonRebaselineDevices({
+    required bool confirm,
+    Map<String, Object?>? head,
+  }) async {
     try {
       final res = await _dio.post(
         '/api/devices/rebaseline',
@@ -424,9 +604,15 @@ class ApiClient {
       );
       final data = res.data;
       if (res.statusCode == 409) {
-        return {'error': data is Map && data['error'] == 'OTHER_ACCOUNT' ? 'OTHER_ACCOUNT' : 'LOG_CHANGED'};
+        return {
+          'error': data is Map && data['error'] == 'OTHER_ACCOUNT'
+              ? 'OTHER_ACCOUNT'
+              : 'LOG_CHANGED',
+        };
       }
-      return res.statusCode == 200 && data is Map<String, dynamic> ? data : null;
+      return res.statusCode == 200 && data is Map<String, dynamic>
+          ? data
+          : null;
     } catch (_) {
       return null;
     }
@@ -508,6 +694,12 @@ class ApiClient {
     final owned = list
         .map((e) => Machine.fromJson(e as Map<String, dynamic>))
         .toList();
+    // Whole machines other accounts share with this one: those named for it and those it added are its
+    // machines too; those shared with its domain and not added wait under Add machine.
+    final sharedWhole = [
+      for (final row in data['sharedMachines'] as List? ?? const [])
+        Machine.fromJson(Map<String, dynamic>.from(row as Map)),
+    ].where((m) => !owned.any((own) => own.machineId == m.machineId)).toList();
     var sharedMachines = _sharedMachines;
     try {
       final shared = await _dio.get('/api/harness-shares');
@@ -530,12 +722,20 @@ class ApiClient {
       _sharedMachines = sharedMachines;
       lastMachinesStale = stale;
     }
-    return MachineInventory([
+    final usable = [
       ...owned,
-      ...sharedMachines.where(
-        (shared) => !owned.any((own) => own.machineId == shared.machineId),
-      ),
-    ], isStale: stale);
+      ...sharedWhole.where((m) => m.machineShare?.added == true),
+    ];
+    return MachineInventory(
+      [
+        ...usable,
+        ...sharedMachines.where(
+          (shared) => !usable.any((own) => own.machineId == shared.machineId),
+        ),
+      ],
+      isStale: stale,
+      toAdd: sharedWhole.where((m) => m.machineShare?.added != true).toList(),
+    );
   }
 
   Future<String?> renameMachine({
@@ -641,4 +841,3 @@ String describeApiError(Object error) {
   }
   return '$error';
 }
-

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "pod/pod_model.h"
+#include "pod/home/ph.h"   // ph_room_scene, ph_card_scene: the scene a working agent plays
 
 static int checks;
 #define CHECK(c) do { assert(c); checks++; } while (0)
@@ -175,6 +176,26 @@ static void pod_model_test_no_agent_ids(void) {
     uint8_t cnt[2] = {0, 0};
     pod_model_swarms(&M, it, ids, cnt, 2, "s2", NULL, 0);
     CHECK(!M.tabs[0].members_known && !M.tabs[1].members_known && M.selected == 1);
+}
+
+// A tab with only shells or viewers (agents 0) is left out of the list; the window's tab among them marks none current.
+static void pod_model_test_hides_agentless_tabs(void) {
+    fresh();
+    cable_swarm_t it[4] = {{"s1", "Shell", 0, 1}, {"s2", "Build", 2, 2}, {"s3", "Empty", 0, 0}, {"s4", "Solo", 1, 1}};
+    const char *const *ids[4] = {NULL, ids_a, NULL, ids_c};
+    uint8_t cnt[4] = {0, 2, 0, 1};
+    pod_model_swarms(&M, it, ids, cnt, 4, "s4", NULL, 0);
+    CHECK(M.tab_count == 2 && !strcmp(M.tabs[0].id, "s2") && !strcmp(M.tabs[1].id, "s4"));
+    CHECK(M.selected == 1 && M.tabs[0].agent[0] == 0);
+    pod_model_swarms(&M, it, ids, cnt, 4, "s1", NULL, 0);
+    CHECK(M.tab_count == 2 && M.selected == 2);
+    // the window's tab with an agent tile is kept even when the daemon's count says 0
+    cable_tile_t tiles[2] = {{0, 0, 500, 1000, ""}, {500, 0, 1000, 1000, "a2"}};
+    pod_model_swarms(&M, it, ids, cnt, 4, "s1", tiles, 2);
+    CHECK(M.tab_count == 3 && M.selected == 0 && !strcmp(M.tabs[0].id, "s1") && M.tabs[0].has_rects);
+    // no tab with an agent: an empty list
+    pod_model_swarms(&M, it, ids, cnt, 1, "s1", NULL, 0);
+    CHECK(M.tab_count == 0 && M.selected == 0);
 }
 
 static void pod_model_test_shared_agent(void) {
@@ -574,8 +595,9 @@ static void pod_model_test_steps(void) {
     pod_model_turn(&M, "a1", "activity", "Running the tests", 6, 70);
     pod_model_turn(&M, "a1", "activity", "Fixing a failure", 7, 80);
     pod_model_turn(&M, "a1", "activity", "Running them again", 8, 90);
-    CHECK(a->step_count == POD_STEPS_MAX && !strcmp(a->steps[0], "Fixing a failure") &&
-          !strcmp(a->steps[1], "Running the tests") && !strcmp(a->steps[2], "Reading the model"));
+    CHECK(a->step_count == 4 && !strcmp(a->steps[0], "Fixing a failure") &&   // POD_STEPS_MAX is 6 now: nothing has fallen off yet
+          !strcmp(a->steps[1], "Running the tests") && !strcmp(a->steps[2], "Reading the model") &&
+          !strcmp(a->steps[3], "Editing pod_model.c now"));
     pod_model_turn(&M, "a1", "done", NULL, 0, 100);
     CHECK(a->step_count == 0 && a->verb[0] == 0 && a->activity[0] == 0);
     pod_model_turn(&M, "a1", "started", NULL, 0, 110);
@@ -587,11 +609,13 @@ static void pod_model_test_steps(void) {
     pod_model_turn(&M, "a1", "activity", "x y", 1, 150);
     pod_model_turn(&M, "a1", "activity", "y z", 1, 151);
     pod_model_question(&M, "a1", "Which?");
-    CHECK(a->step_count == 0);
+    CHECK(a->step_count == 1);                    // the steps survive a question (Pets draws them under it)
+    pod_model_question_close(&M, "a1");
+    CHECK(a->step_count == 1);
 }
 
 // A tool step (turn.activity `step`) joins the same newest-first list, never touches the sentence or the verb, and an empty one
-// says nothing; a question still clears the list.
+// says nothing; a question keeps the list.
 static void pod_model_test_tool_steps(void) {
     fresh();
     pod_model_turn(&M, "a1", "started", NULL, 0, 10);
@@ -609,7 +633,7 @@ static void pod_model_test_tool_steps(void) {
     CHECK(a->step_count == 2 && !strcmp(a->steps[0], "Read \xc2\xb7 pod_model.c"));
     pod_model_question(&M, "a1", "Which?");
     pod_model_turn(&M, "a1", "step", "Edit \xc2\xb7 x.c", 6, 70);   // asking: no step lands
-    CHECK(a->step_count == 0 && a->state == POD_ASKING);
+    CHECK(a->step_count == 2 && a->state == POD_ASKING);   // the question kept the two, and the new one did not land
 }
 
 // The footer verb: trimmed like the dial's activity_text (dots, "…", spaces), UTF-8 safe, an empty read never blanks it, and
@@ -840,6 +864,44 @@ static void pod_model_test_offline_members(void) {
     pod_model_agents_end(&M);
 }
 
+// Entries live 6 h from receipt, by a signed difference, so they survive the uint32 wrap of the device clock.
+static void pod_model_test_unread_expiry(void) {
+    fresh();
+    pod_model_unread_add(&M, "a1", "Alpha", "first", 1, 1000);
+    pod_model_clock(&M, 1000 + POD_UNREAD_TTL_MS - 1);   // 5 h 59 m 59.999 s
+    CHECK(M.unread_count == 1);
+    pod_model_clock(&M, 1000 + POD_UNREAD_TTL_MS);
+    CHECK(M.unread_count == 0);
+    // Across the wrap: received 1 s before it, the clock a little past 6 h later.
+    fresh();
+    pod_model_unread_add(&M, "a1", "Alpha", "first", 1, 0xFFFFFC00u);
+    pod_model_unread_add(&M, "a2", "Beta", "second", 1, 0xFFFFFC00u + 3600000u);   // 1 h later, past the wrap
+    pod_model_clock(&M, 0xFFFFFC00u + POD_UNREAD_TTL_MS - 1);
+    CHECK(M.unread_count == 2);
+    pod_model_clock(&M, 0xFFFFFC00u + POD_UNREAD_TTL_MS);
+    CHECK(M.unread_count == 1 && !strcmp(M.unread[0].agent, "a2"));
+    // A newer entry of the same agent restarts its clock; an asking agent's entry goes when its question closes.
+    fresh();
+    pod_model_unread_add(&M, "a1", "Alpha", "first", 1, 1000);
+    pod_model_unread_add(&M, "a1", "Alpha", "again", 1, 5000);
+    CHECK(M.unread_count == 1);
+    pod_model_clock(&M, 1000 + POD_UNREAD_TTL_MS);
+    CHECK(M.unread_count == 1);
+    pod_model_clock(&M, 5000 + POD_UNREAD_TTL_MS);
+    CHECK(M.unread_count == 0);
+    fresh();
+    pod_model_unread_add(&M, "a1", "Alpha", "a finished one", 1, 100);
+    pod_model_question(&M, "a1", "Which?");
+    pod_model_unread_ask(&M, "a1", "Alpha", "Which?", 200);
+    CHECK(M.unread_count == 1 && M.unread[0].ask && !strcmp(M.unread[0].text, "Which?"));
+    pod_model_question_close(&M, "a1");
+    CHECK(M.unread_count == 0);
+    pod_model_unread_add(&M, "a1", "Alpha", "a finished one", 1, 300);   // not a question's: it stays
+    pod_model_question(&M, "a1", "Which?");
+    pod_model_question_close(&M, "a1");
+    CHECK(M.unread_count == 1);
+}
+
 static void pod_model_test_unread(void) {
     fresh();
     CHECK(M.unread_count == 0);
@@ -911,12 +973,154 @@ static void pod_model_test_unread(void) {
     CHECK(M.read_count == POD_READS_MAX && !strcmp(M.reads[0].agent, "q2"));
 }
 
+// Pets's data: step times, six steps, a failed turn, the unread kind, and the turn stats.
+static void pod_model_test_console_data(void) {
+    fresh();
+    const pod_agent_t *a = pod_model_find(&M, "a1");
+    CHECK(a->failed == false && a->tests_passed == -1 && a->tests_failed == -1 && a->commits == -1 && a->tokens_in == -1 && a->tokens_out == -1);
+    pod_model_turn(&M, "a1", "started", NULL, 0, 1000);
+    pod_model_turn(&M, "a1", "step", "Read \xc2\xb7 a.c", 0, 3500);
+    pod_model_turn(&M, "a1", "step", "Edit \xc2\xb7 a.c", 0, 62000);
+    CHECK(a->step_count == 2 && a->step_at_s[0] == 61 && a->step_at_s[1] == 2);   // newest first, seconds since the start
+    for (int i = 0; i < 7; i++) {
+        char t[16];
+        snprintf(t, sizeof t, "Bash \xc2\xb7 %d", i);
+        pod_model_turn(&M, "a1", "step", t, 0, 63000 + (uint32_t)i * 1000);
+    }
+    CHECK(a->step_count == POD_STEPS_MAX && POD_STEPS_MAX == 6);   // 7 more steps: the oldest are gone
+    CHECK(!strcmp(a->steps[0], "Bash \xc2\xb7 6") && !strcmp(a->steps[5], "Bash \xc2\xb7 1") && a->step_at_s[5] == 63);
+    // A step that arrives with no turn start in the model (a library status made the agent Working) has no time.
+    pod_model_library_status(&M, "a2", "working", 5000);
+    pod_model_turn(&M, "a2", "step", "Read \xc2\xb7 b.c", 0, 9000);
+    const pod_agent_t *b = pod_model_find(&M, "a2");
+    CHECK(b->step_count == 1 && b->step_at_s[0] == 0xFFFF);
+
+    // Stats: stored per agent, an unknown id changes nothing, -1 leaves a field unknown, a new turn clears them.
+    unsigned rev = M.revision;
+    pod_model_turn_stats(&M, "zz", 1, 2, 3, 4, 5);
+    CHECK(M.revision == rev);
+    pod_model_turn_stats(&M, "a1", 44, 0, -1, -1, -1);
+    CHECK(a->tests_passed == 44 && a->tests_failed == 0 && a->commits == -1 && M.revision != rev);
+    rev = M.revision;
+    pod_model_turn_stats(&M, "a1", -1, -1, 1, 42900, 18500);
+    CHECK(a->tests_passed == 44 && a->commits == 1 && a->tokens_in == 42900 && a->tokens_out == 18500 && M.revision != rev);
+    rev = M.revision;
+    pod_model_turn_stats(&M, "a1", -1, -1, -1, 42900, 18500);
+    CHECK(M.revision == rev);
+    pod_model_turn(&M, "a1", "done", NULL, 0, 70000);
+    CHECK(a->tests_passed == 44 && !a->failed);
+    pod_model_turn(&M, "a1", "started", NULL, 0, 71000);
+    CHECK(a->tests_passed == -1 && a->tests_failed == -1 && a->commits == -1 && a->tokens_in == -1 && a->tokens_out == -1);
+
+    // A failed turn: IDLE, flagged, with a FAILED unread entry; the next start clears the flag.
+    pod_model_turn(&M, "a1", "error", NULL, 0, 72000);
+    CHECK(a->state == POD_IDLE && a->failed);
+    pod_model_unread_add(&M, "a1", "Alpha", "boom", 3, 72000);
+    CHECK(pod_model_unread_find(&M, "a1")->kind == POD_UNREAD_FAILED);
+    pod_model_turn(&M, "a1", "started", NULL, 0, 73000);
+    CHECK(!a->failed);
+    pod_model_turn(&M, "a1", "done", NULL, 0, 74000);
+    pod_model_unread_add(&M, "a1", "Alpha", "fine", 3, 74000);
+    CHECK(pod_model_unread_find(&M, "a1")->kind == POD_UNREAD_FINISHED);
+}
+
+// M7: the recap's step count is the turn's total, not the list's.
+// L14: a turn that starts without turn.started clears the failed flag, and its step total is unknown.
+static void pod_model_test_step_total_and_fresh(void) {
+    fresh();
+    const pod_agent_t *a = pod_model_find(&M, "a1");
+    CHECK(a->step_total == -1);                                    // no turn seen
+    pod_model_turn(&M, "a1", "started", NULL, 0, 1000);
+    CHECK(a->step_total == 0);
+    for (int i = 0; i < 9; i++) {
+        char t[16];
+        snprintf(t, sizeof t, "Read %d", i);
+        pod_model_turn(&M, "a1", "step", t, 0, 2000 + (uint32_t)i * 100);
+    }
+    CHECK(a->step_count == POD_STEPS_MAX && a->step_total == 9);
+    pod_model_turn(&M, "a1", "done", NULL, 0, 4000);
+    CHECK(a->step_count == 0 && a->step_total == 9);               // done clears the list, not the total
+    pod_model_turn(&M, "a1", "started", NULL, 0, 5000);
+    CHECK(a->step_total == 0);
+    // A question keeps the steps; steps after the resume join them.
+    pod_model_turn(&M, "a1", "step", "Read a", 0, 5100);
+    pod_model_turn(&M, "a1", "step", "Read b", 0, 5200);
+    pod_model_question(&M, "a1", "Proceed?");
+    CHECK(a->step_count == 2);
+    pod_model_question_close(&M, "a1");
+    CHECK(a->step_count == 2 && a->step_total == 2);
+    pod_model_turn(&M, "a1", "step", "Read c", 0, 5300);
+    CHECK(a->step_count == 3 && a->step_total == 3);
+    pod_model_turn(&M, "a1", "step", "Read a", 0, 5400);           // a repeat of an older step moves it to the front
+    CHECK(a->step_count == 3 && !strcmp(a->steps[0], "Read a") && !strcmp(a->steps[2], "Read b"));
+    pod_model_turn(&M, "a1", "step", "Read c", 0, 5500);
+    CHECK(a->step_count == 3);
+
+    // L14: failed, then a new turn that starts through activity (no turn.started), then done: filed FINISHED.
+    pod_model_turn(&M, "a2", "started", NULL, 0, 6000);
+    pod_model_turn(&M, "a2", "error", NULL, 0, 6100);
+    const pod_agent_t *b = pod_model_find(&M, "a2");
+    CHECK(b->failed && b->state == POD_IDLE);
+    pod_model_turn(&M, "a2", "activity", "Retrying", 1, 6200);
+    CHECK(b->state == POD_WORKING && !b->failed && b->step_total == -1);
+    pod_model_turn(&M, "a2", "step", "Read x", 0, 6300);
+    CHECK(b->step_total == -1);                                    // the start was never seen: unknown, not 1
+    pod_model_turn(&M, "a2", "done", NULL, 0, 6400);
+    pod_model_unread_add(&M, "a2", "Beta", "fine", 3, 6400);
+    CHECK(pod_model_unread_find(&M, "a2")->kind == POD_UNREAD_FINISHED);
+    // A question closing mid-turn is not a new turn: failed and the total stay as they were.
+    pod_model_turn(&M, "a3", "started", NULL, 0, 7000);
+    pod_model_turn(&M, "a3", "step", "Read y", 0, 7100);
+    pod_model_question(&M, "a3", "?");
+    pod_model_question_close(&M, "a3");
+    CHECK(pod_model_find(&M, "a3")->step_total == 1);
+}
+
+// Chef or builder (owner, 2026-10-16): a turn draws once as it starts (pod_model_random) and keeps it to its end, through
+// activity, steps and a question; the room and the Home card play the same scene. No source (host default): always the chef.
+static uint32_t rnd_n;
+static uint32_t rnd_count(void) { return rnd_n++; }
+static void pod_model_test_work_alt(void) {
+    fresh();
+    const pod_agent_t *a = pod_model_find(&M, "a1");
+    pod_model_turn(&M, "a1", "started", "", 0, 1000);
+    CHECK(a->state == POD_WORKING && !a->work_alt && ph_room_scene(&M, a) == POD_SCENE_WORK && ph_card_scene(&M, a) == POD_SCENE_WORK);
+    pod_model_turn(&M, "a1", "done", "", 3, 1500);
+    pod_model_random(rnd_count);
+    rnd_n = 1;
+    pod_model_turn(&M, "a1", "started", "", 0, 2000);
+    CHECK(a->work_alt && rnd_n == 2 && ph_room_scene(&M, a) == POD_SCENE_WORK_ALT && ph_card_scene(&M, a) == POD_SCENE_WORK_ALT);
+    pod_model_turn(&M, "a1", "activity", "Reading files", 2, 2100);
+    pod_model_turn(&M, "a1", "verb", "Infusing", 2, 2200);
+    pod_model_turn(&M, "a1", "step", "Read · a.c", 3, 2300);
+    pod_model_question(&M, "a1", "Delete the build folder?");
+    CHECK(ph_room_scene(&M, a) == POD_SCENE_ASK);
+    pod_model_question_close(&M, "a1");
+    pod_model_turn(&M, "a1", "activity", "Writing", 4, 2400);
+    CHECK(a->work_alt && rnd_n == 2 && ph_room_scene(&M, a) == POD_SCENE_WORK_ALT);   // one draw for the whole turn
+    pod_model_turn(&M, "a1", "done", "", 5, 2500);
+    pod_model_turn(&M, "a1", "started", "", 0, 3000);
+    CHECK(!a->work_alt && rnd_n == 3);   // the next turn draws again: both come up
+    rnd_n = 1;
+    pod_model_turn(&M, "a2", "started", "", 0, 3000);   // Codex has no builder: a drawn builder plays its one WORK
+    const pod_agent_t *b = pod_model_find(&M, "a2");
+    CHECK(b->work_alt && ph_room_scene(&M, b) == POD_SCENE_WORK && ph_card_scene(&M, b) == POD_SCENE_WORK);
+    // The room draws the builder at exactly 2x, as the chef (its 273 px gets the wider square).
+    for (int k = 0; k < 2; k++) {
+        ht_scene_t s; ht_scene_clear(&s, 0);
+        ph_room_pet(&s, &M, a, k ? POD_SCENE_WORK_ALT : POD_SCENE_WORK, 380, 566, 0, 0);
+        CHECK(s.count == 2 && s.runs[0].radius == 16 && s.runs[1].radius == 16);
+    }
+    pod_model_random(NULL);
+}
 int main(void) {
+    pod_model_test_work_alt();
     pod_model_test_states();
     pod_model_test_stale_busy();
     pod_model_test_library_vs_turn_order();
     pod_model_test_tabs_with_ids();
     pod_model_test_no_agent_ids();
+    pod_model_test_hides_agentless_tabs();
     pod_model_test_shared_agent();
     pod_model_test_recap_lines();
     pod_model_test_recap_cut();
@@ -938,6 +1142,9 @@ int main(void) {
     pod_model_test_recent();
     pod_model_test_offline_members();
     pod_model_test_unread();
+    pod_model_test_unread_expiry();
+    pod_model_test_console_data();
+    pod_model_test_step_total_and_fresh();
     printf("Pod model: PASS (%d checks)\n", checks);
     return 0;
 }

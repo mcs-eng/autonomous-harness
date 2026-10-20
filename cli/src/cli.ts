@@ -39,7 +39,8 @@ import { registry } from './lib/registry.js'
 import { readSafeModeMarker } from './lib/daemonSafeMode.js'
 import { SpawnLockBusyError, describeSpawnLockBusyPlainly, describeSpawnLockFailure, describeSpawnLockOwner, describeSpawnLockWaitPlainly, withSpawnLock } from './lib/daemonSpawnLock.js'
 import { stopDaemonProcess } from './lib/daemonStop.js'
-import { installedPlatform, serviceDefinition, startUnderPlatform } from './lib/platformDaemon.js'
+import { installedPlatform, osDaemonUnit, serviceDefinition, startUnderPlatform } from './lib/platformDaemon.js'
+import { askRuntimePort, readCgroup, takeRuntimeBack } from './lib/osUnitTakeover.js'
 import { serviceCommand, serviceCommandDeps } from './lib/serviceCommand.js'
 import { flashCommand } from './lib/flash.js'
 import { awaitLoginCallback, extractCallbackParams, LOGIN_TIMEOUT_MESSAGE, type LoginCallbackParams } from './lib/loginCallback.js'
@@ -62,14 +63,15 @@ import { apiCommand } from './lib/apiCommand.js'
 import { connectionsCommand } from './lib/connectors/command.js'
 import { remoteCommand } from './remoteCommand.js'
 import { tuiCommand } from './tui/index.js'
-import { newCommand } from './lib/newCommand.js'
+import { machineChoices, newCommand, type MachineRow, type NewMachine } from './lib/newCommand.js'
 import { gridSetupCommand } from './lib/gridSetupCommand.js'
+import { localCredentialHeaders } from './lib/localCredential.js'
 import { WebSocket as NewCommandSocket } from 'ws'
 import { describeMasterStatus, readStatusFile } from './harnessd/master.js'
 import { namedNode } from './harnessd/processName.js'
 import { probeThisMaster, startMaster, startMasterInForeground } from './masterProcess.js'
 import { startServiceProcess } from './serviceProcess.js'
-import { isLocalSocketName, localSocketPath, refuseServedDataFolder } from './lib/localSocket.js'
+import { askDataFolderServer, isLocalSocketName, localSocketPath, refuseServedDataFolder } from './lib/localSocket.js'
 import { legacyDaemonStatus, localDaemonStatus } from './lib/daemonEndpoint.js'
 import { runAutonomousDeviceCommand } from './lib/autonomous-device/command.js'
 import { E2eeStore, identitySpent, peekIdentityPub } from './lib/e2ee/store.js'
@@ -89,10 +91,12 @@ import { prepareLogFile } from './lib/log.js'
 import { initializeCli } from './cliInitialization.js'
 import { usage } from './cliUsage.js'
 import { localUpdateNoop } from './lib/localUpdateNoop.js'
+import { privacyCommand } from './lib/privacyCommand.js'
 
 
 // Daemon stdout/stderr. Capped at LOG_MAX_BYTES — see prepareLogFile/trimLogFile in lib/log.ts.
 const LOG_FILE = DAEMON_LOG_FILE
+
 
 
 
@@ -246,6 +250,8 @@ interface SignInHooks {
   onStarted?: (cancel: () => Promise<void>) => void
   /** The person said yes / the browser came back: finish the sign-in, do not abandon it. */
   onCommitted?: () => void
+  /** `--code`: say a short code instead of showing the QR (a device with no screen, #1410). */
+  spoken?: boolean
 }
 
 /**
@@ -276,7 +282,7 @@ async function ensureAccountGrid(note: (line: string) => void): Promise<{ status
   }
   if (!gridName) return { status: 'skipped', name: null }
   const ensured = await ensureHarnessGrid(gridName)
-  if (ensured.status === 'failed' || ensured.status === 'skipped') note(ensured.message)
+  if (ensured.status === 'failed' || ensured.status === 'skipped' || ensured.status === 'refused') note(ensured.message)
   else if (ensured.status === 'created') note(`Created your private grid '${gridName}'.`)
   return { status: ensured.status, name: gridName }
 }
@@ -353,8 +359,8 @@ async function loginCommand(
   }
   const signIn = async (): Promise<SignInOutcome> => {
     try {
-      return method === 'qr'
-        ? await qrSignInCommand(json, emit, (email) => succeed(false, email), { driver, onStarted: (cancel) => { takeBack = cancel }, onCommitted: () => setWaiting(false) })
+      return method === 'qr' || method === 'code'
+        ? await qrSignInCommand(json, emit, (email) => succeed(false, email), { driver, spoken: method === 'code', onStarted: (cancel) => { takeBack = cancel }, onCommitted: () => setWaiting(false) })
         : await browserSignIn(json, emit, () => succeed(false), { entryPoint, provider: method }, { onCommitted: () => setWaiting(false) })
     } finally {
       setWaiting(false)
@@ -465,6 +471,10 @@ function askLine(question: string): Promise<string> {
  * ask the person here whether to sign in as the account that approved, then save the session.
  * Under --json the QR is an event (`{"type":"qr"}`) and the question is one too
  * (`{"type":"confirm","email"}`), answered with a `yes` or `no` line on standard input.
+ *
+ * [SignInHooks.spoken] (`--code`): a device with no screen says a short code instead of the QR —
+ * `{"type":"code","code","expiresIn"}` under --json, sent again whenever the code is kept alive — and
+ * the person types it into Harness on their phone. The confirm question stays, to be asked aloud.
  */
 async function qrSignInCommand(
   json: boolean,
@@ -479,6 +489,15 @@ async function qrSignInCommand(
     ...(hooks.onStarted ? { onStarted: hooks.onStarted } : {}),
     label: hostname().slice(0, 80),
     computerId: computerId(),
+    ...(hooks.spoken ? {
+      showCode: (code: string, expiresIn: number) => {
+        if (json) { emit({ type: 'code', code, expiresIn }); return }
+        if (shown) return
+        shown = true
+        console.log(`\n  On your phone, open Harness ▸ Settings ▸ Sign in a computer ▸ Type a code instead (or Machines ▸ Approve a device on a computer), and enter:\n\n    ${code.slice(0, 4)} ${code.slice(4)}\n`)
+        console.log('  Waiting for your phone…')
+      },
+    } : {}),
     show: (link, expiresIn) => {
       if (json) { emit({ type: 'qr', url: link, expiresIn }); return }
       if (shown) return
@@ -1178,7 +1197,7 @@ async function runningDaemonStatus(): Promise<{
 } | null> {
   try {
     const body = await localDaemonStatus(env.ADAPTER_DATA_DIR, env.PORT)
-      ?? await legacyDaemonStatus(daemonPort(), readPid(), computerId())
+      ?? await legacyDaemonStatus(daemonPort(), readPid(), computerId(), env.ADAPTER_DATA_DIR)
     if (!body) return null
     const status = body as {
       version?: unknown; sessions?: unknown; machineId?: unknown; connected?: unknown
@@ -1280,6 +1299,23 @@ async function launch(foreground: boolean, repair: boolean = false): Promise<voi
   if (repair) {
     const repaired = await repairManagedRuntimes(foreground)
     if (repaired) runtimeNode = repaired
+  }
+  // Harness OS: run by harness-daemon.service, first take the runtime back from a daemon an older CLI
+  // started outside the unit, or this start finds it taken and the unit restarts in vain (osUnitTakeover.ts).
+  if (foreground && osDaemonUnit(process.platform, process.env)) {
+    const socket = localSocketPath(env.ADAPTER_DATA_DIR, env.PORT)
+    await takeRuntimeBack({
+      who: async () => {
+        const server = socket ? await askDataFolderServer(socket, 1_000) : 'none'
+        return typeof server === 'object' ? server : askRuntimePort(daemonPort())
+      },
+      cgroupOf: readCgroup,
+      alive: (pid) => isAlive(pid),
+      signal: (pid, signal) => process.kill(pid, signal),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      now: () => Date.now(),
+      log: (line) => console.log(line),
+    })
   }
   // Foreground mode (a supervisor: launchd, systemd, a terminal) → harnessd's master in this process, as
   // launchd and systemd run it, the core its child. The core ran here on its own before, and a core with no
@@ -1476,12 +1512,18 @@ async function resetCommand(): Promise<void> {
   process.exit(0)
 }
 
+/** What every call to this daemon's loopback API carries: the CSRF mark its writes want, and the local
+ *  credential every TCP call wants (lib/localCredential.ts). */
+function daemonHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return { 'x-adapter-local': '1', ...localCredentialHeaders(env.ADAPTER_DATA_DIR), ...extra }
+}
+
 /** Call the running daemon's localhost control API. Exits with a friendly message if it's not up. */
 async function daemonCall(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ res: Response; json: Record<string, unknown> }> {
   const url = `http://127.0.0.1:${daemonPort()}${path}`
   let res: Response
   try {
-    const headers: Record<string, string> = { 'x-adapter-local': '1' } // passes the local API's CSRF gate
+    const headers: Record<string, string> = daemonHeaders() // the local API's CSRF gate and credential
     if (body) headers['content-type'] = 'application/json'
     res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
   } catch (error) {
@@ -1662,7 +1704,7 @@ async function remotePasswordSetCommand(json: boolean, stdin: boolean): Promise<
   try {
     const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/remote-password/set`, {
       method: 'POST',
-      headers: { 'x-adapter-local': '1', 'content-type': 'application/json' },
+      headers: daemonHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify({ password }),
     })
     if (res.ok) {
@@ -1691,7 +1733,7 @@ async function remotePasswordClearCommand(json: boolean): Promise<void> {
   try {
     const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/remote-password/clear`, {
       method: 'POST',
-      headers: { 'x-adapter-local': '1' },
+      headers: daemonHeaders(),
     })
     if (res.ok) cleared = true
   } catch { /* fall back to the disk-backed store below */ }
@@ -1710,7 +1752,7 @@ async function remotePasswordClearCommand(json: boolean): Promise<void> {
 async function remotePasswordStatusCommand(json: boolean): Promise<void> {
   let status: { hasPassword: boolean; fingerprint: string | null; setAt: number | null } | null = null
   try {
-    const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/remote-password/status`, { headers: { 'x-adapter-local': '1' } })
+    const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/remote-password/status`, { headers: daemonHeaders() })
     if (res.ok) {
       const body = (await res.json().catch(() => null)) as { hasPassword?: unknown; fingerprint?: unknown; setAt?: unknown } | null
       if (typeof body?.hasPassword === 'boolean') {
@@ -1874,7 +1916,7 @@ async function trustLinkedMachine(peer: LinkedPeer): Promise<void> {
   try {
     const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/link/trust-peer`, {
       method: 'POST',
-      headers: { 'x-adapter-local': '1', 'content-type': 'application/json' },
+      headers: daemonHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify(peer),
     })
     if (res.ok) return
@@ -1923,7 +1965,7 @@ async function daemonGroupRemove(selector: string): Promise<boolean> {
   try {
     const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/group/remove`, {
       method: 'POST',
-      headers: { 'x-adapter-local': '1', 'content-type': 'application/json' },
+      headers: daemonHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify({ selector }),
     })
     return res.ok
@@ -1951,7 +1993,7 @@ async function groupCommand(sub: string | undefined, arg: string | undefined, js
   }
   if (sub === 'sync') {
     try {
-      const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/group/sync`, { method: 'POST', headers: { 'x-adapter-local': '1' } })
+      const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/group/sync`, { method: 'POST', headers: daemonHeaders() })
       if (!res.ok) throw new Error(String(res.status))
     } catch (error) {
       console.error(`\n  ✗ ${daemonUnreachableText((error as { cause?: unknown }).cause ?? error)}\n`)
@@ -2150,6 +2192,25 @@ async function fetchMachines(headers: Record<string, string>): Promise<OwnerMach
 /** A machine's own name, else the hostname of the computer that last connected it. */
 function machineLabel(machine: OwnerMachineRow): string {
   return machine.name?.trim() || machine.hostname?.trim() || '(unnamed)'
+}
+
+/** The account's machines as `--machine` resolves them (`harness new`, `ps`, `show`, `wait`, `close`), and `remote` lists them. */
+async function ownedMachines(): Promise<NewMachine[]> {
+  const { session, headers } = await controlPlaneAuth()
+  return (await fetchMachines(headers)).map((machine) => ({
+    machineId: machine.machineId,
+    label: machineLabel(machine),
+    status: machine.status || 'unknown',
+    current: machine.machineId === session.machineId,
+  }))
+}
+
+/** What `--machine` resolves among (`harness new`, `ps`, `show`, `wait`, `close`): the account's machines, then the
+ *  ones other accounts share with it that it may use (lib/newCommand.ts `machineChoices`). */
+async function usableMachines(): Promise<NewMachine[]> {
+  const { session, headers } = await controlPlaneAuth()
+  const data = await requestJson<{ machines?: MachineRow[]; sharedMachines?: MachineRow[] }>('GET', '/api/machines', undefined, headers)
+  return machineChoices(data, session.machineId ?? null)
 }
 
 /** True when `id` names this machine — accepts the short prefix the list prints, not just the full id. */
@@ -2358,8 +2419,11 @@ async function logsExportCommand(json: boolean): Promise<void> {
 }
 
 import { orchestratorCommand } from './orchestrator/command.js'
+import { superTabCommand } from './superTabs/command.js'
 import { paneOwner, sendCommand } from './messages/command.js'
-import { agentOrigin, closeCommand, psCommand, showCommand, waitCommand } from './agentClient/commands.js'
+import { agentOrigin, closeCommand, psCommand, replyCommand, showCommand, waitCommand, whoamiCommand } from './agentClient/commands.js'
+import { agentsHelp } from './agentClient/help.js'
+import { openUrlCommand } from './agentClient/openUrl.js'
 import { harnessRunner, mcpCommand } from './agentClient/mcp.js'
 import { settingsCommand } from './agentClient/settings.js'
 
@@ -2385,16 +2449,27 @@ function withoutFirst(argv: string[], token: string): string[] {
   return at < 0 ? argv : [...argv.slice(0, at), ...argv.slice(at + 1)]
 }
 
+if (cmd === 'help' && args[0] === 'agents') { console.log(agentsHelp()); process.exit(0) }
 if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') usage()
 if (cmd === 'version' || cmd === '--version' || cmd === '-v') { console.log(VERSION); process.exit(0) }
 
 
 switch (cmd) {
+  case 'privacy':
+    privacyCommand(args[0], flags.includes('--json')).catch(onError)
+    break
   case 'send':
     sendCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break
+  // A pane's BROWSER script asking whether a phone takes the page (agentClient/openUrl.ts). Not for people.
+  case 'open-url':
+    openUrlCommand(rest).then(code => { process.exitCode = code }).catch(() => { process.exitCode = 1 })
+    break
+  case 'whoami':
+    whoamiCommand(rest, { machines: ownedMachines }).then(code => { process.exitCode = code }).catch(onError)
+    break
   case 'ps':
-    psCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    psCommand(rest, { machines: usableMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'settings':
     settingsCommand(rest, { port: daemonPort() }).then(code => { process.exitCode = code }).catch(onError)
@@ -2405,16 +2480,22 @@ switch (cmd) {
     break
   }
   case 'show':
-    showCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    showCommand(rest, { machines: usableMachines }).then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'reply':
+    replyCommand(rest, { machines: usableMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'wait':
-    waitCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    waitCommand(rest, { machines: usableMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'close':
-    closeCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    closeCommand(rest, { machines: usableMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'orchestrator':
     orchestratorCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'super-tab':
+    superTabCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'login':
     // The result line goes out FIRST (loginCommand prints it), then the daemon is swapped onto the
@@ -2466,7 +2547,7 @@ switch (cmd) {
     runDevicesCommand(rest, {
       port: daemonPort(),
       machineId: async () => (await runningDaemonStatus())?.machineId ?? null,
-      connect: (url) => new NewCommandSocket(url),
+      connect: (url, headers) => new NewCommandSocket(url, { headers }),
     }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'pair':
@@ -2488,7 +2569,7 @@ switch (cmd) {
         port: daemonPort(),
         localMachineId: wantedDaemonIdentity(),
         daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
-        connect: (url) => new NewCommandSocket(url),
+        connect: (url) => new NewCommandSocket(url, { headers: localCredentialHeaders(env.ADAPTER_DATA_DIR) }),
         output: (line) => console.log(line),
         error: (line) => console.error(line),
       }).then((code) => { process.exitCode = code }).catch(onError)
@@ -2525,16 +2606,8 @@ switch (cmd) {
       port: daemonPort(),
       localMachineId: wantedDaemonIdentity(),
       daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
-      listMachines: async () => {
-        const { session, headers } = await controlPlaneAuth()
-        return (await fetchMachines(headers)).map((machine) => ({
-          machineId: machine.machineId,
-          label: machineLabel(machine),
-          status: machine.status || 'unknown',
-          current: machine.machineId === session.machineId,
-        }))
-      },
-      connect: (url) => new NewCommandSocket(url),
+      listMachines: usableMachines,
+      connect: (url) => new NewCommandSocket(url, { headers: localCredentialHeaders(env.ADAPTER_DATA_DIR) }),
       output: (line) => console.log(line),
       error: (line) => console.error(line),
       origin: () => agentOrigin(),
@@ -2552,15 +2625,7 @@ switch (cmd) {
       localMachineId: wantedDaemonIdentity(),
       port: daemonPort(),
       daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
-      listMachines: async () => {
-        const { session, headers } = await controlPlaneAuth()
-        return (await fetchMachines(headers)).map((machine) => ({
-          machineId: machine.machineId,
-          label: machineLabel(machine),
-          status: machine.status || 'unknown',
-          current: machine.machineId === session.machineId,
-        }))
-      },
+      listMachines: ownedMachines,
       isLinked: (machineId) => new MachinePeerStore().get(machineId) !== null,
       link: (machineId, password) => linkMachineWithPassword(machineId, password),
       promptPassword,
@@ -2577,6 +2642,20 @@ switch (cmd) {
       error: (line) => console.error(line),
       color: process.stdout.isTTY === true,
     })
+    break
+  case 'e2e':
+    // The grid-switch e2e: a fresh agent moved subscription -> grid -> back home with the person's
+    // tool + MCP, leaving a review bundle. Env-driven (see src/e2e/runGridSwitchTrace.ts); the
+    // relay-side reviewer (opencode `e2e-watchdog`) lives with the relay, in autonomous-grid-cli.
+    // Shipped with the CLI, so it is always the daemon's own version that drives the daemon.
+    if (args[0] === 'grid-switch') {
+      import('./e2e/runGridSwitchTrace.js')
+        .then(({ runGridSwitch }) => runGridSwitch())
+        .then((r) => { process.exitCode = r.error || r.stuck ? 1 : 0 })
+        .catch(onError)
+    } else if (args[0] === 'plan') {
+      import('./e2e/plan.js').then(({ planCommand }) => planCommand(flags.includes('--json'))).catch(onError)
+    } else { console.error(`Unknown command: e2e ${args[0] ?? ''} (grid-switch | plan)`); usage(1) }
     break
   case 'machines':
     if (!args[0]) machinesListCommand(flags.includes('--json')).catch(onError)

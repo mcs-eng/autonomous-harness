@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "board/board.h"
+#include "cJSON.h"
 #include "cable_features.h"
 #include "cable_frame.h"
 #include "cable_json_guard.h"
@@ -20,7 +21,6 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "app/pro_voice.h"
-#include "display/pro_turn.h"
 #include "pod/pod_mem.h"
 #include "pod/pod_model.h"
 #include "pro_app_api.h"
@@ -28,6 +28,8 @@
 #include "sys/device_mac.h"
 #include "sys/fw_update.h"
 #include "sys/last_words.h"
+#include "esp_task_wdt.h"
+#include "task_stacks.h"
 
 static const char *TAG = "pro_cable";
 
@@ -41,7 +43,7 @@ static const char *TAG = "pro_cable";
 #define SILENCE_MS       15000
 #define NOTIF_ROWS       16   // notif.replace items kept (the daemon sends at most 8)
 
-// Everything below runs on the cable_link task (6 KB stack) unless the comment says otherwise. Parsing therefore
+// Everything below runs on the cable_link task (12 KB stack) unless the comment says otherwise. Parsing therefore
 // goes into static scratch, never into a stack local over 1 KB (the host test caps every frame at 1024 B).
 _Static_assert(POD_RECAP_BYTES == PRO_RECAP_BYTES, "the recap buffers of pro_cable and Pod must agree");
 
@@ -54,6 +56,11 @@ static uint32_t    s_bad, s_unknown;
 static char        s_machine_name[CABLE_NAME_MAX];
 static char        s_machine_id[MACHINE_ID_MAX];
 static cable_machines_t s_machines;
+// The daemon numbers every JSON frame it sends us (`seq`, reset by each welcome); a hole means a frame was lost on the way in.
+static int64_t     s_seq_last = -1;   // -1: none seen this session
+static uint32_t    s_seq_gaps;
+static bool        s_resync_pending;
+static bool        s_seq_on;          // the welcome carried a seq
 
 // The id of the recording in flight: written by the voice task, read by the cable_link task to match a reply.
 static SemaphoreHandle_t s_upload_lock;
@@ -159,8 +166,7 @@ static bool msg_settings(cJSON **root)
                            cJSON_AddBoolToObject(o, "muted", config_load_muted()) &&
                            cJSON_AddBoolToObject(o, "quiet", false) && cJSON_AddBoolToObject(o, "straightTitle", false) &&
                            cJSON_AddBoolToObject(o, "focusFace", false) && cJSON_AddBoolToObject(o, "scrollReversed", false) &&
-                           cJSON_AddBoolToObject(o, "round", false) &&
-                           cJSON_AddBoolToObject(o, "screenTurned", config_load_turn(pro_turn_build_default())));
+                           cJSON_AddBoolToObject(o, "round", false));
 }
 
 // Absent means unchanged. The whole set is checked before any of it is applied.
@@ -180,8 +186,6 @@ static void handle_settings_set(const cJSON *p)
     const cJSON *bright = cJSON_GetObjectItemCaseSensitive(p, "brightness");
     const cJSON *muted = cJSON_GetObjectItemCaseSensitive(p, "muted");
     const cJSON *lang = cJSON_GetObjectItemCaseSensitive(p, "voiceLang");
-    const cJSON *turned = cJSON_GetObjectItemCaseSensitive(p, "screenTurned");
-    if (turned && !cJSON_IsBool(turned)) error = "Screen turn is not valid.";
     if (cJSON_IsString(lang) && (!lang->valuestring || !lang->valuestring[0] || strlen(lang->valuestring) >= CFG_VLANG_MAX))
         error = "Language code is not valid.";
     if (!error) {
@@ -193,10 +197,6 @@ static void handle_settings_set(const cJSON *p)
         }
         if (cJSON_IsBool(muted) && !config_save_muted(cJSON_IsTrue(muted))) error = "Could not save.";
         if (cJSON_IsString(lang) && !config_save_voicelang(lang->valuestring)) error = "Could not save.";
-        if (cJSON_IsBool(turned)) {
-            if (config_save_turn(cJSON_IsTrue(turned))) pro_app_request_turn(cJSON_IsTrue(turned));
-            else error = "Could not save.";
-        }
     }
     ESP_LOGI(TAG, "settings.set ok=%d muted=%d", error == NULL, (int)config_load_muted());
     cJSON *root = msg("settings.state");
@@ -219,6 +219,7 @@ static void send_hello(void)
     msg_string(&root, "swarms", "members-v1");
     msg_string(&root, "recap", "long-v1");
     msg_string(&root, "activity", "steps-v1");
+    msg_string(&root, "stats", "turn-v1");
     msg_string(&root, "player", "library-v1");
     msg_string(&root, "ota", "v1");
     char mac[24] = "";
@@ -355,6 +356,21 @@ void pro_cable_counters(uint32_t *bad, uint32_t *unknown)
 {
     if (bad) *bad = s_bad;
     if (unknown) *unknown = s_unknown;
+}
+
+uint32_t pro_cable_seq_gaps(void) { return s_seq_gaps; }
+
+// A frame with a `seq` that does not follow the last one means frames in between never arrived (the USB path drops
+// whole packets, and a small frame vanishes without a trace). Count it and ask for a snapshot (link_resync).
+static void track_seq(const cJSON *root, bool welcome)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "seq");
+    const bool ok = cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble < 4294967296.0;
+    if (welcome) s_seq_on = ok;   // a daemon that does not number its frames is not checked at all
+    if (!s_seq_on || !ok) return;
+    const int64_t seq = (int64_t)v->valuedouble;
+    if (!welcome && s_seq_last >= 0 && seq != s_seq_last + 1) { s_seq_gaps++; s_resync_pending = true; }
+    s_seq_last = seq;   // a welcome restarts the count
 }
 
 // ── the agent list ──────────────────────────────────────────────────────────────────────────────────
@@ -558,15 +574,49 @@ static void handle_turn_activity(const char *id, const cJSON *p)
     if (step && step[0]) pro_app_turn(id, "step", step, -1);
 }
 
+// One optional count: absent is -1 (unknown); present must be a whole number 0..max, else the message is refused.
+static bool stat_of(const cJSON *p, const char *key, int max, int *out)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(p, key);
+    *out = -1;
+    if (!v) return true;
+    if (!cJSON_IsNumber(v) || !(v->valuedouble >= 0 && v->valuedouble <= max) ||
+        v->valuedouble != (double)(int)v->valuedouble) return false;
+    *out = (int)v->valuedouble;
+    return true;
+}
+
+static void handle_turn_stats(const char *id, const cJSON *p)
+{
+    int passed, failed, commits, tin, tout;
+    if (!stat_of(p, "testsPassed", 1000000, &passed) || !stat_of(p, "testsFailed", 1000000, &failed) ||
+        !stat_of(p, "commits", 1000000, &commits) || !stat_of(p, "tokensIn", 50000000, &tin) ||
+        !stat_of(p, "tokensOut", 50000000, &tout)) {
+        s_bad++;
+        return;
+    }
+    pro_app_turn_stats(id, passed, failed, commits, tin, tout);
+}
+
 static bool flag(const cJSON *p, const char *key) { return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, key)); }
 
-// restore is history filled back in, quiet is "the desktop already shows this agent", silent is a sub-agent's turn: the
-// recap is applied for all three, but none is news (no entry, no banner, no beep). Absent flags are false.
+// The recap is always applied; how loud the end is comes from `tier` (alert / list / silent). restore is history filled back
+// in: never news. A summary with no (or an unknown) tier is from an older daemon: quiet ("the desktop already shows this agent")
+// and silent (a sub-agent's turn) drop the entry as before, anything else is an alert. Absent flags are false.
+static pod_tier_t tier_of(const cJSON *p)
+{
+    if (flag(p, "restore")) return POD_TIER_SILENT;
+    const char *tier = str_of(p, "tier");
+    if (tier && !strcmp(tier, "alert")) return POD_TIER_ALERT;
+    if (tier && !strcmp(tier, "list")) return POD_TIER_LIST;
+    if (tier && !strcmp(tier, "silent")) return POD_TIER_SILENT;
+    return flag(p, "quiet") || flag(p, "silent") ? POD_TIER_SILENT : POD_TIER_ALERT;
+}
+
 static void handle_summary(const char *id, const cJSON *p)
 {
-    const bool restore = flag(p, "restore");
     pro_app_summary(id, cut_of(p, "text", s_text, sizeof s_text), cut_of(p, "recap", s_recap, sizeof s_recap),
-                    cut_of(p, "full", s_full, sizeof s_full), restore, !restore && !flag(p, "quiet") && !flag(p, "silent"));
+                    cut_of(p, "full", s_full, sizeof s_full), flag(p, "restore"), tier_of(p));
 }
 
 // The fixed field the daemon sizes a readToken by: [A-Za-z0-9_-]{1,63}. Anything else is not a token.
@@ -619,11 +669,12 @@ static void handle_notif_seen(const cJSON *p)
 
 static void handle_question(const char *id, const cJSON *p)
 {
-    if (!str_of(p, "id")) return;   // the request this question belongs to
+    const char *request = str_of(p, "id");   // the request this question belongs to
+    if (!request) return;
     const cJSON *questions = cJSON_GetObjectItemCaseSensitive(p, "questions");
     const char *prompt = str_of(cJSON_GetArrayItem(questions, 0), "q");
     copy_cut(s_text, PRO_QUESTION_BYTES, prompt ? prompt : "Needs your answer");
-    pro_app_question(id, s_text);
+    pro_app_question(id, request, s_text);
 }
 
 static void handle_question_close(const char *id, const cJSON *p)
@@ -754,8 +805,7 @@ static void session_up(const cJSON *p)
         // console and `idf.py monitor` behaves as it always has.
         cable_link_set_log_framing(true);
         ESP_LOGI(TAG, "session up: %s", s_machine_name);
-        // The welcome parsed: this image's cable path works, so a fresh install may be confirmed now (fw_update.h).
-        if (fw_confirm_session_up()) pro_app_note_update();
+        fw_confirm_session_up((uint32_t)(esp_timer_get_time() / 1000));   // starts the clock a fresh image is confirmed on (fw_update.h)
     }
     if (was && !moved) return;
     // Anything held belonged to another host. Drop a half-streamed roster before its end can make it current.
@@ -783,8 +833,13 @@ static void session_down(const char *why)
     s_agent_count = 0;
     s_machine_name[0] = 0;
     s_machine_id[0] = 0;
+    s_seq_last = -1;
+    s_seq_on = false;
+    s_resync_pending = false;
+    cable_link_reset_decoder();   // runs on the tick: whatever is half-received belonged to the session that ended
     cable_link_set_log_framing(false);   // first: what follows should be readable on a plain monitor
     ESP_LOGI(TAG, "session down (%s)", why);
+    fw_confirm_session_down();
     fw_update_abort("session down");
     pro_app_machines(s_machines.rows, 0, "");
     pro_app_link(false, NULL);
@@ -847,7 +902,12 @@ static void handle_message(const cJSON *root)
         }
         if (!strcmp(t, "turn.activity")) { handle_turn_activity(agent_id, p); return; }
         if (!strcmp(t, "turn.done")) { pro_app_turn(agent_id, "done", "", 0); return; }
-        if (!strcmp(t, "turn.error")) { pro_app_turn(agent_id, "error", "", 0); return; }
+        if (!strcmp(t, "turn.error")) {
+            const char *message = cut_of(p, "message", s_text, sizeof s_text);
+            pro_app_turn(agent_id, "error", message ? message : "", 0);
+            return;
+        }
+        if (!strcmp(t, "turn.stats")) { handle_turn_stats(agent_id, p); return; }
         if (!strcmp(t, "summary")) { handle_summary(agent_id, p); return; }
         if (!strcmp(t, "question")) { handle_question(agent_id, p); return; }
         if (!strcmp(t, "question.close")) { handle_question_close(agent_id, p); return; }
@@ -874,7 +934,7 @@ void pro_cable_on_frame(uint8_t version, uint8_t type, const uint8_t *payload, s
         s_unknown++;
         return;
     }
-    // Parse straight from the bounded frame; the guard caps depth and token count so cJSON fits the 6 KB stack.
+    // Parse straight from the bounded frame; the guard caps depth and token count so cJSON fits the cable_link stack.
     if (!cable_json_guard(payload, payload_len)) { s_bad++; ESP_LOGW(TAG, "frame refused by the guard: %u B", (unsigned)payload_len); return; }
     const char *end = NULL;
     cJSON *root = cJSON_ParseWithLengthOpts((const char *)payload, payload_len, &end, false);
@@ -885,31 +945,46 @@ void pro_cable_on_frame(uint8_t version, uint8_t type, const uint8_t *payload, s
     }
     if (!root) { s_bad++; ESP_LOGW(TAG, "frame did not parse: %u B", (unsigned)payload_len); return; }
     s_last_rx_us = esp_timer_get_time();
+    const char *kind = str_of(root, "t");
+    track_seq(root, kind && !strcmp(kind, "welcome"));
     handle_message(root);
     cJSON_Delete(root);
 }
 
-// A frame lost on the way in may have been a roster push; the daemon answers these requests with a forced push. During a
-// transfer the resend logic covers it (the loss is consumed, not replayed after). At most once per 5 s.
+// A frame lost on the way in (a bad CRC or a seq gap) may have been a roster push; `resync` (when the welcome advertises it, else the
+// old swarms.list + agents.list) asks the daemon for the whole snapshot: machines, swarms, agents, notices and open questions. During a transfer the resend logic covers it (the loss
+// is consumed, not replayed after). At most once per 2 s.
 static void link_resync(void)
 {
     static uint32_t seen;
-    static int64_t last_us = -5000000;
+    static int64_t last_us = -2000000;
     uint32_t corrupt = 0, discarded = 0;
     cable_link_counters(&corrupt, &discarded);
-    if (corrupt == seen || !atomic_load(&s_session)) return;
+    if ((corrupt == seen && !s_resync_pending) || !atomic_load(&s_session)) return;
     const int64_t now = esp_timer_get_time();
-    if (fw_update_active()) { seen = corrupt; return; }
-    if (now - last_us < 5000000) return;   // keep it pending; the next tick after the window answers
+    if (fw_update_active()) { seen = corrupt; s_resync_pending = false; return; }
+    if (now - last_us < 2000000) return;   // keep it pending; the next tick after the window answers
     seen = corrupt;
+    s_resync_pending = false;
     last_us = now;
-    send_json(msg("swarms.list"));
-    send_json(msg("agents.list"));
+    if (atomic_load(&s_features) & CABLE_FEATURE_RESYNC) {
+        send_json(msg("resync"));
+    } else {   // a daemon that predates `resync`: the old refresh
+        send_json(msg("swarms.list"));
+        send_json(msg("agents.list"));
+    }
 }
 
 void pro_cable_tick(void *ctx)
 {
     (void)ctx;
+    // Under the task watchdog like the render task, so a hang here is a TASK_WDT panic with a backtrace, not a silent
+    // hardware reset. Joined on the first tick (this runs on the link's reader task, which this file does not create).
+    static bool watched;
+    if (!watched) { watched = esp_task_wdt_add(NULL) == ESP_OK; }
+    else esp_task_wdt_reset();
+    last_words_phase(LW_CABLE, fw_update_active() ? "ota" : "cable.read");
+    last_words_rx((uint32_t)(s_last_rx_us / 1000));
     fw_update_tick((uint32_t)(esp_timer_get_time() / 1000));
     link_resync();
     if (atomic_load(&s_session) && esp_timer_get_time() - s_last_rx_us > (int64_t)SILENCE_MS * 1000)
@@ -940,7 +1015,7 @@ void pro_cable_start(void)
     s_upload_lock = xSemaphoreCreateMutex();
     if (!s_upload_lock) { ESP_LOGE(TAG, "no memory for the upload lock - link disabled"); return; }
     s_last_rx_us = esp_timer_get_time();
-    if (xTaskCreate(hello_task, "cable_hello", 4096, NULL, 4, &hello) != pdPASS) {
+    if (xTaskCreate(hello_task, "cable_hello", STACK_CABLE_HELLO, NULL, 4, &hello) != pdPASS) {
         ESP_LOGE(TAG, "hello task create failed - no handshake");
         return;
     }

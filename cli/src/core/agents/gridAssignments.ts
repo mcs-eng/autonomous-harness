@@ -1,12 +1,12 @@
 /** Optional model metadata follows discovery; it never owns a binding or delays session control. */
 import type { ModelsPort } from '../api.js'
-import { gridAssignmentAnswersIn, gridAssignmentProcess, sameGridAssignment,
+import { gridAssignmentAnswersIn, gridAssignmentEvidence, gridAssignmentProcess, sameGridAssignment,
   type GridAssignment, type GridAssignmentProcess } from '../../lib/gridAssignmentWire.js'
 import { readProcessEnv } from '../../lib/processEnv.js'
 import type { RegisteredSession, registry as Registry } from '../../lib/registry.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
 import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
-import { processArgvIsBoundaryFaithful, processRows } from '../../lib/tmux.js'
+import { launchArgs, processArgvIsBoundaryFaithful, processRows } from '../../lib/tmux.js'
 
 /**
  * The endpoint this daemon itself built a row's launch for, when that launch is a local Grid profile's.
@@ -18,13 +18,17 @@ function trustedBaseUrl(session: RegisteredSession): string | undefined {
 
 /**
  * A committed process's command line, only where its argv boundaries are real (/proc on Linux and WSL).
- * Flattened `ps` text is never read as flags: a prompt could spell a provider endpoint or `-m`. Without
- * faithful argv the executable alone is offered, so environment- and config-backed launches still classify.
+ * Flattened `ps` text is never read as flags: a prompt could spell a provider endpoint or `-m`. The one
+ * exception is upstream's macOS case (tmux.ts `launchArgs`): a single-token `ps` title is resolved through
+ * its parent launcher's validated command line, which names the engine token itself. Without either source
+ * the executable alone is offered, so environment- and config-backed launches still classify.
  */
 async function faithfulArgs(identity: NonNullable<RegisteredSession['processIdentity']>): Promise<string> {
   const rows = await processRows()
   const row = rows?.find(candidate => sameProcessIdentity(candidate, identity))
-  return row && processArgvIsBoundaryFaithful(row) ? row.args : identity.executable
+  if (!rows || !row) return identity.executable
+  if (processArgvIsBoundaryFaithful(row)) return row.args
+  return /\s/.test(row.args.trim()) ? identity.executable : launchArgs(rows, row) || identity.executable
 }
 
 export interface GridAssignmentsDeps {
@@ -103,10 +107,12 @@ export function createGridAssignments({ models, registry, revision, announce, wa
       if (!owner) return
       const identity = session.processIdentity
       void Promise.all([readProcessEnv(identity), faithfulArgs(identity)]).then(([env, args]) => {
-        if (!env) { owner.done(); return }
-        const process = gridAssignmentProcess(owner.key, session.engine, env, args, trustedBaseUrl(session))
+        const process = env
+          ? gridAssignmentProcess(owner.key, session.engine, env, args, trustedBaseUrl(session))
+          : gridAssignmentEvidence(owner.key, session.engine, null, args)
         if (process) ask([{ owner, process }])
-        else { owner.apply(null); owner.done() }
+        else if (process === null) { owner.apply(null); owner.done() }
+        else owner.done()
       }).catch(() => { owner.done() })
     },
   }
