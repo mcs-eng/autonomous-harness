@@ -1,6 +1,6 @@
 /** Optional model metadata follows discovery; it never owns a binding or delays session control. */
 import type { ModelsPort } from '../api.js'
-import { gridAssignmentAnswersIn, gridAssignmentEvidence, sameGridAssignment,
+import { gridAssignmentAnswersIn, gridAssignmentEvidence, gridAssignmentProcess, sameGridAssignment,
   type GridAssignment, type GridAssignmentProcess } from '../../lib/gridAssignmentWire.js'
 import { readProcessEnv } from '../../lib/processEnv.js'
 import type { RegisteredSession, registry as Registry } from '../../lib/registry.js'

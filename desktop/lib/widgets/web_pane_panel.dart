@@ -118,8 +118,6 @@ class _WebPanePanelState extends State<WebPanePanel> {
   InteractiveViewerSession? _remote;
   String? _remoteIdentity;
   String? _loadedUrl;
-  bool _loading = false;
-  String? _failure;
   String? _browserUrl;
   String? _browserFailure;
   bool _openingBrowser = false;

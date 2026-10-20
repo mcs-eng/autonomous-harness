@@ -96,7 +96,6 @@ function trustedBaseUrlIn(value: unknown): string | undefined | null {
 export function gridAssignmentEvidence(key: string, engine: AgentEngine, env: Record<string, string> | null, args: string): GridAssignmentProcess | null | undefined {
   return env ? gridAssignmentProcess(key, engine, env, args) : gridAssignmentProcess(key, engine, {}, args) ?? undefined
 }
-}
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 export function gridAssignmentProcessesIn(value: unknown): GridAssignmentProcess[] | null {

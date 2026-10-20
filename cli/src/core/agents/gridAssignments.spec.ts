@@ -183,10 +183,6 @@ it('refresh reads boundary-faithful argv and otherwise offers models only the ex
   vi.mocked(processRows).mockReset().mockResolvedValue([])
 })
 
-  vi.mocked(readProcessEnv).mockReset().mockResolvedValue({ ANTHROPIC_BASE_URL: 'https://grid.example/relay' })
-  vi.mocked(processRows).mockReset().mockResolvedValue([])
-})
-
 it("reads a Pi whose environment cannot be read from how it was launched, and only when that names a grid", async () => {
   // Pi renames its process, and `ps` then shows neither its environment nor its argv (2026-10-14): what is left is
   // its launcher's command line. Moved onto a grid, that names the extension, and the switch is confirmed at once.

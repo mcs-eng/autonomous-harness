@@ -8363,6 +8363,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
                                                                         ),
                                                                     onChoose:
                                                                         _chooseStartSearch,
+                                                                    resume:
+                                                                        _resumeWork(),
                                                                   )
                                                           : null,
                                                     ),
