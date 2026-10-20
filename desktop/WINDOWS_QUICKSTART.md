@@ -12,10 +12,10 @@ CLI and tmux inside WSL2. Your coding agents still require their own accounts.
    `data`, the DLLs, and `harness-cli` together. Do not run it inside the ZIP.
 3. Open `Release/harness.exe`. The preview is unsigned; Windows may warn about an
    unknown publisher. Review the source and checksum before deciding to run it.
-4. Follow the setup screen. Without a saved sign-in, Harness opens on this
-   computer in [local mode](#local-mode-no-account). To reach your other
-   machines, select **Sign in** at the foot of the projects sidebar or in
-   **Settings → Account**, and finish in your browser.
+4. Follow the setup screen, then sign in on the required sign-in page and
+   finish in your browser. Without a sign-in the Desktop does not open a
+   workspace; see [Local mode](#local-mode-no-account) for what still runs
+   on this computer without an account (the daemon and the WSL CLI).
 5. Create a project and agent. Install and authenticate the coding agent in the
    selected development distribution if its engine is missing. Prefer native Linux
    agent installations; WSL interop discovery is also supported.
@@ -694,7 +694,9 @@ One upstream behavior change to know in local mode: what agents may do
 experiment of the signed-in account, each off by default (Settings ▸
 Experimental, or `harness settings`). Signed out, the local desk still runs,
 but changing one of these returns a sign-in prompt instead of a local toggle —
-the fork adopts this as upstream designed it.
+the fork adopts this as upstream designed it. (Superseded by the October 20
+batch 2 entry below: the Desktop now requires sign-in, so a signed-out
+window shows the sign-in page instead of the local desk.)
 This is a source change; it does not update an installed desktop or daemon.
 
 
@@ -710,12 +712,11 @@ stay, while upstream semantics that supersede fork behavior are adopted.
 
 The one visible behavior change is upstream #1276: sign-in is now required at
 the Desktop login wall. The wall no longer offers **Use this computer without
-an account**; a cancelled or failed sign-in leaves the sign-in screen up. The
-Desktop now requires sign-in at the wall (upstream #1276, adopted this
-batch): a signed-out launch, an ended session and **Sign out** all return the
-window to the required sign-in page, and the account-free desk button is
-gone. Account-free local operation remains only in the daemon and the WSL
-CLI below; **Settings → Account** still says **Local mode** and offers **Sign in**. The login tests that drove the removed button went with it, and the
+an account**; a cancelled or failed sign-in leaves the sign-in screen up. A
+signed-out launch, an ended session and **Sign out** all return the window
+to the required sign-in page, and the account-free desk button is gone.
+Account-free local operation remains only in the daemon and the WSL CLI
+(see *Local mode* above); **Settings → Account** still says **Local mode** and offers **Sign in**. The login tests that drove the removed button went with it, and the
 wall's tests now pin the mandatory sign-in step.
 
 Also in this batch: `harness --help` opens with upstream's agent pointer
