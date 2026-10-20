@@ -100,8 +100,17 @@ Linux CI (the PR #47 recipe):
    fixtures on the sync branch.
 4. Delete the temporary branch, local and remote.
 
-`launch-argv` keeps upstream's override records, whose former call order its spec
-pins on purpose. Never commit a golden recorded on the Windows host.
+`launch-argv` keeps upstream's override records. Its spec pins the *former* call
+order of the two named-agent grid cases (`opencode · harness on a grid, as git,
+as a named agent` and `pi · harness on a grid, as git, as a named agent`):
+`writeGridConfigDir …` must stay before `dshLaunch …` in the stored record, and
+the live launch is expected to produce the reverse. A fresh
+`RECORD_LAUNCH_GOLDEN=1` recording stores the live (reversed) order, so after
+step 3 swap those two cases' stored `calls` arrays back to the former order
+before committing — otherwise the `former order` pin fails deterministically on
+every host. The unpinned
+`opencode · started by an agent, a harness on a grid as a named agent` case keeps
+the live order. Never commit a golden recorded on the Windows host.
 
 ## Evidence snapshot: 2026-10-17
 
