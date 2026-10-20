@@ -7564,14 +7564,6 @@ class AppNotifier extends ChangeNotifier {
     loginBrowserError = null;
   }
 
-  Future<void> continueWithoutAccount() async {
-    if (_disposed || viewer != null || signingIn || signingOut) return;
-    _invalidateAuthWork();
-    _lastError = null;
-    _lastErrorRetryable = true;
-    await _continueAfterEnvironmentReady();
-  }
-
   /// Reopens the current authorization URL without creating another login.
   Future<void> openLoginBrowser() async {
     final url = pendingAuthorizeUrl;

@@ -176,52 +176,8 @@ Widget _host(AppNotifier app, Widget Function() child) => MaterialApp(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('the login screen\'s way back to this computer', () {
-    test(
-      'a signed-out CLI lands on the guest desk, with no profile read',
-      () async {
-        final app = _Notifier(
-          discovery: _ReadyDiscovery(),
-          cli: _ScriptedCli(const CliAuthStatus(loggedIn: false)),
-        );
-        addTearDown(app.dispose);
-        // Where a cancelled sign-in leaves a desktop window.
-        app.status = AppStatus.unauthenticated;
-
-        await app.continueWithoutAccount();
-
-        expect(app.status, AppStatus.authenticated);
-        expect(app.isGuest, isTrue);
-        expect(app.currentUser, isNull);
-        expect(app.profileReads.meCalls, 0);
-        expect(app.refreshes, 1);
-      },
-    );
-
-    test('a CLI that signed in meanwhile lands on the account desk', () async {
-      final app = _Notifier(
-        discovery: _ReadyDiscovery(),
-        cli: _ScriptedCli(const CliAuthStatus(loggedIn: true)),
-      );
-      addTearDown(app.dispose);
-      app.status = AppStatus.unauthenticated;
-
-      await app.continueWithoutAccount();
-
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isFalse);
-      expect(app.profileReads.meCalls, 1);
-    });
-
-    // Upstream #1276 (adopted in the 2026-10-20 sync batch) made sign-in
-    // required at the Desktop login wall: the wall no longer offers an
-    // account-free way back to the desk, so the button and sheet variants of
-    // this test are gone with the widget they drove. The notifier-level
-    // contract above is what remains of local mode's way back.
-  });
-
   test(
-    'signing out keeps a desktop window on its desk, in local mode',
+    'signing out keeps the daemon state local',
     () async {
       final cli = _ScriptedCli(const CliAuthStatus(loggedIn: true));
       final app = _Notifier(discovery: _ReadyDiscovery(), cli: cli)
