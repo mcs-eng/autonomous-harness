@@ -22,10 +22,14 @@ Machine:
   harness login --google       sign in with Google in your browser, without asking
   harness login --apple        sign in with Apple in your browser, without asking
   harness login --qr           sign in by scanning a QR with Harness on your phone, without asking
+  harness login --code         for a device with no screen: say a short code the person types into Harness
+                               (phone: Settings ▸ Sign in a computer ▸ Type a code instead; desktop or web:
+                               Machines ▸ Approve a device); with --json the code is an event
   harness login --force        stop the daemon and sign in with a different account
   harness login --json         emit machine-readable NDJSON instead of opening a browser (for GUI clients)
   harness login --entry-point=desktop   record which surface started the sign-in (GUI clients; default cli)
   harness auth status --json   print {loggedIn,...} for this computer's saved session
+  harness privacy status|on|off   view or change product usage sharing for this account
   harness start                start the adapter using the saved SSO session
   harness start -f             run the daemon in the FOREGROUND (for a supervisor; logs to stdout): harnessd's
                                master, as launchd and systemd run it, its core and services its children
@@ -46,20 +50,27 @@ Machine:
   harness service status       what launchd or systemd has registered, and whether it runs (--json)
   harness logs export          zip the last 7 days of logs (app, CLI, dial, daemon) to the Desktop
   harness tui                  all of Harness in this terminal: swarms, panes, every machine (⌥O ⌥P ⌥N)
-  harness new [agent] [@machine] [folder|name] [-- task]
+  harness new [agent] [--machine <name>] [folder|name] [-- task]
                                make a harness from a shell: \`harness new\` is claude here; see \`harness new -h\`
   harness machines             list the machines on this account (this computer's is marked)
   harness search <words>       find the conversation on this computer that said them: every turn of
                                every harness, live or stopped (--limit=N, --json)
   harness send <name> "text"   from an agent's pane: message a teammate in this tab (Agent Messages,
                                Settings ▸ Experimental); \`harness send\` alone lists who is here
+  harness whoami               who you are to Harness: which agent, which machine, whether you may start harnesses
   harness ps [--all]           the harnesses here: state, who started each, what each is about
   harness show <name>          a harness's state and last turn: what it was asked and what it answered
   harness wait <name>[,<name>] wait until they stop working (--any, --timeout 30m); exit 3 = needs the person
   harness close <name> [--now] save a harness's screen and stop it; an agent closes only what it started
+  harness reply <name> -- <w>  say words to a cloud harness (Devin Cloud, Cursor Cloud, Fo): its answer or what next
+                               new, ps, show, wait, reply and close take --machine <name> for another of your
+                               machines: \`harness show --machine office x\`
   harness mcp                  the agent verbs as an MCP server on stdin/stdout, for agents that use MCP
+  harness help agents          the agent commands, states, exit codes and rules on one screen
   harness settings [<name> on|off]  what agents may do (agents-start-agents, pull-request-line, agent-messages): your account's experiments in Settings ▸ Experimental, each off by default
   harness machines delete <id> remove ANOTHER machine (refuses this one; use \`harness logout\`)
+  harness e2e plan             which coding tools have a new version out (the grid-switch e2e trigger)
+  harness e2e grid-switch      move a fresh agent subscription -> grid -> back home with its tool + MCP; leaves a review bundle
   harness remote               from a Harness terminal tile: open a terminal on another of your machines and move this tile to it
   harness version              print the installed version (v${VERSION})
   harness update [--force]     update to the latest build now (it also self-updates in the background;

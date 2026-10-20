@@ -10,7 +10,8 @@ retired; only the host routes below were kept.
 
 | Route | What |
 |---|---|
-| `/`, `/s/:id`, `/auth/callback`, `/callback` | The Flutter app (`public/harness-web/index.html`, via `rewrites()` in `next.config.js`) |
+| `/` | Redirects (307) to `/hub`, the front door (owner, 2026-10-13). An `hn view` link (`/?machine=…&agent=…`) still opens the Flutter viewer here |
+| `/web`, `/s/:id`, `/auth/callback`, `/callback` | The Flutter app (`public/harness-web/index.html`, via `rewrites()` in `next.config.js`); `/web` is the workspace, where sign-in returns (`src/lib/webApp.ts`) |
 | `/download` (and `/install` → it) | Install page: CLI command and desktop downloads |
 | `/app` | The phone app's download code: an iPhone or iPad is redirected to the App Store and an Android device to Google Play, by user agent (`src/lib/phoneApp.ts`); anything else gets both stores |
 | `/pair` | Phone setup guidance — the mobile app and the desktop "add phone" dialog link here |
@@ -119,13 +120,29 @@ transferred. Nothing becomes public until the creator reviews the output, source
 and clicks Publish. A draft survives the existing sign-in flow; repeated submission uses one
 publication ID. Remote projects and older apps can use the project-folder picker or import
 `OPEN-HARNESS.json`. The output is the project's `preview.html` (or the page a fork arrived with,
-once changed). Without one, as for a native result such as a Typst PDF or a Blender model, the
+once changed), or else a page the session made that loads nothing the sandbox cannot reach, such as
+a one-file game: a top-level page (`index.html` first), then a folder's `index.html`. Without one, as for a native result such as a Typst PDF or a Blender model, the
 desktop asks the machine's daemon for a picture of the harness's viewer (`viewer_surface`, headless
 Chrome) and publishes it as `preview.html` and the cover; a fork still opens the real viewer. The first version requires a self-contained HTML preview, up to 30 files/6 MB;
 hidden configuration, symlinks and installed dependencies are excluded. Conversation tails may be
-incomplete and the review form says so. `/explore` links remain compatible with `/hub`.
+incomplete and the review form says so. A draft that arrives from Desktop or a bundle is translated
+into English once the creator is signed in (`POST /api/community/translate`: title, description and
+the people's and agent's turns; tool output stays as it is), and the form can switch back to the
+original before publishing. `/explore` links remain compatible with `/hub`.
 
-Backend reads are public; likes, comments, following, publication, and unpublication require SSO.
+What people publish is HTML and JavaScript, and Cloudflare's managed rules in front of the Hub and
+its API refuse a request body with raw `<script>` in it. So bodies travel gzipped: Desktop hands
+off the draft as a `draft.json.gz` file, `communityRequest` sends every body as `application/gzip`,
+the proxy forwards those bytes unchanged, and the backend unpacks them (bounded) before validating
+(`backend/src/lib/gzipJson.ts`). Plain JSON bodies and an older Desktop's text field still work.
+
+Backend reads are public; likes, comments, following, publication, editing, and unpublication require SSO.
+An author edits a publication in place (`PUT /api/community/harnesses/:id`): **Edit**, beside Fork on
+its page and shown only to its author, opens `/hub/publish?edit=<id>`, where **Unpublish this harness**
+also lives; a draft arriving from Desktop can choose **Publish as → Update "…"**. A harness page whose
+likes and actions fail to load says so with Retry, and one read anonymously because the browser's sign-in
+expired asks to sign in again, instead of silently hiding Edit. The address, likes, comments and forks stay; forks keep the version they copied; where it
+came from (`forkedFrom`, credits) and its cover (unless a new one is chosen) stay as published.
 Counts are persisted, like/follow writes are idempotent, comment retries have per-user request IDs,
 replies retain their parent and display a Creator badge,
 and authors can remove their publication and moderate its comments. Reads and writes are isolated

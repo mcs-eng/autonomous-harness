@@ -1,6 +1,6 @@
 /** Optional model metadata follows discovery; it never owns a binding or delays session control. */
 import type { ModelsPort } from '../api.js'
-import { gridAssignmentAnswersIn, gridAssignmentProcess, sameGridAssignment,
+import { gridAssignmentAnswersIn, gridAssignmentEvidence, sameGridAssignment,
   type GridAssignment, type GridAssignmentProcess } from '../../lib/gridAssignmentWire.js'
 import { readProcessEnv } from '../../lib/processEnv.js'
 import type { RegisteredSession, registry as Registry } from '../../lib/registry.js'
@@ -103,10 +103,12 @@ export function createGridAssignments({ models, registry, revision, announce, wa
       if (!owner) return
       const identity = session.processIdentity
       void Promise.all([readProcessEnv(identity), faithfulArgs(identity)]).then(([env, args]) => {
-        if (!env) { owner.done(); return }
-        const process = gridAssignmentProcess(owner.key, session.engine, env, args, trustedBaseUrl(session))
+        const process = env
+          ? gridAssignmentProcess(owner.key, session.engine, env, args, trustedBaseUrl(session))
+          : gridAssignmentEvidence(owner.key, session.engine, null, args)
         if (process) ask([{ owner, process }])
-        else { owner.apply(null); owner.done() }
+        else if (process === null) { owner.apply(null); owner.done() }
+        else owner.done()
       }).catch(() => { owner.done() })
     },
   }

@@ -17,11 +17,19 @@ class AppIconButton extends StatefulWidget {
     this.hoverFill,
     this.destructive = false,
     this.spinning = false,
+    this.focusNode,
+    this.selected,
   });
 
   final IconData icon;
+
+  /// Navigation controls keep a visible well and selected semantics.
+  final bool? selected;
   final VoidCallback? onPressed;
   final String? tooltip;
+
+  /// For a form that moves the keys between its controls itself (the picker's editors).
+  final FocusNode? focusNode;
 
   /// The glyph turns, and the button stops taking presses.
   ///
@@ -162,7 +170,9 @@ class _AppIconButtonState extends State<AppIconButton>
 
     return Semantics(
       value: widget.spinning ? 'Working' : null,
+      selected: widget.selected,
       child: IconButton(
+        focusNode: widget.focusNode,
         tooltip: widget.tooltip,
         onPressed: enabled ? widget.onPressed : null,
         iconSize: widget.size,
@@ -203,7 +213,11 @@ class _AppIconButtonState extends State<AppIconButton>
                 ? active
                 : resting;
           }),
-          backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+          backgroundColor: WidgetStatePropertyAll(
+            widget.selected == true
+                ? AppSurface.selectedFill
+                : Colors.transparent,
+          ),
           overlayColor: WidgetStateProperty.resolveWith((states) {
             if (states.contains(WidgetState.disabled)) {
               return Colors.transparent;

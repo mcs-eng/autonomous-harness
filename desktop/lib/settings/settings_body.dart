@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../state/app_state.dart';
 import 'experimental_features.dart';
@@ -8,7 +9,10 @@ import 'sections/connectors_section.dart';
 import 'sections/debug_section.dart';
 import 'sections/experimental_section.dart';
 import 'sections/notifications_section.dart';
+import 'sections/privacy_section.dart';
+import 'sections/routing_section.dart';
 import 'sections/shortcuts_section.dart';
+import 'sections/tab_invites_section.dart';
 import 'sections/usage_section.dart';
 import 'settings_section.dart';
 
@@ -38,9 +42,14 @@ class SettingsBody extends StatelessWidget {
         'Customization opens over the workspace.',
       ),
       SettingsSection.notifications => const NotificationsSection(),
+      SettingsSection.privacy when kIsWeb => PrivacySection(notifier: notifier),
+      SettingsSection.privacy ||
       SettingsSection.experimental => ExperimentalSection(
+        notifier: notifier,
         store: experimentalFeatures ?? notifier.experimentalFeatures,
       ),
+      SettingsSection.routing => RoutingSection(notifier: notifier),
+      SettingsSection.tabInvites => TabInvitesSection(notifier: notifier),
       SettingsSection.shortcuts => const ShortcutsSection(),
       SettingsSection.debug => const DebugSection(),
       SettingsSection.about => AboutSection(notifier: notifier),

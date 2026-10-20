@@ -260,6 +260,16 @@ Future<void> showAgentActions(
         confirmDeleteAgent(context, notifier, machineId, agent.id, agent.name),
       ),
     ),
+    // The conversation too, for good — not for a terminal, which keeps none.
+    if (agent.engine != 'terminal')
+      PhoneSheetAction(
+        icon: LucideIcons.trash300,
+        label: 'Delete Harness…',
+        destructive: true,
+        onTap: () => unawaited(
+          confirmPurgeAgent(context, notifier, machineId, agent.id, agent.name),
+        ),
+      ),
   ],
 );
 
@@ -271,11 +281,17 @@ Future<void> showAgentActions(
 /// Returns when the form closes — by creating an agent or by being backed out
 /// of — so a caller whose own chrome depends on being the top route can rebuild
 /// (see `terminal_page.dart`). Callers that do not care can ignore it.
+///
+/// [deskTabId] is the tab the new agent joins, for a door that picked one — see
+/// [NewAgentPage.deskTabId]. [newDeskTab] gives it a tab of its own — see
+/// [NewAgentPage.newDeskTab].
 Future<void> openNewAgent(
   BuildContext context,
   AppNotifier notifier,
   String machineId, {
   String? folder,
+  String? deskTabId,
+  bool newDeskTab = false,
   VoiceInputController? voice,
 }) => Navigator.of(context).push(
   phoneRoute(
@@ -283,6 +299,8 @@ Future<void> openNewAgent(
       notifier: notifier,
       machineId: machineId,
       folder: folder,
+      deskTabId: deskTabId,
+      newDeskTab: newDeskTab,
       voice: voice,
     ),
   ),

@@ -15,6 +15,8 @@
  */
 import { env } from '../config/env.js'
 import type { GatewayEvents, GatewayPort, RemoteRole, RemoteTransport } from '../core/api.js'
+import { launchErrorCode, type ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
+import type { LaunchErrorCode, ProductUsageMetric } from '../lib/productUsageContract.js'
 import { WINDOW_SURFACES, type LocalWindows, type WindowSurface } from '../lib/windowSurfaces.js'
 import { deviceDump } from '../lib/autonomous-device/dump.js'
 import type { AuthSessionManager } from '../lib/authSession.js'
@@ -49,6 +51,16 @@ export interface RelayGatewayOptions {
 }
 
 export class RelayGateway implements GatewayPort {
+  /** Optional scalar-only measurement hooks. Never hand a frame or user payload to the collector. */
+  productUsage?: {
+    launch?(signal: ProductUsageLaunchSignal): void
+    counter?(metric: ProductUsageMetric): void
+    presence(active: boolean): void
+    opened(surface: WindowSurface): void
+    observe(type: 'turn_started' | 'turn_ended' | 'text_delta' | 'error', agent: string, replay: boolean, interrupted?: boolean): void
+    /** An agent's launch state as its `agent_synced` frame says it, the failure's code a listed name only. */
+    launchState?(agent: string, state: 'starting' | 'ready' | 'failed' | 'held' | 'other', code?: LaunchErrorCode): void
+  }
   /** Web↔adapter E2EE: group-encrypts user events, runs the CPace pairing, holds per-conn sessions. */
   readonly e2ee: E2eeManager
   readonly machineId: string
@@ -133,9 +145,15 @@ export class RelayGateway implements GatewayPort {
       isConnectionAvailable: connId => this.directDeviceSinks.has(connId) || this.connected(),
       onIdentityPaired: (connId, pub) => { if (this.directDeviceSinks.has(connId)) this.directDevicePins.set(connId, pub) },
       onIdentityRevoked: identity => { this.deviceUnpaired(identity); this.onDirectDeviceRevoked?.(fingerprint(b64d(identity))) },
-      onSessionOpened: (connId, role, identity) => this.core.client(connId, {
-        role, label: this.e2ee.sessionLabel(connId), identity, direct: this.directDeviceSinks.has(connId),
-      }),
+      onSessionOpened: (connId, role, identity) => {
+        const peer = this.e2ee.pairedPeers().find(p => p.identityPub === identity)
+        this.core.client(connId, {
+          role, label: this.e2ee.sessionLabel(connId), identity, direct: this.directDeviceSinks.has(connId),
+          accountOwner: role === 'web' && !!peer && !peer.shared,
+          // Trusted only because this machine is shared: that account's guest, never the owner.
+          ...(peer?.shared ? { guest: peer.sharedWith ?? '' } : {}),
+        })
+      },
       onSessionDropped: (connId) => this.core.client(connId, null),
       onPeerLinked: (peer) => {
         // The mutual half of a password link: a machine that proved this one's password is pinned back,
@@ -209,19 +227,66 @@ export class RelayGateway implements GatewayPort {
     this.openRequestGate()
   }
 
-  windowOpened(surface: WindowSurface): void { this.link.sendAppPresence('open', surface) }
+  usageLaunch(signal: ProductUsageLaunchSignal): void {
+    try { this.productUsage?.launch?.(signal) } catch { /* Optional measurement. */ }
+  }
+
+  usageCounter(metric: ProductUsageMetric): void {
+    try { this.productUsage?.counter?.(metric) } catch { /* Work never waits for reporting. */ }
+  }
+
+  windowOpened(surface: WindowSurface): void {
+    try { this.productUsage?.opened(surface) } catch { /* Reporting must not affect the relay. */ }
+    this.link.sendAppPresence('open', surface)
+  }
 
   localClients(windows: LocalWindows): void {
     this.localWindows = windows
+    try { this.productUsage?.presence(windows.desktop + windows.tui > 0) } catch { /* Reporting is optional. */ }
     for (const surface of WINDOW_SURFACES) if (windows[surface] === 0) this.link.noLocalClients(surface)
   }
 
   // ── out, to remote clients ───────────────────────────────────────────────────────────────────────
 
-  /** User-content events are group-encrypted (E2EE) here; system frames pass through as plaintext. */
-  broadcast(frame: Frame): void {
+  /** User-content events are group-encrypted (E2EE) here; system frames pass through as plaintext.
+   *  [guest]: the guest whose harness the frame is about (the core reads it from the registry). The group
+   *  never reaches a guest (manager.ts `groupKeyFor`, backend/src/lib/hub.ts), so its sessions are sent
+   *  the frame sealed for each of them. */
+  broadcast(frame: Frame, guest?: string): void {
+    if ((frame.type === 'turn_started' || frame.type === 'turn_ended' || frame.type === 'text_delta' || frame.type === 'error') && typeof frame.agentId === 'string') {
+      const interrupted = frame.type === 'turn_ended' && (frame.payload as { aborted?: unknown } | undefined)?.aborted === true
+      try { this.productUsage?.observe(frame.type, frame.agentId, frame.replay === true, interrupted) } catch { /* Work continues without metrics. */ }
+    }
+    // A created harness whose engine then did not start is announced, not replied: the reply already said
+    // created (core/agents/newPane.ts), so these were counted as launches that worked (production counters,
+    // 2026-10-16). The core says it to every remote client in this frame; the gateway reads its launch state.
+    if (frame.type === 'agent_synced' && this.productUsage?.launchState) {
+      try {
+        const agent = (frame.payload as { agent?: { id?: unknown; launch?: { state?: unknown; error?: unknown } } } | undefined)?.agent
+        const state = agent?.launch?.state
+        if (typeof agent?.id === 'string') {
+          this.productUsage.launchState(agent.id, state === 'starting' || state === 'ready' || state === 'failed' || state === 'held' ? state : 'other',
+            state === 'failed' ? launchErrorCode(agent.launch?.error) : undefined)
+        }
+      } catch { /* Work continues without metrics. */ }
+    }
     if (this.link.servesThisComputerOnly()) return
     this.link.enqueue({ t: 'up', frame: this.e2ee.wrapUp(frame) })
+    if (guest) {
+      for (const connId of this.e2ee.guestSessions(guest)) {
+        const sealed = this.e2ee.wrapFor(connId, frame)
+        if (sealed) this.link.enqueue({ t: 'up', targetConnId: connId, frame: sealed })
+      }
+    }
+  }
+
+  /** The guest a remote connection's session is (gateway/sharedTrust.ts), '' when its store did not
+   *  record the account; undefined for everyone else. */
+  private guestOf(connId: string): string | undefined {
+    const identity = this.e2ee.sessionIdentity(connId)
+    if (!identity) return undefined
+    const peer = this.e2ee.pairedPeers().find((p) => p.identityPub === identity)
+    return peer?.shared ? (peer.sharedWith ?? '') : undefined
   }
 
   /** A DEVICE-audience frame (commanderEligible, not web). User/data frames are group-encrypted (E2EE)
@@ -482,6 +547,13 @@ export class RelayGateway implements GatewayPort {
       return
     }
     const payload = (opened.payload ?? {}) as Record<string, unknown>
+    // A guest manages none of this machine's pairings and is no member of its trust group
+    // (docs/plans/2026-10-19-guest-machine-sharing-plan.md): the rest it asks, the core decides.
+    if ((type === 'group_sync' || GATEWAY_REQUEST_TYPES.has(type)) && this.guestOf(connId) !== undefined) {
+      this.logRequest(connId, opened)
+      this.reply(connId, type, payload.requestId, { error: 'GUEST_NOT_ALLOWED' })
+      return
+    }
     // Trust-group roster exchange: only over an E2EE session, from the identity that session proved —
     // the roster carries the keys this machine trusts, and the peer's own entry must be that identity.
     if (type === 'group_sync') {

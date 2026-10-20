@@ -55,6 +55,8 @@ class SharedHarnessBar extends StatelessWidget {
     this.viewerSelected,
     this.onSelectViewer,
     this.onRetry,
+    this.onRemove,
+    this.leader = false,
   });
 
   final String name;
@@ -62,12 +64,18 @@ class SharedHarnessBar extends StatelessWidget {
   final SharedPaneStatus status;
   final bool commentsSelected;
   final VoidCallback onToggleComments;
-  final VoidCallback onClose;
+  final VoidCallback? onClose;
 
   /// Null hides the Terminal/Viewer switch: the pane shows one of them only.
   final bool? viewerSelected;
   final ValueChanged<bool>? onSelectViewer;
   final VoidCallback? onRetry;
+
+  /// Sharing ended: takes the pane off the desk, nothing else.
+  final VoidCallback? onRemove;
+
+  /// This harness leads the shared tab.
+  final bool leader;
 
   /// Below this width the actions move to a second row instead of squeezing
   /// the name to nothing.
@@ -84,11 +92,13 @@ class SharedHarnessBar extends StatelessWidget {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final close = AppIconButton(
-            icon: AppIcons.close,
-            tooltip: 'Close shared harness',
-            onPressed: onClose,
-          );
+          final close = onClose == null
+              ? const SizedBox.shrink()
+              : AppIconButton(
+                  icon: AppIcons.close,
+                  tooltip: 'Close shared harness',
+                  onPressed: onClose,
+                );
           final actions = Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -147,7 +157,7 @@ class SharedHarnessBar extends StatelessWidget {
           message: detail,
           child: Text(
             detail,
-            maxLines: 2,
+            maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: DesktopChrome.metadata(),
           ),
@@ -177,6 +187,7 @@ class SharedHarnessBar extends StatelessWidget {
             ],
           ),
           Text('View only', style: DesktopChrome.metadata()),
+          if (leader) Text('Leader', style: DesktopChrome.metadata()),
         ],
       ),
     ],
@@ -201,6 +212,8 @@ class SharedHarnessBar extends StatelessWidget {
       ],
       if (onRetry case final retry?)
         DesktopPill(label: 'Retry', onPressed: retry, compact: true),
+      if (onRemove case final remove?)
+        DesktopPill(label: 'Remove', onPressed: remove, compact: true),
       DesktopPill(
         label: commentsSelected ? 'Watch' : 'Comments',
         onPressed: onToggleComments,

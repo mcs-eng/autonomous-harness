@@ -7,6 +7,7 @@ import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import { watchSocketLiveness } from './lib/wsLiveness.js'
 import { isLoopbackRequest, loopbackHosts } from './lib/loopbackRequest.js'
 import { isTrustedLocal } from './lib/localSocket.js'
+import { localCredentialMatches } from './lib/localCredential.js'
 import type { Frame, LocalClientSink } from './backendSocket.js'
 import {
   decodeTerminalLocal,
@@ -42,6 +43,8 @@ export interface LocalWsBackend {
   handleLocalBinary: (connId: string, frame: TerminalBinaryClear) => Promise<void>
   /** The agent this window has focused, or null — which of its terminals gets the short output window. */
   setLocalTerminalFocus?: (connId: string, agentId: string | null) => void
+  /** hn's `product_observe`, from a connection on this computer's own socket bound to this machine. */
+  observeProduct?: (connId: string, payload: unknown) => void
 }
 
 export interface LocalWsServerOptions {
@@ -49,6 +52,9 @@ export interface LocalWsServerOptions {
   backend: LocalWsBackend
   /** The daemon's Unix-socket server (lib/localSocket.ts), served the same endpoint beside TCP. */
   localSocketServer?: http.Server | null
+  /** The daemon's local credential (lib/localCredential.ts). Given, a TCP upgrade must carry it: the
+   *  loopback port takes any local OS user's process, the Unix socket only this user's. */
+  localCredential?: string
   /** Serves a `machine_select` for any OTHER machine this signed-in user owns, by relaying to
    *  backend's `/api/web-ws` — see lib/remoteRelay.ts — and one for a harness shared with this account
    *  (`shareId`, sharing/relay.ts). Both are the gateway's. Omit to keep today's own-machine-only behavior. */
@@ -279,9 +285,10 @@ function withLocalClient(frame: Frame, localClient: LocalWsServerOptions['localC
 }
 
 /**
- * Add an internal loopback WebSocket endpoint to the CLI's existing HTTP server. It intentionally has
- * no credential: loopback-only, no Origin header, and the desktop computer-id validation identify the
- * local process without placing SSO credentials on this transport.
+ * Add an internal loopback WebSocket endpoint to the CLI's existing HTTP server. Over the daemon's Unix
+ * socket it takes no credential: the filesystem says who the peer is. Over TCP it takes the daemon's
+ * local credential (lib/localCredential.ts) — never an SSO credential — besides being loopback-only with
+ * no Origin header: any OS user's process can reach the loopback port.
  */
 /** How long a closing server waits for its clients to answer the close before it drops them. */
 export const LOCAL_WS_CLOSE_GRACE_MS = 1_000
@@ -290,8 +297,8 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: MAX_WS_MESSAGE_BYTES,
-    // The loopback endpoint deliberately has no credential. Echo a protocol only for generic WS
-    // clients that insist on proposing one; it carries no authority and is never inspected.
+    // The local credential travels in a header, never a subprotocol. Echo a protocol only for generic
+    // WS clients that insist on proposing one; it carries no authority and is never inspected.
     handleProtocols: (protocols) => [...protocols][0] ?? false,
   })
   // One desktop can have a connection per machine. Once a live window reports its selected pane,
@@ -322,6 +329,12 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
     const bound = server.address()
     if (req.headers.origin || !bound || typeof bound === 'string' || !isLoopbackRequest(req, loopbackHosts(bound.port))) {
       rejectUpgrade(socket, 403, 'Forbidden')
+      return
+    }
+    // Another OS user's process reaches this port too (a guest's harness, say): only this user's carries
+    // the credential.
+    if (options.localCredential !== undefined && !localCredentialMatches(options.localCredential, req)) {
+      rejectUpgrade(socket, 401, 'Unauthorized')
       return
     }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
@@ -509,6 +522,15 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
           if (!relay && boundMachineId === options.machineId && typeof p?.operationId === 'string'
             && /^[a-f0-9]{64}$/.test(p.operationId) && typeof p.agentId === 'string' && p.agentId.length > 0 && p.agentId.length <= 200) {
             options.onDevicePrepareOpened?.(p.operationId, p.agentId)
+          }
+          return
+        }
+        // hn's own measurement, for this computer's product-usage queue alone: one-way, never answered,
+        // never relayed to another machine or handed to the backend socket's dispatch. Over the owner's
+        // socket only, from a window (not a tool) bound to this machine; the backend checks it is hn's.
+        if (parsed?.type === 'product_observe') {
+          if (trusted && !tool && !relay && boundMachineId === options.machineId && windowSinks.has(connId)) {
+            options.backend.observeProduct?.(connId, parsed.payload)
           }
           return
         }
@@ -734,7 +756,9 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
           }
           // Compatibility for windows that never report selection. A modern window restores every
           // terminal on reconnect; their attachment order is not the pane the person selected.
-          if (parsed?.type === 'terminal_open' && !explicitFocusClients.size && typeof agentId === 'string' && agentId) {
+          // (A watch-only open is hn with no terminal reading a pane: nobody is in front of it.)
+          if (parsed?.type === 'terminal_open' && !explicitFocusClients.size && typeof agentId === 'string' && agentId
+            && (parsed.payload as Record<string, unknown>).watch !== true) {
             options.onAppFocus?.(boundMachineId, agentId)
           }
         }

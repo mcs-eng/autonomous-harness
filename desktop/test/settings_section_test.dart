@@ -30,6 +30,7 @@ void main() {
       SettingsSection.account,
       SettingsSection.customize,
       SettingsSection.notifications,
+      if (kIsWeb) SettingsSection.privacy,
       SettingsSection.shortcuts,
       // What agents may do is the account's, under Experimental (owner, 2026-10-12).
       if (!kIsWeb) SettingsSection.connectors,
@@ -37,6 +38,8 @@ void main() {
       // files, and it reads nothing at all until a provider is switched on, so
       // there is nothing here for a shipped build to hide.
       SettingsSection.usage,
+      SettingsSection.routing,
+      SettingsSection.tabInvites,
       SettingsSection.experimental,
       SettingsSection.about,
     ]);
@@ -56,10 +59,15 @@ void main() {
       [
         SettingsSection.customize,
         SettingsSection.notifications,
+        if (kIsWeb) SettingsSection.privacy,
         SettingsSection.shortcuts,
       ],
-      [if (!kIsWeb) SettingsSection.connectors, SettingsSection.usage],
-      [SettingsSection.experimental],
+      [
+        if (!kIsWeb) SettingsSection.connectors,
+        SettingsSection.usage,
+        SettingsSection.routing,
+      ],
+      [SettingsSection.tabInvites, SettingsSection.experimental],
       [SettingsSection.about, SettingsSection.debug],
     ]);
     // Customize keeps its name in the palette's memory; the rail calls it Appearance.

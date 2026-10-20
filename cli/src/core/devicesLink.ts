@@ -101,7 +101,11 @@ export function createDevicesLink(deps: DevicesLinkDeps) {
     // This computer's agents as the dial lists them, and what else the dial reads in line: asked as its
     // tick or ⌘K builds a list, so the devices read the registry as it is then.
     view: () => ({
-      agents: core.agents.advertised().map((session) => ({ ...session, displayName: core.agents.displayName(session), runtimeProfile: core.agents.runtimeProfile(session) })),
+      agents: [
+        ...core.agents.advertised().map((session) => ({ ...session, displayName: core.agents.displayName(session), runtimeProfile: core.agents.runtimeProfile(session) })),
+        // The cloud harnesses: on the dial's wheel as on the desk, with no pane behind them.
+        ...core.agents.cloud?.() ?? [],
+      ],
       machine: { id: core.machine.id(), computerId: core.machine.computerId(), name: core.machine.name() },
       signedIn: core.account.signedIn(),
       environment: core.account.environment(),
@@ -109,6 +113,7 @@ export function createDevicesLink(deps: DevicesLinkDeps) {
     }),
     activityText: async ({ agentId }) => ({ text: await core.agents.activityText(text(agentId)) }),
     activitySnapshot: async ({ agentId }) => ({ activity: await core.agents.activitySnapshot?.(text(agentId)) ?? null }),
+    usageFresh: async ({ agentId }) => ({ usage: await core.usageFresh?.(text(agentId)) ?? null }),
     recent: async ({ agentId, n }) => ({ turns: await core.turns.recent(text(agentId), typeof n === 'number' ? n : 3) }),
     asks: async ({ agentId }) => ({ asks: await core.turns.asks(text(agentId)) }),
     answerReviewed: async ({ answer }) => ({ ok: await core.questions.answerReviewed(answer as ReviewedAnswer) }),

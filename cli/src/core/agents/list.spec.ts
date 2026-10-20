@@ -33,6 +33,27 @@ function setup(live: RegisteredSession[], saved: RegisteredSession[] = [], over:
   return { deps, created, replies, ask }
 }
 
+describe('the agents a guest asks for', () => {
+  // A guest (a session of an account this machine is shared with) sees the harnesses it started and nothing
+  // of the owner's (docs/plans/2026-10-19-guest-machine-sharing-plan.md).
+  it('only its own harnesses, oldest first; never the owner\'s, the stopped, the cloud ones or the monitor\'s readings', async () => {
+    const [mine, also, older, owners, theirs] = [session('mine', { guest: 'kim@acme.io' }), session('also', { guest: 'kim@acme.io' }), session('older', { guest: 'kim@acme.io' }), session('owners'), session('theirs', { guest: 'lee@acme.io' })]
+    const cloud = vi.fn(() => [])
+    const { created, replies, deps } = setup([mine, also, older, owners, theirs], [session('saved', { guest: 'kim@acme.io' })], { cloudFrames: cloud })
+    created.set('older', '2026-10-05T09:00:00.000Z')
+    await createAgentList(deps).agentsList({ includeStopped: true, monitor: true }, () => 'web', (r) => { replies.push(r) }, 'kim@acme.io')
+    // Made at the same time, the id breaks the tie.
+    expect(replies).toEqual([{ agents: [expect.objectContaining({ id: 'older' }), expect.objectContaining({ id: 'also' }), expect.objectContaining({ id: 'mine' })] }])
+    expect(deps.stoppedAgents.available).not.toHaveBeenCalled()
+    expect(cloud).not.toHaveBeenCalled()
+    expect(deps.harnessResourcesReader).not.toHaveBeenCalled()
+    // A share recorded before its account was: a guest that owns nothing.
+    replies.length = 0
+    await createAgentList(deps).agentsList({}, () => 'web', (r) => { replies.push(r) }, '')
+    expect(replies).toEqual([{ agents: [] }])
+  })
+})
+
 describe('the agents a window asks for', () => {
   it('every live agent\'s frame, oldest first, an id breaking a tie, and nothing stopped unless asked for', async () => {
     const [a, b, c] = [session('b-agent'), session('a-agent'), session('c-agent')]
@@ -57,6 +78,21 @@ describe('the agents a window asks for', () => {
     await ask({ includeStopped: true })
     expect(deps.stoppedAgents.available).toHaveBeenCalledWith(live)
     expect(replies[0].agents.map((agent: AgentFrame) => [agent.id, agent.status])).toEqual([['saved', 'stopped'], ['live', 'active']])
+  })
+})
+
+describe('the cloud harnesses', () => {
+  const cloud = (id: string, createdAt: string, status = 'active') => ({ id, name: id, engine: 'fo', createdAt, status, selectedModel: null, location: 'cloud' }) as never
+
+  it('are listed with the rest in the same order, and a stopped one only where stopped agents are asked for', async () => {
+    const a1 = session('a1')
+    const { ask, replies } = setup([a1], [], { cloudFrames: () => [cloud('cloud_1', '2026-10-05T09:00:00.000Z'), cloud('cloud_2', '2026-10-05T11:00:00.000Z', 'stopped')] })
+    await ask({})
+    expect(replies[0].agents.map((agent: { id: string }) => agent.id)).toEqual(['cloud_1', 'a1'])
+    await ask({ includeStopped: true })
+    expect(replies[1].agents.map((agent: { id: string }) => agent.id)).toEqual(['cloud_1', 'a1', 'cloud_2'])
+    await ask({ includeStopped: true }, 'device')
+    expect(replies[2].agents).toEqual([{ id: 'cloud_1', name: 'cloud_1', engine: 'fo', selectedModel: null }, { id: 'a1', name: 'a1 name', engine: 'claude', selectedModel: null }])
   })
 })
 
@@ -173,6 +209,8 @@ describe('the device\'s rows', () => {
     expect(deviceAgentListItem({ id: 'a', engine: 'codex', selectedModel: 'runtime-v1:s:codex:gpt@high' }))
       .toStrictEqual({ id: 'a', engine: 'codex', selectedModel: 'runtime-v1:s:codex:gpt@high' })
     expect(deviceAgentListItem({ id: 'a', engine: 42, selectedModel: null })).toStrictEqual({ id: 'a', selectedModel: null })
+    // A cloud agent is driven from the dial too: its question screen answers it.
+    expect(deviceAgentListItem({ id: 'cloud_1', engine: 'devin-cloud', selectedModel: null })).toStrictEqual({ id: 'cloud_1', engine: 'devin-cloud', selectedModel: null })
   })
 
   it('a terminal is no row of a device\'s; anything else is', () => {

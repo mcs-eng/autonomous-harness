@@ -2,7 +2,7 @@
 // contacts become Pod gestures, and the render task draws Pod's frame. The rules here are the ones the Pod build of
 // the round dial's ui_habitat.c followed (docs/port-inventory.md; row ids R* and P* below name its entries).
 //
-// THREADS: three tasks meet here. The cable_link task (6 KB stack) calls the pro_app_* callbacks; the touch task
+// THREADS: three tasks meet here. The cable_link task (STACK_CABLE_LINK, 12 KB) calls the pro_app_* callbacks; the touch task
 // calls pro_app_touch; the render task ticks, draws and paints. One recursive mutex guards the Pod object, the
 // busy/question/machine tables and the dirty flag. Nothing that leaves the device is sent under it: effects and
 // requests are queued while the mutex is held and sent by leave() after it is released.
@@ -16,14 +16,17 @@
 #include "app/pro_touch.h"
 #include "app/pro_voice.h"
 #include "audio/audio_capture.h"
+#include "audio/pro_recorder.h"
+#include "cable/cable_link.h"
 #include "cable/pro_cable.h"
 #include "pro_app_api.h"
 #include "pro_display.h"
 #include "pro_frame.h"
-#include "pro_turn.h"
 #include "sys/config_store.h"
 #include "sys/fw_update.h"
+#include "sys/last_words.h"
 #include "sys/ram_telemetry.h"
+#include "task_stacks.h"
 #include "theme.h"
 
 #include "esp_attr.h"
@@ -41,7 +44,6 @@
 
 static const char *TAG = "pro";
 
-#define RENDER_STACK 24576          // the ROM inflater and the 24-row strips want room (SRC's Pro render task)
 #define IDLE_SLEEP_MS 300000u       // no touch for this long and the screen sleeps (R / P25)
 #define HEARTBEAT_MS 60000u
 #define FX_MAX 4                    // effects queued under the lock until leave()
@@ -49,13 +51,17 @@ static const char *TAG = "pro";
 #define SWEEP_RETRY_MS 1000         // a request that could not be sent
 #define SWEEP_STALL_MS 3000         // a request nobody answered
 
-// Pod's model, scenes and tables. All in PSRAM: the model alone is ~130 KB, two scenes of 128 runs ~53 KB (R18).
+// Pod's model, scenes and tables. All in PSRAM: the model alone is ~130 KB, two scenes of 192 runs ~80 KB (R18).
 static EXT_RAM_BSS_ATTR pod_ui_t s_pod;
 static EXT_RAM_BSS_ATTR ht_scene_t s_scene[2];
-static EXT_RAM_BSS_ATTR pod_roster_row_t s_rows[POD_AGENTS_MAX];   // not on the 6 KB cable_link stack (P9)
+static EXT_RAM_BSS_ATTR pod_roster_row_t s_rows[POD_AGENTS_MAX];   // not on the cable_link stack (P9)
 static EXT_RAM_BSS_ATTR struct { char id[ID_MAX], machine_id[ID_MAX]; } s_info[POD_AGENTS_MAX];   // the roster's machine ids
 static EXT_RAM_BSS_ATTR char s_busy[POD_AGENTS_MAX][ID_MAX];       // agents in a live turn ("" = free slot)
 static EXT_RAM_BSS_ATTR char s_quest[POD_AGENTS_MAX][ID_MAX];      // agents with an open question
+// Agents whose open question already woke the glass, and a hash of its prompt. A link drop does not clear it: the daemon
+// re-sends the open question after the relink and that must not beep again. A close (answered, withdrawn) clears it.
+static EXT_RAM_BSS_ATTR char s_alerted[POD_AGENTS_MAX][ID_MAX];
+static uint32_t s_alerted_h[POD_AGENTS_MAX];
 static EXT_RAM_BSS_ATTR cable_machine_t s_mach[CABLE_MAX_MACHINES];
 static int s_mach_n;
 
@@ -65,7 +71,10 @@ static bool s_started, s_linked, s_dirty;
 
 static pod_out_t s_fxq[FX_MAX];
 static int s_fxn;
-static bool s_beepq;   // a new notification landed: beep once after the lock is released
+static bool s_beepq;   // an alert landed and the last beep is old enough: beep once after the lock is released
+static bool s_wakeq;   // an alert landed: light a dark glass after the lock is released
+static bool s_beep_set;
+static uint32_t s_beep_ms;   // when the last beep was queued (POD_BEEP_COALESCE_MS)
 
 // The library sweep's request state. The walk itself is the glue's (pod_ui_sweep_*).
 static int s_sweep_offset;        // the offset the running sweep asks for next
@@ -80,9 +89,6 @@ static scroll_ev_t s_sq[SCROLL_MAX];
 static int s_sqn;
 
 static atomic_bool s_asleep, s_force_frame;
-// A finger held across a turn: its next samples arrive on the new axes, at the mirrored spot. The rest of that
-// contact is swallowed (pro_app_touch answers false once, and pro_touch keeps swallowing until the finger lifts).
-static atomic_bool s_turn_swallow;
 static atomic_bool s_updating, s_painted;   // a firmware image is being written (mirrors pod_ui_updating, readable without the lock); the first frame is out
 static char s_ota_from[24], s_ota_to[24];   // the update screen's versions, set at its begin
 static char s_updated[24];                  // "Updated to X": set by pro_app_note_update, shown (3 s) once the cable is up
@@ -113,12 +119,27 @@ static void change(void)
 static void settle(pod_out_t o)
 {
     if (o.fx != POD_FX_NONE && s_fxn < FX_MAX) s_fxq[s_fxn++] = o;
+    (void)pod_ui_start(&s_pod, ms());   // Pets: after the first swarms of a link, enter tab 0 (device-local: no agent.open to the desktop)
     if (pod_ui_take_changed(&s_pod)) change();
 }
 
 static void voice_begin_effect(const char *agent);
 static void voice_end_effect(void);
 static void send_library(uint32_t request, int offset);
+
+// An alert for someone else's screen (the caller holds the lock): wake the glass, and beep unless one was queued in the last
+// POD_BEEP_COALESCE_MS. Quiet over the update: the Inbox has it.
+static void alert_locked(void)
+{
+    if (pod_ui_updating(&s_pod)) return;
+    s_wakeq = true;
+    const uint32_t now = ms();
+    if (!s_beep_set || (int32_t)(now - s_beep_ms) >= POD_BEEP_COALESCE_MS) {
+        s_beep_set = true;
+        s_beep_ms = now;
+        s_beepq = true;
+    }
+}
 
 static void perform(const pod_out_t *o)
 {
@@ -144,17 +165,15 @@ static void leave(void)
     const int lib_offset = s_libq.offset;
     const uint32_t lib_request = s_libq.request;
     s_libq.on = false;
-    const bool beep = s_beepq;
-    s_beepq = false;
+    const bool beep = s_beepq, wake = s_wakeq;
+    s_beepq = s_wakeq = false;
     pod_read_out_t reads[POD_READS_MAX];
     const int read_n = pod_ui_take_reads(&s_pod, reads, POD_READS_MAX);   // entries read on the Pod: tell the host
     pro_app_unlock();
     for (int i = 0; i < n; i++) perform(&q[i]);
     for (int i = 0; i < read_n; i++) pro_cable_send_notif_read(reads[i].agent, reads[i].token);
-    if (beep) {   // a new notification: light a dark glass so its banner is seen, and chime unless muted
-        pro_app_wake();
-        if (!pro_settings_muted() && !atomic_load(&s_updating)) audio_beep();
-    }
+    if (wake) pro_app_wake();   // an alert: light a dark glass so its banner is seen
+    if (beep && !pro_settings_muted() && !atomic_load(&s_updating)) audio_beep();   // and chime, unless muted
     if (lib) send_library(lib_request, lib_offset);
 }
 
@@ -299,14 +318,6 @@ void pro_app_link(bool up, const char *machine)
     leave();
 }
 
-bool pro_app_linked(void)
-{
-    pro_app_lock();
-    const bool linked = s_linked;
-    pro_app_unlock();
-    return linked;
-}
-
 // ---- roster, tabs, library ------------------------------------------------------------------------------
 
 void pro_app_agents(const pro_agent_row_t *rows, int n)
@@ -336,6 +347,7 @@ void pro_app_swarms(const cable_swarm_t *items, int n, const cable_swarm_members
                     const cable_tile_t *tiles, int tile_n)
 {
     pro_app_lock();
+    pod_model_clock(&s_pod.model, ms());   // the focus echo window is measured on this clock, which otherwise stands still while the glass sleeps
     settle(pod_ui_swarms(&s_pod, items, n, members, selected, tiles, tile_n));   // every frame, changed or not (P12)
     leave();
 }
@@ -457,6 +469,10 @@ static void turn_locked(const char *id, const char *kind, const char *text, int 
     } else if (!strcmp(kind, "done") || !strcmp(kind, "error")) {
         set_remove(s_busy, id);
         settle(pod_ui_turn(&s_pod, id, kind, "", 0, now));
+        if (!strcmp(kind, "error")) {   // a failure is always an alert, whatever the daemon's tiers say
+            if (pod_ui_notify_text(&s_pod, id, POD_TIER_ALERT, text && text[0] ? text : "The turn failed", false, !pro_app_asleep(), now)) alert_locked();
+            change();
+        }
     }
 }
 
@@ -468,7 +484,15 @@ void pro_app_turn(const char *id, const char *kind, const char *text, int elapse
     leave();
 }
 
-void pro_app_summary(const char *id, const char *text, const char *recap, const char *full, bool restore, bool notify)
+void pro_app_turn_stats(const char *id, int tests_passed, int tests_failed, int commits, int tokens_in, int tokens_out)
+{
+    if (!id_ok(id)) return;
+    pro_app_lock();
+    settle(pod_ui_turn_stats(&s_pod, id, tests_passed, tests_failed, commits, tokens_in, tokens_out));
+    leave();
+}
+
+void pro_app_summary(const char *id, const char *text, const char *recap, const char *full, bool restore, pod_tier_t tier)
 {
     if (!id_ok(id)) return;
     pro_app_lock();
@@ -481,8 +505,8 @@ void pro_app_summary(const char *id, const char *text, const char *recap, const 
         const bool has_text = text && text[0] && strcmp(text, "done");
         if ((recap && recap[0]) || has_text) settle(pod_ui_recap(&s_pod, id, recap && recap[0] ? recap : text, restore));
         if (full && full[0]) settle(pod_ui_recap(&s_pod, id, full, restore));   // the long recap wins last (R6)
-        if (notify && !restore && pod_ui_notify(&s_pod, id, !pro_app_asleep(), now)) {   // news: an unread entry, the banner, one beep
-            s_beepq = !pod_ui_updating(&s_pod);   // quiet over the update: the Inbox has it
+        if (!restore && tier != POD_TIER_SILENT) {   // news: an entry; an alert also toasts, wakes and beeps
+            if (pod_ui_notify(&s_pod, id, tier, !pro_app_asleep(), now)) alert_locked();
             change();
         }
     }
@@ -510,11 +534,24 @@ void pro_app_notif_seen(const char *id, const char *token)
     leave();
 }
 
-void pro_app_question(const char *id, const char *text)
+void pro_app_question(const char *id, const char *request, const char *text)
 {
     if (!id_ok(id)) return;
     pro_app_lock();
-    if (s_linked && held(id) && set_add(s_quest, id)) settle(pod_ui_question(&s_pod, id, text && text[0] ? text : "Needs your answer"));
+    if (s_linked && held(id) && set_add(s_quest, id)) {
+        const char *q = text && text[0] ? text : "Needs your answer";
+        settle(pod_ui_question(&s_pod, id, q));
+        uint32_t h = 2166136261u;   // FNV-1a of the request id and the prompt: a lost close must not mute the next one
+        for (const char *c = request ? request : ""; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
+        h = (h ^ 0u) * 16777619u;
+        for (const char *c = q; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
+        int a = set_find(s_alerted, id);
+        const bool again = a >= 0 && s_alerted_h[a] == h;   // filed already, re-sent after a relink: no second beep
+        if (!again && set_add(s_alerted, id)) { a = set_find(s_alerted, id); s_alerted_h[a] = h; }
+        // A question is an alert; filed again after a relink it is the same one, and only the row returns.
+        if (pod_ui_notify_text(&s_pod, id, POD_TIER_ALERT, q, true, !pro_app_asleep(), ms()) && !again) alert_locked();
+        change();
+    }
     leave();
 }
 
@@ -523,6 +560,7 @@ void pro_app_question_close(const char *id)
     if (!id_ok(id)) return;
     pro_app_lock();
     set_remove(s_quest, id);
+    set_remove(s_alerted, id);
     settle(pod_ui_question_close(&s_pod, id));
     leave();
 }
@@ -669,18 +707,12 @@ static void flush_scroll(void)
 static void cancel_locked(void)
 {
     pod_ui_scroll_sink(&s_pod, scroll_emit, NULL, false);
-    pod_ui_touch_cancel(&s_pod);   // a cancelled drag ends with a zero UP (P4)
-    settle((pod_out_t){0});
+    settle(pod_ui_touch_cancel(&s_pod));   // a cancelled drag ends with a zero UP (P4); an open recording stays (the next tap sends it)
 }
 
 bool pro_app_touch(bool down, int x, int y)
 {
     pro_app_lock();
-    if (atomic_exchange(&s_turn_swallow, false)) {   // the finger that was down when the glass turned
-        leave();
-        flush_scroll();
-        return false;
-    }
     if (pro_app_asleep()) {
         // The screen went to sleep halfway through this contact (a power key, say). Nothing is delivered; the
         // caller swallows the rest of the contact.
@@ -753,9 +785,10 @@ void pro_app_button_press(void)
         return;
     }
     pro_app_lock();
+    pod_ui_navigated(&s_pod);
     pod_out_t out = {0};
     if (pod_ui_talking(&s_pod)) out = pod_nav_act(&s_pod.nav, &s_pod.model, POD_A_TABS, 0, ms());
-    while (s_pod.nav.depth > 1) (void)pod_nav_act(&s_pod.nav, &s_pod.model, POD_A_BACK, 0, ms());
+    if (s_pod.nav.depth > 1) out = pod_nav_act(&s_pod.nav, &s_pod.model, POD_A_BACK, 0, ms());   // back one level, nothing at the root
     change();
     settle(out);
     leave();
@@ -787,6 +820,9 @@ void pro_app_tick(void)
         pod_ui_talk_over(&s_pod);
         change();
     }
+    // A cross-task abort (link lost, side button, nav sync) can land between leave() and pro_voice_begin claiming
+    // s_open, leaving a recording with no Talk screen. A voice with neither Talk nor a sent clip is that orphan.
+    const bool orphan = pro_voice_open() && !pro_voice_waiting() && !pod_ui_talking(&s_pod);
     if (!pro_app_asleep() && pod_ui_clock_tick(&s_pod, now)) change();
     // R15: the library sweep (pod_glue.h). The request is pinned by its id; a request nobody answered is retried
     // after 3 s, one that could not be sent after 1 s.
@@ -804,6 +840,7 @@ void pro_app_tick(void)
         }
     }
     leave();
+    if (orphan) pro_voice_end(false);   // no lock held: it may notify pro_app and send on the cable
 }
 
 uint32_t pro_app_next_wake_ms(void)
@@ -822,6 +859,7 @@ bool pro_app_take_scene(ht_scene_t *scene)
     if (s_dirty) {   // R9; the hits stay in s_pod.frame for the touch task
         s_dirty = false;
         ht_scene_clear(scene, ht_rgb(HT_THEME_CANVAS));
+        s_pod.frame.mic_level = (int)pro_rec_level();   // the Pets voice wave
         pod_ui_render(&s_pod, scene, ms());
         fresh = true;
     }
@@ -841,13 +879,20 @@ static void heartbeat(uint32_t frames, uint32_t raster_max_us, uint32_t frame_ma
     last = now;
     pro_touch_stats_t touch;
     pro_touch_stats(&touch);
+    const cable_link_stats_t link = cable_link_stats();
+    uint32_t bad = 0, unknown = 0;
+    pro_cable_counters(&bad, &unknown);
     // The host watches this line while the renderer is alive, including while asleep.
-    ESP_LOGI(TAG, "alive up=%lus heap=%u/%u psram=%u touches=%lu read_fails=%lu frames=%lu raster_max_us=%lu frame_max_us=%lu stack_free=%u muted=%d%s%s",
+    ESP_LOGI(TAG, "alive up=%lus heap=%u/%u psram=%u touches=%lu read_fails=%lu frames=%lu raster_max_us=%lu frame_max_us=%lu stack_free=%u muted=%d isr_rx=%lu ring_drop=%lu seq_gaps=%lu link_rx=%lu link_frames=%lu link_corrupt=%lu link_discarded=%lu link_dropped_logs=%lu msg_bad=%lu msg_unknown=%lu%s%s",
              (unsigned long)(now / 1000), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              (unsigned long)touch.presses, (unsigned long)touch.read_failures, (unsigned long)frames,
              (unsigned long)raster_max_us, (unsigned long)frame_max_us,
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (int)pro_settings_muted(), touch.controller_ok ? "" : " TOUCH-DEAD", pro_app_asleep() ? " asleep" : "");
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (int)pro_settings_muted(),
+             (unsigned long)link.isr_rx, (unsigned long)link.ring_drop, (unsigned long)pro_cable_seq_gaps(),
+             (unsigned long)link.rx_bytes, (unsigned long)link.frames_ok, (unsigned long)link.corrupt_frames,
+             (unsigned long)link.discarded_bytes, (unsigned long)link.dropped_logs, (unsigned long)bad, (unsigned long)unknown,
+             touch.controller_ok ? "" : " TOUCH-DEAD", pro_app_asleep() ? " asleep" : "");
     ram_telemetry_periodic("alive");   // the heap checkpoint, and every tenth time the long-lived tasks' stack marks
 }
 
@@ -862,8 +907,8 @@ static void render_task(void *arg)
     uint32_t frames = 0, raster_max_us = 0, frame_max_us = 0;
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
+        last_words_phase(LW_RENDER, "render");
         pro_app_tick();
-        pro_app_apply_turn();
         const bool fresh = pro_app_take_scene(&s_scene[front ^ 1]);
         uint32_t wake_ms = pro_app_next_wake_ms();
         const int64_t wake_at = esp_timer_get_time() + (int64_t)wake_ms * 1000;
@@ -878,11 +923,14 @@ static void render_task(void *arg)
         if (on && (fresh || force)) {
             if (!fresh) s_scene[front ^ 1] = s_scene[front];
             const int64_t started = esp_timer_get_time();
-            const uint32_t raster_us = pro_frame_present(painted && !force ? &s_scene[front] : NULL, &s_scene[front ^ 1]);
+            uint32_t pushed_px = 0;
+            const uint32_t raster_us = pro_frame_present(painted && !force ? &s_scene[front] : NULL, &s_scene[front ^ 1], &pushed_px);
             const uint32_t frame_us = (uint32_t)(esp_timer_get_time() - started);
-            if (raster_us > raster_max_us) raster_max_us = raster_us;
-            if (frame_us > frame_max_us) frame_max_us = frame_us;
-            frames++;
+            if (pushed_px) {   // a scene identical to the last one paints nothing: it is no frame, and its few microseconds of damage compare must not
+                if (raster_us > raster_max_us) raster_max_us = raster_us;   // dilute the heartbeat's frame count or hide the slowest real frame
+                if (frame_us > frame_max_us) frame_max_us = frame_us;
+                frames++;
+            }
             front ^= 1;
             painted = true;
             atomic_store(&s_painted, true);
@@ -907,29 +955,6 @@ static void render_task(void *arg)
 
 void pro_app_set_brightness(uint8_t level) { pro_display_set_brightness(level); }
 
-// The cable task asks; the render task switches at the top of its next frame, so no frame is half one way.
-static atomic_int s_turn_req = -1;   // -1: nothing asked, else the wanted flag
-
-void pro_app_request_turn(bool turned)
-{
-    atomic_store(&s_turn_req, turned ? 1 : 0);
-    if (s_renderer) xTaskNotifyGive(s_renderer);
-}
-
-bool pro_app_apply_turn(void)
-{
-    const int want = atomic_exchange(&s_turn_req, -1);
-    if (want < 0 || (want != 0) == pro_turn_get()) return false;
-    pro_app_lock();
-    const bool held = s_pod.down;         // a contact began on the old axes
-    pro_app_unlock();
-    pro_turn_set(want != 0);
-    atomic_store(&s_force_frame, true);   // every pixel moved: the next awake frame paints the whole glass (as a wake does)
-    if (held) atomic_store(&s_turn_swallow, true);
-    pro_app_touch_cancel();
-    return true;
-}
-
 void pro_app_start(void)
 {
     if (s_started) return;
@@ -941,10 +966,10 @@ void pro_app_start(void)
     pro_frame_init();
     pro_display_set_brightness(config_load_brightness());
     pro_app_bump_activity();
-    BaseType_t ok = xTaskCreatePinnedToCore(render_task, "pro_render", RENDER_STACK, NULL, 5, &s_renderer, 1);
+    BaseType_t ok = xTaskCreatePinnedToCore(render_task, "pro_render", STACK_RENDER, NULL, 5, &s_renderer, 1);
     assert(ok == pdPASS);
     (void)ok;
-    ESP_LOGI(TAG, "app up: Pod, render stack %d B", RENDER_STACK);
+    ESP_LOGI(TAG, "app up: Pod, render stack %d B", STACK_RENDER);
 }
 
 // ---- firmware update (sys/fw_update.c calls these, from the cable task) -----------------------------------------
@@ -1042,8 +1067,6 @@ bool pro_app_test_take_dirty(void)
     return dirty;
 }
 
-bool pro_app_test_take_force_frame(void) { return atomic_exchange(&s_force_frame, false); }
-
 void pro_app_test_reset(void)
 {
     if (!s_lock) s_lock = xSemaphoreCreateRecursiveMutex();
@@ -1051,11 +1074,12 @@ void pro_app_test_reset(void)
     memset(s_info, 0, sizeof s_info);
     memset(s_busy, 0, sizeof s_busy);
     memset(s_quest, 0, sizeof s_quest);
+    memset(s_alerted, 0, sizeof s_alerted);
     s_mach_n = 0;
     s_linked = false;
     s_dirty = true;
     s_fxn = 0;
-    s_beepq = false;
+    s_beepq = s_wakeq = s_beep_set = false;
     s_sqn = 0;
     s_libq.on = false;
     s_sweep_offset = 0;
@@ -1065,7 +1089,6 @@ void pro_app_test_reset(void)
     s_lib_pending = false;
     atomic_store(&s_asleep, false);
     atomic_store(&s_force_frame, false);
-    atomic_store(&s_turn_req, -1);
     atomic_store(&s_updating, false);
     s_updated[0] = 0;
 }

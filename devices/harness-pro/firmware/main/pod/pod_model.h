@@ -28,7 +28,7 @@ typedef enum { POD_IDLE, POD_WORKING, POD_ASKING, POD_DONE, POD_OFFLINE } pod_st
 // The footer's spinner word (turn.activity `text`, "Infusing..." with its dots dropped): its own field, so it and the
 // progress sentence (`action`, in activity[]) never overwrite each other.
 #define POD_VERB_BYTES 64
-#define POD_STEPS_MAX  3
+#define POD_STEPS_MAX  6
 #define POD_STEP_BYTES 160
 
 typedef struct {
@@ -39,7 +39,13 @@ typedef struct {
     char activity[POD_ACTIVITY_BYTES], question[320], recap[POD_RECAP_BYTES];
     char verb[POD_VERB_BYTES];
     char steps[POD_STEPS_MAX][POD_STEP_BYTES];   // this turn's tools and previous activity sentences, newest first (cut on a codepoint)
+    uint16_t step_at_s[POD_STEPS_MAX];   // seconds into the turn each step arrived (steps[] order); 0xFFFF = unknown (no turn start seen)
     uint8_t step_count;
+    int16_t step_total;                  // steps pushed this turn (not cut by the list's cap or by done), -1 when no turn.started was seen
+    bool turn_started;                   // a turn.started began the current turn (step times are measured from since_ms)
+    bool failed;                         // the last turn ended in turn.error; the next turn.started clears it (state stays IDLE)
+    int32_t tests_passed, tests_failed, commits;   // turn.stats of the last turn, -1 unknown; cleared by turn.started
+    int32_t tokens_in, tokens_out;                 // same, from turn.stats tokensIn / tokensOut
     bool activity_cut;                   // the cable text was longer than activity[]: the view ends it with an ellipsis
     bool recap_cut;                      // the text ends mid-thought (the source was cut, or too long to keep): the view ends it with "..."
     uint8_t recap_lines;                 // recap[] holds that many NUL-terminated lines, back to back
@@ -59,6 +65,9 @@ typedef struct {
     // event arrives, or Idle again after POD_SENT_WAIT_MS with none.
     bool sent;
     uint32_t sent_ms;
+    // This turn plays the pet's second working scene (POD_SCENE_WORK_ALT, Claude's builder) instead of its first (the
+    // chef): drawn once as the turn starts (pod_model_random), kept until it ends, so every screen shows the same one.
+    bool work_alt;
 } pod_agent_t;
 
 typedef struct { int16_t x1, y1, x2, y2; } pod_rect_t;   // 0..1000
@@ -77,8 +86,13 @@ typedef struct {
 #define POD_UNREAD_MAX  16
 #define POD_UNREAD_TEXT 240
 #define POD_TOKEN_MAX   64
+#define POD_UNREAD_TTL_MS    (6u * 3600u * 1000u)   // an entry lives 6 h from receipt (the device's monotonic ms, uint32-wrap safe)
+#define POD_BEEP_COALESCE_MS 30000                  // at most one beep per this long
+typedef enum { POD_UNREAD_FINISHED, POD_UNREAD_FAILED } pod_unread_kind_t;
 typedef struct {
     char agent[ID_MAX], name[CABLE_NAME_MAX], token[POD_TOKEN_MAX], text[POD_UNREAD_TEXT];
+    bool ask;                            // filed by a question (not a finished turn): it goes when the question closes
+    pod_unread_kind_t kind;              // FAILED when the agent's last turn ended in an error
     uint32_t at_ms;
     int32_t elapsed_s;                   // the turn's length, -1 unknown
 } pod_unread_t;
@@ -90,7 +104,7 @@ typedef struct {
     pod_agent_t agents[POD_AGENTS_MAX];
     uint8_t agent_count;
     pod_tab_t tabs[POD_TABS_MAX];
-    uint8_t tab_count, selected;
+    uint8_t tab_count, selected;         // tabs holding no agent are left out; selected == tab_count: the window's tab is one of those
     bool linked;
     uint32_t revision;                   // bumped by every feed that changes something
     uint32_t clock_ms;                   // the newest now_ms seen (pod_model_clock); the stale rule reads it
@@ -107,6 +121,9 @@ void pod_copy_str(char *dst, size_t cap, const char *src);
 void pod_utf8_trim(char *s);
 
 void pod_model_reset(pod_model_t *);
+// The random source a new turn draws its working scene from (pod_agent_t.work_alt): esp_random on the device (pro_app);
+// NULL, the default, always the first scene (the host tests and goldens: the chef).
+void pod_model_random(uint32_t (*rnd)(void));
 // Interface addition: call at agents.begin; agents_end then drops every agent not re-sent since.
 void pod_model_agents_begin(pod_model_t *);
 void pod_model_agent(pod_model_t *, const char *id, const char *name, const char *engine, const char *machine);
@@ -137,6 +154,8 @@ void pod_model_library_status(pod_model_t *, const char *id, const char *status,
 // step (text = a tool the turn started, "Read · file.c"), done, error.
 // An empty text never blanks the line it feeds.
 void pod_model_turn(pod_model_t *, const char *id, const char *kind, const char *text, int elapsed_s, uint32_t now_ms);
+// turn.stats: the last turn's test and commit counts (-1 leaves a field unknown). Unknown agents are ignored.
+void pod_model_turn_stats(pod_model_t *, const char *id, int32_t passed, int32_t failed, int32_t commits, int32_t tokens_in, int32_t tokens_out);
 void pod_model_question(pod_model_t *, const char *id, const char *text);
 void pod_model_question_close(pod_model_t *, const char *id);
 void pod_model_recap(pod_model_t *, const char *id, const char *recap, bool restore);
@@ -177,5 +196,9 @@ bool pod_model_unread_seen(pod_model_t *, const char *agent, const char *token);
 // Read here: the same, and an entry that had a token is queued in reads[] for notif.read.
 bool pod_model_unread_read(pod_model_t *, const char *agent);
 const pod_unread_t *pod_model_unread_find(const pod_model_t *, const char *agent);
+// How many notices Pets lists (the Notices screen and Home's Notices card): the asking agents, then the unread entries of agents that are not asking.
+int pod_notice_count(const pod_model_t *);
+// The entry of a question that was just asked (the toast needs one): like pod_model_unread_add, marked `ask`.
+void pod_model_unread_ask(pod_model_t *, const char *agent, const char *name, const char *text, uint32_t now_ms);
 // Take the queued notif.read frames (at most max); returns the count.
 int pod_model_take_reads(pod_model_t *, pod_read_out_t out[], int max);

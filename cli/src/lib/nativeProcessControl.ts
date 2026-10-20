@@ -81,7 +81,7 @@ export function parseNativeProcessControl(output: string, pids: readonly number[
         || BigInt(fd.device) > 0xffffffffn || typeof fd.inode !== 'string' || !/^\d{1,20}$/.test(fd.inode)
         || BigInt(fd.inode) > 0xffffffffffffffffn) return nativeUnavailable('the native control descriptor is invalid')
       seen.add(fd.fd)
-      const kinds: Record<number, string> = { 2: 'SOCKET', 3: 'PSXSHM', 4: 'PSXSEM', 5: 'KQUEUE', 6: 'PIPE', 7: 'FSEVENT' }
+      const kinds: Record<number, string> = { 2: 'SOCKET', 3: 'PSXSHM', 4: 'PSXSEM', 5: 'KQUEUE', 6: 'PIPE', 7: 'FSEVENT', 9: 'NPOLICY' }
       const modes: Record<number, string> = { [0o100000]: 'REG', [0o040000]: 'DIR', [0o020000]: 'CHR', [0o060000]: 'BLK', [0o010000]: 'FIFO' }
       const kind = fd.type === 1 ? modes[fd.mode] : kinds[fd.type]
       if (!kind || (fd.type === 1 ? fd.inode === '0' : fd.mode !== 0 || fd.device !== '0' || fd.inode !== '0')) {
@@ -141,7 +141,9 @@ function linuxControl(pids: readonly number[], parent: number, budget: NativeEvi
     if (!parent) return []
     const tasks = entries(`/proc/${parent}/task`, 128), ids: number[] = []
     if (!tasks.length) return nativeUnavailable('the native task pool is empty')
-    for (const task of tasks) {
+    // In thread order, as /proc lists them: a directory read elsewhere (a test's tmpfs, a hashed ext4) lists in
+    // its own order, and the children came back in it (CI, 2026-10-20: [44, 43] for [43, 44]).
+    for (const task of [...tasks].sort((a, b) => Number(a) - Number(b))) {
       const text = bytes(`/proc/${parent}/task/${task}/children`, 1024)
       if (!/^(?:\d+\s+)*$/.test(text)) return nativeUnavailable('the native child pool is malformed')
       for (const value of text.trim().split(/\s+/).filter(Boolean)) {

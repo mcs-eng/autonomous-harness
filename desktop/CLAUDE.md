@@ -152,9 +152,16 @@ Each relay connection also negotiates a WebRTC data channel to the machine
 (`web/p2p/`, the phone's `../mobile/lib/p2p` on the browser's own
 `RTCPeerConnection` — no `flutter_webrtc`, so native builds gain no plugin);
 terminal frames take it when it is up and fall back to the relay. Those files,
-the transport interface and the E2EE session are copies of the phone's (mobile
-stays a standalone package); `test/p2p/mobile_parity_test.dart` fails until a
-change is carried to both. The browser's E2EE is pure Dart on the UI thread,
+the transport interface and the E2EE session began as copies of the phone's
+(mobile stays a standalone package). `test/p2p/mobile_parity_test.dart` still
+holds two of them to the phone's — the link (`web/p2p/terminal_p2p_link.dart`)
+and the transport interface (`ws/terminal_transport_plugin.dart`) — and fails
+until a change is carried to both. The P2P plugin and policy, the relay codec
+and the E2EE session differ on purpose since 2026-10-14: the phone starts its
+channel on the first terminal with no open wait, redials a dropped one within
+seconds, and works the hello, the welcome and large frames on a background
+isolate; the browser keeps its own copies, so a fix to one of them is carried
+across by hand. The browser's E2EE is pure Dart on the UI thread,
 and that is fine: sealing plus opening a 4 KiB frame measured 316 µs under
 dart2js `-O4`, 282 µs on the Dart VM and 479 µs as `-O4` WASM (Node 24,
 2026-10-06) — `flutter test --platform chrome` compiles unoptimized and reads
@@ -193,19 +200,23 @@ The native desktop target uses the CLI for cloud access and SSO tokens:
   client it was issued to, so the session keeps the client the backend's exchange REPORTS — never
   the one it asked for, since an older backend exchanges as its configured client and names none
   — and every refresh names it again (`AuthSession.ssoClientId`, the CLI's `session.json`).
-  **A computer new to Harness is asked once to sign in, between setup and its first workspace**
+  **Desktop requires sign-in after setup and before opening the workspace**
   (`widgets/sign_in_step.dart`, `AppNotifier.signInStepShowing`; design
-  `../docs/research/2026-10-08-onboarding-redesign/index.html` 1b, owner 2026-10-11): what an
-  account adds in four lines, Continue with Google and Continue with Apple, and under them Skip
-  and Continue with email (no provider: the sign-in page's own chooser). It follows the setup
-  tour — or the setup screen, where there was no tour — only when setup installed the CLI on a
-  computer that never had it and nobody is signed in; the first workspace keeps building behind
-  it. ⚠️ The page does not change while the browser is open, so its controls stay live
-  (`signInFromStep`): the same one again reopens its page, another one cancels and switches.
-  Afterwards the same sign-in is the tab row's last control: **Sign in** as a guest, the account's
-  initial once signed in, whose menu is `widgets/account_menu.dart`
-  (`design/workspace-status-bar.md`). The sign-in sheet carries Continue with email too, except
-  in a short window, where one more row pushes the expired-session line off screen.
+  `../docs/research/2026-10-08-onboarding-redesign/index.html` 1b, owner 2026-10-12).
+  The tour has five slides: machines, agents, persistent sessions, phone and device;
+  the ⌘P and ⌘N slides are removed. The sign-in page keeps its four benefits and
+  standalone Google and Apple buttons, with Continue with email centered underneath;
+  there is no surrounding card or Skip. It applies to existing signed-out installations and relaunches after
+  setup too. A successful explicit sign-out brings it back. A signed-in offline launch
+  opens normally. A server-rejected session requires sign-in again; saved local work
+  and running harnesses survive behind the page. A temporary network outage keeps
+  an already signed-in workspace available.
+  Agent downloads still run during setup; first-arrival agents wait for an account.
+  The page does not change while the browser is open: the same option reopens its page,
+  and another option cancels and switches. Failures and cancellation keep the required
+  page visible. The workspace account menu is `widgets/account_menu.dart`
+  (`design/workspace-status-bar.md`). Every native sign-in entry uses this same
+  page; the old fleet-map card and desktop phone-scanning choice are removed.
   Sign-out owns its CLI process, checks its exit, and terminates it on timeout. `AppNotifier` joins
   repeated sign-out requests and blocks another sign-in until credential and connection cleanup
   finish; failure offers keyboard-focused Retry sign out. Development fixture disconnects never
@@ -233,6 +244,10 @@ The native desktop target uses the CLI for cloud access and SSO tokens:
   `LocalCliDiscovery`, which runs `harness start` when needed). The CLI terminates E2EE for relayed
   machines; the app carries no crypto. Close code `4404`/`NO_PEER_LINK` means the machine needs
   `harness link import` — surfaced as `MachineState.needsLink` and polled via `_linkRetryTimers`.
+  Native link retries wait 5, 10, 20, then 30 seconds between probes, and never close an active
+  connection or password-link handshake. Explicit Connect is immediate; repeated clicks join it.
+  The initial unlinked refusal is measured once; later automatic probes are suppressed until the
+  machine is linked. This changes neither the browser's retry policy nor the daemon.
   A viewer build settles its own `NO_PEER_LINK`/`E2E_DENIED` first (`_settleTrust`): it joins the
   device log if it is not in it (`ViewerDeviceLog.ensureRegistered`), reads it and dials again,
   showing the machine as connecting; only a refusal that outlasts two rounds (~15s), or a frozen
@@ -455,8 +470,9 @@ add a kind there, not at the call site.
   repaint on a theme flip.
 - The [workspace status bar](design/workspace-status-bar.md) places system-font tabs and global actions at the top,
   with harness, machine and installed local model counts plus subscription allowance remaining at the bottom left and focused machine/repo/branch/PR at the bottom right.
-  Tabs center their name/status group and show no shortcut hint (Command changes nothing on
-  them). Hovering a tab shows only its ×. Agent Messages has nothing on a tab: no 💬 (it was
+  Tabs center their name/status group. Holding Command shows their current shortcut in the status
+  slot using the original small labels; release or window deactivation restores the status.
+  Hovering a tab shows only its ×. Agent Messages has nothing on a tab: no 💬 (it was
   easy to hit by mistake and turned the tab off, owner 2026-10-12; Settings ▸ Experimental holds
   the account's switch) and no traffic, so its status slot keeps its own status (messages arrive when they
   arrive). A tab's log is its menu's and File's Show Agent Messages (`lib/agent_messages/`,
@@ -526,6 +542,9 @@ add a kind there, not at the call site.
   sha256(`<provider>:<id>`), `usageAccountKey` here and `accountKey` there, both suites pinning one
   vector — decides whether a remote subscription is this one again (folded in, unlabelled) or
   another (its own figure, labelled with the machine). Hashed because RPC replies are logged.
+  Subscription headings show the provider login's email when available; older readings without
+  an email show only the provider. Email is display metadata, redacted from structured logs.
+  Account grouping, search identity and model selection continue to use the full hashed key.
   ⚠️ A null key never matches, itself included, and a remote reading folds into this computer's
   only when this computer HAS figures — otherwise a token that expired here would swallow a live
   reading of the same account taken there. `readings` stays this computer's alone and `accounts`
@@ -702,9 +721,13 @@ add a kind there, not at the call site.
   (`log_stream.dart` + `log_stream_sinks.dart`): a bounded ring of the last 500 entries that
   `installFileLogs` tees into. Routine DEBUG records use a one-second flush deadline,
   256 entries or 64 Ki characters. INFO/WARN and admitted ERROR records flush their preceding context;
-  export, backgrounding, normal quit and updater handoff also flush. An abrupt process kill
-  can lose the pending DEBUG batch. CLI transcripts remain immediately
-  flushed. No timer runs with an empty buffer. It is developer
+  export, backgrounding, normal quit and updater handoff also flush. Every flush and immediate
+  record reaches the kernel at once, but only admitted ERROR records (crashes included), normal
+  quit and updater handoff fsync (`flushAppLog(durable: true)`): on Linux ext4 an fsync on the UI
+  isolate waits for a journal commit (10–500+ ms under I/O), the best fit for the Linux long
+  frames of 2026-10-16. An abrupt process kill can lose the pending DEBUG batch; a power loss can
+  also lose written lines not yet synced. CLI transcripts are still written line by line, without
+  an fsync. No timer runs with an empty buffer. It is developer
   furniture — `kDebugSurfaceEnabled` (`logging/debug_surface.dart`, `kDebugMode` or
   `--dart-define=HARNESS_DEBUG_SURFACE=true`) gates the rail row, the ⌘D shortcut
   (`kDebugShortcut`, in `appShortcuts()` rather than `kAppShortcuts`) and the ring itself; the log

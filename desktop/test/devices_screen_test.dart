@@ -228,7 +228,11 @@ void main() {
           expect(tester.takeException(), isNull);
           expect(find.text('Shop'), findsOneWidget);
           if (!empty) {
-            expect(find.text('Harness Pro'), findsNWidgets(3));
+            // Five known devices, four plugged in: the unplugged Travel Pro
+            // has no card, and the count is of the plugged-in ones.
+            expect(find.text('4 devices'), findsOneWidget);
+            expect(find.text('Travel'), findsNothing);
+            expect(find.text('Harness Pro'), findsNWidgets(2));
             expect(find.text('Faces'), findsOneWidget);
           }
           await capture(
@@ -404,24 +408,20 @@ void main() {
     dial.dispose();
   });
 
-  testWidgets('Rotate screen 180° shows only for a Pro reporting screenTurned', (
+  testWidgets('A Pro that still reports a uiSkin shows no Interface choice', (
     tester,
   ) async {
     final dial = DialState();
-    final sent = <Map<String, Object?>>[];
     final controller = DevicesController(
       dial: dial,
       accountId: 'a',
-      sendSettings: (_, patch) async {
-        sent.add(patch);
-        return true;
-      },
+      sendSettings: (_, patch) async => true,
     );
     await controller.load();
-    DialStatus pro(String id, {bool? turned}) => DialStatus.fromJson({
+    final pro = DialStatus.fromJson({
       'attached': true,
-      'id': id,
-      'mac': 'aa:bb:cc:$id',
+      'id': 'p1',
+      'mac': 'aa:bb:cc:p1',
       'fw': '0.1.1',
       'hw': 'harness-pro',
       'board': 'pro',
@@ -429,38 +429,25 @@ void main() {
         'brightness': 70, 'character': 2, 'face': 720, 'round': false,
         'muted': false, 'quiet': false, 'straightTitle': true,
         'focusFace': true, 'scrollReversed': false, 'voiceLang': 'en',
-        'screenTurned': ?turned,
+        'uiSkin': 'classic', // an older firmware: Pets is the only interface now
       },
     });
-    report(dial, [pro('p1', turned: false), pro('p2'), deviceStatus('round')]);
+    report(dial, [pro]);
     await pump(tester, controller);
-    Future<void> select(int i) async {
-      await tester.tap(
-        find.byKey(ValueKey('device-card-${controller.devices[i].key}')),
-      );
-      await tester.pumpAndSettle();
-    }
-
-    await select(0);
-    final key = controller.devices[0].key;
-    final row = find.byKey(ValueKey('devices-screen-turn-$key'));
-    expect(find.text('Rotate screen 180°'), findsOneWidget);
-    await tester.ensureVisible(row);
-    await tester.tap(row);
-    await tester.pump();
-    expect(sent.last, {'screenTurned': true});
-
-    await select(1);
-    expect(find.text('Rotate screen 180°'), findsNothing);
-    await select(2);
-    expect(find.text('Rotate screen 180°'), findsNothing);
+    await tester.tap(
+      find.byKey(ValueKey('device-card-${controller.devices[0].key}')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Brightness'), findsWidgets); // the settings did open
+    expect(find.text('Interface'), findsNothing);
+    expect(find.byType(SegmentedButton<String>), findsNothing);
     await tester.pumpWidget(const SizedBox());
     controller.dispose();
     dial.dispose();
   });
 
   testWidgets(
-    'selected device owns changes through reorder and disconnect; Faces is a single choice',
+    'selected device owns changes through reorder; Faces is a single choice; unplugged it leaves the page',
     (tester) async {
       final dial = DialState();
       final sent = <(String, Map<String, Object?>)>[];
@@ -492,9 +479,6 @@ void main() {
       report(dial, [deviceStatus('b', muted: false)]);
       await tester.pumpAndSettle();
       expect(tester.widget<Switch>(sound).value, isTrue);
-      report(dial, []);
-      await tester.pumpAndSettle();
-      expect(tester.widget<Switch>(sound).onChanged, isNull);
       final faces = find.byKey(const Key('devices-faces'));
       await tester.ensureVisible(faces);
       await tester.tap(faces);
@@ -508,6 +492,13 @@ void main() {
         hasLength(1),
         reason: 'Inspecting the current face never writes',
       );
+      // Unplugged, the device leaves the page: no card, no settings to change.
+      report(dial, []);
+      await tester.pumpAndSettle();
+      expect(find.byKey(ValueKey('device-card-$key')), findsNothing);
+      expect(find.byType(DeviceSettingsPanel), findsNothing);
+      expect(find.text('No devices connected'), findsOneWidget);
+      expect(sent, hasLength(1));
       await tester.pumpWidget(const SizedBox());
       controller.dispose();
       dial.dispose();

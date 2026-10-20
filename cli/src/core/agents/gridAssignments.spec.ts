@@ -183,6 +183,33 @@ it('refresh reads boundary-faithful argv and otherwise offers models only the ex
   vi.mocked(processRows).mockReset().mockResolvedValue([])
 })
 
+  vi.mocked(readProcessEnv).mockReset().mockResolvedValue({ ANTHROPIC_BASE_URL: 'https://grid.example/relay' })
+  vi.mocked(processRows).mockReset().mockResolvedValue([])
+})
+
+it("reads a Pi whose environment cannot be read from how it was launched, and only when that names a grid", async () => {
+  // Pi renames its process, and `ps` then shows neither its environment nor its argv (2026-10-14): what is left is
+  // its launcher's command line. Moved onto a grid, that names the extension, and the switch is confirmed at once.
+  const s = setup()
+  s.rows[0] = { ...s.rows[0], engine: 'pi', grid: undefined }
+  const identity = s.rows[0].processIdentity!
+  vi.mocked(readProcessEnv).mockResolvedValueOnce(null)
+  vi.mocked(processRows).mockResolvedValueOnce([{ ...identity, parentPid: 1, args: "zsh -lic . 'launch.sh' harness-engine /w /bin/pi --session s --model grid/chosen -e /c/grid-provider.ts" }])
+  s.service.refresh(s.rows[0])
+  await flush()
+  expect(s.pending[0].processes).toEqual([{ key: expect.any(String), engine: 'pi', env: {}, args: '-e /c/grid-provider.ts --model grid/chosen' }])
+  s.answer(0, assignment)
+  await flush()
+  expect(s.rows[0].grid).toEqual(assignment)
+  // A launch naming no grid says nothing about an environment that could not be read: still not known.
+  vi.mocked(readProcessEnv).mockResolvedValueOnce(null)
+  vi.mocked(processRows).mockResolvedValueOnce([{ ...identity, parentPid: 1, args: 'zsh -lic . launch.sh harness-engine /w /bin/pi --session s' }])
+  s.service.refresh(s.rows[0])
+  await flush()
+  expect(s.rows[0].grid).toEqual(assignment)
+  expect(s.models.gridAssignments).toHaveBeenCalledOnce()
+})
+
 it('marks only a local profile launch with its own endpoint, on discovery and on refresh', async () => {
   const s = setup()
   const local = 'http://127.0.0.1:8090/v1'

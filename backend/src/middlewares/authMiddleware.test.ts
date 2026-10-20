@@ -98,3 +98,10 @@ describe('control-plane SSO auth middleware', () => {
     })
   })
 })
+
+it('exempts only the exact credential-free setup and Hub endpoints from authentication', () => {
+  expect(shouldSkipAuth('/api/product-usage/setup')).toBe(true)
+  expect(shouldSkipAuth('/api/product-usage/hub')).toBe(true)
+  for (const path of ['/api/product-usage/report', '/api/product-usage/settings', '/api/product-usage/setup/extra',
+    '/api/product-usage/hub/extra']) expect(shouldSkipAuth(path)).toBe(false)
+})

@@ -1,3 +1,18 @@
+/// [name] without the quantization its file name ends in, which a row's Quant
+/// says: `Qwen3.8-27B-UD-Q4_K_M` is `Qwen3.8-27B`, `qwen3:4b-instruct-2507-q4_k_m`
+/// is `qwen3:4b-instruct-2507` — hn's `without_quant`, so a model reads the same
+/// in both, and the same on the machine running it as on one it is shared with.
+/// A name that is all quant stays.
+String withoutQuant(String name) {
+  final quant = RegExp(
+    r'[-_.](?:ud[-_])?(?:(?:iq|q|mxfp)\d[a-z0-9_]*|bf16|fp16|f16)$',
+    caseSensitive: false,
+  ).firstMatch(name);
+  return quant == null || quant.start == 0
+      ? name
+      : name.substring(0, quant.start);
+}
+
 /// The local daemon reports lifecycle and measured telemetry. Unknown values
 /// stay absent; a weights file's size is never relabelled as memory use.
 class LocalModel {
@@ -69,13 +84,19 @@ class LocalModel {
     ).firstMatch(id)?.group(1)?.toUpperCase();
   }
 
+  /// Its name as shown: without the quant its file name ends in ([withoutQuant]).
+  String get shownName => withoutQuant(name);
+
+  /// [shownName] with its quant beside it: what tells two downloads of one
+  /// model apart.
   String get displayName {
+    final shown = shownName;
     final variant = quantization;
-    if (variant == null || variant.isEmpty) return name;
+    if (variant == null || variant.isEmpty) return shown;
     final present = RegExp(
       '(^|[^a-z0-9])${RegExp.escape(variant.toLowerCase())}([^a-z0-9]|\$)',
-    ).hasMatch(name.toLowerCase());
-    return present ? name : '$name · $variant';
+    ).hasMatch(shown.toLowerCase());
+    return present ? shown : '$shown · $variant';
   }
 
   factory LocalModel.fromJson(Map<String, dynamic> data) => LocalModel(

@@ -223,6 +223,25 @@ pub fn state_dir() -> std::path::PathBuf {
 /// The agent a reply is about (`agentId`).
 fn agent_id_of(reply: &Value) -> Option<String> { reply.get("agentId").and_then(Value::as_str).map(str::to_string) }
 
+/// `terminal_open` for a pane of [size]. [takeover]: take the keyboard from any other window.
+/// hn with no terminal ([headless]) has no one to give the keyboard or the size to: it opens as a
+/// watcher (`watch`), which the machine never counts as holding the terminal — otherwise, first
+/// back after a daemon restart, it took every agent of the desk at its 80x24 layout and left the
+/// window in use watching until someone typed. A command it runs that types still takes over.
+fn open_request(agent_id: &str, (cols, rows): (u16, u16), host: &str, takeover: bool, headless: bool) -> Value {
+    let mut request = json!({
+        "protocolVersion": 3,
+        "agentId": agent_id,
+        "cols": cols,
+        "rows": rows,
+        "compression": ["zlib", "none"],
+        "client": { "kind": "tui", "name": format!("{host} terminal") },
+        "takeover": takeover,
+    });
+    if headless && !takeover { request["watch"] = json!(true) }
+    request
+}
+
 /// Seconds since the epoch.
 pub fn epoch_secs() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
@@ -600,6 +619,9 @@ pub struct App {
     /// Each machine's last measured round trip (the live roster request), for `@`.
     pub rtt: HashMap<String, Duration>,
     pub homes: HashMap<String, String>,
+    /// On a machine shared with this account, the folders its owner shares with guests (path, editable),
+    /// as it last said (`guest_folders`); the guest's workspace stands as its home in [homes].
+    pub guest_folders: HashMap<String, Vec<(String, bool)>>,
     last_focus_sent: Option<(String, String)>,
     /// The mouse event of the key whose commands are running (tmux's item event): `-t =`, the
     /// commands' target, send-keys -M and the mouse_* formats read it.
@@ -733,6 +755,9 @@ pub struct App {
     /// Each machine's agent accounts' rate limits (usage_read), and when they were last asked.
     pub usage: HashMap<String, Vec<fleet::Usage>>,
     pub usage_checked: Option<Instant>,
+    /// When each machine was last asked its usage, and on which connection (read_usage: at most once a
+    /// minute per connection; a reconnect is asked its own).
+    pub usage_asked: HashMap<String, (u64, Instant)>,
     pub key_name: Option<String>,
     pub key_run: Option<String>,
     pub cfg_finished: bool,
@@ -884,6 +909,8 @@ pub struct App {
     pub controls: crate::workspace_controls::State,
     pub agent_switch: crate::agent_switch::State,
     pub hardware: crate::hardware::State,
+    /// hn's product measurement, waiting for this computer's daemon (measure.rs).
+    pub measure: crate::measure::State,
 }
 
 impl App {
@@ -973,6 +1000,7 @@ impl App {
             enriching: 0,
             usage: HashMap::new(),
             usage_checked: None,
+            usage_asked: HashMap::new(),
             key_name: None,
             key_run: None,
             cfg_finished: false,
@@ -1084,6 +1112,7 @@ impl App {
             shell_context: crate::shell_context::State::load(),
             rtt: HashMap::new(),
             homes: HashMap::new(),
+            guest_folders: HashMap::new(),
             last_focus_sent: None,
             mouse_ev: None,
             mouse_state: Default::default(),
@@ -1113,6 +1142,7 @@ impl App {
             controls: Default::default(),
             agent_switch: Default::default(),
             hardware: Default::default(),
+            measure: Default::default(),
         }
     }
 
@@ -1240,29 +1270,7 @@ impl App {
         self.spawn(async move { http_json(port, "GET", "/api/status", None).await }, move |app, status| {
             if request != app.boot_request { return }
             match status {
-            Ok(status) => {
-                app.daemon_down = false;
-                app.viewer_web_url = status.get("webUrl").and_then(Value::as_str).unwrap_or("").to_string();
-                let id = status.get("machineId").and_then(Value::as_str).unwrap_or("").to_string();
-                if id.is_empty() { return }
-                app.adopt_daemon_identity(&status);
-                if app.fleet.agents.is_empty() && app.fleet.machines.is_empty() { app.fleet.load_cache(&id) }
-                app.fleet.local_id = id.clone();
-                for machine in &mut app.fleet.machines { machine.local = machine.id == id || crate::local::is_local(&machine.id); }
-                if app.fleet.machine(&id).is_none() {
-                    app.fleet.machines.insert(0, Machine { shared: false, id: id.clone(), name: fleet::machine_display_name(&id, None), local: true, status: "running".into(), reach: Reach::Unknown });
-                }
-                // Signed out, this computer is its computer id; signed in, the account's machine id.
-                // Windows saved under the other one stayed `Connecting…` (after a sign-in) or `not
-                // linked` (after a sign-out) to a machine that no longer answers to it.
-                let computer = status.get("computerId").and_then(Value::as_str).unwrap_or("").to_string();
-                for old in [computer, app.saved_local.take().unwrap_or_default()] {
-                    if !old.is_empty() && old != id && !crate::local::is_local(&old) { app.move_machine(&old, &id) }
-                }
-                app.follow_account(status.get("signedIn").and_then(Value::as_bool).unwrap_or(false));
-                app.connect(&id);
-                app.refresh_machines();
-            }
+            Ok(status) => app.booted(&status),
             Err(_) => {
                 app.daemon_down = true;
                 app.fleet.local_id = crate::local::MACHINE.into();
@@ -1278,6 +1286,41 @@ impl App {
                 app.retry_boot();
             }
         }});
+    }
+
+    /// This computer's daemon answered `/api/status`: who it is now, and its link.
+    fn booted(&mut self, status: &Value) {
+        self.daemon_down = false;
+        self.viewer_web_url = status.get("webUrl").and_then(Value::as_str).unwrap_or("").to_string();
+        let id = status.get("machineId").and_then(Value::as_str).unwrap_or("").to_string();
+        if id.is_empty() { return }
+        self.adopt_daemon_identity(status);
+        if self.fleet.agents.is_empty() && self.fleet.machines.is_empty() { self.fleet.load_cache(&id) }
+        self.fleet.local_id = id.clone();
+        for machine in &mut self.fleet.machines { machine.local = machine.id == id || crate::local::is_local(&machine.id); }
+        if self.fleet.machine(&id).is_none() {
+            self.fleet.machines.insert(0, Machine { shared: false, id: id.clone(), name: fleet::machine_display_name(&id, None), local: true, status: "running".into(), reach: Reach::Unknown });
+        }
+        // Signed out, this computer is its computer id; signed in, the account's machine id.
+        // Windows saved under the other one stayed `Connecting…` (after a sign-in) or `not
+        // linked` (after a sign-out) to a machine that no longer answers to it.
+        let computer = status.get("computerId").and_then(Value::as_str).unwrap_or("").to_string();
+        for old in [computer, self.saved_local.take().unwrap_or_default()] {
+            if !old.is_empty() && old != id && !crate::local::is_local(&old) { self.move_machine(&old, &id) }
+        }
+        self.follow_account(status.get("signedIn").and_then(Value::as_bool).unwrap_or(false));
+        // Every failure of this computer's link asks the daemon who it is (recheck_local_identity).
+        // Dialled here at once, the link skipped its backoff and was redialled as fast as /api/status
+        // answered, one of the dials behind prod's first day (2026-10-16) reading workspace_connect
+        // 43 started, 21 failed. A link waiting out its backoff is dialled when that ends (redial_due).
+        if !self.retry_waiting(&id) { self.connect(&id) }
+        self.refresh_machines();
+        crate::account::daemon_status(self, status);
+    }
+
+    /// [machine]'s link failed and its next dial is scheduled.
+    fn retry_waiting(&self, machine: &str) -> bool {
+        self.links.get(machine).is_some_and(|s| s.link.is_none() && s.retry_at.is_some())
     }
 
     /// Once a desk window contains a local PTY, keep this client's windows as an ordinary
@@ -1317,7 +1360,19 @@ impl App {
         self.spawn(async move { http_json(port, "GET", "/api/machines", None).await }, move |app, reply| {
             if app.account_epoch != epoch || request != app.machines_request { return }
             let Ok(reply) = reply else { return };
-            let Some(rows) = reply.get("machines").and_then(Value::as_array) else { return };
+            let Some(owned) = reply.get("machines").and_then(Value::as_array) else { return };
+            // Whole machines other accounts share with this one: those named for it and those it added
+            // are its machines too; one shared with its domain waits to be added. A list that could not
+            // say (no `sharedMachines`) keeps the ones it had.
+            let before = app.fleet.shares.clone();
+            let rows = &app.fleet.take_shared(owned, reply.get("sharedMachines").and_then(Value::as_array));
+            // A machine its owner stopped sharing leaves the list, and its panes close with it: the
+            // status line says why (a fresh list says so; an outage's copy proves nothing).
+            if reply["stale"] != true && reply.get("sharedMachines").is_some() {
+                let ended: Vec<String> = before.iter().filter(|(id, _)| !app.fleet.shares.contains_key(*id))
+                    .map(|(id, share)| format!("{} stopped sharing {} with you", share.owner, app.fleet.machine_name(id))).collect();
+                for said in ended { app.say(said, crate::theme::WARN) }
+            }
             let local = app.fleet.local_id.clone();
             // Only a fresh response is authoritative for removals. Outage caches may
             // predate a connected computer, so their omissions must retain its views.
@@ -1334,7 +1389,9 @@ impl App {
             }
             // This computer first, then the ones that are up.
             app.fleet.machines.sort_by_key(|m| (!m.local, !m.online(), m.name.to_lowercase()));
-            let ids: Vec<String> = app.fleet.machines.iter().filter(|m| m.online() && matches!(m.reach, Reach::Unknown | Reach::Error(_))).map(|m| m.id.clone()).collect();
+            let ids: Vec<String> = app.fleet.machines.iter()
+                .filter(|m| m.online() && (matches!(m.reach, Reach::Unknown | Reach::Error(_)) || (m.reach == Reach::NeedsLink && app.fleet.shares.contains_key(&m.id))))
+                .map(|m| m.id.clone()).collect();
             for id in ids { app.connect(&id) }
             for machine in app.fleet.machines.iter_mut() { if !machine.online() && machine.reach == Reach::Unknown { machine.reach = Reach::Offline } }
             crate::workspace_controls::refresh_workspace(app);
@@ -1351,6 +1408,7 @@ impl App {
         let attempts = self.links.get(machine_id).map(|s| s.attempts).unwrap_or(0);
         self.links.insert(machine_id.to_string(), LinkState { link: Some(link), generation: self.generation, attempts, retry_at: None });
         if let Some(machine) = self.fleet.machine_mut(machine_id) { machine.reach = Reach::Connecting }
+        crate::measure::dialling(self, machine_id);
     }
 
     /// This computer's daemon can come back under another machine id: `harness login` restarts it
@@ -1367,6 +1425,7 @@ impl App {
     /// what was read in them. Its link and harness rows go; the daemon lists them again under `id`.
     fn move_machine(&mut self, old: &str, id: &str) {
         if let Some(state) = self.links.remove(old) { if let Some(link) = state.link { link.close() } }
+        crate::measure::forget(self, old);
         self.rtt.remove(old);
         self.homes.remove(old);
         self.seen_rostered.remove(old);
@@ -1385,12 +1444,35 @@ impl App {
         }
     }
 
-    fn schedule_reconnect(&mut self, machine_id: &str) {
+    /// [refused_share]: a machine shared with this account refused (NO_PEER_LINK) until one of the two
+    /// daemons reads the sharing, which they do within seconds of a change and every 2 minutes besides
+    /// (cli/src/services/sharedMachines.ts BUSY_MS). Redialled on the usual backoff (15 s at most) it is
+    /// refused ~240 times an hour for nothing; 30 s, then 60 s, still gets in within a minute of the read.
+    fn schedule_reconnect(&mut self, machine_id: &str, refused_share: bool) {
         let Some(state) = self.links.get_mut(machine_id) else { return };
         if let Some(link) = state.link.take() { link.close(); }
         state.attempts += 1;
-        let wait = Duration::from_millis((500 * 2u64.pow(state.attempts.min(5))).min(15_000));
+        let wait = if refused_share { Duration::from_secs(if state.attempts > 1 { 60 } else { 30 }) }
+            else { Duration::from_millis((500 * 2u64.pow(state.attempts.min(5))).min(15_000)) };
         state.retry_at = Some(Instant::now() + wait);
+    }
+
+    /// The links whose backoff is over are dialled again. One whose machine went offline meanwhile
+    /// is given up: that connection failed.
+    fn redial_due(&mut self) {
+        let now = Instant::now();
+        // Every link but hn's own shells goes through this computer's daemon socket, so while it is
+        // down a dial can only fail (DAEMON_UNREACHABLE), every machine's at once after one daemon
+        // restart. They wait for boot to find the daemon again (retry_boot) and go at the tick after.
+        let down = self.daemon_down;
+        let due: Vec<String> = self.links.iter()
+            .filter(|(id, s)| s.link.is_none() && s.retry_at.is_some_and(|t| t <= now) && (!down || crate::local::is_local(id)))
+            .map(|(id, _)| id.clone()).collect();
+        for id in due {
+            if let Some(state) = self.links.get_mut(&id) { state.retry_at = None }
+            if id == self.fleet.local_id || self.fleet.machine(&id).map(Machine::online).unwrap_or(false) { self.connect(&id) }
+            else { crate::measure::dialled(self, &id, false) }
+        }
     }
 
     /// Tell every connected machine's daemon the terminal's own colours (`theme_set`), so it
@@ -1421,6 +1503,9 @@ impl App {
         // before the replacement connection has a new generation.
         let current = self.links.get(&machine_id).is_some_and(|s| s.generation == generation && s.link.is_some());
         if !current { return }
+        // A dial's answer. A failure is one only where hn stops dialling below: one it dials again
+        // after is the same connection still being made (measure.rs `dialling`).
+        if matches!(event, MachineEvent::Connected) { crate::measure::dialled(self, &machine_id, true) }
         match event {
             MachineEvent::Connected => {
                 if let Some(state) = self.links.get_mut(&machine_id) { state.attempts = 0 }
@@ -1431,8 +1516,15 @@ impl App {
                 if machine_id == self.fleet.local_id && !crate::local::is_local(&machine_id) { self.daemon_down = false; crate::dial::reconnected(self) }
                 self.relist(&machine_id);
                 self.push_theme();
-                // Its home folder, so its paths read `~/…` like this machine's do.
-                if !self.homes.contains_key(&machine_id) {
+                // Its plans now, not at the next five-minute read: on a machine shared with this account
+                // they are the owner's, which a harness there runs on.
+                if !crate::local::is_local(&machine_id) { self.read_usage(&machine_id); }
+                // A guest there has no home of the owner's to read: its workspace stands for it, beside the
+                // folders the owner shares (docs/plans/2026-10-19-guest-machine-sharing-plan.md).
+                if self.fleet.shares.contains_key(&machine_id) {
+                    crate::input::load_guest_folders(self, machine_id.clone());
+                } else if !self.homes.contains_key(&machine_id) {
+                    // Its home folder, so its paths read `~/…` like this machine's do.
                     if let Some(link) = self.link(&machine_id) {
                         let id = machine_id.clone();
                         let generation = link.generation;
@@ -1456,9 +1548,38 @@ impl App {
                     agent.activity = crate::activity::Activity::default();
                     agent.activity.unknown = unknown;
                 }
-                let needs_link = error.code == "NO_PEER_LINK";
+                // A machine shared with this account links by its key, never a password: refused, it only
+                // means one of the two daemons has not read the sharing yet (the desktop app keeps dialling
+                // and gets in). Seen 2026-10-16: hn took it for "not linked", stopped, and showed `?` for good.
+                let needs_link = error.code == "NO_PEER_LINK" && !self.fleet.shares.contains_key(&machine_id);
+                // Its owner stopped sharing it: no reconnect brings it back. Say so on its panes and in
+                // the status line, and read the list again, which takes it (and them) away.
+                if error.code == "NOT_YOUR_MACHINE" {
+                    if let Some(share) = self.fleet.shares.get(&machine_id).cloned() {
+                        let name = self.fleet.machine_name(&machine_id);
+                        let close = self.keymap.hint("confirm-before -p \"kill-pane #P? (y/n)\" kill-pane").unwrap_or_else(|| "C-b x".into());
+                        for pane in self.panes.values_mut().filter(|p| p.machine_id == machine_id) {
+                            pane.stream = None;
+                            pane.opening = false;
+                            pane.open_token += 1;
+                            pane.phase = Phase::Card {
+                                title: format!("{} stopped sharing {name} with you", share.owner),
+                                detail: "The harness stays on their machine. What is shown here is read only.".into(),
+                                keys: vec![(close.clone(), "close pane".into())],
+                            };
+                            pane.dirty = true;
+                        }
+                        if let Some(state) = self.links.get_mut(&machine_id) { if let Some(link) = state.link.take() { link.close(); } state.retry_at = None; }
+                        crate::measure::dialled(self, &machine_id, false);
+                        self.say(format!("{} stopped sharing {name} with you", share.owner), crate::theme::WARN);
+                        self.refresh_machines();
+                        return;
+                    }
+                }
                 if let Some(machine) = self.fleet.machine_mut(&machine_id) {
-                    machine.reach = if needs_link { Reach::NeedsLink } else if machine.online() { Reach::Error(error.to_string()) } else { Reach::Offline };
+                    machine.reach = if needs_link { Reach::NeedsLink }
+                        else if error.code == "NO_PEER_LINK" { Reach::Connecting }
+                        else if machine.online() { Reach::Error(error.to_string()) } else { Reach::Offline };
                 }
                 if machine_id == self.fleet.local_id && !crate::local::is_local(&machine_id) && matches!(error.code.as_str(), "DAEMON_UNREACHABLE" | "HEARTBEAT_TIMEOUT" | "DISCONNECTED") {
                     self.daemon_down = true;
@@ -1480,8 +1601,13 @@ impl App {
                     }
                     pane.dirty = true;
                 }
-                if needs_link { if let Some(state) = self.links.get_mut(&machine_id) { if let Some(link) = state.link.take() { link.close(); } state.retry_at = None; } }
-                else { self.schedule_reconnect(&machine_id) }
+                if needs_link {
+                    if let Some(state) = self.links.get_mut(&machine_id) { if let Some(link) = state.link.take() { link.close(); } state.retry_at = None; }
+                    crate::measure::dialled(self, &machine_id, false);
+                } else {
+                    let refused_share = error.code == "NO_PEER_LINK" && self.fleet.shares.contains_key(&machine_id);
+                    self.schedule_reconnect(&machine_id, refused_share)
+                }
             }
             MachineEvent::Terminal(frame) => self.on_terminal(frame),
             MachineEvent::Frame { ty, payload } => self.on_frame(&machine_id, &ty, payload),
@@ -1574,6 +1700,15 @@ impl App {
                 self.relist(machine_id);
             }
             "turn_started" | "turn_heartbeat" | "tool_start" | "tool_end" | "text_delta" | "thinking_title" => {
+                // A live turn and its text (not a re-read): first work, first response and a resume's
+                // outcome, as the desktop app reads them (measure.rs). Text is looked at only while a
+                // first response is still being watched for: nothing per delta otherwise.
+                let measured = match ty { "turn_started" => true, "text_delta" => crate::measure::watching(self), _ => false };
+                if measured && payload["replay"] != true {
+                    if let Some(agent) = payload.get("agentId").and_then(Value::as_str) {
+                        if ty == "turn_started" { crate::measure::turn_started(self, machine_id, agent) } else { crate::measure::text(self, machine_id, agent) }
+                    }
+                }
                 if let Some(agent) = self.fleet.event_agent(machine_id, &payload) {
                     let now = fleet::now_ms();
                     // A turn begun (or found running): the state's clock starts, what it says anew.
@@ -1617,6 +1752,8 @@ impl App {
                 }
             }
             "turn_ended" => {
+                // Its turn is no longer live: later text is not the first response (measure.rs).
+                if let Some(agent) = payload.get("agentId").and_then(Value::as_str) { crate::measure::turn_ended(self, machine_id, agent) }
                 let visible = self.visible_agents();
                 let looking = self.focused().filter(|_| self.terminal_focused).and_then(|f| self.panes.get(&f)).map(|p| (p.machine_id.clone(), p.agent_id.clone()));
                 let opened: Vec<(String, String)> = self.panes.values().map(|p| (p.machine_id.clone(), p.agent_id.clone())).collect();
@@ -1765,10 +1902,14 @@ impl App {
                 if let Some(taken) = payload.get("takenBy") {
                     let who = taken.get("name").and_then(Value::as_str).unwrap_or("another window").to_string();
                     pane.phase = Phase::Watching(who);
-                    // Still worth seeing: watch it until someone types here.
+                    // Watched until someone types here — the watcher is what hears `terminal_free`
+                    // — but frozen: its frames come at the taker's size (a phone's), and drawn
+                    // here they shrank the screen's pane. Its last frame stays, as the desktop's.
+                    pane.frozen = true;
                     let id = pane.id;
                     self.open_stream(id, false);
                 } else {
+                    pane.frozen = false;
                     let id = pane.id;
                     let reason = payload.get("reason").and_then(Value::as_str).unwrap_or("the terminal closed");
                     if matches!(reason, "heartbeat timeout" | "backend disconnected") {
@@ -1789,6 +1930,14 @@ impl App {
                     }
                 }
             }
+            // The view that had the keyboard of a pane watched here left (a phone closed it): one on
+            // screen takes it back, at this window's size. Otherwise the agent kept the size of the
+            // one that left — a phone's, in a corner of a full screen — until someone typed here.
+            "terminal_free" => {
+                let stream = payload.get("streamId").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok());
+                let Some(id) = self.panes.values().find(|p| p.stream.is_some() && p.stream == stream).map(|p| p.id) else { return };
+                if self.rects.iter().any(|(pane, _)| *pane == id) { self.take_if_watching(id) }
+            }
             // ── models: the daemon's picture of the grids changed — the whole list, pushed ──
             "grid_models_changed" => crate::models::on_push(self, machine_id, &payload),
             _ => {}
@@ -1807,6 +1956,8 @@ impl App {
         pane.last_seq = Some(pane.last_seq.map(|s| s.max(frame.seq)).unwrap_or(frame.seq));
         pane.ack_due = true;
         if frame.kind == Kind::Sync { return }
+        // Taken by another client: acknowledged above, never drawn — see [Pane::frozen].
+        if pane.frozen { return }
         let bytes = if frame.compressed { match pane::inflate(&frame.bytes) { Some(b) => b, None => return } } else { frame.bytes };
         if let Ok(path) = std::env::var("HARNESS_TUI_TRACE") {
             use std::io::Write;
@@ -1891,7 +2042,8 @@ impl App {
     /// A user asks for control of this TUI: reclaim every available pane across its tabs and
     /// sessions without moving focus. Reconnects and ownership notifications never call this.
     pub fn take_control(&mut self) {
-        if self.read_only() { return }
+        // (hn with no terminal has no user to ask for it: it takes only a pane it types into.)
+        if self.read_only() || self.headless { return }
         let mut ids: Vec<u64> = self.tabs.iter().chain(self.sessions.iter()
             .filter(|s| !s.mirror.as_ref().is_some_and(|m| m.readonly))
             .flat_map(|s| s.tabs.iter())).flat_map(Tab::panes).collect();
@@ -1925,6 +2077,11 @@ impl App {
         }
         let Some(pane) = self.panes.get_mut(&pane_id) else { return };
         if pane.opening { return }
+        // hn with no terminal takes a terminal exactly when it has something to type into it (a
+        // command's send-keys, the first line of a shell it made). Whatever else asks — a retry
+        // while a harness starts, a view another window replaced, a pane a command brought forward —
+        // it watches: no one is there to give the keyboard to, and every window with a person keeps it.
+        let takeover = if self.headless { !pane.queued.is_empty() } else { takeover };
         // Do not send an open before machine_select has succeeded: its reply could otherwise
         // be discarded by the selecting link, leaving this pane waiting for 45 seconds.
         let Some(link) = self.links.get(&pane.machine_id).and_then(|s| s.link.clone())
@@ -1934,7 +2091,9 @@ impl App {
         };
         let (cols, rows) = content.unwrap_or((pane.cols, pane.rows));
         // The remote terminal follows the actual tile, including narrow or short split panes.
-        let (cols, rows) = pane::stream_size(cols, rows);
+        // hn with no terminal has no tile anyone sees: what it takes (a command typing into a pane,
+        // a shell it made) keeps the size the far pane already has, once a keyframe said it.
+        let (cols, rows) = if self.headless && pane.far_sized { (pane.cols, pane.rows) } else { pane::stream_size(cols, rows) };
         pane.opening = true;
         pane.want = (cols, rows);
         if !matches!(pane.phase, Phase::Watching(_)) || takeover { pane.phase = Phase::Connecting(if takeover { "Taking over…".into() } else { "Opening…".into() }) }
@@ -1946,17 +2105,9 @@ impl App {
         // recognised by this token and not allowed to overwrite the current state.
         pane.open_token += 1;
         let token = pane.open_token;
-        let host = self.fleet.local_machine_name();
+        let request = open_request(&agent_id, (cols, rows), &self.fleet.local_machine_name(), takeover, self.headless);
         self.spawn(async move {
-            link.request("terminal_open", json!({
-                "protocolVersion": 3,
-                "agentId": agent_id,
-                "cols": cols,
-                "rows": rows,
-                "compression": ["zlib", "none"],
-                "client": { "kind": "tui", "name": format!("{host} terminal") },
-                "takeover": takeover,
-            }), Duration::from_secs(45)).await
+            link.request("terminal_open", request, Duration::from_secs(45)).await
         }, move |app, reply| app.opened(pane_id, &machine_id, token, (cols, rows), reply));
     }
 
@@ -1972,6 +2123,7 @@ impl App {
             }
             return;
         }
+        let headless = self.headless;
         let Some(pane) = self.panes.get_mut(&pane_id) else { return };
         pane.opening = false;
         let takeover_requested = std::mem::take(&mut pane.takeover_pending);
@@ -1986,11 +2138,17 @@ impl App {
                 pane.phase = if pane.read_only {
                     Phase::Watching(payload.get("heldBy").and_then(|h| h.get("name")).and_then(Value::as_str).unwrap_or("another window").to_string())
                 } else { Phase::Live };
+                // Held here: its frames come at this side's size, so they are drawn. Held by another
+                // client (a phone that opened it first, its Start): its frames come at that one's
+                // size and are not drawn here — the screen's pane says who has it, at its own size,
+                // until a key takes it. hn with no terminal reads them all the same: it has no size.
+                pane.frozen = pane.read_only && !headless;
                 let retake = takeover_requested && pane.read_only;
                 let queued = if retake { Vec::new() } else { std::mem::take(&mut pane.queued) };
                 let read_only = pane.read_only;
-                // The tile changed size while this was opening: tell the far pane now.
-                if !read_only && pane.want != asked {
+                // The tile changed size while this was opening: tell the far pane now. (hn with no
+                // terminal has no tile: it keeps the size it asked for, the far pane's own.)
+                if !read_only && !self.headless && pane.want != asked {
                     pane.resize_seq += 1;
                     let (seq, want) = (pane.resize_seq, pane.want);
                     if let (Some(stream), Some(link)) = (stream, self.links.get(machine_id).and_then(|s| s.link.clone())) {
@@ -2111,10 +2269,19 @@ impl App {
         let epoch = self.account_epoch;
         let generation = link.generation;
         let expected_agent = agent_id.clone();
+        // resume_recovery is ok at the harness's next live turn (measure.rs), as the desktop app counts it.
+        crate::measure::resuming(self, &machine_id, &agent_id);
         self.spawn(async move { link.rpc("agent_resume", json!({ "agentId": agent_id }), Duration::from_secs(120)).await }, move |app, reply| {
             if let Some(visit) = visit { crate::shell_context::resumed(app, &visit); }
             if app.account_epoch != epoch || app.connection_generation(&machine_id) != Some(generation)
                 || app.panes.get(&pane_id).is_none_or(|p| p.agent_id != expected_agent || p.machine_id != machine_id || p.open_token != token) { return }
+            // Failed only when the daemon refused it, as the desktop app reads a refusal. Its internal
+            // errors, no answer in time and a lost connection leave the outcome to the next turn.
+            let refused = match &reply {
+                Err(e) => !matches!(e.code.as_str(), "INTERNAL" | "CREATION_STORAGE_FAILED" | "RESTART_FAILED" | "TIMEOUT" | "DISCONNECTED"),
+                Ok(r) => r["state"] == "failed" && r.pointer("/failure/code").is_some_and(Value::is_string),
+            };
+            if refused { crate::measure::resume_failed(app, &machine_id, &expected_agent) }
             if let Some(pane) = app.panes.get_mut(&pane_id) { pane.opening = false; }
             match reply {
             Ok(_) => { app.relist(&machine_id); app.open_stream(pane_id, true) }
@@ -2209,7 +2376,8 @@ impl App {
             if pane.want == want { continue }
             pane.want = want;
             let Some(stream) = pane.stream else { continue };
-            if pane.read_only { continue }
+            // hn with no terminal sizes no agent: its 80x24 layout is nobody's screen.
+            if pane.read_only || headless { continue }
             pane.resize_seq += 1;
             let seq = pane.resize_seq;
             if let Some(link) = self.links.get(&pane.machine_id).and_then(|s| s.link.clone()) {
@@ -4064,8 +4232,12 @@ impl App {
     /// A pane you come to (a click, a key, the bar) that another window has the keyboard of is
     /// yours at once — as typing in it would make it — not "Take control" first.
     pub fn take_if_watching(&mut self, pane: u64) {
+        // hn with no terminal: no one came to it (a script's select-window), and a takeover would
+        // size the agent to its 80x24 layout under the window someone is using.
+        if self.headless { return }
         let Some(p) = self.panes.get(&pane) else { return };
-        if matches!(p.phase, Phase::Watching(_)) && !p.read_only && !p.opening { self.open_stream(pane, true) }
+        // A watcher is read-only (the daemon's `readOnly`): that is what there is to take.
+        if matches!(p.phase, Phase::Watching(_)) && !p.opening { self.open_stream(pane, true) }
     }
 
     /// A machine's first roster since hn started, read against when you last looked at each of
@@ -5650,6 +5822,7 @@ impl App {
     /// other harnesses go with the account.
     pub(crate) fn follow_account(&mut self, signed_in: bool) {
         let was = std::mem::replace(&mut self.signed_in, signed_in);
+        if was != signed_in { crate::measure::account_changed(self) }
         if self.desk_mode != DeskMode::Account || (was == signed_in && self.session_desk == signed_in) { return }
         if signed_in { self.enter_desk() } else { self.leave_desk() }
     }
@@ -5732,20 +5905,52 @@ impl App {
     /// started in — once, when the desk has answered and this computer's daemon is connected.
     /// Until then (or if it never connects: not signed in) the window shows what it can.
     pub fn maybe_start_shell(&mut self) {
+        if crate::account::entry_required(self) { return }
         if self.shell_asked || !self.desk_answered || self.capture.is_some() { return }
         // A headless client makes only the sessions it is asked for.
         if self.headless { self.shell_asked = true; return }
         // The OS opens on the agent launcher. An explicit `hn new ...` still gets
         // its requested shell; reconnecting to existing work is handled by the desk.
         if self.os_session && self.start_session.is_none() {
+            // Work of this computer's own on the desk: the "code" tab a phone's Start made. Tabs of
+            // other computers do not count — the account's desk can hold those of one since removed
+            // (this very computer before a reinstall), "Connecting…" for ever.
+            let local = self.fleet.local_id.clone();
+            let own_work = self.tabs.iter().flat_map(|t| t.panes())
+                .any(|id| self.panes.get(&id).is_some_and(|p| p.machine_id == local));
+            // The welcome waits for this computer's daemon to be up, not only linked: a sign-in
+            // restarts it, and a shell asked for meanwhile went to hn's own local shells
+            // (`shell_machine`) — OpenCode then ran where no phone or desktop could see it.
+            let daemon_ready = self.link(&self.fleet.local_id).is_some() && !self.daemon_down;
             if (self.os_live || self.os_first_use) && self.tabs.len() == 1 && self.tabs[0].root.is_none() {
-                if self.link(&self.fleet.local_id).is_none() { return }
+                if !daemon_ready { return }
                 self.shell_asked = true;
                 // The welcome reply may arrive after another terminal is requested.
                 // Fill its original tab instead of whichever tab is now active.
                 let tab = self.tab().id.clone();
                 crate::input::new_shell_from(self, None, Placement::Fill(tab), None, Some("/usr/bin/hn-os welcome".into()));
-            } else { self.shell_asked = true; }
+            } else if (self.os_live || self.os_first_use) && crate::os_welcome::welcome_waits_on_wifi(self) {
+                // Asked again every tick until the Wi-Fi form gives the tab back.
+            } else if self.os_first_use && !self.os_live && !own_work {
+                // Only other computers' tabs on the desk: the welcome still comes, in a tab of its own.
+                if !daemon_ready { return }
+                self.shell_asked = true;
+                crate::input::new_shell_from(self, None, Placement::Tab, None, Some("/usr/bin/hn-os welcome".into()));
+            } else {
+                self.shell_asked = true;
+                // The desk already had work for this screen — the "code" tab a phone's Start made
+                // after setting this computer up — so it opens on that instead of a welcome with
+                // an OpenCode of its own. Its first use is over all the same: the welcome is what
+                // marks that (onboarding.py), and without the mark every boot is a first one.
+                if self.os_first_use && !self.os_live && own_work {
+                    self.os_first_use = false;
+                    // Not from a test: it would mark the developer's own home.
+                    if let Some(home) = std::env::var_os("HOME").filter(|_| !cfg!(test)) {
+                        let state = std::path::Path::new(&home).join(".local/state/harness-os");
+                        let _ = std::fs::create_dir_all(&state).and_then(|_| std::fs::File::create(state.join("onboarded")));
+                    }
+                }
+            }
             return;
         }
         // `hn new -s work` (a session besides the desk's): made here, with its shell.
@@ -6116,6 +6321,37 @@ impl App {
 
     // ── the loop's slow tick ─────────────────────────────────────────────────
 
+    /// Ask [machine] its agent accounts' rate limits (usage_read), unless it was asked in the last
+    /// minute: when it connects, when Models opens, and on enrich's five-minute timer. On a machine
+    /// shared with this account they are its owner's, the plans a harness there runs on. False when
+    /// it has no link to ask.
+    ///
+    /// The minute is the connection's: a read's reply is dropped once its connection is gone, so a
+    /// machine that drops and connects again is asked again rather than waiting for the timer.
+    pub fn read_usage(&mut self, machine: &str) -> bool {
+        let Some(link) = self.link(machine) else { return false };
+        let generation = link.generation;
+        if self.usage_asked.get(machine).is_some_and(|&(asked_on, at)| asked_on == generation && at.elapsed() < Duration::from_secs(60)) { return true }
+        self.usage_asked.insert(machine.to_string(), (generation, Instant::now()));
+        let id = machine.to_string();
+        self.spawn(async move { link.rpc("usage_read", json!({}), Duration::from_secs(30)).await }, move |app, reply| app.usage_replied(id, generation, reply));
+        true
+    }
+
+    /// A usage_read's answer from [machine]'s connection [generation]: nothing once that connection
+    /// is gone (the next one asks its own).
+    fn usage_replied(&mut self, machine: String, generation: u64, reply: Result<Value, RpcError>) {
+        if self.connection_generation(&machine) != Some(generation) { return }
+        // A first read that failed is asked again on the timer's half-minute retry (enrich).
+        let Ok(reply) = reply else {
+            self.usage_asked.remove(&machine);
+            if !self.usage.contains_key(&machine) { self.usage_checked = Instant::now().checked_sub(Duration::from_secs(270)) }
+            return;
+        };
+        let readings: Vec<fleet::Usage> = reply.get("providers").and_then(Value::as_array).map(|p| p.iter().filter_map(fleet::usage_from).collect()).unwrap_or_default();
+        self.usage.insert(machine, readings);
+    }
+
     /// What the daemons know of each harness beyond its row, asked a few at a time, the focused
     /// pane's first, then in the order they need you: its last recap (agent_recent — so what it did
     /// is there after hn starts again), and the pull request for its branch (git_pull_request, at
@@ -6132,14 +6368,7 @@ impl App {
             let ids: Vec<String> = self.fleet.machines.iter().filter(|m| m.usable()).map(|m| m.id.clone()).collect();
             if ids.is_empty() { self.usage_checked = soon() }
             for id in ids {
-                let Some(link) = self.link(&id) else { self.usage_checked = soon(); continue };
-                let generation = link.generation;
-                self.spawn(async move { link.rpc("usage_read", json!({}), Duration::from_secs(30)).await }, move |app, reply| {
-                    if app.connection_generation(&id) != Some(generation) { return }
-                    let Ok(reply) = reply else { if !app.usage.contains_key(&id) { app.usage_checked = soon() } return };
-                    let readings: Vec<fleet::Usage> = reply.get("providers").and_then(Value::as_array).map(|p| p.iter().filter_map(fleet::usage_from).collect()).unwrap_or_default();
-                    app.usage.insert(id, readings);
-                });
+                if !self.read_usage(&id) { self.usage_checked = soon() }
             }
         }
         if self.enriching >= AT_ONCE { return }
@@ -6359,6 +6588,7 @@ impl App {
         crate::shell_context::tick(self);
         crate::agent_switch::tick(self);
         crate::hardware::tick(self);
+        crate::measure::tick(self);
         self.maybe_start_shell();
         self.release_waiting();
         self.release_cli();
@@ -6391,11 +6621,7 @@ impl App {
                 agent.working = false; agent.activity.unknown = true;
             }
         }
-        let due: Vec<String> = self.links.iter().filter(|(_, s)| s.link.is_none() && s.retry_at.map(|t| t <= now).unwrap_or(false)).map(|(id, _)| id.clone()).collect();
-        for id in due {
-            if let Some(state) = self.links.get_mut(&id) { state.retry_at = None }
-            if id == self.fleet.local_id || self.fleet.machine(&id).map(Machine::online).unwrap_or(false) { self.connect(&id) }
-        }
+        self.redial_due();
         if self.tick % 120 == 0 { self.refresh_machines() }
         if self.tick % 80 == 40 { self.fleet.save_cache() }
         if self.tick % 20 == 10 { self.save_seen() }
@@ -6634,6 +6860,74 @@ mod recovery_tests {
     use super::*;
 
     #[tokio::test]
+    async fn os_welcome_waits_out_a_daemon_restarting_after_the_sign_in() {
+        // Signed in at the screen: the daemon restarts, and a welcome asked for meanwhile ran in
+        // hn's own local shells, where no phone or desktop could see its OpenCode.
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19791, sink, (80, 24));
+        app.handed_over = true;
+        app.os_session = true;
+        app.os_first_use = true;
+        app.desk_answered = true;
+        app.fleet.local_id = "this-computer".into();
+        app.fleet.machines.push(Machine { shared: false, id: "this-computer".into(), name: "me".into(), local: true, status: "running".into(), reach: Reach::Ready });
+        let link = Link::spawn(app.port, "this-computer", 1, app.sink.clone());
+        app.links.insert("this-computer".into(), LinkState { link: Some(link), generation: 1, attempts: 0, retry_at: None });
+        app.daemon_down = true;
+        app.maybe_start_shell();
+        assert!(!app.shell_asked, "not while its daemon is down");
+        app.daemon_down = false;
+        app.maybe_start_shell();
+        assert!(app.shell_asked, "once it is back");
+        app.links["this-computer"].link.as_ref().unwrap().close();
+    }
+
+    #[tokio::test]
+    async fn os_first_use_skips_its_welcome_only_for_work_of_this_computer() {
+        let first_use = |machine: &str| {
+            let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(19790, sink, (80, 24));
+            app.handed_over = true;
+            app.os_session = true;
+            app.os_first_use = true;
+            app.desk_answered = true;
+            app.fleet.local_id = "this-computer".into();
+            app.new_tab();
+            app.open_agent(machine, "a", Placement::Auto(None));
+            app.maybe_start_shell();
+            app
+        };
+        // A desk tab of another computer — one since removed, "Connecting…" for ever: the welcome
+        // still comes (it waits here only for this computer's daemon).
+        let app = first_use("removed-computer");
+        assert!(app.os_first_use && !app.shell_asked);
+        // A tab of its own (the "code" tab a phone's Start made): that, and its first use is done.
+        let app = first_use("this-computer");
+        assert!(!app.os_first_use && app.shell_asked);
+    }
+
+    #[tokio::test]
+    async fn os_first_workspace_waits_while_the_wifi_form_holds_the_tabs() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (80, 24));
+        app.handed_over = true;
+        app.os_session = true;
+        app.os_first_use = true;
+        app.desk_answered = true;
+        app.new_tab();
+        app.open_agent(crate::local::MACHINE, "wifi", Placement::Auto(None));
+        let form = app.focused().unwrap();
+        app.os_welcome.wifi_pane = Some(form);
+        app.maybe_start_shell();
+        assert!(!app.shell_asked, "the welcome must not give up while the Wi-Fi form holds the tabs");
+        app.close_pane(form);
+        app.maybe_start_shell();
+        // No local daemon in this test: the welcome is still to come rather than given up on.
+        assert!(!app.shell_asked);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[tokio::test]
     async fn os_starts_at_the_agent_launcher_without_creating_an_unused_shell() {
         let (sink, _) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(19789, sink, (80, 24));
@@ -6728,6 +7022,30 @@ mod recovery_tests {
         app.panes.get_mut(&3).unwrap().stream = None;
         app.shells.insert(("test-peer".into(), "agent-2".into()));
         app
+    }
+
+    /// Another account on this computer with no sign-out between (hn sees only the daemon's new
+    /// identity): none of the first account's measurement — its flows under way, its milestones,
+    /// what waits to be sent — is the second's (measure.rs).
+    #[tokio::test]
+    async fn an_account_switch_without_a_sign_out_ends_the_last_accounts_measurement() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19813, sink, (80, 24));
+        app.adopt_daemon_identity(&json!({"machineId":"account-a","computerId":"computer","signedIn":true}));
+        app.follow_account(true);
+        let flow = crate::measure::begin(&mut app, "computer_link");
+        crate::measure::turn_started(&mut app, "account-a", "a1");
+        app.adopt_daemon_identity(&json!({"machineId":"account-b","computerId":"computer","signedIn":true}));
+        app.follow_account(true);
+        flow.finish(&mut app, crate::measure::Outcome::Ok);
+        app.fleet.local_id = "account-b".into();
+        app.fleet.machines.push(Machine { shared: false, id: "account-b".into(), name: "b".into(), local: true, status: "running".into(), reach: Reach::Ready });
+        crate::measure::turn_started(&mut app, "account-b", "b1");
+        crate::measure::tick(&mut app);
+        let sent = &app.measure.sent;
+        assert!(!sent.iter().any(|v| v["flow"] == "computer_link"), "A's flow, start or outcome: {sent:?}");
+        assert_eq!(sent.iter().filter(|v| v["measure"] == "funnel_first_work").count(), 1, "B's own first work only: {sent:?}");
+        assert_eq!(sent.iter().filter(|v| **v == json!({ "flow": "workspace_ready" })).count(), 1, "B's own workspace_ready: {sent:?}");
     }
 
     /// `harness login` restarts this computer's daemon under the account's machine id. hn follows
@@ -7056,6 +7374,247 @@ mod recovery_tests {
         app.links["test-peer"].link.as_ref().unwrap().close();
     }
 
+    // Seen 2026-10-16: the owner stopped sharing and the person's panes waited to reconnect forever.
+    #[tokio::test]
+    async fn a_machine_its_owner_stops_sharing_says_who_and_stops_reconnecting() {
+        let mut app = fixture();
+        app.fleet.shares.insert("test-peer".into(), crate::fleet::MachineShare { owner: "Dee".into(), email: "dee@acme.io".into(), team: false });
+        app.on_machine("test-peer".into(), 1, MachineEvent::Failed(RpcError::new("NOT_YOUR_MACHINE", "")));
+        let on_it: Vec<u64> = app.panes.values().filter(|p| p.machine_id == "test-peer").map(|p| p.id).collect();
+        assert!(!on_it.is_empty());
+        for id in on_it {
+            match &app.panes[&id].phase {
+                Phase::Card { title, keys, .. } => {
+                    assert!(title.starts_with("Dee stopped sharing"), "{title}");
+                    assert_eq!(keys.iter().map(|(_, what)| what.as_str()).collect::<Vec<_>>(), ["close pane"]);
+                }
+                other => panic!("pane {id} shows {other:?}"),
+            }
+            assert!(app.panes[&id].stream.is_none());
+        }
+        assert!(app.links["test-peer"].link.is_none());
+        assert!(app.links["test-peer"].retry_at.is_none(), "no reconnect is scheduled");
+    }
+
+    // Seen 2026-10-16: a machine shared with this account was refused once (its daemon had not read
+    // the sharing yet) and hn showed it `?`, "not linked", for good, while the desktop app got in.
+    #[tokio::test]
+    async fn a_shared_machine_refused_before_the_sharing_is_read_keeps_dialling() {
+        let mut app = fixture();
+        app.fleet.shares.insert("test-peer".into(), crate::fleet::MachineShare { owner: "Dee".into(), email: "dee@acme.io".into(), team: false });
+        app.on_machine("test-peer".into(), 1, MachineEvent::Failed(RpcError::new("NO_PEER_LINK", "")));
+        assert_eq!(app.fleet.machines[0].reach, Reach::Connecting, "a shared machine is never asked for a password");
+        assert!(app.links["test-peer"].link.is_none());
+        assert!(app.links["test-peer"].retry_at.is_some(), "it dials again");
+        for id in [1, 2] {
+            assert!(matches!(app.panes[&id].phase, Phase::Connecting(_)), "pane {id}: {:?}", app.panes[&id].phase);
+        }
+
+        // The account's own machine still needs its password, and is not dialled again by itself.
+        let mut app = fixture();
+        app.on_machine("test-peer".into(), 1, MachineEvent::Failed(RpcError::new("NO_PEER_LINK", "")));
+        assert_eq!(app.fleet.machines[0].reach, Reach::NeedsLink);
+        assert!(app.links["test-peer"].retry_at.is_none());
+        assert!(matches!(&app.panes[&1].phase, Phase::Card { title, .. } if title == "This machine is not linked here"));
+    }
+
+    // A machine shared with this account showed the guest's own plans for up to five minutes after it
+    // connected: its usage (the owner's plans, which a harness there runs on) waited for the timer.
+    #[tokio::test]
+    async fn a_shared_machine_is_asked_its_usage_when_it_connects_and_at_most_once_a_minute() {
+        let mut app = fixture();
+        app.fleet.shares.insert("test-peer".into(), crate::fleet::MachineShare { owner: "Dee".into(), email: "dee@acme.io".into(), team: false });
+        app.on_machine("test-peer".into(), 1, MachineEvent::Connected);
+        let asked = *app.usage_asked.get("test-peer").expect("usage_read sent on connect");
+        app.read_usage("test-peer");
+        assert_eq!(app.usage_asked["test-peer"], asked, "not again within the minute");
+
+        // It dropped and connected again within the minute: the first connection's read is never
+        // answered here (its reply is that connection's), so the new one is asked its own.
+        app.links["test-peer"].link.as_ref().unwrap().close();
+        app.links.insert("test-peer".into(), LinkState { link: Some(Link::spawn(app.port, "test-peer", 2, app.sink.clone())), generation: 2, attempts: 0, retry_at: None });
+        app.on_machine("test-peer".into(), 2, MachineEvent::Connected);
+        assert_ne!(app.usage_asked["test-peer"], asked, "asked again on the new connection");
+        let again = app.usage_asked["test-peer"];
+
+        // The first connection's answer, arriving now, is not this one's: neither a failure nor plans.
+        app.usage_replied("test-peer".into(), 1, Err(RpcError::new("DISCONNECTED", "")));
+        app.usage_replied("test-peer".into(), 1, Ok(json!({ "providers": [] })));
+        assert_eq!(app.usage_asked["test-peer"], again);
+        assert!(!app.usage.contains_key("test-peer"));
+        // This connection's read failed: it may be asked again at once.
+        app.usage_replied("test-peer".into(), 2, Err(RpcError::new("TIMEOUT", "")));
+        assert!(!app.usage_asked.contains_key("test-peer"));
+        app.links["test-peer"].link.as_ref().unwrap().close();
+    }
+
+    // ── connections as measured (measure.rs): one per connection, not one per dial ──
+
+    /// Signed in, with this computer listed and connected so what is measured is sent.
+    fn measured(app: &mut App) {
+        app.fleet.local_id = "this-computer".into();
+        app.fleet.machines.push(Machine { shared: false, id: "this-computer".into(), name: "Mac".into(), local: true, status: "running".into(), reach: Reach::Ready });
+        app.signed_in = true;
+        crate::measure::account_changed(app);
+    }
+    /// The test peer's fixture link dropped, so the next connect is a fresh dial of its own.
+    fn undialled(app: &mut App) {
+        if let Some(link) = app.links.remove("test-peer").and_then(|state| state.link) { link.close() }
+    }
+    /// What was counted of workspace_connect and remote_connect: (flow, "started" or its outcome).
+    fn connects(app: &mut App) -> Vec<(String, String)> {
+        crate::measure::tick(app);
+        app.measure.sent.iter().filter(|v| v["flow"].as_str().is_some_and(|f| f.ends_with("_connect")))
+            .map(|v| (v["flow"].as_str().unwrap().to_string(), v["outcome"].as_str().unwrap_or("started").to_string())).collect()
+    }
+    fn fail(app: &mut App, machine: &str, code: &str) {
+        let generation = app.links[machine].generation;
+        app.on_machine(machine.into(), generation, MachineEvent::Failed(RpcError::new(code, "")));
+    }
+    /// Its backoff over: the tick dials it again.
+    fn redial(app: &mut App, machine: &str) {
+        app.links.get_mut(machine).unwrap().retry_at = Some(Instant::now());
+        app.redial_due();
+    }
+    fn pair(flow: &str, what: &str) -> (String, String) { (flow.into(), what.into()) }
+
+    /// Each backoff retry was counted as a connection started and failed: prod's first day
+    /// (2026-10-16) read remote_connect 51 started, 30 failed, 22 ok.
+    #[tokio::test]
+    async fn a_dial_retried_until_it_connects_is_one_connection() {
+        let mut app = fixture();
+        measured(&mut app);
+        undialled(&mut app);
+        app.connect("test-peer");
+        for code in ["TIMEOUT", "DISCONNECTED", "DAEMON_UNREACHABLE", "MACHINE_UNAVAILABLE"] {
+            fail(&mut app, "test-peer", code);
+            assert!(app.retry_waiting("test-peer"), "{code}: dialled again after its backoff");
+            redial(&mut app, "test-peer");
+            assert!(app.links["test-peer"].link.is_some(), "{code}: dialled again");
+        }
+        assert_eq!(connects(&mut app), [pair("remote_connect", "started")], "still being made");
+        let generation = app.links["test-peer"].generation;
+        app.on_machine("test-peer".into(), generation, MachineEvent::Connected);
+        assert_eq!(connects(&mut app), [pair("remote_connect", "started"), pair("remote_connect", "ok")]);
+        app.links["test-peer"].link.as_ref().unwrap().close();
+    }
+
+    /// The connection fails once, when hn stops dialling: the machine went offline meanwhile, is not
+    /// linked here, or its owner stopped sharing it.
+    #[tokio::test]
+    async fn a_connection_hn_stops_dialling_fails_once() {
+        for case in ["offline", "NO_PEER_LINK", "NOT_YOUR_MACHINE"] {
+            let mut app = fixture();
+            measured(&mut app);
+            undialled(&mut app);
+            if case == "NOT_YOUR_MACHINE" {
+                app.fleet.shares.insert("test-peer".into(), crate::fleet::MachineShare { owner: "Dee".into(), email: "dee@acme.io".into(), team: false });
+            }
+            app.connect("test-peer");
+            fail(&mut app, "test-peer", "TIMEOUT");
+            redial(&mut app, "test-peer");
+            if case == "offline" {
+                fail(&mut app, "test-peer", "TIMEOUT");
+                app.fleet.machine_mut("test-peer").unwrap().status = "offline".into();
+                redial(&mut app, "test-peer");
+            } else {
+                fail(&mut app, "test-peer", case);
+            }
+            assert!(app.links["test-peer"].link.is_none() && app.links["test-peer"].retry_at.is_none(), "{case}: no longer dialled");
+            assert_eq!(connects(&mut app), [pair("remote_connect", "started"), pair("remote_connect", "failed")], "{case}");
+        }
+    }
+
+    /// A shared machine refused until one of the two daemons reads the sharing (#1381) was redialled
+    /// on the 15 s backoff for good, each refusal a remote_connect failed (2026-10-16).
+    #[tokio::test]
+    async fn a_shared_machine_refused_until_its_sharing_is_read_is_one_connection_tried_every_30_to_60_s() {
+        let mut app = fixture();
+        measured(&mut app);
+        undialled(&mut app);
+        app.fleet.shares.insert("test-peer".into(), crate::fleet::MachineShare { owner: "Dee".into(), email: "dee@acme.io".into(), team: false });
+        app.connect("test-peer");
+        for refusal in 1..=6 {
+            fail(&mut app, "test-peer", "NO_PEER_LINK");
+            let wait = app.links["test-peer"].retry_at.unwrap().saturating_duration_since(Instant::now());
+            assert!(wait > Duration::from_secs(29) && wait <= Duration::from_secs(60), "refusal {refusal}: {wait:?}");
+            redial(&mut app, "test-peer");
+        }
+        assert_eq!(connects(&mut app), [pair("remote_connect", "started")], "no failure: hn is still dialling it");
+        let generation = app.links["test-peer"].generation;
+        app.on_machine("test-peer".into(), generation, MachineEvent::Connected);
+        assert_eq!(connects(&mut app), [pair("remote_connect", "started"), pair("remote_connect", "ok")]);
+        app.links["test-peer"].link.as_ref().unwrap().close();
+    }
+
+    /// Every link goes through this computer's daemon socket: one restart closed them all, and each
+    /// redial failed DAEMON_UNREACHABLE until it was back, this computer's counted as remote_connect
+    /// (its id is hn's own shells meanwhile). They wait for the daemon now.
+    #[tokio::test]
+    async fn while_this_computers_daemon_is_down_no_machine_is_dialled() {
+        let mut app = fixture();
+        measured(&mut app);
+        app.generation = 2;
+        app.links.insert("this-computer".into(), LinkState { link: Some(Link::spawn(app.port, "this-computer", 2, app.sink.clone())), generation: 2, attempts: 0, retry_at: None });
+        app.on_machine("this-computer".into(), 2, MachineEvent::Closed(RpcError::new("DISCONNECTED", "")));
+        app.on_machine("test-peer".into(), 1, MachineEvent::Closed(RpcError::new("DISCONNECTED", "")));
+        assert!(app.daemon_down);
+        // boot found no daemon (`/api/status` unreachable).
+        app.fleet.local_id = crate::local::MACHINE.into();
+        for id in ["this-computer", "test-peer"] { redial(&mut app, id) }
+        for id in ["this-computer", "test-peer"] {
+            assert!(app.links[id].link.is_none(), "{id} is not dialled while the daemon is down");
+            assert!(app.retry_waiting(id), "{id} still waits");
+        }
+        // It answers: dialled at the next tick, this computer's as its own.
+        app.booted(&json!({"machineId":"this-computer","computerId":"this-computer","signedIn":true}));
+        assert!(!app.daemon_down);
+        app.redial_due();
+        for id in ["this-computer", "test-peer"] {
+            assert!(app.links[id].link.is_some(), "{id} is dialled once the daemon is back");
+            let generation = app.links[id].generation;
+            app.on_machine(id.into(), generation, MachineEvent::Connected);
+        }
+        let mut counted = connects(&mut app);
+        counted.sort();
+        assert_eq!(counted, [pair("remote_connect", "ok"), pair("remote_connect", "started"), pair("workspace_connect", "ok"), pair("workspace_connect", "started")]);
+        for id in ["this-computer", "test-peer"] { app.links[id].link.as_ref().unwrap().close() }
+    }
+
+    /// A failure of this computer's link asks the daemon who it is (recheck_local_identity); its
+    /// answer dialled the same machine at once, skipping the backoff.
+    #[tokio::test]
+    async fn this_computers_link_waits_out_its_backoff_when_the_daemon_says_who_it_is() {
+        let mut app = fixture();
+        measured(&mut app);
+        app.connect("this-computer");
+        fail(&mut app, "this-computer", "TIMEOUT");
+        assert!(!app.daemon_down);
+        let retry = app.links["this-computer"].retry_at;
+        assert!(retry.is_some());
+        app.booted(&json!({"machineId":"this-computer","computerId":"this-computer","signedIn":true}));
+        assert!(app.links["this-computer"].link.is_none(), "not dialled before its backoff is over");
+        assert_eq!(app.links["this-computer"].retry_at, retry);
+        redial(&mut app, "this-computer");
+        assert!(app.links["this-computer"].link.is_some());
+        let generation = app.links["this-computer"].generation;
+        app.on_machine("this-computer".into(), generation, MachineEvent::Connected);
+        assert_eq!(connects(&mut app), [pair("workspace_connect", "started"), pair("workspace_connect", "ok")]);
+        app.links["this-computer"].link.as_ref().unwrap().close();
+    }
+
+    #[tokio::test]
+    async fn this_computer_is_the_daemons_machine_whatever_local_id_says() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19814, sink, (80, 24));
+        app.adopt_daemon_identity(&json!({"machineId":"account-a","computerId":"computer","signedIn":true}));
+        // The daemon down: `local_id` is hn's own shells, and this computer may not be listed yet.
+        app.fleet.local_id = crate::local::MACHINE.into();
+        assert!(app.this_computer("account-a"));
+        assert!(!app.this_computer("peer"));
+        assert!(!app.this_computer(crate::local::MACHINE), "hn's own shells are no connection");
+    }
+
     #[tokio::test]
     async fn expired_lease_recovers_hidden_shells_and_ignores_cancelled_events() {
         let mut app = fixture();
@@ -7103,6 +7662,111 @@ mod recovery_tests {
                 assert!(app.links["test-peer"].link.is_none());
             }
         }
+    }
+
+    #[test]
+    fn hn_with_no_terminal_opens_a_pane_only_to_watch_it() {
+        let open = |takeover, headless| open_request("agent-1", (37, 22), "Mac Auto", takeover, headless);
+        // Back after a daemon restart, beside the window in use: it must not take the agent at its 80x24 layout.
+        assert_eq!(open(false, true)["watch"], json!(true));
+        assert_eq!(open(false, true)["takeover"], json!(false));
+        // A window with a person in it opens as it always has, and so does a command that types.
+        for (takeover, headless) in [(false, false), (true, false), (true, true)] {
+            assert!(open(takeover, headless).get("watch").is_none(), "{takeover} {headless}");
+        }
+        assert_eq!(open(true, false)["client"], json!({ "kind": "tui", "name": "Mac Auto terminal" }));
+        assert_eq!((open(true, false)["cols"].clone(), open(true, false)["rows"].clone()), (json!(37), json!(22)));
+    }
+
+    /// hn with no terminal (kept for the desk after its last window closed) took the desk's agents
+    /// at its 80x24 layout on 2026-10-14. It sizes none now, and takes a pane only to type into it.
+    #[tokio::test]
+    async fn hn_with_no_terminal_takes_a_pane_only_to_type_and_never_sizes_one() {
+        let mut app = fixture();
+        app.headless = true;
+        app.tabs[0].root = Some(Node::new(1, 80, 23));
+        app.tabs[0].focus = Some(1);
+        // The far pane is the size the window in use gave it; this layout would make it 80x24.
+        { let p = app.panes.get_mut(&1).unwrap(); p.want = (1, 1); p.keyframe(99, 55, b""); }
+        app.fit_panes();
+        assert_eq!(app.panes[&1].resize_seq, 0);
+        // Asked to take every pane, or one again, with nothing to type: it watches.
+        app.take_control();
+        assert!(!app.panes[&1].opening);
+        app.open_stream(1, true);
+        assert!(matches!(&app.panes[&1].phase, Phase::Connecting(s) if s == "Opening…"));
+        assert_eq!(app.panes[&1].want, (99, 55));
+        // A command types into it while that open is in flight: taken once the open answers.
+        crate::input::send_to_pane(&mut app, 1, b"y\r".to_vec());
+        assert!(app.panes[&1].takeover_pending);
+        // With something to type it takes the pane, at the size the far pane already has.
+        app.panes.get_mut(&1).unwrap().opening = false;
+        app.open_stream(1, false);
+        assert!(matches!(&app.panes[&1].phase, Phase::Connecting(s) if s == "Taking over…"));
+        assert_eq!(app.panes[&1].want, (99, 55));
+        app.links["test-peer"].link.as_ref().unwrap().close();
+    }
+
+    #[tokio::test]
+    async fn hn_with_no_terminal_takes_no_pane_it_is_brought_to() {
+        let mut app = fixture();
+        let pane = app.panes.get_mut(&1).unwrap();
+        // Taken over (`takenBy`), watching until someone comes to it.
+        pane.phase = Phase::Watching("Mac Auto terminal".into());
+        // Watching, as the daemon answers a watcher.
+        pane.read_only = true;
+        app.headless = true;
+        app.take_if_watching(1);
+        assert!(!app.panes[&1].opening);
+        assert_eq!(app.panes[&1].open_token, 7);
+        // A window with a terminal takes it at once, as it always has.
+        app.headless = false;
+        app.take_if_watching(1);
+        assert!(app.panes[&1].opening);
+        app.links["test-peer"].link.as_ref().unwrap().close();
+    }
+
+    #[tokio::test]
+    async fn a_pane_on_screen_takes_back_what_a_phone_left() {
+        // A phone opened this agent and took it at its own size; this screen watched. The phone left.
+        let mut app = fixture();
+        let (on_screen, hidden) = (1, 2);
+        app.rects = vec![(on_screen, Rect::new(0, 0, 80, 24))];
+        for id in [on_screen, hidden] {
+            let pane = app.panes.get_mut(&id).unwrap();
+            pane.phase = Phase::Watching("Pixel 8 Pro".into());
+            pane.read_only = true;
+        }
+        for id in [on_screen, hidden] {
+            let stream = app.panes[&id].stream.unwrap().to_string();
+            app.on_machine("test-peer".into(), 1, MachineEvent::Frame { ty: "terminal_free".into(), payload: json!({"streamId": stream}) });
+        }
+        assert!(app.panes[&on_screen].opening, "the pane on screen takes it back");
+        assert!(!app.panes[&hidden].opening, "one out of sight stays a watcher until someone comes to it");
+        app.links["test-peer"].link.as_ref().unwrap().close();
+    }
+
+    #[tokio::test]
+    async fn a_phone_taking_a_pane_does_not_shrink_it_here() {
+        // The phone took the terminal at its own size; this screen watches it frozen, as the
+        // desktop keeps its tile: the phone-sized frames are not drawn here.
+        let mut app = fixture();
+        app.rects = vec![(1, Rect::new(0, 0, 80, 24))];
+        let before = (app.panes[&1].cols, app.panes[&1].rows);
+        let stream = app.panes[&1].stream.unwrap().to_string();
+        app.on_machine("test-peer".into(), 1, MachineEvent::Frame {
+            ty: "terminal_closed".into(),
+            payload: json!({"streamId": stream, "code": "TERMINAL_TAKEN_OVER", "takenBy": {"name": "Pixel 8 Pro"}}),
+        });
+        let pane = app.panes.get_mut(&1).unwrap();
+        assert!(pane.frozen);
+        assert!(matches!(&pane.phase, Phase::Watching(who) if who == "Pixel 8 Pro"));
+        let watcher = Uuid::new_v4();
+        pane.stream = Some(watcher);
+        pane.read_only = true;
+        app.on_terminal(proto::Frame { kind: Kind::Keyframe, stream: watcher, seq: 1, bytes: b"phone".to_vec(), compressed: false, size: Some((45, 30)) });
+        assert_eq!((app.panes[&1].cols, app.panes[&1].rows), before, "the phone's size is not this screen's");
+        app.links["test-peer"].link.as_ref().unwrap().close();
     }
 
     #[tokio::test]

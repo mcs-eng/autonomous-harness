@@ -41,6 +41,7 @@ mod layout;
 mod desk_layout;
 mod local;
 mod machine_menu;
+mod measure;
 mod modal;
 mod buttons;
 mod dialog;
@@ -449,6 +450,8 @@ async fn run(config: config::Config) -> io::Result<()> {
     // Its ids ($N @N %N) from this server name's counters: unique among its clients.
     ids::use_file(&app::sessions_path(None));
     let mut app = app::App::new(port, tx.clone(), size);
+    // app_start runs from the process's start, as the Desktop's launch clock does.
+    app.measure.since = started;
     app.first_session();
     // `hn <command>` from a shell comes in here.
     let socket = ipc::serve(tx.clone(), port);
@@ -491,6 +494,7 @@ async fn run(config: config::Config) -> io::Result<()> {
     }
     // When you last looked at each harness (what finished while hn was closed shows as done).
     app.load_seen();
+    account::begin_entry(&mut app);
     app.boot();
     // The sessions a client left (C-b d), and the one asked for; attach's client flags.
     app.client_flags = start.as_ref().map(|s| s.flags.clone()).unwrap_or_default();
@@ -524,7 +528,7 @@ async fn run(config: config::Config) -> io::Result<()> {
     let mut mouse_all = false;
     let mut cursor_colour: Option<String> = None;
     let mut startup_input = std::collections::VecDeque::new();
-    let mut input_ready = app.focused().is_some();
+    let mut input_ready = account::entry_required(&app) || app.focused().is_some();
     loop {
         // Wait for something — or for the frame we owe to come due.
         let wait = if need_draw { frame_budget.saturating_sub(last_draw.elapsed()) } else { Duration::from_secs(3600) };
@@ -572,6 +576,7 @@ async fn run(config: config::Config) -> io::Result<()> {
         server::publish(&mut app);
         commands::run_pending_hooks(&mut app);
         app.show_causes();
+        account::enforce_entry(&mut app);
         app.mark_seen();
         if app.quit { break }
         if std::mem::take(&mut app.mouse_changed) {

@@ -1,15 +1,19 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../../shared/widgets/section_scaffold.dart';
 import '../../shared/widgets/setting_row.dart';
 import '../experimental_features.dart';
+import '../../state/app_state.dart';
+import 'privacy_section.dart' show ProductUsageSetting;
 
 class ExperimentalSection extends StatefulWidget {
-  const ExperimentalSection({super.key, this.store});
+  const ExperimentalSection({super.key, this.store, this.notifier});
 
   final ExperimentalFeaturesStore? store;
+  final AppNotifier? notifier;
 
   @override
   State<ExperimentalSection> createState() => _ExperimentalSectionState();
@@ -33,7 +37,9 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
   @override
   Widget build(BuildContext context) {
     final preferences = widget.store ?? _fallbackStore;
-    final features = ExperimentalFeature.values.where((f) => f.available);
+    final features = ExperimentalFeature.values.where(
+      (f) => f.available && f.visibleInSettings,
+    );
     return SectionScaffold(
       title: 'Experimental',
       subtitle: 'Try features that are still taking shape. Account experiments sync across your devices.',
@@ -63,7 +69,7 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
                       ),
                   ],
                 ),
-              for (final feature in features)
+              for (final feature in features) ...[
                 SettingRow(
                   title: feature.label,
                   detail: feature.description,
@@ -73,13 +79,18 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
                       alignment: Alignment.centerLeft,
                       child: Switch(
                         key: ValueKey('experimental-${feature.id}'),
-                        value: preferences.enabled(feature),
+                        value: preferences.enabled(feature) != feature.inverted,
                         onChanged:
                             preferences.loaded &&
                                 !preferences.saving &&
                                 (preferences.isAvailable(feature) ||
                                     preferences.enabled(feature))
-                            ? (on) => unawaited(preferences.set(feature, on))
+                            ? (on) => unawaited(
+                                preferences.set(
+                                  feature,
+                                  on != feature.inverted,
+                                ),
+                              )
                             : null,
                       ),
                     ),
@@ -106,6 +117,9 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
                         )
                       : null,
                 ),
+              ],
+              if (!kIsWeb && widget.notifier != null)
+                ProductUsageSetting(notifier: widget.notifier!, compact: true),
             ],
           ),
         ),

@@ -1,4 +1,7 @@
 import 'dart:async';
+
+import '../super_tabs/project_visibility.dart';
+
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -132,7 +135,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
               !_advancedRows.contains(row) ||
               box.advancedOpen) &&
           (row != _Row.profile || box.usesProfile) &&
-          (row != _Row.model || !box.isTerminal) &&
+          (row != _Row.model || (!box.isTerminal && !box.asGuest)) &&
           (row != _Row.approvals || box.hasModes))
         row,
   ];
@@ -368,6 +371,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     _Row.branch when box.gitError != null => box.gitError,
     _Row.branch when !box.isGitProject => 'Not a Git repository',
     _Row.worktree when box.gitError != null => box.gitError,
+    _Row.worktree when box.inWorktree => 'Already a worktree',
     _Row.worktree when !box.canUseWorktree => 'Not a Git repository',
     _ => null,
   };
@@ -381,7 +385,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     _Row.worktree => 'Worktree',
     _Row.approvals => 'Approvals',
     _Row.profile => widget.desktop ? 'Account' : 'Profile',
-    _Row.start => 'New Harness',
+    _Row.start => box.actionLabel,
   };
 
   /// What the row currently answers — or, while its list is open, what the
@@ -398,7 +402,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     _Row.approvals => box.modeLabel,
     _Row.profile =>
       box.profileLabel ?? (widget.desktop ? 'Default account' : 'Default'),
-    _Row.start => box.checking ? 'Check status' : _label(row),
+    _Row.start => box.checking ? box.pendingActionLabel : _label(row),
   };
 
   // These leave this form for a native sheet, account flow or another route.
@@ -896,8 +900,38 @@ class NewHarnessFormState extends State<NewHarnessForm> {
 
   bool _checkingLaunch = false;
 
-  Future<void> _start() async {
+  /// [existingFolder]: "Use the existing folder" was pressed, so the harness
+  /// starts in the folder the typed project name found
+  /// ([NewHarnessController.useExistingFolder]).
+  Future<void> _start({bool existingFolder = false}) async {
     if (box.busy) return;
+    bool? resendAttachments;
+    if (box.needsAttachmentReview) {
+      resendAttachments = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Check file delivery'),
+          content: const Text(
+            'The files and first message may already have reached the harness. Open it from Recent harnesses to check. Before sending again, clear any unfinished text in its terminal.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Already sent'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Send again'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || resendAttachments == null) return;
+    }
     _restoreChoiceFocus = false;
     if (box.requiredChoice case final choice?) {
       box.focusField(choice.field);
@@ -908,7 +942,9 @@ class NewHarnessFormState extends State<NewHarnessForm> {
       return;
     }
     _checkingLaunch = box.checking;
-    final outcome = await box.create();
+    final outcome = existingFolder
+        ? await box.useExistingFolder(resendAttachments: resendAttachments)
+        : await box.create(resendAttachments: resendAttachments);
     if (!mounted) return;
     switch (outcome) {
       case NewHarnessOutcome.created:
@@ -1744,11 +1780,17 @@ class NewHarnessFormState extends State<NewHarnessForm> {
 
   Widget _desktopHeader() {
     final folder = box.project.folder;
-    final projectName =
-        box.project.name ??
-        folder?.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty).lastOrNull ??
-        box.project.repository?.name ??
-        'Choose repo';
+    final lastPart = folder
+        ?.split(RegExp(r'[/\\]'))
+        .where((p) => p.isNotEmpty)
+        .lastOrNull;
+    // A guest starts in its workspace or a folder the owner shares (NewHarnessController.asGuest).
+    final projectName = box.asGuest
+        ? lastPart ?? 'My workspace'
+        : box.project.name ??
+              lastPart ??
+              box.project.repository?.name ??
+              'Choose repo';
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1766,43 +1808,100 @@ class NewHarnessFormState extends State<NewHarnessForm> {
                   capsule: true,
                 ),
               ),
-              _desktopField(
-                order: 2,
-                anchor: _headerMachineAnchor,
-                child: _desktopMachineAnchor(
+              // A cloud agent runs in its maker's cloud, never on a computer:
+              // the place is said where the computer is, and does not change.
+              if (box.isCloud)
+                _desktopField(
+                  order: 2,
+                  anchor: _headerMachineAnchor,
                   child: DesktopPill(
                     key: const ValueKey('new-harness-field-machine'),
                     focusNode: _headerMachineFocus,
-                    label: _repoMachineLabel(box.machineId),
-                    semanticLabel:
-                        'Computer, ${_repoMachineLabel(box.machineId)}',
-                    icon: box.app.stateOf(box.machineId)?.isLocalMachine == true
-                        ? AppIcons.laptop
-                        : AppIcons.monitor,
-                    menu: true,
+                    label: cloudPlaceOf(box.engine),
+                    semanticLabel: 'Runs in ${cloudPlaceOf(box.engine)}',
+                    icon: AppIcons.monitor,
                     capsule: true,
-                    tooltip: 'Choose computer',
+                    tooltip: '${box.agentLabel} runs on its maker\'s servers',
                     textSize: 13,
                     surfaceColor: DesktopChrome.surface,
-                    onPressed: box.locked
-                        ? null
-                        : () => _headerMachineMenu.isOpen
-                              ? _headerMachineMenu.close()
-                              : _headerMachineMenu.open(),
+                    onPressed: null,
+                  ),
+                )
+              else
+                _desktopField(
+                  order: 2,
+                  anchor: _headerMachineAnchor,
+                  child: _desktopMachineAnchor(
+                    child: DesktopPill(
+                      key: const ValueKey('new-harness-field-machine'),
+                      focusNode: _headerMachineFocus,
+                      label: _repoMachineLabel(box.machineId),
+                      semanticLabel:
+                          'Computer, ${_repoMachineLabel(box.machineId)}',
+                      icon:
+                          box.app.stateOf(box.machineId)?.isLocalMachine == true
+                          ? AppIcons.laptop
+                          : AppIcons.monitor,
+                      menu: true,
+                      capsule: true,
+                      tooltip: 'Choose computer',
+                      textSize: 13,
+                      surfaceColor: DesktopChrome.surface,
+                      onPressed: box.locked
+                          ? null
+                          : () => _headerMachineMenu.isOpen
+                                ? _headerMachineMenu.close()
+                                : _headerMachineMenu.open(),
+                    ),
                   ),
                 ),
-              ),
-              _desktopField(
-                order: 3,
-                anchor: _desktopAnchors[_Row.project]!,
-                maxWidth: 340,
-                child: _desktopChoiceButton(
-                  _Row.project,
-                  AppIcons.folder,
-                  label: projectName,
-                  capsule: true,
+              // Fo takes no repository; a cloud coding agent works on the chosen
+              // repository's GitHub copy, never on this computer's folder.
+              if ((!box.isCloud || cloudAgentTakesRepository(box.engine)) &&
+                  (!box.asGuest ||
+                      box.fields.contains(NewHarnessField.projectMenu)))
+                _desktopField(
+                  order: 3,
+                  anchor: _desktopAnchors[_Row.project]!,
+                  maxWidth: 340,
+                  child: Tooltip(
+                    message: box.isCloud
+                        ? (box.cloudRepository == null
+                              ? 'Choose a repository on GitHub, or a folder whose remote is on GitHub'
+                              : 'Works on ${box.cloudRepository}. Changes not pushed stay on this computer.')
+                        : '',
+                    child: _desktopChoiceButton(
+                      _Row.project,
+                      AppIcons.folder,
+                      label: box.isCloud
+                          ? box.cloudRepository
+                                    ?.replaceFirst(
+                                      RegExp(
+                                        r'^(https://github\.com/|git@github\.com:)',
+                                      ),
+                                      '',
+                                    )
+                                    .replaceFirst(RegExp(r'\.git$'), '') ??
+                                projectName
+                          : projectName,
+                      capsule: true,
+                    ),
+                  ),
                 ),
-              ),
+              if (box.integration?.projectVisibility case final visibility?)
+                FocusTraversalOrder(
+                  order: const NumericFocusOrder(3.5),
+                  child: ProjectVisibility(
+                    key: const ValueKey('new-harness-project-visibility'),
+                    value: visibility,
+                    onChanged:
+                        box.locked || box.integration!.projectVisibilityLocked
+                        ? null
+                        : (value) => setState(
+                            () => box.integration!.projectVisibility = value,
+                          ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -1974,11 +2073,41 @@ class NewHarnessFormState extends State<NewHarnessForm> {
         mainAxisSize: MainAxisSize.min,
         spacing: 2,
         children: [
-          if (!box.isTerminal)
+          // A guest's harness runs on the owner's subscription: no model or
+          // account of its own to pick.
+          if (!box.isTerminal && !box.isCloud && !box.asGuest)
             _desktopField(
               order: 5,
               anchor: _desktopAnchors[_Row.model]!,
               child: _desktopChoiceButton(_Row.model, AppIcons.brain),
+            ),
+          // Devin Cloud bills while it works: the session's limit, low by
+          // default, stepped through on each press.
+          if (box.isCloud && box.engine == 'devin-cloud')
+            _desktopField(
+              order: 5,
+              anchor: _desktopAnchors[_Row.model]!,
+              child: DesktopPill(
+                key: const ValueKey('new-harness-field-acu'),
+                label: 'Up to ${box.acuLimit} ACUs',
+                semanticLabel: 'ACU limit, ${box.acuLimit}',
+                icon: AppIcons.gauge,
+                quiet: true,
+                compact: true,
+                textSize: 12,
+                foregroundColor: DesktopChrome.muted,
+                tooltip:
+                    'The most this session may spend. Press for another limit.',
+                onPressed: box.locked
+                    ? null
+                    : () {
+                        const limits = NewHarnessController.acuLimits;
+                        box.setAcuLimit(
+                          limits[(limits.indexOf(box.acuLimit) + 1) %
+                              limits.length],
+                        );
+                      },
+              ),
             ),
           if (box.hasModes)
             _desktopField(
@@ -2023,7 +2152,8 @@ class NewHarnessFormState extends State<NewHarnessForm> {
                 ),
               ),
             ),
-          if (box.isGitProject || box.checkingGit || box.gitError != null)
+          if (!box.isCloud &&
+              (box.isGitProject || box.checkingGit || box.gitError != null))
             _desktopField(
               order: 9,
               anchor: _desktopAnchors[_Row.branch]!,
@@ -2115,11 +2245,20 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     child: const Text('Cancel request'),
   );
 
+  /// Offered beside the refusal of a typed project name whose folder is
+  /// already there: starts in that folder, only once pressed.
+  Widget _useExistingFolderButton() => TextButton(
+    key: const ValueKey('use-existing-folder'),
+    onPressed: box.busy ? null : () => unawaited(_start(existingFolder: true)),
+    child: const Text('Use the existing folder'),
+  );
+
   Widget _desktopLaunchActions() => Wrap(
     spacing: 8,
     crossAxisAlignment: WrapCrossAlignment.center,
     children: [
       if (box.canCancelPending) _cancelPendingButton(),
+      if (box.existingFolder != null) _useExistingFolderButton(),
       _desktopStartButton(),
     ],
   );
@@ -2130,8 +2269,8 @@ class NewHarnessFormState extends State<NewHarnessForm> {
       final label = box.busy
           ? (_checkingLaunch ? 'Checking…' : 'Starting…')
           : box.checking
-          ? 'Check status'
-          : 'New Harness';
+          ? box.pendingActionLabel
+          : box.actionLabel;
       return FocusTraversalOrder(
         order: const NumericFocusOrder(10),
         child: FilledButton(
@@ -2889,6 +3028,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
               ),
             _buildButton(),
             if (box.canCancelPending) _cancelPendingButton(),
+            if (box.existingFolder != null) _useExistingFolderButton(),
             if (!_picking && box.requiredChoice != null) ...[
               SizedBox(height: _rowHeight),
               Padding(

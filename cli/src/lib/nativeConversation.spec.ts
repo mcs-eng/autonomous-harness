@@ -46,6 +46,15 @@ it('deduplicates multiple descriptors, aliases and hard links for the same open 
   symlinkSync(own, alias); linkSync(own, link); held = [own, own, alias, link]
   await expect(find()).resolves.toEqual({ sessionId: id(), transcriptPath: own })
 })
+it('resolves the rollout of a process that also holds the nameless NPOLICY descriptor', async () => {
+  const own = rollout(); held = [own]
+  const base = sources.descriptors
+  sources.descriptors = async (pid, budget) => {
+    const evidence = await base(pid, budget)
+    return { ...evidence, descriptors: [...evidence.descriptors, { fd: '33', path: '', kind: 'NPOLICY' }] }
+  }
+  await expect(find()).resolves.toEqual({ sessionId: id(), transcriptPath: own })
+})
 it('holds two eligible files rather than letting Stop accept an empty identity', async () => {
   held = [rollout(1), rollout(2)]
   await expect(find()).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
@@ -139,7 +148,9 @@ it('does not decode a partial body character after a valid header with leading b
 })
 it('holds path aliases that loop and pools that exceed the candidate budget', async () => {
   const loop = join(home, 'rollout-loop.jsonl'); symlinkSync(loop, loop); held = [loop]
-  await expect(find()).rejects.toThrow('alias depth limit')
+  // macOS's longer temporary root can exhaust the component budget first;
+  // either explicit bound must hold the identity instead of following the loop.
+  await expect(find()).rejects.toThrow(/alias depth limit|path component limit/)
   const own = rollout(); held = Array(65).fill(own)
   await expect(find()).rejects.toThrow('descriptor limit')
 })

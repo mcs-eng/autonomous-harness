@@ -22,6 +22,7 @@ import { processStartTicks } from './processLiveness.js'
 import { nativeProcessImages } from './nativeProcessImages.js'
 import { neutralizePasteControls } from './pasteText.js'
 import { patientDeadline, patientExec } from './patientExec.js'
+import { probeExecFile } from './offThreadExec.js'
 import { inTmuxRoom } from './tmuxControlGate.js'
 import { tmuxFeatures, type TmuxFeatures } from './tmuxVersion.js'
 import { processIdentityOf, sameProcessIdentity } from './terminalRuntime.js'
@@ -588,6 +589,34 @@ export async function processArgs(identity: ProcessIdentity): Promise<string> {
   return rows?.find((row) => sameProcessIdentity(row, identity))?.args ?? ''
 }
 
+/**
+ * The command line [row]'s engine was launched with, for reading how it was launched (its grid).
+ *
+ * Its own, unless that is a bare title: Pi renames its process, which on macOS overwrites its argv and environment
+ * in `ps` with `pi` (2026-10-14), and nothing it was launched with can be read there. Then the launcher this daemon
+ * started it under still holds the command (`… harness-engine [cwd] <engine binary> <args>`, lib/engineLaunch.ts),
+ * and is read when it is the direct parent in the same table, naming a binary of that title right after
+ * `harness-engine`. Anything else is '': not known, never another process's command line.
+ */
+export function launchArgs(rows: readonly ProcessRow[], row: ProcessRow): string {
+  const title = row.args.trim()
+  if (/\s/.test(title)) return row.args
+  const parent = rows.find((candidate) => candidate.pid === row.parentPid)
+  if (!title || !parent) return ''
+  const tokens = argvTokens(parent.args)
+  const at = tokens.indexOf('harness-engine')
+  if (at < 0) return ''
+  const named = (token: string | undefined) => !!token && basename(token) === title
+  return named(tokens[at + 1]) || named(tokens[at + 2]) ? parent.args : ''
+}
+
+/** [launchArgs] for the process [identity] names, read from a fresh table; '' once it is not that process. */
+export async function processLaunchArgs(identity: ProcessIdentity): Promise<string> {
+  const rows = await processRows()
+  const row = rows?.find((candidate) => sameProcessIdentity(candidate, identity))
+  return rows && row ? launchArgs(rows, row) : ''
+}
+
 /** The process table, or null when `ps` itself failed — "we could not look" is not "nothing is there". */
 export function processRows(): Promise<ProcessRow[] | null> {
   if (processRowsInFlight) return processRowsInFlight
@@ -631,7 +660,7 @@ function execText(command: string, args: string[], timeout: number): Promise<str
     // timeout, for a deadline shared across calls: `killed` without an error is that timeout throwing
     // away an answer that had arrived (patientExec.ts), so it is no answer, not an empty one.
     let child: { killed?: boolean } | undefined
-    child = execFile(command, args, { timeout }, (err, stdout) => resolve((err && !stdout) || child?.killed ? null : stdout))
+    child = probeExecFile(execFile)(command, args, { timeout }, (err, stdout) => resolve((err && !stdout) || child?.killed ? null : stdout))
   })
 }
 

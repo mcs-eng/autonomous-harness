@@ -447,6 +447,19 @@ describe('createInput', () => {
 describe('message', () => {
   afterEach(() => vi.restoreAllMocks())
 
+  it('carries a bounded opaque context with the actual composed message, without treating it as identity', async () => {
+    const promptTyped = vi.fn(), run = deps({ promptTyped }), inputs = createInput(run.deps)
+    const context = 'conversation-input-context'
+    inputs.messageRequest({ agentId: 'a1', content: 'Scoped composed input', inputContext: context })
+    await vi.waitFor(() => expect(promptTyped).toHaveBeenCalledWith(agents.get('a1'), READY_PANE, expect.any(Object), context))
+    inputs.input.forget('a1')
+    const plain = vi.fn(), request = createMessageRequest(plain)
+    request({ agentId: 'a1', content: 'Unscoped', inputContext: { user: 'untrusted' } })
+    expect(plain).toHaveBeenCalledWith('a1', 'Unscoped')
+    // An observer is optional; a scoped message still uses the original writer.
+    expect(await messageWriter(deps().deps)('a1', 'Without observer', undefined, context)).toEqual(ok)
+  })
+
   it('writes what a person typed into the agent the frame names, and reads no tab an older window still names', () => {
     const typed = vi.fn()
     const inputs = createInput({ ...deps().deps, typed })
@@ -467,6 +480,25 @@ describe('message', () => {
     message({ content: '', agentId: 'a1' })
     message({ content: 'nobody to type into' })
     expect(submit.mock.calls).toEqual([['a1', 'hi'], ['s1', 'hi'], ['a1', 'in a tab']])
+  })
+
+  it('hands what became of it to its measurement: a dropped frame is invalid, a kept one carries the receipt down', () => {
+    const submit = vi.fn(), receipt = vi.fn()
+    const message = createMessageRequest(submit)
+    message({ content: '', agentId: 'a1' }, receipt)
+    message({ content: 'nobody to type into' }, receipt)
+    expect(receipt.mock.calls).toEqual([['invalid'], ['invalid']])
+    message({ content: 'hi', agentId: 'a1' }, receipt)
+    message({ content: 'scoped', agentId: 'a1', inputContext: 'conversation-input-context' }, receipt)
+    expect(submit.mock.calls).toEqual([['a1', 'hi', undefined, receipt], ['a1', 'scoped', 'conversation-input-context', receipt]])
+    expect(receipt).toHaveBeenCalledTimes(2)
+
+    const inputs = createInput(deps().deps)
+    const into = vi.spyOn(inputs.input, 'submit').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    inputs.messageRequest({ content: 'hello', agentId: 's1' }, receipt)
+    inputs.messageRequest({ content: 'hello', agentId: 's1', inputContext: 'conversation-input-context' }, receipt)
+    expect(into.mock.calls).toEqual([['a1', 'hello', undefined, undefined, receipt], ['a1', 'hello', undefined, 'conversation-input-context', receipt]])
   })
 })
 

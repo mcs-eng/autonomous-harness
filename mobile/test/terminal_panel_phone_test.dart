@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_mobile/core/models.dart';
+import 'package:harness_mobile/phone/media_preview_page.dart';
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/terminal/remote_media_download.dart';
 import 'package:harness_mobile/terminal/terminal_binary.dart';
@@ -72,7 +73,16 @@ class _Platform {
         switch (call.method) {
           case 'Clipboard.setData':
             copied = (call.arguments as Map)['text'] as String?;
+          // ⚠️ Answered as well as `getData`: a paste asks it FIRST, which is how iOS is spared an
+          // "Allow Paste" prompt for a clipboard with no text on it. Unanswered it reads as false,
+          // and the paste never reads the text. Typed `<String, dynamic>`, the type Flutter casts
+          // the reply to.
+          case 'Clipboard.hasStrings':
+            return <String, dynamic>{
+              'value': clipboard != null && clipboard!.isNotEmpty,
+            };
           case 'Clipboard.getData':
+            onRead?.call();
             return clipboard == null ? null : {'text': clipboard};
         }
         return null;
@@ -89,6 +99,10 @@ class _Platform {
   final calls = <MethodCall>[];
   String? clipboard;
   String? copied;
+
+  /// Runs while the clipboard's text is being read — the window in which iOS can be showing its
+  /// paste prompt.
+  void Function()? onRead;
 }
 
 /// A download that finishes when the test says so.
@@ -188,6 +202,14 @@ void main() {
   TerminalView view(WidgetTester tester) =>
       tester.widget<TerminalView>(find.byType(TerminalView));
 
+  /// The frames the pane's menu (Copy, Select All) takes to follow the
+  /// selection: shown or hidden after the frame the change lands in, from the
+  /// app's root overlay, and built or taken down in the one after.
+  Future<void> pumpMenu(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump();
+  }
+
   /// The rendered row height — `RenderTerminal` itself is not exported.
   double lineHeight(WidgetTester tester) => tester
       .state<TerminalViewState>(find.byType(TerminalView))
@@ -283,6 +305,8 @@ void main() {
         view(tester).terminal.buffer.lines[0].getText(),
         startsWith('the screen after the resize'),
       );
+      // The session's wait for a screen of the size it asked for runs out.
+      await tester.pump(const Duration(seconds: 2));
     });
 
     testWidgets('keeps a reader at the end at the end', (tester) async {
@@ -298,6 +322,8 @@ void main() {
 
       final position = scroll(tester);
       expect(position.pixels, position.maxScrollExtent);
+      // The session's wait for a screen of the size it asked for runs out.
+      await tester.pump(const Duration(seconds: 2));
     });
 
     testWidgets('keeps a reader in the history on the line they were reading', (
@@ -326,6 +352,8 @@ void main() {
         reason: 'the screen moved under the reader, not the reader',
       );
       expect(scroll(tester).pixels, lessThan(scroll(tester).maxScrollExtent));
+      // The session's wait for a screen of the size it asked for runs out.
+      await tester.pump(const Duration(seconds: 2));
     });
 
     testWidgets('keeps a selection whose text is still there', (tester) async {
@@ -336,7 +364,7 @@ void main() {
       final before = view(tester).terminal.buffer;
       view(tester).controller!
           .setSelection(before.createAnchor(0, 2), before.createAnchor(14, 2));
-      await tester.pump();
+      await pumpMenu(tester);
       expect(find.text('Copy'), findsOneWidget);
 
       await keyframe(tester, pane, 1, lines(8));
@@ -346,6 +374,8 @@ void main() {
       final selection = view(tester).controller!.selection;
       expect(selection, isNotNull);
       expect(view(tester).terminal.buffer.getText(selection), 'history line 2');
+      // The session's wait for a screen of the size it asked for runs out.
+      await tester.pump(const Duration(seconds: 2));
     });
 
     testWidgets('lets a selection go when its text is not', (tester) async {
@@ -356,7 +386,8 @@ void main() {
       final before = view(tester).terminal.buffer;
       view(tester).controller!
           .setSelection(before.createAnchor(0, 2), before.createAnchor(14, 2));
-      await tester.pump();
+      await pumpMenu(tester);
+      expect(find.text('Copy'), findsOneWidget);
 
       await keyframe(tester, pane, 1, lines(8, from: 50));
       await tester.pump();
@@ -364,6 +395,55 @@ void main() {
 
       expect(view(tester).controller!.selection, isNull);
       expect(find.text('Copy'), findsNothing);
+      // The session's wait for a screen of the size it asked for runs out.
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    // Back puts the keyboard away without a word to the app: the terminal keeps its focus and its
+    // input connection. The resize keyframe that answered the keyboard rising, landing as it slid
+    // down, showed it again (a Galaxy S23, 6 of 19 dismissals, 2026-10-14).
+    testWidgets(
+      'does not show the keyboard again under a terminal holding the focus',
+      (tester) async {
+        final pane = session();
+        await pumpPanel(tester, pane, focused: true);
+        await keyframe(tester, pane, 0, 'the first screen');
+        expect(tester.testTextInput.hasAnyClients, isTrue);
+        tester.testTextInput.log.clear();
+
+        await keyframe(tester, pane, 1, 'the screen after the resize');
+        await tester.pump();
+
+        expect(identical(view(tester).terminal, pane.terminal), isTrue);
+        expect(
+          tester.testTextInput.log.map((call) => call.method),
+          isNot(contains('TextInput.show')),
+        );
+        // The connection it had is still the one keys arrive on.
+        expect(tester.testTextInput.hasAnyClients, isTrue);
+        // The session's wait for a screen of the size it asked for runs out.
+        await tester.pump(const Duration(seconds: 2));
+      },
+    );
+
+    testWidgets('claims the keyboard for a focused terminal that lost it', (
+      tester,
+    ) async {
+      final pane = session();
+      await pumpPanel(tester, pane, focused: true);
+      await keyframe(tester, pane, 0, 'the first screen');
+      expect(tester.testTextInput.hasAnyClients, isTrue);
+      // The page still asks for this terminal's keyboard; the focus went elsewhere.
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump();
+      expect(tester.testTextInput.hasAnyClients, isFalse);
+
+      await keyframe(tester, pane, 1, 'the screen after the resize');
+      await tester.pump();
+
+      expect(tester.testTextInput.hasAnyClients, isTrue);
+      // The session's wait for a screen of the size it asked for runs out.
+      await tester.pump(const Duration(seconds: 2));
     });
   });
 
@@ -371,15 +451,20 @@ void main() {
     testWidgets('copies what is selected and lets it go', (tester) async {
       final platform = _Platform(tester);
       final pane = session();
-      pane.terminal.write('npm test\r\nall 42 passed');
+      // At the foot of the screen: the menu shows nothing while what it is
+      // about is scrolled out of the pane.
+      pane.terminal.write('${_blank}npm test\r\nall 42 passed');
       await pumpPanel(tester, pane);
       final buffer = pane.terminal.buffer;
-      view(tester).controller!
-          .setSelection(buffer.createAnchor(0, 1), buffer.createAnchor(13, 1));
-      await tester.pump();
+      final row = buffer.lines.length - 1;
+      view(tester).controller!.setSelection(
+        buffer.createAnchor(0, row),
+        buffer.createAnchor(13, row),
+      );
+      await pumpMenu(tester);
 
       await tester.tap(find.text('Copy'));
-      await tester.pump();
+      await pumpMenu(tester);
 
       expect(platform.copied, 'all 42 passed');
       expect(view(tester).controller!.selection, isNull);
@@ -390,24 +475,35 @@ void main() {
       );
     });
 
-    testWidgets('× lets it go without copying', (tester) async {
+    testWidgets('a tap lets it go without copying', (tester) async {
       final platform = _Platform(tester);
       final pane = session();
-      pane.terminal.write('npm test');
+      pane.terminal.write('${_blank}npm test');
       await pumpPanel(tester, pane);
       final buffer = pane.terminal.buffer;
-      view(tester).controller!
-          .setSelection(buffer.createAnchor(0, 0), buffer.createAnchor(3, 0));
-      await tester.pump();
+      final row = buffer.lines.length - 1;
+      view(tester).controller!.setSelection(
+        buffer.createAnchor(0, row),
+        buffer.createAnchor(3, row),
+      );
+      await pumpMenu(tester);
+      expect(find.text('Copy'), findsOneWidget);
 
-      await tester.tap(find.bySemanticsLabel('Clear selection'));
-      await tester.pump();
+      // The system's menu has no button for it: a tap on the terminal, away
+      // from the selection's handles, lets it go as it would in a text field.
+      await tester.tap(find.byType(TerminalView));
+      // Past the double-tap window, which is what holds a single tap back.
+      await tester.pump(kDoubleTapTimeout);
+      await pumpMenu(tester);
 
       expect(platform.copied, isNull);
       expect(view(tester).controller!.selection, isNull);
+      expect(find.text('Copy'), findsNothing);
     });
   });
 
+  // On a pane whose host gave it no paste of its own (`TerminalPanel.onPaste`): the clipboard's text
+  // and nothing else. With the phone page's paste hooked up, ⌘V is `terminal_panel_paste_test.dart`.
   group('a hardware keyboard\'s ⌘V', () {
     Future<void> commandV(WidgetTester tester, {bool shift = false}) async {
       await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
@@ -454,17 +550,22 @@ void main() {
       expect(wire.input, contains('git status'));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    // ⚠️ It used to hand the agent a ⌃V here, for its engine to read a picture itself — off the FAR
+    // machine's clipboard, not this phone's. An image is the host's paste to send, or nothing.
     testWidgets(
-      'an empty clipboard hands the agent its own ⌃V, to read a picture itself',
+      'a clipboard with no text pastes nothing, and never a ⌃V for the far '
+      'machine',
       (tester) async {
-        _Platform(tester);
-        // What the image reader answers on a phone: nothing, at once. The
-        // test host is a Mac, where it would ask a channel nobody answers.
+        final platform = _Platform(tester);
+        // A picture on the clipboard, as the phone's native side would answer for one.
         const images = MethodChannel('harness/clipboard_image');
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          images,
-          (_) async => null,
-        );
+        var imageReads = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(images, (
+          _,
+        ) async {
+          imageReads++;
+          return Uint8List.fromList([0x89, 0x50, 0x4e, 0x47]);
+        });
         addTearDown(
           () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
             images,
@@ -478,7 +579,35 @@ void main() {
 
         await commandV(tester);
 
-        expect(wire.input, '\x16');
+        expect(wire.input, isNot(contains('\x16')));
+        expect(wire.binaries, isEmpty);
+        expect(wire.types, isNot(contains('terminal_chunked_upload_begin')));
+        expect(imageReads, 0);
+        // No text, so it was never read: iOS asks nobody about it.
+        expect(
+          platform.calls.map((c) => c.method),
+          isNot(contains('Clipboard.getData')),
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a terminal that reconnected during the read is not pasted into',
+      (tester) async {
+        final pane = session();
+        _Platform(tester)
+          ..clipboard = 'git status'
+          // The read waits on iOS's prompt, and the stream came back as another one meanwhile.
+          ..onRead = () => pane.streamId = 's2';
+        _machine(notifier, pasteRaw: true);
+        await pumpPanel(tester, pane, focused: true);
+        await tester.pump();
+
+        await commandV(tester);
+
+        expect(wire.ofKind(TerminalBinaryKind.paste), isEmpty);
+        expect(wire.input, isEmpty);
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
@@ -686,7 +815,8 @@ void main() {
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets(
-      'a picture on the far machine is fetched with a bar, then opened',
+      'a picture on the far machine is fetched with a bar, then shown in the '
+      'app',
       (tester) async {
         final launched = <Uri>[];
         final downloader = _Downloader();
@@ -721,8 +851,77 @@ void main() {
         await tester.pump();
         await tester.pump();
 
-        expect(launched, [Uri.file('/tmp/preview/shot.png')]);
+        // On its own page in the app, never handed to the launcher: a phone's
+        // `url_launcher` cannot open a `file:` URL, so that always failed.
+        expect(launched, isEmpty);
         expect(find.textContaining('Downloading'), findsNothing);
+        expect(find.textContaining('Could not open'), findsNothing);
+        await tester.pump(const Duration(seconds: 1));
+        final page = find.byType(MediaPreviewPage);
+        expect(page, findsOneWidget);
+        expect(
+          tester.widget<MediaPreviewPage>(page).path,
+          '/tmp/preview/shot.png',
+        );
+
+        // Back is the terminal again, as it was.
+        await tester.tap(find.byKey(const ValueKey('tty-back')));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        expect(page, findsNothing);
+        expect(find.byType(TerminalView), findsOneWidget);
+        expect(launched, isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a video on the far machine is shown in the app, the same way',
+      (tester) async {
+        final launched = <Uri>[];
+        final downloader = _Downloader();
+        final pane = session();
+        pane.terminal.write('${_blank}recorded /work/demo.mp4');
+        await pumpPanel(
+          tester,
+          pane,
+          mediaDownloader: downloader,
+          linkOpener: TerminalLinkOpener(
+            launch: (uri) async {
+              launched.add(uri);
+              return true;
+            },
+            fileExists: (_) async => true,
+          ),
+        );
+
+        await tester.tapAt(cellOf(tester, pane, '/work/demo.mp4', offset: 3));
+        await tester.pump(kDoubleTapTimeout);
+        await tester.pump();
+        downloader.result.complete('/tmp/preview/demo.mp4');
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(launched, isEmpty);
+        final page = find.byType(MediaPreviewPage);
+        expect(
+          tester.widget<MediaPreviewPage>(page).path,
+          '/tmp/preview/demo.mp4',
+        );
+        // No player answers in a test: the page says so rather than breaking.
+        await tester.pump();
+        expect(find.text('Could not open this preview.'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('media-preview-share')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+
+        await tester.tap(find.byKey(const ValueKey('tty-back')));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        expect(page, findsNothing);
+        expect(find.byType(TerminalView), findsOneWidget);
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
@@ -756,6 +955,8 @@ void main() {
 
       expect(launched, isEmpty);
       expect(find.textContaining('preview'), findsNothing);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(MediaPreviewPage), findsNothing);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   });
 

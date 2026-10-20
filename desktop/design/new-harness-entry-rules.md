@@ -175,10 +175,12 @@ Detached checkouts do not invent a branch name; full path and checkout details
 remain available through the context controls. Worktree implementation folders
 are not everyday project labels. See [workspace-status-bar.md](workspace-status-bar.md)
 for context actions and compact layout. A folder inside a linked
-worktree (the focused pane's, or one typed or browsed) shows as the same folder
-in the repository's main checkout, so Cmd-N from a worktree pane starts beside
-it rather than inside it. Worktrees Start made are never offered as recent
-projects.
+worktree that the form inherits (the focused pane's, a draft's, a recent one)
+shows as the same folder in the repository's main checkout, so Cmd-N from a
+worktree pane starts beside it rather than inside it. A worktree folder the
+person browses or types stays itself: the harness works in it on its current
+branch, and Worktree is off and unavailable ("Already a worktree"). Worktrees
+Start made are never offered as recent projects.
 
 **Branch** starts on `main` for a fresh desktop form. With Worktree on, local
 `main` or `origin/main` can supply the base. With Worktree off, it must be a local
@@ -272,6 +274,14 @@ silently reused on another. Generated folders use exclusive reservation and
 advance to seconds/a suffix only on a confirmed collision. Explicit names are
 never silently renamed, and existing files are never overwritten.
 
+An explicit name whose folder already exists is refused (`PROJECT_EXISTS`).
+When what is there is a folder, the refusal names it and the form offers
+**Use the existing folder**, which switches Project to that folder on the same
+machine and starts there only when pressed; a file of that name, or another
+name or machine, offers nothing. A clone whose destination is already a
+checkout of the same repository (its `origin`, however git spells it) starts in
+that checkout instead of cloning; anything else there is still refused.
+
 ## Regression coverage
 
 `tool/check_new_harness_coverage.mjs` requires 100% executable-line coverage of
@@ -316,6 +326,10 @@ not a guarantee about every possible external machine or agent failure.
 - `test/generated_project_launch_test.dart` and
   `test/new_harness_project_context_test.dart`: generated versus edited names,
   collisions, delayed replies, and machine-specific project choices.
+- `test/project_exists_test.dart` and `test/repository_clone_test.dart`: an
+  explicit name's existing folder offered and used only when chosen, on this
+  computer and another machine, and a clone reusing a checkout of the same
+  repository. `cli/src/lib/projectFolder.spec.ts` covers the daemon's side.
 - `integration_test/native_workspace_e2e_test.dart`: native onboarding,
   Cmd-T/Cmd-Shift-P creation, edited defaults, Store product switching for Open/Try,
   the Models menu, and terminal input immediately after starting without a

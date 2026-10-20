@@ -83,6 +83,8 @@ pub struct Pane {
     /// The far pane's size — what the grid is.
     pub cols: u16,
     pub rows: u16,
+    /// Whether [cols]/[rows] came from the far pane (a keyframe), not from this side's guess.
+    pub far_sized: bool,
     /// What we last asked the far pane to be.
     pub want: (u16, u16),
     pub input_seq: u64,
@@ -99,6 +101,10 @@ pub struct Pane {
     /// A user requested app-wide control while this pane's passive open was in flight.
     pub takeover_pending: bool,
     pub read_only: bool,
+    /// Taken by another client (`terminal_closed.takenBy`): its last frame stays at this side's size
+    /// and the watcher's frames — at the taker's size — are not drawn, as the desktop app keeps its
+    /// tile, until this side takes it back.
+    pub frozen: bool,
     pub last_alive: Instant,
     pub dirty: bool,
     pub bell: bool,
@@ -470,6 +476,8 @@ impl Pane {
             input_off: false,
             opening: false,
             takeover_pending: false,
+            frozen: false,
+            far_sized: false,
             read_only: false,
             last_alive: Instant::now(),
             dirty: true,
@@ -532,6 +540,7 @@ impl Pane {
     pub fn keyframe(&mut self, cols: u16, rows: u16, bytes: &[u8]) {
         self.cols = cols.max(1);
         self.rows = rows.max(1);
+        self.far_sized = true;
         self.term = Term::new(config(), &Size(self.cols, self.rows), self.listener.clone());
         self.parser = Processor::new();
         self.in_screen_title = false;

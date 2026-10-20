@@ -24,6 +24,7 @@ typedef struct {
     uint8_t depth;
     uint32_t talk_started_ms, send_started_ms;
     char sent_agent[ID_MAX];
+    uint8_t work_page;     // Home's Working card: the page of three pets shown (0-based; reset when the card is not shown)
     pod_view_t talk_prev;  // AGENT or RECAP: the screen TALK was opened from (talk_over goes back to it)
     bool sending;          // TALK after the stop tap: the voice screen shows SEND until the agent's real turn begins (or POD_SENT_WAIT_MS)
     bool sent_seen;        // the model has marked sent_agent's optimistic Working (pod_model_sent) since the stop tap
@@ -33,7 +34,7 @@ typedef struct {
 
 typedef enum {
     POD_A_NONE, POD_A_BACK,
-    POD_A_BANNER,       // hit only: the notification banner (the glue handles its tap and its swipe up; the nav ignores it)
+    POD_A_BANNER,       // hit only: the notice toast (the glue handles its tap and its swipe up; the nav ignores it)
     POD_A_OPEN_TAB,     // arg: tab index, or POD_TAB_RECENT. Only from the TABS frame.
     POD_A_OPEN_AGENT,   // arg: index into the list pod_nav_list returns for the current TAB frame.
     POD_A_PREV, POD_A_NEXT, POD_A_TALK,
@@ -42,8 +43,10 @@ typedef enum {
     POD_A_PANES,        // from an agent screen: back to the tab's list (from TALK it aborts first)
     POD_A_TABS,         // from an agent screen: straight back to the Tabs root (from TALK it aborts first)
     POD_A_INBOX,        // the bell: push the Inbox (from anywhere but TALK and the Inbox itself)
-    POD_A_OPEN_NOTIF,   // arg: index into model->unread, from the Inbox: open that agent (an Agent/Recap frame over the Inbox) and mark it read
-    POD_A_SCROLL        // arg: signed delta added to the top frame's scroll (clamped to >= 0): rows, whatever the screen draws as one.
+    POD_A_OPEN_NOTIF,   // arg: index into model->unread, from the Inbox: open that agent (an Agent/Recap frame over the Inbox) and mark it read. An idle agent opens on its Recap (which reads it)
+    POD_A_FOLLOW,       // arg: index into model->agents: open that agent from anywhere (Inbox rows with no unread entry); the glue resolves the id
+    POD_A_SCROLL,       // arg: signed delta added to the top frame's scroll (clamped to >= 0): rows, whatever the screen draws as one.
+    POD_A_ENTER_TAB     // arg: tab index, only from the TABS frame: push the TAB frame and the tab's first agent (AGENT_OPEN). An empty or unknown tab: nothing.
 } pod_action_t;
 
 typedef enum { POD_FX_NONE, POD_FX_VOICE_BEGIN, POD_FX_VOICE_END, POD_FX_VOICE_ABORT, POD_FX_AGENT_OPEN } pod_effect_t;
@@ -54,10 +57,10 @@ void pod_nav_init(pod_nav_t *);
 pod_out_t pod_nav_act(pod_nav_t *, pod_model_t *, pod_action_t, int arg, uint32_t now_ms);
 // Call after a model change: pops frames whose agent or tab is gone. Returns VOICE_ABORT (with the agent) when
 // it pops a TALK frame, else NONE. (Deviation from the plan's void return.)
-pod_out_t pod_nav_sync(pod_nav_t *, const pod_model_t *);
+pod_out_t pod_nav_sync(pod_nav_t *, pod_model_t *);
 // Just the Agent <-> Recap flips of pod_nav_sync (the clock moving can cause the first without a feed): no pops, no
 // effects, the stack depth untouched. Recap -> Agent when the open agent starts working or asking.
-void pod_nav_flip_recaps(pod_nav_t *, const pod_model_t *);
+void pod_nav_flip_recaps(pod_nav_t *, pod_model_t *);
 // The recording ended without the person (a refused start, the link, the 600 s cap): TALK goes back to the
 // screen it came from, with the stack as it was. Nothing happens when the top is not TALK.
 void pod_nav_talk_over(pod_nav_t *);
@@ -74,4 +77,8 @@ int pod_nav_list(const pod_nav_t *, const pod_model_t *, const pod_agent_t *out[
 // Recent; the TAB frame's scroll shows the agent's row. Not a task: Recent does not change. Emits no AGENT_OPEN: the
 // host already is there. Does nothing for an unknown agent, while TALK is on top, or when the agent is already open.
 // Returns true when the stack changed.
+// The label of the top frame's Back, from the frame below it: "Recent" (came from the Recent list), the tab's name
+// (a tab list), "Tabs" (the root), "Inbox", else "Back". The pointer is into the model (or a literal): valid until the next model change.
+const char *pod_nav_origin(const pod_nav_t *, const pod_model_t *);
 bool pod_nav_follow(pod_nav_t *, pod_model_t *, const char *agent_id, uint32_t now_ms);
+bool pod_nav_follow_tab(pod_nav_t *, pod_model_t *);   // The app window's selected tab changed: Home's card or the room follows (device-local)

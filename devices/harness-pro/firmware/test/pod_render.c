@@ -1,13 +1,16 @@
-// Dev tool (not run by run.sh): renders one Pod screen of a fixed demo model to a 720 x 720 PPM.
-// Usage: pod_render <screen> <out.ppm> [now_ms]      pod_render.py builds it and converts the PPMs to PNG.
-//   screens: tabs[:<rows scrolled>[+<more tabs>][@<px offset: mid-drag>] | :mock] (the album grid; mock = the mockup's six covers, one empty), default[:tab|:talk] (default marks), recent, chrome[:talk] (the status bar and transport alone), tab:<n>, agent:<id>, recap:<id>, talk:<id>   (ids: fw ota be cli web desk docs vault
-//   site cur notes2 kilo). ota:<pct>|ota:restart (the update screen), notice:updated|notice:failed (the Tabs screen with that pill). inbox; and ":bell" (unread entries: the bell in the status bar) or ":banner" (the notification banner too) on any
-//   other screen, e.g. tabs:bell, tab:1:bell, agent:fw:banner, recap:desk:banner. The demo is the HTML mockup's (the Pod mockup): the same agents, tabs and times.
+// Dev tool (not run by run.sh): renders one Pets screen of a fixed demo model to a 720 x 720 PPM.
+// Usage: pod_render [--spec out.json] <screen> <out.ppm> [now_ms]      pod_render.py builds it and converts the PPMs to PNG.
+//   screens: tabs[:<tab>[+<more tabs>] | :mock | :9 | :seven | :single | :long | :notices | :linkdown | :banner] (Home),
+//   agent:<id>, recap:<id>, talk:<id> (ids: fw ota be cli web desk docs vault site cur notes2 kilo; suffixes :long :offline :unread :viet ...),
+//   talk:listen|send, inbox[:viet|:quiet|:failed], ota:<pct>|ota:restart (the update screen), notice:updated|notice:failed (the Home screen with that pill),
+//   <room>:toast[@<ms after it showed>] (the notice toast), and ":bell" / ":banner" on a screen (unread entries; banner adds the toast). The demo is the
+//   HTML mockup's: the same agents, tabs and times. `--skin pets` is accepted and ignored (Pets is the only interface).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
+#include "pod/home/ph.h"
 #include "pod/pod_view.h"
 #include "pro_canvas.h"
 
@@ -81,7 +84,55 @@ static void demo(void)
     pod_nav_init(&N);
 }
 
-// The mockup's Option B: Recent, then five tabs with the second selected, the last one empty.
+// Fixtures: the agent's verb, steps and stats the Pets
+// screens read. screen's tokens pick edge cases: long (long names, a long question, long steps), offline, extreme (999 passes, 12 failures, 1:23:45, huge tokens), testfail (desk's turn
+// stats fail), scroll (desk's recap is long and scrolled), and inbox (reading-list's last turn failed).
+static void set_steps(const char *id, int n, const char *const text[], const uint16_t at[])
+{
+    pod_agent_t *a = (pod_agent_t *)pod_model_find(&M, id);
+    for (int i = 0; i < n; i++) { snprintf(a->steps[i], sizeof a->steps[i], "%s", text[i]); a->step_at_s[i] = at[i]; }
+    a->step_count = (uint8_t)n;
+}
+static void console_fixture(const char *screen)
+{
+    static const char *const fw[] = {"npm test \xc2\xb7 44 passed", "The hero now uses the new gradient; pricing is next.", "Read src/pricing.tsx", "Read src/hero.tsx", "Read src/tokens.css", "Listed src/"};
+    static const uint16_t fw_at[] = {41, 72, 130, 151, 160, 170};
+    static const char *const cli[] = {"Ran the migration on a copy \xc2\xb7 ok", "Read migrations/0042_retry_queue.sql"};
+    static const uint16_t cli_at[] = {12, 30};
+    pod_agent_t *a;
+    set_steps("fw", 6, fw, fw_at);
+    snprintf(((pod_agent_t *)pod_model_find(&M, "fw"))->verb, POD_VERB_BYTES, "Edit");
+    set_steps("cli", 2, cli, cli_at);
+    set_steps("desk", 6, fw, fw_at);
+    ((pod_agent_t *)pod_model_find(&M, "desk"))->step_total = 14;   // the recap's STEPS tile: the turn's total (the list holds 6); the other recaps' turn starts were never seen
+    pod_model_turn_stats(&M, "desk", 54, 0, 0, 42900, 18500);   // the TOKENS tile: 61.4k
+    if (strstr(screen, "testfail")) { pod_model_turn_stats(&M, "desk", 52, 2, 1, -1, -1); }
+    if (strstr(screen, "extreme")) {   // recap tiles at their widest: 3 digits of passes, failures, a 1:23:45 duration, a huge token count and commit count
+        pod_model_turn_stats(&M, "desk", 999, 12, 99999, 99999999, 99999999);
+        ((pod_agent_t *)pod_model_find(&M, "desk"))->elapsed_s = 5025;
+    }
+    if (!strncmp(screen, "inbox", 5)) ((pod_agent_t *)pod_model_find(&M, "notes2"))->failed = true;
+    if (strstr(screen, "offline")) ((pod_agent_t *)pod_model_find(&M, "be"))->state = POD_OFFLINE;
+    if (strstr(screen, "long")) {
+        static const char *const lg[] = {"A very long tool line that goes on and on and certainly cannot fit in the row of the timeline at all, not even close",
+                                         "Read a/very/deeply/nested/path/to/some/source/file/that/has/a/long/name/and_an_even_longer_basename_in_the_end.tsx", "Short"};
+        static const uint16_t at[] = {41, 0xFFFF, 130};
+        a = (pod_agent_t *)pod_model_find(&M, "fw");
+        snprintf(a->name, sizeof a->name, "%s", "marketing-site-redesign-with-a-really-long-name");
+        snprintf(a->machine, sizeof a->machine, "A Very Long Machine Name On The Network");
+        snprintf(a->activity, sizeof a->activity, "src/components/pricing/PricingCardWithAnimatedGradientBackground.tsx and then some");
+        set_steps("fw", 3, lg, at);
+        pod_model_question(&M, "cli", "Run the migration on the dev database now, or do you want me to wait until the retry queue drains and the nightly backup has finished, "
+                           "because the migration locks the jobs table for about a minute and every worker will stall meanwhile and then retry?");
+    }
+    if (strstr(screen, "scroll")) {
+        char text[2048] = "";
+        for (int i = 0; strlen(text) < 1900; i++) { char t[80]; snprintf(t, sizeof t, "Sentence %d of the recap says the Relaxing chip follows Rest. ", i + 1); strcat(text, t); }
+        pod_model_recap(&M, "desk", text, false);
+    }
+}
+
+// The mockup's Option B: Recent, then five tabs with the second selected (the mockup's last, empty one is not shown).
 static void mock_tabs(void)
 {
     static const char *const names[] = {"Harness repo", "Doi song", "Thoi trang", "Harness Store", "New Swarm"};
@@ -118,6 +169,28 @@ static void more_tabs(int extra)
     pod_model_swarms(&M, sw, ids, n, total, "s5", NULL, 0);
 }
 
+// Pets Home fixtures: tabs:seven (a middle tab of seven agents: four icons and "+3") and tabs:single (a middle tab of one agent), each between
+// two other tabs so the neighbours peek in.
+static void cover_tabs(bool seven)
+{
+    static const char *const seven_ids[] = {"fw", "ota", "be", "cli", "web", "desk", "docs"}, *const one_id[] = {"kilo"};
+    static const char *const *ids[3];
+    static const char *const names[] = {"Firmware", "Harness repo", "Notes"};
+    static uint8_t n[3];
+    cable_swarm_t sw[3];
+    memset(sw, 0, sizeof sw);
+    ids[0] = T_FW; n[0] = 2;
+    ids[1] = seven ? seven_ids : one_id; n[1] = seven ? 7 : 1;
+    ids[2] = T_NOTES; n[2] = 3;
+    for (int i = 0; i < 3; i++) {
+        snprintf(sw[i].id, SWARM_ID_MAX, "c%d", i);
+        snprintf(sw[i].name, CABLE_NAME_MAX, "%s", seven || i != 1 ? names[i] : "Solo");
+        sw[i].panes = sw[i].agents = n[i];
+    }
+    pod_model_swarms(&M, sw, ids, n, 3, "c1", NULL, 0);
+    pod_nav_act(&N, &M, POD_A_SCROLL, 1, T0);
+}
+
 static bool open_agent(const char *id)
 {
     for (int t = 0; t < TABS; t++)
@@ -130,54 +203,148 @@ static bool open_agent(const char *id)
     return false;
 }
 
+// --spec <out.json>: every run of the finished scene and every hit rect, for the design-spec export (dev only).
+// Run kinds 1..5 are pro_canvas.c's private PRO_TEXT / PRO_RECT / PRO_IMAGE / PRO_RECT_AA / PRO_RECT_AA_STROKE; 16..19 are pod_draw.h's. Colours are RGB565
+// (the scene's own) expanded to 8 bits per channel; build.py recovers the original hex from the C(0x...) sources.
+static void json_str(FILE *f, const char *t)
+{
+    fputc('"', f);
+    for (const unsigned char *p = (const unsigned char *)t; *p; p++) {
+        if (*p == '"' || *p == '\\') fprintf(f, "\\%c", *p);
+        else if (*p < 0x20) fprintf(f, "\\u%04x", *p);
+        else fputc(*p, f);
+    }
+    fputc('"', f);
+}
+static void json_col(FILE *f, const char *key, unsigned v)
+{
+    fprintf(f, ",\"%s\":\"#%02x%02x%02x\",\"%s565\":%u", key, (v >> 11) * 255 / 31, ((v >> 5) & 63) * 255 / 63, (v & 31) * 255 / 31, key, v);
+}
+static void write_spec(const char *path, const char *screen)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); exit(1); }
+    fprintf(f, "{\"screen\":"); json_str(f, screen);
+    fprintf(f, ",\"width\":720,\"height\":720,\"runs\":[");
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        ht_rect_t b = ht_run_bounds(r);
+        const char *kind = "unknown";
+        switch (r->pro_kind) {
+        case 1: kind = "text"; break; case 2: kind = "rect"; break; case 3: kind = "image"; break;
+        case 4: kind = "rect-aa"; break; case 5: kind = "rect-aa-stroke"; break;
+        case 16: kind = "pet-cell"; break; case 17: kind = "arc"; break; case 18: kind = "gradient"; break; case 19: kind = "triangle"; break;
+        }
+        fprintf(f, "%s{\"i\":%d,\"kind\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d", i ? "," : "", i, kind, b.x, b.y, b.w, b.h);
+        if (r->pro_kind == 1) {
+            const ht_pro_font_t *ft = r->pro_font;
+            int size = ft == &ht_pro_24 ? 24 : ft == &ht_pro_32 ? 32 : ft == &ht_pro_42 ? 42 : ft == &ht_pro_56 ? 56 : 0;
+            fprintf(f, ",\"text\":"); json_str(f, r->text);
+            fprintf(f, ",\"size\":%d,\"line_height\":%d,\"clip_w\":%d,\"measured_w\":%d,\"align\":\"left\"", size, ft ? ft->height : 0, r->w, ht_pro_width(ft, r->text));
+            json_col(f, "color", r->fg);
+        } else if (r->pro_kind == 2) {
+            fprintf(f, ",\"radius\":%d", r->radius); json_col(f, "color", r->fg);
+        } else if (r->pro_kind == 4) {   // anti-aliased rounded rect: radius and colour
+            fprintf(f, ",\"radius\":%d", r->radius); json_col(f, "color", r->fg);
+        } else if (r->pro_kind == 5) {   // anti-aliased rect with a border: radius, border colour (color), fill colour in text[0..1]
+            uint16_t fill; memcpy(&fill, r->text, sizeof fill);
+            fprintf(f, ",\"radius\":%d", r->radius); json_col(f, "color", r->fg); json_col(f, "fill", fill);
+        } else if (r->pro_kind == 3) {
+            fprintf(f, ",\"opacity\":%d", r->radius ? r->radius : 255);
+        } else if (r->pro_kind == 16) {
+            const ht_cell_frame_t *cf = r->bitmap.asset;
+            fprintf(f, ",\"zoom8\":%d,\"cols\":%d,\"rows\":%d,\"cell\":%d", r->radius, cf->cols, cf->rows, cf->cell);
+        } else if (r->pro_kind == 17) {
+            int16_t a[2]; uint16_t u[2];   // arc_params_t: cx16 cy16 r16 w16 ...
+            memcpy(a, r->text, 4); memcpy(u, r->text + 4, 4);
+            fprintf(f, ",\"cx\":%.4f,\"cy\":%.4f,\"r\":%.4f,\"band\":%.4f", a[0] / 16.0, a[1] / 16.0, u[0] / 16.0, u[1] / 16.0);
+            json_col(f, "color", r->fg);
+        } else if (r->pro_kind == 18) {
+            uint16_t g[2]; memcpy(g, r->text, 4);
+            fprintf(f, ",\"radius\":%d", r->radius); json_col(f, "color", g[0]); json_col(f, "color2", g[1]);
+        } else if (r->pro_kind == 19) {
+            int16_t v[6]; memcpy(v, r->text, 12);
+            fprintf(f, ",\"points\":[[%.4f,%.4f],[%.4f,%.4f],[%.4f,%.4f]]", v[0] / 16.0, v[1] / 16.0, v[2] / 16.0, v[3] / 16.0, v[4] / 16.0, v[5] / 16.0);
+            json_col(f, "color", r->fg);
+        }
+        fputc('}', f);
+    }
+    static const char *const act[] = {"NONE", "BACK", "BANNER", "OPEN_TAB", "OPEN_AGENT", "PREV", "NEXT", "TALK", "RECAP", "PANES", "TABS", "INBOX", "OPEN_NOTIF", "FOLLOW", "SCROLL", "ENTER_TAB"};
+    fprintf(f, "],\"hits\":[");
+    for (int i = 0; i < F.hit_count; i++) {
+        const pod_hit_t *h = &F.hits[i];
+        fprintf(f, "%s{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"action\":\"%s\",\"arg\":%d,\"id\":", i ? "," : "", h->x, h->y, h->w, h->h,
+                (unsigned)h->action < sizeof act / sizeof act[0] ? act[h->action] : "?", h->arg);
+        json_str(f, h->id);
+        fputc('}', f);
+    }
+    fprintf(f, "]}\n");
+    fclose(f);
+}
+
+// What the glue adds after pod_render, once the entry is still unread: the toast over a room (not Home or Notices) of another agent.
+static void overlay(bool banner, bool toast, uint32_t now)
+{
+    const pod_unread_t *bn = pod_model_unread_find(&M, "be");   // "be" is the entry the toast shows
+    if (!bn) return;
+    const pod_frame_t *top = N.depth ? &N.stack[N.depth - 1] : NULL;
+    if ((banner || toast) && top && (top->view == POD_V_AGENT || top->view == POD_V_RECAP) && strcmp(top->agent, "be")) ph_toast(&F, &M, bn, T0, now);
+}
+
 int main(int argc, char **argv)
 {
+    const char *spec = NULL;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--spec")) { spec = argv[i + 1]; memmove(argv + i, argv + i + 2, (size_t)(argc - i - 2) * sizeof *argv); argc -= 2; break; }
+    for (int i = 1; i + 1 < argc; i++)   // --skin <name>: accepted and ignored (Pets is the only interface)
+        if (!strcmp(argv[i], "--skin")) { memmove(argv + i, argv + i + 2, (size_t)(argc - i - 2) * sizeof *argv); argc -= 2; break; }
     bool notice = false, notice_bad = false;
     const char *notice_text = "Didn't catch that";
     int ota_pct = -1;   // ota:<pct> | ota:restart (the update screen, the mockup's 0.1.2 -> 0.1.3); restart is -2
-    if (argc < 3) { fprintf(stderr, "usage: pod_render <screen> <out.ppm> [now_ms]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: pod_render [--spec out.json] <screen> <out.ppm> [now_ms]\n"); return 2; }
     const char *screen = argv[1];
+    if (!strcmp(screen, "talk:listen")) screen = "talk:fw";          // Talk, listening / sending (talk:<id>[:send] for any agent)
+    else if (!strcmp(screen, "talk:send")) screen = "talk:fw:send";
     bool timing = !strncmp(screen, "time:", 5);   // time:<screen>: rasterise the screen 50 times, print the mean us per full frame
     if (timing) screen += 5;
     uint32_t now = argc > 3 ? (uint32_t)strtoul(argv[3], NULL, 10) : T0;
+    const bool toast = strstr(screen, "toast") != NULL;   // <agent|recap>:<id>:toast[@<ms after it showed>], the notice toast over that room (shown at T0)
+    if (toast && strchr(screen, '@')) now = T0 + (uint32_t)atoi(strchr(screen, '@') + 1);
     demo();
-    bool banner = strstr(screen, "banner") != NULL, bell = banner || strstr(screen, "bell") != NULL, inbox = !strcmp(screen, "inbox");
-    if (bell || inbox) {   // unread entries, oldest first (the newest ends on top); "be" is the one the banner shows
+    bool banner = strstr(screen, "banner") != NULL, bell = banner || toast || strstr(screen, "bell") != NULL || !strcmp(screen, "tabs:notices"), inbox = !strncmp(screen, "inbox", 5);
+    if ((!strncmp(screen, "agent:", 6) || !strncmp(screen, "recap:", 6) || !strncmp(screen, "talk:", 5) || !strncmp(screen, "inbox", 5)))
+        console_fixture(screen);   // only the screens that read it: the older Pets goldens keep their model
+    if ((bell || inbox) && !strstr(screen, "quiet")) {   // unread entries, oldest first (the newest ends on top); "be" is the one the banner shows
         pod_model_unread_add(&M, "cur", "api-client", "Bumped the SDK and regenerated the client. Nothing else changed.", 41, T0 - 3600000u);
         pod_model_unread_add(&M, "vault", "obsidian-vault", "Added two more poems to Poems and Themes.md", 12, T0 - 720000u);
         pod_model_unread_add(&M, "ota", "dial-ota", "Built and flashed the dial with the new face. The OTA channel is untouched.", 301, T0 - 180000u);
         pod_model_unread_add(&M, "be", "backend", "Fixed the cable resync. Tests pass on the host and the device, and the frame time is back under 45 ms.", 134, T0 - 2000u);
     }
+    if (inbox && strstr(screen, "viet")) {   // Vietnamese texts on the rows
+        snprintf(((pod_unread_t *)pod_model_unread_find(&M, "be"))->text, POD_UNREAD_TEXT, "Đã sửa lỗi đồng bộ cáp. Mọi bài kiểm thử đều xanh trên máy chủ và thiết bị.");
+        snprintf(((pod_unread_t *)pod_model_unread_find(&M, "ota"))->text, POD_UNREAD_TEXT, "Đã nạp mặt mới cho núm xoay, kênh cập nhật không đổi và mọi thứ vẫn chạy ổn định như trước đó.");
+    }
     if (inbox) pod_nav_act(&N, &M, POD_A_INBOX, 0, T0);
-    else if (!strncmp(screen, "tabs", 4)) {   // tabs, or tabs:<n>: the Cover Flow with cover n (0 = Recent) chosen
+    else if (!strcmp(screen, "tabs:notices")) {   // Home on the Notices card (the entries are added above; the asking agent counts too)
+        pod_nav_act(&N, &M, POD_A_SCROLL, POD_HOME_NOTICES, T0);
+    } else if (!strncmp(screen, "tabs:working", 12)) {   // Home on the Working card (fw, be, web, cur work: three pets on page 0); :codex has be, web (Muse), site (Codex) work
+        if (strstr(screen, ":codex")) {
+            static const char *const off[] = {"fw", "ota", "cur"};
+            for (int i = 0; i < 3; i++) pod_model_turn(&M, off[i], "done", NULL, 0, T0);
+            pod_model_turn(&M, "site", "activity", "Building the landing page", 20, T0);
+        }
+        pod_nav_act(&N, &M, POD_A_SCROLL, POD_HOME_WORKING, T0);
+    } else if (!strcmp(screen, "tabs:9")) more_tabs(3);   // nine tabs: more than one page
+    else if (!strcmp(screen, "tabs:seven") || !strcmp(screen, "tabs:single")) cover_tabs(!strcmp(screen, "tabs:seven"));
+    else if (!strcmp(screen, "tabs:none")) { static const char *const *no_ids[1]; static const uint8_t no_n[1]; pod_model_swarms(&M, NULL, no_ids, no_n, 0, "", NULL, 0); pod_model_question_close(&M, "cli"); for (unsigned i = 0; i < sizeof AGENTS / sizeof AGENTS[0]; i++) pod_model_turn(&M, AGENTS[i].id, "done", NULL, 0, T0); }   // the first screen: no tabs, nobody working (else the Working card)
+    else if (!strcmp(screen, "tabs:long")) snprintf(M.tabs[0].name, CABLE_NAME_MAX, "%.*s", CABLE_NAME_MAX - 1, "marketing-site-redesign-with-a-long-name");   // Home: a name as long as the model keeps one
+    else if (!strncmp(screen, "tabs", 4)) {   // tabs, or tabs:<n>: Home on tab n
         if (screen[4] == ':' && !strcmp(screen + 5, "mock")) mock_tabs();
         else if (screen[4] == ':') {
             const char *plus = strchr(screen, '+');   // tabs:<rows>+<n>: n more tabs
             if (plus) more_tabs(atoi(plus + 1));
-            pod_nav_act(&N, &M, POD_A_SCROLL, atoi(screen + 5), T0);   // rows (2 a page)
+            pod_nav_act(&N, &M, POD_A_SCROLL, atoi(screen + 5), T0);   // the tab
         }
-        const char *at = strchr(screen, '@');   // tabs:<rows>@<px>: mid-drag, the grid at this offset from the top of page 0
-        if (at) { F.tabs_moving = true; F.tabs_off = atoi(at + 1); }
-    } else if (!strncmp(screen, "default", 7) && !inbox) {   // default marks: a tab with no panes, one of unknown agents, one with a stranger
-        pod_model_agents_begin(&M);
-        pod_model_agent(&M, "zz", "stranger", "zzz", "MacBook Pro");
-        pod_model_agent(&M, "fw", "firmware-pro", "claude", "MacBook Pro");
-        pod_model_agents_end(&M);
-        static const char *const A[] = {"zz", "nobody"}, *const B[] = {"fw", "zz", "nobody"};
-        static const char *const *L[] = {NULL, A, B};
-        static const uint8_t NN[] = {0, 2, 3};
-        cable_swarm_t sw[3];
-        memset(sw, 0, sizeof sw);
-        snprintf(sw[0].id, SWARM_ID_MAX, "e0"); snprintf(sw[0].name, CABLE_NAME_MAX, "Empty");
-        snprintf(sw[1].id, SWARM_ID_MAX, "e1"); snprintf(sw[1].name, CABLE_NAME_MAX, "Strangers"); sw[1].panes = sw[1].agents = 2;
-        snprintf(sw[2].id, SWARM_ID_MAX, "e2"); snprintf(sw[2].name, CABLE_NAME_MAX, "Mixed"); sw[2].panes = sw[2].agents = 3;
-        pod_model_swarms(&M, sw, L, NN, 3, "e0", NULL, 0);
-        if (strstr(screen, "tab")) pod_nav_act(&N, &M, POD_A_OPEN_TAB, 2, T0);
-        if (strstr(screen, "talk")) { pod_nav_act(&N, &M, POD_A_OPEN_TAB, 1, T0); pod_nav_act(&N, &M, POD_A_OPEN_AGENT, 0, T0); }
-    } else if (!strcmp(screen, "recent")) {
-        pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, T0);
-    } else if (!strncmp(screen, "tab:", 4)) {
-        pod_nav_act(&N, &M, POD_A_OPEN_TAB, atoi(screen + 4), T0);
     } else if (!strncmp(screen, "agent:", 6) || !strncmp(screen, "recap:", 6) || !strncmp(screen, "talk:", 5)) {
         char idbuf[32];
         snprintf(idbuf, sizeof idbuf, "%s", strchr(screen, ':') + 1);
@@ -189,13 +356,23 @@ int main(int argc, char **argv)
         if (screen[0] == 'r' && N.stack[N.depth - 1].view != POD_V_RECAP) pod_nav_act(&N, &M, POD_A_RECAP, 0, T0);
         if (screen[0] == 't') pod_nav_act(&N, &M, POD_A_TALK, 0, T0);
         if (screen[0] == 't' && suffix && !strcmp(suffix, "send")) pod_nav_act(&N, &M, POD_A_TALK, 0, T0 + 1000);
+        if (suffix && !strncmp(suffix, "unread", 6)) {   // the Pets room: an unread FINISHED entry (unread) or FAILED one (unreadfail), added after the open that would read it
+            const pod_agent_t *ua = pod_model_find(&M, id);
+            pod_model_unread_add(&M, id, ua ? ua->name : id, ua && ua->recap_lines ? ua->recap : "Fixed the checkout test. Nothing else changed.", 41, T0 - 2000u);
+            if (!strcmp(suffix, "unreadfail")) ((pod_unread_t *)pod_model_unread_find(&M, id))->kind = POD_UNREAD_FAILED;
+        }
+        if (suffix && !strcmp(suffix, "long")) pod_model_recap(&M, id, "I went through the whole checkout flow and fixed the failing test first, then tidied the fixtures, renamed two helpers, rewrote the retry loop so it backs off properly, added a regression test for the double charge, updated the docs and the changelog, and re-ran the full suite twice to be sure nothing else moved. Everything is green now and the branch is ready for review whenever you are.", false);
+        if (suffix && !strcmp(suffix, "ask")) pod_model_question(&M, id, "Run the migration on the dev database now?");   // agent:<id>:ask, any agent asking (fw is Claude, web is Muse; cli asks already)
+        if (suffix && !strcmp(suffix, "short")) pod_model_recap(&M, id, "All green.", false);
+        if (suffix && !strcmp(suffix, "medium")) pod_model_recap(&M, id, "Fixed the checkout test and tidied the fixtures. I also renamed two helpers.", false);
+        if (suffix && !strcmp(suffix, "viet")) pod_model_recap(&M, id, "Tôi đã sửa lỗi thanh toán ở bước cuối, chỉnh lại vòng lặp thử lại và thêm kiểm thử cho trường hợp trụ hai lần. Tệp chính nằm ở /Users/duynguyen/go/src/github.com/autonomous-ai/autonomous-harness/devices/harness-pro/firmware/main/pod/home/ph_recap.c. Mọi thứ đều xanh, nhánh này sẵn sàng để xem lại khi bạn rảnh. Cứ gọi tôi nếu cần thêm gì nữa.", false);
+        if (suffix && !strcmp(suffix, "scroll")) N.stack[N.depth - 1].scroll = 3;
         if (suffix && !strcmp(suffix, "notice")) notice = true;
         if (suffix && (!strcmp(suffix, "updated") || !strcmp(suffix, "failed"))) {   // agent:<id>:updated|failed, the OTA pills
             notice = true;
             notice_bad = !strcmp(suffix, "failed");
             notice_text = notice_bad ? "Update failed \xc2\xb7 trying again later" : "Updated to 0.1.3";
         }
-    } else if (!strncmp(screen, "chrome", 6)) {
     } else if (!strncmp(screen, "ota:", 4)) {
         ota_pct = !strcmp(screen + 4, "restart") ? -2 : atoi(screen + 4);
     } else if (!strncmp(screen, "notice:", 7)) {   // the Tabs screen with the glue's pill: notice:updated | notice:failed
@@ -206,24 +383,28 @@ int main(int argc, char **argv)
         fprintf(stderr, "unknown screen: %s\n", screen);
         return 2;
     }
-    ht_scene_clear(&S, ht_rgb(0xffffff));
+    ht_scene_clear(&S, ht_rgb(0xffffffu));
     F.scene = &S;
+    if (strstr(screen, "linkdown")) pod_model_link(&M, false);   // e.g. tabs:linkdown
     F.banner = banner;
+    F.mic_level = strstr(screen, "quiet") ? 0 : 3;
     if (ota_pct != -1) {
-        pod_view_ota(&F, "0.1.2", "0.1.3", ota_pct < 0 ? 100 : ota_pct, ota_pct == -2);
-    } else if (!strncmp(screen, "chrome", 6)) {   // the status bar and the transport alone: chrome or chrome:talk
-        pod_status(&F, "Firmware", true, 0);
-        pod_transport(&F, strstr(screen, "talk") != NULL);
+        ph_view_ota(&F, "0.1.1", "0.1.2", ota_pct < 0 ? 100 : ota_pct, ota_pct == -2);
     } else {
         pod_render(&F, &N, &M, now);
     }
-    if (banner) pod_banner(&F, &M, pod_model_unread_find(&M, "be"), now);   // the glue draws it after pod_render
+    overlay(banner, toast, now);   // the glue draws it after pod_render, and only while the entry is unread (pod_glue.c)
     if (notice) {   // the glue's pill (pod_glue.c pod_ui_render), repeated here: this tool does not link the glue
         const char *text = notice_text;
-        int w = ht_pro_width(&ht_pro_24, text), pw = w + 40, ny = POD_TRANSPORT_Y - 8 - 40;
-        ht_pro_rect(&S, (POD_W - pw) / 2, ny, pw, 40, 20, ht_rgb(notice_bad ? 0xb3261e : 0x111111));
-        ht_pro_text(&S, (POD_W - w) / 2, ny + 7, w, &ht_pro_24, ht_rgb(0xffffff), text);
+        const ht_pro_font_t *font = &ht_pro_24;
+        int w = ht_pro_width(font, text);
+        if (w > 600) w = 600;
+        int pw = w + 40, ny = POD_TRANSPORT_Y - 8 - 40;
+        const uint16_t bg = ht_rgb(notice_bad ? 0xb3261e : 0x111111);
+        ht_pro_rect(&S, (POD_W - pw) / 2, ny, pw, 40, 20, bg);
+        ht_pro_text(&S, (POD_W - w) / 2, ny + 7, w, font, ht_rgb(0xffffff), text);
     }
+    if (spec) write_spec(spec, screen);
     static uint16_t px[720 * 720];
     ht_rect_t all = {0, 0, 720, 720};
     if (timing) {
@@ -232,8 +413,9 @@ int main(int argc, char **argv)
         double build = 0, raster = 0;
         for (int i = 0; i < REPS; i++) {
             clock_gettime(CLOCK_MONOTONIC, &a);
-            ht_scene_clear(&S, ht_rgb(0xffffff));
+            ht_scene_clear(&S, ht_rgb(0xffffffu));
             pod_render(&F, &N, &M, now);
+            overlay(banner, toast, now);   // the glue draws it after pod_render: time it too
             clock_gettime(CLOCK_MONOTONIC, &b);
             build += (double)(b.tv_sec - a.tv_sec) * 1e6 + (double)(b.tv_nsec - a.tv_nsec) / 1e3;
             clock_gettime(CLOCK_MONOTONIC, &a);
@@ -241,8 +423,17 @@ int main(int argc, char **argv)
             clock_gettime(CLOCK_MONOTONIC, &b);
             raster += (double)(b.tv_sec - a.tv_sec) * 1e6 + (double)(b.tv_nsec - a.tv_nsec) / 1e3;
         }
-        printf("%s: %d runs; mean per full frame over %d: %.0f us rasterise, %.0f us build the scene\n", screen, S.count, REPS,
-               raster / REPS, build / REPS);
+        // The device rasterises in 24-row strips (pro_frame.c): the number the Pets perf check (test_ph_perf.sh) compares.
+        double strips = 1e30;
+        for (int rep = 0; rep < REPS; rep++) {
+            clock_gettime(CLOCK_MONOTONIC, &a);
+            for (int y = 0; y < 720; y += 24) { ht_rect_t st = {0, (int16_t)y, 720, 24}; ht_raster(&S, st, px); }
+            clock_gettime(CLOCK_MONOTONIC, &b);
+            double us = (double)(b.tv_sec - a.tv_sec) * 1e6 + (double)(b.tv_nsec - a.tv_nsec) / 1e3;
+            if (us < strips) strips = us;
+        }
+        printf("%s: %d runs; mean per full frame over %d: %.0f us rasterise, %.0f us build the scene; strips24 best %.0f us\n", screen, S.count, REPS,
+               raster / REPS, build / REPS, strips);
         return 0;
     }
     ht_raster(&S, all, px);

@@ -26,8 +26,11 @@ Full key list, in the order the Pro sends it:
 | `swarms` | `"members-v1"` | capability |
 | `recap` | `"long-v1"` | capability |
 | `activity` | `"steps-v1"` | capability |
+| `stats` | `"turn-v1"` | capability |
 | `player` | `"library-v1"` | capability |
+| `ota` | `"v1"` | capability: the Pro takes firmware offers |
 | `mac` | `aa:bb:...` | existing |
+| `settings` | object | existing: brightness, character, face, voiceLang, muted, quiet, straightTitle, focusFace, scrollReversed, round |
 
 Dropped from the branch's hello: `speech` (`pcm16-v1`). The Pro does not take speech output.
 
@@ -109,7 +112,7 @@ separately), every `speech.*` and the speech PCM frame (`0x05`), `models`, `noti
 `question.state`, `answer.receipt`, `draft.state`, `voice.draft`, `voice.question`, `voice.search`, `voice.form`,
 `selection.state`, `carry.state`, `form.state`, `visit.state`, `metrics.state` (and `metrics.get`),
 `player.overview`, `player.context` (parsed in the shared firmware but unused by Pod), `machine.selected`,
-`machine.error`, `toast`, and the notification fields of `summary` (`silent`, `quiet`, `name`, `machine`).
+`machine.error`, `toast`, and the notification fields of `summary` (`silent`, `quiet`, `name`, `machine`), though it reads `tier` (below).
 The Pro does use: `welcome`, `ping`, `agents.*`, `agent.updated`, `machines.*`, `swarms`, `focus`,
 `turn.started/activity/done/error`, `summary`, `question`, `question.close`, `player.library`, `voice.transcript`,
 `voice.error`; and sends `hello`, `machines.list`, `agents.list`, `player.library.get`, `agent.open`, `scroll`,
@@ -129,3 +132,34 @@ The Pro does use: `welcome`, `ping`, `agents.*`, `agent.updated`, `machines.*`, 
    changes behavior before porting `latestUpdate` (see the Player activity row).
 
 Firmware offers: a hello with `board:"pro"` gets no `fw.offer` (no manifest lookup, no transfer) until the Pro has its own OTA channel; a hello without `board` is offered as before.
+
+## 7. Losing bytes on the USB path: `seq` and `resync`
+
+The Pro's USB-Serial/JTAG path loses bytes host to device, each loss under one 64-byte packet. A small frame
+(`ping`, `turn.done`, `focus`, `question.close`...) can vanish whole and nothing notices. Three layers catch it:
+
+- **Count below the driver.** The firmware carries a copy of ESP-IDF 5.5.4's `esp_driver_usb_serial_jtag`
+  (`firmware/components/`) with two atomic counters; the `alive` heartbeat prints `isr_rx` (bytes the ISR pulled from
+  the hardware FIFO) and `ring_drop` (ring-buffer pushes that failed). If `isr_rx` is short of what the daemon wrote,
+  the loss is on the wire; if `ring_drop` moves, the reader is too slow.
+- **Partial frames.** A frame that stops arriving mid-way (its tail lost) is dropped after 300 ms of silence, counted as
+  corrupt and resynced at once, so the next frame is not swallowed by its pending length.
+- **`seq`.** The daemon adds an integer `seq` to every JSON frame it sends to a device whose hello says `board:"pro"`.
+  Each `welcome` restarts the count at 0 (the welcome itself carries `seq:0`), so a keepalive hello restarts it too.
+  Round dials get no `seq`: their frames are byte-identical to before. The Pro takes the first `seq` of a session as
+  the base and expects each next one to be exactly +1; anything else is a gap (a frame was lost) and counts in
+  `seq_gaps` on the heartbeat. A frame without `seq` (an older daemon) is not checked.
+
+A gap, or a frame that failed its CRC, makes the Pro send `{t:"resync"}`, at most once per 2 s (and not during a
+firmware transfer, which has its own resend). The daemon answers with a full snapshot, also rate-limited to once per
+2 s: `machines.*`, `swarms`, `agents.*`, `notif.replace` (the notices, including question rows), and a `question`
+frame for each question still open. It does not replay recent `summary` history (the attach push does); a lost
+`summary` is not repaired by a resync. The welcome of a Pro lists `resync` in `features`; a Pro whose welcome does not (an older daemon) sends the old
+`swarms.list` and `agents.list` instead. A welcome without `seq` turns the gap check off for that session.
+
+## `summary.tier`
+
+`summary` carries `tier`: `"alert"` (beep, wake, toast, Notices entry), `"list"` (Notices entry only: no beep,
+wake or toast) or `"silent"` (the card updates, nothing else). The host still sends the older flags beside it
+for firmware that predates `tier`: `alert` sets neither, `list` sets `quiet: true`, `silent` sets `silent: true`.
+`question` and `turn.error` carry no `tier`; treat both as `alert`.

@@ -40,17 +40,33 @@ enum ExperimentalFeature {
   agentMessages(
     'agent_messages',
     'Agents in the same tab can message each other',
-    'Turn on to let Claude Code and Codex in one tab send each other messages with harness send.',
+    'Turn on to let Claude Code and Codex in one tab send each other messages with harness send. Invite people to a tab and their harnesses join it from their own computers.',
+  ),
+
+  /// Stored inverted (ruling T4): every account experiment is "off unless true", and the summary is
+  /// shared unless the person hides it. The switch shows it as "share", checked when this is off.
+  agentMessagesHideSummary(
+    'agent_messages_hide_summary',
+    'Share a one-line summary of what your harnesses are doing with people in your shared tabs',
+    'One line of at most 120 characters, for the harnesses listed in a shared tab.',
   );
 
   const ExperimentalFeature(this.id, this.label, this.description);
   final String id, label, description;
+
+  /// Super Tab owns coordination. Keep the old wire values readable for existing
+  /// clients and sessions, without asking people to assemble the feature here.
+  bool get visibleInSettings => this == focusBarCreature || this == shareButton;
+
+  /// The switch shows the opposite of the stored value.
+  bool get inverted => this == agentMessagesHideSummary;
   bool get available => switch (this) {
     focusBarCreature => !kIsWeb && !kViewerMode,
     shareButton ||
     agentsStartAgents ||
     agentPullRequestLine ||
-    agentMessages => true,
+    agentMessages ||
+    agentMessagesHideSummary => true,
   };
 }
 
@@ -143,18 +159,40 @@ class ExperimentalFeaturesStore extends ChangeNotifier {
   }
 
   Future<void> _read(int generation, int epoch) async {
+    Map<String, dynamic>? result;
     try {
-      final result = await _transport!.read();
-      if (!_current(generation) || epoch != _epoch) return;
+      result = await _transport!.read();
+    } catch (_) {}
+    if (!_current(generation) || epoch != _epoch) return;
+    final before = _shown();
+    try {
+      if (result == null) throw const FormatException('Unreadable');
       _apply(result);
       error = null;
       errorFeature = null;
     } catch (_) {
-      if (!_current(generation) || epoch != _epoch) return;
       error = 'Couldn’t read your account settings. Refresh to try again.';
     }
-    _notify();
+    // The fallback poll reads every 30 s and almost always finds nothing new.
+    // Every pane header, the workspace screen (a setState and a native menu
+    // sync) and search listen here, so notifying on each read rebuilt them
+    // twice a minute for every account, on the UI thread whose long frames
+    // production samples (Oct 17: 6.7% of Linux samples over 250 ms, macOS
+    // 0.25%). Only a read that changes what is shown notifies.
+    if (!listEquals(before, _shown())) _notify();
   }
+
+  /// Everything a listener can read after a read: a newer revision that
+  /// changes no choice changes nothing on screen.
+  List<Object?> _shown() => [
+    loaded,
+    error,
+    errorFeature,
+    for (final feature in ExperimentalFeature.values) ...[
+      _choices[feature],
+      _available[feature],
+    ],
+  ];
 
   void _apply(Map<String, dynamic> result) {
     final revision = result['revision'];
@@ -224,4 +262,24 @@ class ExperimentalFeaturesStore extends ChangeNotifier {
     _poll?.cancel();
     super.dispose();
   }
+}
+
+/// One experiment's [ExperimentalFeaturesStore.choice] as a listenable: null
+/// until the account's settings are read. It notifies whenever the store does
+/// — when any experiment, its availability, a save or an error changes — so a
+/// listener compares with the value it last saw.
+class ExperimentChoice implements ValueListenable<bool?> {
+  const ExperimentChoice(this.store, this.feature);
+
+  final ExperimentalFeaturesStore store;
+  final ExperimentalFeature feature;
+
+  @override
+  bool? get value => store.choice(feature);
+
+  @override
+  void addListener(VoidCallback listener) => store.addListener(listener);
+
+  @override
+  void removeListener(VoidCallback listener) => store.removeListener(listener);
 }

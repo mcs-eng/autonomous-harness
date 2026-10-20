@@ -43,6 +43,10 @@ class FakeBackend implements LocalWsBackend {
   setLocalTerminalFocus(connId: string, agentId: string | null): void {
     this.focuses.push([connId, agentId])
   }
+  observed: Array<[string, unknown]> = []
+  observeProduct(connId: string, payload: unknown): void {
+    this.observed.push([connId, payload])
+  }
 }
 
 function onceOpen(ws: WebSocket): Promise<void> {
@@ -156,6 +160,46 @@ describe('local CLI WebSocket', () => {
       const browser = new WebSocket(url, { headers: { origin: 'http://localhost' } })
       const status = await new Promise<number>((resolve) => browser.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0)))
       expect(status).toBe(403)
+    } finally {
+      await local?.close()
+      local = null
+      await unix.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // The port takes any OS user's process — a guest's harness running as its own user
+  // (docs/plans/2026-10-19-guest-machine-sharing-plan.md); only this user can read the 0600 credential.
+  it('takes a TCP upgrade only with the daemon\'s local credential, by header or bearer', async () => {
+    const credential = 'c'.repeat(43)
+    const url = await start(new FakeBackend(), { localCredential: credential })
+    const refused = async (headers: Record<string, string>): Promise<number> => {
+      const ws = new WebSocket(url, { headers })
+      return new Promise<number>((resolve) => ws.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0)))
+    }
+    expect(await refused({})).toBe(401)
+    expect(await refused({ 'x-harness-local': 'w'.repeat(43) })).toBe(401)
+    for (const headers of [{ 'x-harness-local': credential }, { authorization: `Bearer ${credential}` }]) {
+      const ws = new WebSocket(url, { headers })
+      await onceOpen(ws)
+      const connected = onceMessage(ws)
+      ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId, localProtocolVersion: 1 } }))
+      expect(await connected).toMatchObject({ type: 'connected', payload: { machineId } })
+      ws.close()
+    }
+  })
+
+  it('takes an upgrade over the daemon\'s socket with no credential, the TCP port still wanting one', async () => {
+    const dir = mkdtempSync('/tmp/lws-cred-')
+    const socketPath = join(dir, 'daemon.sock')
+    const unix = await listenLocalSocket((_req, res) => { res.statusCode = 404; res.end() }, socketPath)
+    const tcp = await start(new FakeBackend(), { localSocketServer: unix.server, localCredential: 'c'.repeat(43) })
+    try {
+      const ws = new WebSocket(`ws+unix://${socketPath}:/api/local-ws`)
+      await onceOpen(ws)
+      ws.close()
+      const refused = new WebSocket(tcp)
+      expect(await new Promise<number>((resolve) => refused.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0)))).toBe(401)
     } finally {
       await local?.close()
       local = null
@@ -745,6 +789,8 @@ describe('local CLI WebSocket', () => {
     ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId, localProtocolVersion: 1 } }))
     await connected
 
+    // hn with no terminal reading a pane is no one's focus.
+    ws.send(JSON.stringify({ type: 'terminal_open', payload: { agentId: 'agent-watched', watch: true } }))
     // Opening a terminal still counts: that is all an older app build sends.
     ws.send(JSON.stringify({ type: 'terminal_open', payload: { agentId: 'agent-opened' } }))
     // And a window that MOVED without opening anything now says so — which is every click on a pane
@@ -759,7 +805,7 @@ describe('local CLI WebSocket', () => {
     ])
     // Consumed locally: it describes a hand at this desk, and the machine has no use for an unknown
     // frame type arriving on every pane click.
-    expect(backend.frames.map((frame) => frame.type)).toEqual(['terminal_open', 'terminal_open'])
+    expect(backend.frames.map((frame) => frame.type)).toEqual(['terminal_open', 'terminal_open', 'terminal_open'])
     ws.close()
   })
 
@@ -988,6 +1034,37 @@ describe('local CLI WebSocket', () => {
       expect(await result).toEqual({ type: 'daemon_act_result', payload: { requestId: 'r1', id: 'need:x', ok: false, error: 'UNSUPPORTED' } })
       expect(backend.frames).toEqual([])
       ws.close()
+    } finally {
+      await w.cleanup()
+    }
+  })
+
+  it('takes hn\'s product_observe over the owner\'s socket from a window here, and never passes it on', async () => {
+    const backend = new FakeBackend(), relayed: Frame[] = []
+    const relayPool = {
+      acquire: async (_id: string, _env: string, _select: Frame, sink: LocalClientSink) => {
+        sink.sendFrame({ type: 'connected', payload: { machineId: 'remote', e2ee: false } })
+        return { send: async (frame: Frame) => { relayed.push(frame) }, sendBinary: async () => {}, detach: () => {} }
+      },
+      acquireIsolated: async () => { throw new Error('unused') }, invalidate: () => {},
+    }
+    const w = await unixWorld(backend, { autonomousEnv: 'test', relayPool: relayPool as unknown as NonNullable<LocalWsServerOptions['relayPool']> })
+    try {
+      const observe = { type: 'product_observe', payload: { flow: 'viewer_open', outcome: 'ok', durationMs: 12 } }
+      const hn = await w.open(w.unix, { machineId, client: 'tui' })
+      const hnId = backend.connId
+      const others = [await w.open(w.tcp, { machineId, client: 'tui' }), await w.open(w.unix, { machineId, tool: true }),
+        await w.open(w.unix, { machineId: 'remote', client: 'tui' })]
+      // Each connection's frames are handled in order: its marker arriving means its observation was handled.
+      for (const [i, ws] of [hn, ...others].entries()) {
+        ws.send(JSON.stringify(observe))
+        ws.send(JSON.stringify({ type: 'agents_list', payload: { requestId: `after-${i}` } }))
+      }
+      await vi.waitFor(() => expect([...backend.frames, ...relayed].map(f => (f.payload as { requestId?: string }).requestId).sort())
+        .toEqual(['after-0', 'after-1', 'after-2', 'after-3']))
+      expect(backend.observed).toEqual([[hnId, observe.payload]])
+      expect([...backend.frames, ...relayed].some(f => f.type === 'product_observe')).toBe(false)
+      for (const ws of [hn, ...others]) ws.close()
     } finally {
       await w.cleanup()
     }
