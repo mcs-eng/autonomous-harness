@@ -427,17 +427,20 @@ def carried_by_upstream(repo, head, path, line_no, text, upstream_ref, cache):
 def path_blob_carried_by_upstream(repo, head_oid, upstream_ref, path):
     """Whether a flagged added/renamed/copied path names upstream's exact blob.
 
-    True only when upstream_ref resolves the path and its blob is identical to
+    True only when upstream_ref resolves the path to the same object id as
     the pull request's blob there, so the whole file — name included — is the
     upstream's own public content and the fork added nothing of its own under
-    that name. Any doubt (missing path upstream, changed or unreadable blob)
-    is False: a fork could otherwise park a private file behind a name the
-    upstream also uses.
+    that name. Any doubt (path missing upstream, different object id, git
+    error or timeout) is False: a fork could otherwise park a private file
+    behind a name the upstream also uses.
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "-q", "--verify", f"{upstream_ref}:{path}"],
-        cwd=repo, check=False, capture_output=True, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "-q", "--verify", f"{upstream_ref}:{path}"],
+            cwd=repo, check=False, capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     if result.returncode != 0:
         return False
     upstream_oid = result.stdout.decode("ascii", errors="replace").strip()
@@ -634,7 +637,9 @@ def parse_args(argv):
     parser.add_argument("--repo", default=".", help="repository to scan")
     parser.add_argument("--upstream-ref",
                         help="commit ref (fetched upstream history); lines carried "
-                             "verbatim from it are exempt from line findings")
+                             "verbatim from it and identical carried paths of added, "
+                             "renamed or copied files are exempt from line and path "
+                             "findings, respectively")
     return parser.parse_args(argv)
 
 
@@ -650,6 +655,9 @@ def main(argv=None):
             print(f"privacy guard: {safe_line(message)}", file=sys.stderr)
         else:
             print("privacy guard could not read the git range", file=sys.stderr)
+        return 1
+    except subprocess.TimeoutExpired:
+        print("privacy guard: a git command timed out", file=sys.stderr)
         return 1
     except OSError:
         print("privacy guard could not read an input file", file=sys.stderr)

@@ -1,5 +1,6 @@
 """Privacy guard tests. Terms in this file are fake stand-ins, not real names."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -7,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "privacy-guard.py"
@@ -492,7 +494,7 @@ class RepositoryScanTests(unittest.TestCase):
 
 
 class UpstreamCarriedTests(unittest.TestCase):
-    """--upstream-ref exempts only lines carried verbatim from upstream history."""
+    """--upstream-ref exempts carried lines and identical carried file paths."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -601,6 +603,39 @@ class UpstreamCarriedTests(unittest.TestCase):
         head = self.merge_upstream(carried)
         self.assertEqual(self.scan(head), ["file [redacted path]: [redacted 11 chars]"])
         self.assertEqual(self.scan(head, upstream_ref=carried), [])
+
+    def test_path_lookup_timeout_keeps_carried_path_finding(self):
+        path = "docs/examplehost-notes.md"
+        self.write(path, "public upstream notes\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        real_run = guard.subprocess.run
+
+        def run_with_timeout(argv, *args, **kwargs):
+            if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+                raise subprocess.TimeoutExpired(argv, timeout=120)
+            return real_run(argv, *args, **kwargs)
+
+        with mock.patch.object(guard.subprocess, "run", side_effect=run_with_timeout) as run:
+            findings = self.scan(head, upstream_ref=carried)
+        run.assert_any_call(
+            ["git", "rev-parse", "-q", "--verify", f"{carried}:{path}"],
+            cwd=self.root, check=False, capture_output=True, timeout=120,
+        )
+        self.assertEqual(findings, ["file [redacted path]: [redacted 11 chars]"])
+
+    def test_main_timeout_does_not_print_path_or_term(self):
+        path = "docs/examplehost-notes.md"
+        error = subprocess.TimeoutExpired(
+            ["git", "rev-parse", "-q", "--verify", f"upstream:{path}"], timeout=120,
+        )
+        with mock.patch.object(guard, "run_pull_request", side_effect=error):
+            with mock.patch.object(guard.sys, "stderr", new_callable=io.StringIO) as stderr:
+                result = guard.main(["--pull-request"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr.getvalue(), "privacy guard: a git command timed out\n")
+        self.assertNotIn(path, stderr.getvalue())
+        self.assertNotIn("examplehost", stderr.getvalue().lower())
 
     def test_path_match_with_content_different_from_upstream_is_not_exempted(self):
         self.write("docs/examplehost-notes.md", "public upstream notes\n")
