@@ -8,9 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { mangleClaudeProjectDir } from '../../../../cli/src/lib/claudeProject.js'
 import {
-  BORROW_MAX_FILE_BYTES, LessonBorrower, borrowSignal, hermesProvenance, parseFrontmatter, readClaudeMemory, readCodexMemories, readHermesSkills,
+  BORROW_MAX_FILE_BYTES, LessonBorrower, borrowSignal, hermesProvenance, mangleClaudeProjectDir, parseFrontmatter, readClaudeMemory, readCodexMemories, readHermesSkills,
 } from './borrow.js'
 import { LessonStore } from './store.js'
 import { projectHash } from './types.js'
