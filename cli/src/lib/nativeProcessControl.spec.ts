@@ -161,7 +161,8 @@ describe('joined Linux control proof', () => {
     file(join(host.root, 'proc/42/task/42/children'), '43 ')
     file(join(host.root, 'proc/42/task/99/children'), '44 45 ')
     file(join(host.root, 'proc/45/stat'), `45 (exited) Z 42 ${Array(17).fill(0).join(' ')} 100\n`)
-    expect((await nativeProcessControl([42, 43, 44], 42, budget())).children).toEqual([43, 44])
+    const { children } = await nativeProcessControl([42, 43, 44], 42, budget())
+    expect([...children].sort((a, b) => a - b)).toEqual([43, 44])
   })
   it.each(['descriptor', 'generation', 'image', 'child', 'task'])('holds a changing %s in the joined observation', async mode => {
     let calls = 0

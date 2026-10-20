@@ -1,6 +1,9 @@
 import { PassThrough } from 'node:stream'
+import { parseNewArgs } from '../lib/newCommand.js'
+import { step } from './commands.js'
 import { describe, expect, it } from 'vitest'
-import { agentOfClient, answer, callerEnv, INSTRUCTIONS, mcpCommand, PROTOCOL_VERSIONS, result, type McpDeps, type Ran } from './mcp.js'
+import { agentOfClient, answer, callerEnv, INSTRUCTIONS, mcpCommand, PROTOCOL_VERSIONS, result, TOOLS, type McpDeps, type Ran } from './mcp.js'
+import { HARNESS_AGENT_TOOLS } from '../engines/facets/hooks.js'
 
 /** A runner that records what it was asked and answers [ran]. */
 function runner(ran: Partial<Ran> = {}) {
@@ -29,6 +32,33 @@ describe('harness mcp', () => {
     expect(outside.every((t) => t.argv === undefined)).toBe(true)
     expect((await names(true)).map((t) => t.name)).toContain('harness_send')
     expect(await answer(call('harness_send', { to: 'x', text: 'y' }), deps())).toMatchObject({ error: { code: -32602 } })
+    // It reaches teammates in the agent's tab while Agent Messages are on (Settings ▸ Experimental, owner 2026-10-12), and
+    // nothing else: not a harness the agent started (owner, 2026-10-11: Agent Messages off means off).
+    const send = (await names(true)).find((t) => t.name === 'harness_send') as unknown as { description: string }
+    expect(send.description).toMatch(/teammate: a harness in the same tab as you, while Agent Messages are on \(Settings ▸ Experimental, off by default\)\. Refused anywhere else, even to a harness you started/)
+    expect(INSTRUCTIONS).toContain('A follow-up goes by harness_send only to a teammate in your tab, while Agent Messages are on')
+    expect(INSTRUCTIONS).toContain('starting a harness does not let you message it')
+    expect(INSTRUCTIONS).not.toContain('Send follow-ups for the same work to the harness you started')
+    // When to start one at all, and to close it, as every harness is told as it starts (lib/agentAttribution.ts).
+    expect(INSTRUCTIONS).toContain('Every harness spends the person\'s tokens. Start one (harness_start) only for work that can run in parallel')
+    expect(INSTRUCTIONS).toContain('close it once you have its answer (harness_close). At most 4 of yours at once, and a harness another agent started may not start harnesses itself.')
+  })
+
+  it('says which tools only read, add or close what can be resumed, so Codex runs them all without asking', async () => {
+    // Codex's rule for a tool with no approval setting of its own (codex-rs core/src/mcp_tool_call.rs
+    // `requires_mcp_tool_approval`, 0.162.1): destructive asks, read-only does not, and anything else asks unless it
+    // says it is neither destructive nor open-world. A close keeps the conversation, so it is not destructive either.
+    const codexAsks = (a: Record<string, unknown> = {}) => a.destructiveHint === true || (a.readOnlyHint !== true && (a.destructiveHint !== false || a.openWorldHint !== false))
+    const listed = ((await answer({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, deps({ inPane: true })))!.result as { tools: Array<{ name: string; annotations?: Record<string, unknown> }> }).tools
+    expect(Object.fromEntries(listed.map((tool) => [tool.name, codexAsks(tool.annotations)]))).toEqual({
+      harness_list: false, harness_start: false, harness_wait: false, harness_read: false, harness_send: false, harness_close: false,
+    })
+  })
+
+  it('runs only the verbs Harness allows agents to run without asking, each as the tool the rules name', () => {
+    // The engines' permission rules (facets/hooks.ts HARNESS_AGENT_TOOLS) allow each verb, and its tool by name.
+    const runs = Object.fromEntries(TOOLS.map((tool) => [tool.argv({ name: 'x', names: ['x'], task: 't', to: 'x', text: 't' }, '/work')[0], tool.name]))
+    expect(runs).toEqual(HARNESS_AGENT_TOOLS)
   })
 
   it('runs each tool as its verb', async () => {
@@ -52,21 +82,57 @@ describe('harness mcp', () => {
       ['new', 'claude', '/work/here/app', '--name', 'reviewer', '--task', 'review it\nall of it'],
       ['new', 'codex', '@mini', '/abs', '--name', 'gpu', '--task', 'train'],
       ['new', 'claude', '~/p', '--name', 'n', '--task', 'x'],
-      ['wait', 'a,b', '--timeout', '120s'], ['wait', 'a', '--any', '--timeout', '600s'], ['wait', 'a', '--timeout', '2s'],
+      ['wait', 'a,b', '--timeout', '45s'], ['wait', 'a', '--any', '--timeout', '600s'], ['wait', 'a', '--timeout', '2s'],
       ['show', 'a'], ['show', 'a', '--chars', '99'],
       ['send', 'a', 'also the footer'],
       ['close', 'a'], ['close', 'a', '--now'],
     ])
   })
 
+  it('starts a harness in a new project Harness makes when asked for one, or when given no folder', async () => {
+    // A folder was required, so Codex as an MCP client could only name one of its own: Claude Code, started in an empty
+    // ~/work, waited on its trust question (a clean VM, CLI 0.3.75, 2026-10-11).
+    const listed = ((await answer({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, deps()))!.result as { tools: Array<{ name: string; inputSchema: { required: string[]; properties: Record<string, unknown> } }> })
+      .tools.find((tool) => tool.name === 'harness_start')!
+    expect(listed.inputSchema.required).toEqual(['task', 'name'])
+    expect(listed.inputSchema.properties).toHaveProperty('project')
+    expect(INSTRUCTIONS).toContain('For scratch or new work give it a project name (project), not a folder of your own')
+    const r = runner()
+    const d = deps({ run: r.run })
+    await answer(call('harness_start', { task: 'a second opinion', project: 'opinion', name: 'opinion' }), d)
+    await answer(call('harness_start', { task: 'go', name: 'quick', agent: 'codex', machine: 'mini' }), d)
+    await answer(call('harness_start', { task: 'go', name: 'both', folder: 'app', project: 'p' }), d)
+    expect(r.calls.map((c) => c.argv)).toEqual([
+      ['new', 'claude', '--new', 'opinion', '--name', 'opinion', '--task', 'a second opinion'],
+      ['new', 'codex', '@mini', '--new', '--name', 'quick', '--task', 'go'],
+      ['new', 'claude', '/work/here/app', '--new', 'p', '--name', 'both', '--task', 'go'],
+    ])
+    // As `harness new` reads them: a new project, one named by the clock, and a refusal to guess between the two.
+    const words = { cwd: '/work/here', home: '/home/me' }
+    expect(parseNewArgs(r.calls[0].argv.slice(1), words)).toMatchObject({ agent: 'claude', cwd: null, projectName: 'opinion', name: 'opinion' })
+    expect(parseNewArgs(r.calls[1].argv.slice(1), words)).toMatchObject({ agent: 'codex', machine: 'mini', cwd: null, projectName: '' })
+    expect(() => parseNewArgs(r.calls[2].argv.slice(1), words)).toThrow('Name a folder or a new project, not both.')
+  })
+
   it('says whose session it is when the agent did not, and leaves a harness pane and a named session alone', () => {
-    expect(callerEnv(deps({ env: { PATH: '/bin' } }), 'cursor-vscode')).toEqual({ PATH: '/bin', AI_AGENT: 'cursor', HARNESS_AGENT_SESSION: 'mcp-1' })
-    expect(callerEnv(deps({ env: { AI_AGENT: 'amp_1_agent' } }))).toEqual({ AI_AGENT: 'amp_1_agent', HARNESS_AGENT_SESSION: 'mcp-1' })
+    const via = { HARNESS_VIA_MCP: '1' }
+    expect(callerEnv(deps({ env: { PATH: '/bin' } }), 'cursor-vscode')).toEqual({ PATH: '/bin', AI_AGENT: 'cursor', HARNESS_AGENT_SESSION: 'mcp-1', ...via })
+    expect(callerEnv(deps({ env: { AI_AGENT: 'amp_1_agent' } }))).toEqual({ AI_AGENT: 'amp_1_agent', HARNESS_AGENT_SESSION: 'mcp-1', ...via })
     expect(callerEnv(deps({ env: {} }))).toMatchObject({ AI_AGENT: 'mcp-client' })
     expect(callerEnv(deps({ env: {}, session: undefined }))).toMatchObject({ HARNESS_AGENT_SESSION: `mcp-${process.ppid}` })
-    expect(callerEnv(deps({ env: { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's' } }), 'claude-code')).toEqual({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's' })
-    expect(callerEnv(deps({ env: { CODEX_THREAD_ID: 't' } }))).toEqual({ CODEX_THREAD_ID: 't' })
-    expect(callerEnv(deps({ env: { TMUX_PANE: '%1' }, inPane: true }))).toEqual({ TMUX_PANE: '%1' })
+    expect(callerEnv(deps({ env: { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's' } }), 'claude-code')).toEqual({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's', ...via })
+    expect(callerEnv(deps({ env: { CODEX_THREAD_ID: 't' } }))).toEqual({ CODEX_THREAD_ID: 't', ...via })
+    expect(callerEnv(deps({ env: { TMUX_PANE: '%1' }, inPane: true }))).toEqual({ TMUX_PANE: '%1', ...via })
+  })
+
+  it('has the verbs it runs name their next steps as its tools, and the shell keeps its own', () => {
+    const mcp = { HARNESS_VIA_MCP: '1' }
+    expect(step(mcp, 'show', 'reviewer')).toBe('harness_read (name: "reviewer")')
+    expect(step(mcp, 'wait', 'reviewer')).toBe('harness_wait (names: "reviewer")')
+    expect(step(mcp, 'ps')).toBe('harness_list')
+    expect(step(mcp, 'show', 'reviewer', { flag: '--chars 9000', arg: 'chars: 9000' })).toBe('harness_read (name: "reviewer", chars: 9000)')
+    expect(step({}, 'show', 'reviewer', { flag: '--chars 9000', arg: 'chars: 9000' })).toBe('harness show reviewer --chars 9000')
+    expect(step({}, 'ps')).toBe('harness ps')
   })
 
   it('knows the agents MCP clients are by the names they give', () => {

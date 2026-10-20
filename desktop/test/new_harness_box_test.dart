@@ -785,7 +785,7 @@ void main() {
         commandsOnly: true,
         commands: () => [
           command('agent.new', 'New Harness'),
-          command('app.settings', 'Customize Harness'),
+          command('app.settings', 'Settings'),
           command('pane.zoom', 'Zoom pane'),
         ],
         recentCommands: () => history.recentCommands,

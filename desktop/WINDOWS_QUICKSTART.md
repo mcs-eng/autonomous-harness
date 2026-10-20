@@ -315,7 +315,11 @@ Harness backend, and lists this computer as its one machine. Everything on this
 PC works as it does when signed in: create agents, attach terminals, switch panes.
 
 What needs the account stays off until you sign in: other machines, linking,
-shared harnesses, the shared desk, and the signed-in profile. The foot of the
+shared harnesses, the shared desk, the signed-in profile, and the
+agent-settings switches (`agents-start-agents`, `pull-request-line`,
+`agent-messages`). Those three are experiments of the account: in local mode
+they stay off, and `harness settings` answers with a sign-in prompt instead of
+changing them. The foot of the
 projects sidebar and **Settings → Account** say **Local mode** and offer
 **Sign in**; linking another machine asks for the sign-in too. If a sign-in is
 cancelled or fails, the sign-in screen offers **Use this computer without an
@@ -657,3 +661,35 @@ commands, drive paths passed directly to Node's ESM loader, and locked-file
 cleanup in other fixtures. The remaining failures were not individually
 baselined or all proven Windows-only; this focused change does not claim a green
 full Windows CLI suite.
+
+## October 17 upstream sync batch 1
+
+This source snapshot incorporates upstream `0130b6c18` (96 commits since the
+`ecf8097ac` merge base) on fork main `9cd20975`. It takes daemon-state
+reachability text, the per-user
+shell probe, Codex profile handling in launch overrides, the named-agent
+relaunch contract, the pull-request attribution line for harnesses another
+agent started, device-ack core, the three account experiments (what agents may
+do, each off by default), and the desktop's model search, swarm search,
+theme and settings-section updates. (The CLI usage split, the engine-command
+catalog and the short-lived-command fast path arrived earlier as fork PR #66,
+not in this batch; only the merge of upstream's newer usage wording
+into `cliUsage.ts` is this batch's.)
+
+The Windows contracts hold: WSL distro and account selection, account-free
+local mode, the Projects sidebar and Continue Working, local Grid profile
+routing (`local:` / `trustedBaseUrl` — the usage text keeps the grid profile
+verbs), WebView2 embedded viewers, Ctrl+C copy-when-selected, and USERPROFILE
+test isolation. The workspace tab keeps the fork's visible close control
+because Meta+W opens Widgets on Windows, alongside upstream's Agent Messages
+removal. The three launch goldens are re-recorded on hosted Linux CI (a
+Windows recording writes Windows paths into them); `launch-argv` keeps
+upstream's override records, whose former call order its spec pins on purpose.
+
+One upstream behavior change to know in local mode: what agents may do
+(`agents-start-agents`, `pull-request-line`, `agent-messages`) is now an
+experiment of the signed-in account, each off by default (Settings ▸
+Experimental, or `harness settings`). Signed out, the local desk still runs,
+but changing one of these returns a sign-in prompt instead of a local toggle —
+the fork adopts this as upstream designed it.
+This is a source change; it does not update an installed desktop or daemon.

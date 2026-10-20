@@ -14,6 +14,7 @@ import { hasAuthSession } from './authSession.js'
 import { readOrMintComputerId } from './computerIdentity.js'
 import { savedDaemonPort } from './daemonEndpoint.js'
 import { tildify } from './displayPath.js'
+import { pidIn, unreachableText } from './unreachable.js'
 
 export { tildify } from './displayPath.js'
 
@@ -43,6 +44,12 @@ export function isAlive(pid: number): boolean {
 
 /** Whether a durable SSO session exists for this computer. */
 export function hasSavedAuthSession(): boolean { return hasAuthSession() }
+
+/** What to say when this shell cannot reach the daemon of [dataDir]: stopped, or out of reach in a sandbox
+ *  (lib/unreachable.ts). The agent verbs reach the daemon that made their pane, whose folder may not be this CLI's. */
+export function daemonUnreachableText(error?: unknown, dataDir: string = env.ADAPTER_DATA_DIR): string {
+  return unreachableText({ error, pid: pidIn(dataDir) })
+}
 
 /** Is the background daemon process alive right now? (pid file present AND that pid still exists) */
 export function isDaemonRunning(): boolean {

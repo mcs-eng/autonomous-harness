@@ -18,6 +18,10 @@ export interface Frame {
   project?: { cwd?: string; root?: string; branch?: string | null; worktree?: boolean } | null
   createdAt?: string
   updatedAt?: string
+  /** The harness here whose agent started this one (registry `parentAgentId`); null for the rest. */
+  parentAgentId?: string | null
+  /** `agent` when another agent started it, here or from another machine or outside Harness. */
+  startedBy?: string | null
 }
 
 /** The agent running the verb: a harness in its own pane, or an agent outside Harness. Null for a person at a terminal. */
@@ -27,9 +31,12 @@ export interface Caller extends LedgerMember {
   /** An agent Harness did not start (in a terminal app, an editor, the person's own tmux): no pane, so nothing can
    *  message it, and it is told apart by the session its shell names. */
   outside?: boolean
+  /** Another agent started this harness, as the core's row says (`startedBy`, `parentAgentId`): one level down. */
+  startedByAgent?: boolean
 }
 
-export type State = 'working' | 'idle' | 'needs-input' | 'stopped' | 'offline' | 'unknown'
+/** `installing`, `starting`, `failed`: a harness asked for that has not started (commands.ts `Asked`). */
+export type State = 'working' | 'idle' | 'needs-input' | 'stopped' | 'offline' | 'unknown' | 'installing' | 'starting' | 'failed'
 
 export interface Row {
   name: string
@@ -74,7 +81,7 @@ export function callerOf(frames: Frame[], pane: string | undefined, machineId: s
   const on = frames.filter((f) => f.tmuxPane === pane)
   const frame = on.find((f) => f.status === 'active') ?? on.filter(isAgent).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0]
   if (!frame || !isAgent(frame)) return null
-  return { machineId, agentId: frame.id, name: frame.name || frame.id.slice(0, 8), engine: frame.engine ?? '' }
+  return { machineId, agentId: frame.id, name: frame.name || frame.id.slice(0, 8), engine: frame.engine ?? '', ...(frame.startedBy === 'agent' || frame.parentAgentId ? { startedByAgent: true } : {}) }
 }
 
 /**
@@ -170,6 +177,17 @@ export interface LastTurn {
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')
 
 /**
+ * What a harness was asked, as the person said it: without the markers Claude Code puts around a paste. `ps` and
+ * `show` printed `asked: another agent release: <pasted_content id="1c18"> #1242 is merged…` (October 12, 2026).
+ * What was pasted stays: it was said. A marker on a line of its own goes with its line; one inside a line, as the
+ * daemon keeps an ask (on one line), leaves a space.
+ */
+const PASTE_TAG = '<\\/?pasted_content\\b[^>]*>'
+const PASTE_LINE = new RegExp(`^[^\\S\\n]*${PASTE_TAG}[^\\S\\n]*\\n?`, 'gm')
+const PASTE_INLINE = new RegExp(`[^\\S\\n]*${PASTE_TAG}[^\\S\\n]*`, 'g')
+export const asSaid = (ask: string): string => ask.replace(PASTE_LINE, '').replace(PASTE_INLINE, ' ').replace(/\n{3,}/g, '\n\n').trim()
+
+/**
  * The last turn in [events], oldest first: the last ask, and the answer, which is the text after the turn's last
  * tool call (the narration before it is the working, not the result). Null when the page holds no ask.
  *
@@ -187,7 +205,7 @@ export function lastTurn(events: HistoryEvent[]): LastTurn | null {
   turn.forEach((e, i) => { if (e.type === 'tool_start') tools++; if (e.type === 'tool_end' || e.type === 'tool_start') lastTool = i })
   const said = (from: number) => turn.slice(from).filter((e) => e.type === 'text_delta').map((e) => text(e.payload?.content)).join('').trim()
   const final = said(lastTool + 1)
-  return { ask: text(events[start].payload?.content).trim() || null, answer: final || said(0), tools, answered: !!final }
+  return { ask: asSaid(text(events[start].payload?.content)) || null, answer: final || said(0), tools, answered: !!final }
 }
 
 export const clip = (value: string, max: number): string => (value.length > max ? `${value.slice(0, max - 1)}…` : value)

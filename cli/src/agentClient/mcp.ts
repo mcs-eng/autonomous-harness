@@ -15,7 +15,7 @@ import { isAbsolute, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { VERSION } from '../version.js'
 import { AGENT_SESSION_ENV } from './model.js'
-import { EXIT } from './commands.js'
+import { EXIT, VIA_MCP_ENV } from './commands.js'
 
 /** Newest first: the client's own when it is one of these, else the newest. */
 export const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const
@@ -23,14 +23,16 @@ export const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '202
 /** What an agent is told once, as it connects: when Harness is the right tool, and whose harnesses are whose. */
 export const INSTRUCTIONS = `Harness runs coding agents (Claude Code, Codex) in sessions of their own, on this computer or the person's other machines. The person can watch and join every one in the Harness app.
 
-Start a harness (harness_start) for work that can run beside yours, needs another agent's view (a review, a second opinion from Codex), takes long, or belongs in its own folder. Do small, quick work yourself.
+Every harness spends the person's tokens. Start one (harness_start) only for work that can run in parallel with yours, needs another model's view (a review, a second opinion from Codex), takes long, or belongs in its own folder. Do quick work yourself. For scratch or new work give it a project name (project), not a folder of your own: Claude Code and Codex ask the person to trust a folder Harness did not make.
 
-List first (harness_list). Send follow-ups for the same work to the harness you started for it, not a new one. Never give work to, or close, a harness you did not start: those are the person's.
+List first (harness_list). Put everything in the task: starting a harness does not let you message it. A follow-up goes by harness_send only to a teammate in your tab, while Agent Messages are on; otherwise start a new harness with the fuller task. Never give work to, or close, a harness you did not start: those are the person's.
 
-Name every harness. Then wait for it (harness_wait), read its answer (harness_read), and close it when you are done (harness_close). Never ask a harness to publish, deploy, delete or push.`
+Name every harness. Then wait for it (harness_wait), read its answer (harness_read), and close it once you have its answer (harness_close). At most 4 of yours at once, and a harness another agent started may not start harnesses itself. Never ask a harness to publish, deploy, delete or push.`
 
-/** How long `harness_wait` waits when not told: within what MCP clients allow a call. */
-const WAIT_DEFAULT_S = 120
+/** How long `harness_wait` waits when not told: within what MCP clients allow a call. Codex ends one at 60 s unless its
+ *  config says otherwise (`tool_timeout_sec`, developers.openai.com/codex/mcp), so 120 s ended every long wait as an
+ *  error there; the agent calls again for more. */
+const WAIT_DEFAULT_S = 45
 const WAIT_MAX_S = 600
 
 interface Tool {
@@ -55,17 +57,29 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'harness_start',
-    description: 'Start a new harness: an agent in a session of its own, working on [task] in [folder]. Returns at once; wait for it with harness_wait and read its answer with harness_read.',
+    description: 'Start a new harness: an agent in a session of its own, working on [task] in an existing [folder], or in a new [project] Harness makes for it. Returns within a minute; wait for it with harness_wait and read its answer with harness_read. If its agent is still being installed then, it starts by itself: follow it by its name, and never start it again.',
     inputSchema: schema({
       task: { type: 'string', description: 'The whole task, as you would write it to a colleague: what to do, where, and what to answer with.' },
-      folder: { type: 'string', description: 'The folder to work in: an absolute path, or one relative to where this server runs.' },
+      folder: { type: 'string', description: 'An existing folder to work in: an absolute path, or one relative to where this server runs. Claude Code and Codex ask the person to trust a folder Harness did not make, and wait until they answer.' },
+      project: { type: 'string', description: 'For scratch or new work, instead of folder: a name for a new project folder Harness makes (~/harnesses/<name>), which needs no approval. With neither, Harness names one.' },
       name: { type: 'string', description: 'A short name to call it by (e.g. "reviewer"). Always give one.' },
       agent: { type: 'string', enum: ['claude', 'codex'], description: 'Claude Code (default) or Codex.' },
       machine: { type: 'string', description: 'Another of the person\'s machines, by name, to run it there.' },
-    }, ['task', 'folder', 'name']),
+    }, ['task', 'name']),
+    // Starting a harness only adds one, on the person's own machines. Said so, Codex runs it without asking: a tool
+    // that says nothing counts as destructive and open-world there, so `codex exec` refused every start ("MCP tool
+    // call requires approval, but approval policy is never") and interactive Codex asked each time (codex-rs
+    // core/src/mcp_tool_call.rs `requires_mcp_tool_approval`, 0.162.1). What an agent may start is Harness's to
+    // decide (Settings ▸ Experimental, the spawn limits).
+    annotations: { destructiveHint: false, openWorldHint: false },
     argv: (a, cwd) => {
-      const folder = str(a.folder)
-      return ['new', str(a.agent) || 'claude', ...(str(a.machine) ? [`@${str(a.machine)}`] : []), isAbsolute(folder) || folder.startsWith('~') ? folder : resolve(cwd, folder || '.'),
+      // A folder was required, and a relative one was resolved against this server's folder, so an MCP agent could not
+      // ask for a project Harness makes: Codex started Claude Code in an empty ~/work, which waited on its trust question
+      // (a clean VM, CLI 0.3.75, 2026-10-11). Both given, `harness new` says to name one.
+      const folder = str(a.folder), project = str(a.project)
+      const where = folder ? [isAbsolute(folder) || folder.startsWith('~') ? folder : resolve(cwd, folder)] : []
+      return ['new', str(a.agent) || 'claude', ...(str(a.machine) ? [`@${str(a.machine)}`] : []), ...where,
+        ...(project || !folder ? ['--new', ...(project ? [project] : [])] : []),
         '--name', str(a.name), '--task', typeof a.task === 'string' ? a.task : '']
     },
   },
@@ -93,15 +107,21 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'harness_send',
-    description: 'Send a message to a harness you started, while it works: a follow-up, a correction, more context.',
-    inputSchema: schema({ to: { type: 'string', description: 'The harness\'s name.' }, text: { type: 'string' } }, ['to', 'text']),
+    description: 'Send a message to a teammate: a harness in the same tab as you, while Agent Messages are on (Settings ▸ Experimental, off by default). Refused anywhere else, even to a harness you started.',
+    inputSchema: schema({ to: { type: 'string', description: 'The teammate\'s name.' }, text: { type: 'string' } }, ['to', 'text']),
+    // A message adds to a teammate's inbox in this tab and nothing more; as harness_start, said so Codex does not ask.
+    annotations: { destructiveHint: false, openWorldHint: false },
     argv: (a) => ['send', str(a.to), typeof a.text === 'string' ? a.text : ''],
   },
   {
     name: 'harness_close',
     description: 'Close a harness you started, once it is done. Its conversation is kept: the person can resume it. Refused while it works, unless now is true.',
     inputSchema: schema({ name: { type: 'string' }, now: { type: 'boolean', description: 'Close it even while it works.' } }, ['name']),
-    annotations: { destructiveHint: true },
+    // Not destructive: the conversation is kept and the person can resume it, and Harness itself lets an agent close only
+    // what it started. Said so, Codex closes without asking even where the server was added by hand (`codex mcp add`),
+    // not only through the plugin's manifest: a close that waits on approval in `codex exec` left the harness running
+    // (2026-10-12, in a clean VM).
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
     argv: (a) => ['close', str(a.name), ...(a.now === true ? ['--now'] : [])],
   },
 ]
@@ -172,7 +192,8 @@ export async function answer(message: Message, deps: McpDeps, state: { client?: 
  * and Codex's shells do; an MCP server's environment may not). `AI_AGENT` names the agent, as its client said.
  */
 export function callerEnv(deps: McpDeps, client = ''): NodeJS.ProcessEnv {
-  const env = { ...(deps.env ?? process.env) }
+  // The verbs then name their next steps as this server's tools.
+  const env: NodeJS.ProcessEnv = { ...(deps.env ?? process.env), [VIA_MCP_ENV]: '1' }
   if (deps.inPane || (env.CLAUDECODE === '1' && env.CLAUDE_CODE_SESSION_ID) || env.CODEX_THREAD_ID) return env
   if (!env.AI_AGENT) env.AI_AGENT = agentOfClient(client)
   env[AGENT_SESSION_ENV] = deps.session ?? `mcp-${process.ppid}`
