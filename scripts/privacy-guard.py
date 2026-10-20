@@ -427,6 +427,11 @@ def carried_by_upstream(repo, head, path, line_no, text, upstream_ref, cache):
 def path_blob_carried_by_upstream(repo, head_oid, upstream_ref, path):
     """Whether a flagged added/renamed/copied path names upstream's exact blob.
 
+    Require a canonical path: nonempty, without leading or trailing slashes,
+    and with no empty, "." or ".." components. Git's revision syntax can
+    normalize leading "./" or "../" and collapse "." and ".." components,
+    making a different literal path appear to carry upstream's blob.
+
     True only when upstream_ref resolves the path to the same object id as
     the pull request's blob there, so the whole file — name included — is the
     upstream's own public content and the fork added nothing of its own under
@@ -434,6 +439,8 @@ def path_blob_carried_by_upstream(repo, head_oid, upstream_ref, path):
     error or timeout) is False: a fork could otherwise park a private file
     behind a name the upstream also uses.
     """
+    if any(part in ("", ".", "..") for part in path.split("/")):
+        return False
     try:
         result = subprocess.run(
             ["git", "rev-parse", "-q", "--verify", f"{upstream_ref}:{path}"],

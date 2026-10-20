@@ -604,6 +604,30 @@ class UpstreamCarriedTests(unittest.TestCase):
         self.assertEqual(self.scan(head), ["file [redacted path]: [redacted 11 chars]"])
         self.assertEqual(self.scan(head, upstream_ref=carried), [])
 
+    def test_path_blob_exemption_requires_a_canonical_path(self):
+        path = "docs/examplehost-notes.md"
+        self.write(path, "public upstream notes\n")
+        carried = self.upstream_commit_adding()
+        oid = self.git("rev-parse", f"{carried}:{path}")
+        self.assertTrue(
+            guard.path_blob_carried_by_upstream(self.root, oid, carried, path))
+        for noncanonical in (
+            "",
+            f"/{path}",
+            f"{path}/",
+            f"./x/../{path}",
+            f"./{path}",
+            f".//{path}",
+            f"../{path}",
+            "docs//examplehost-notes.md",
+            "docs/./examplehost-notes.md",
+            "docs/../docs/examplehost-notes.md",
+        ):
+            with self.subTest(path=noncanonical):
+                self.assertFalse(
+                    guard.path_blob_carried_by_upstream(
+                        self.root, oid, carried, noncanonical))
+
     def test_path_lookup_timeout_keeps_carried_path_finding(self):
         path = "docs/examplehost-notes.md"
         self.write(path, "public upstream notes\n")
