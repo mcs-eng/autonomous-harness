@@ -28,15 +28,18 @@ column) and a masked stand-in for the match that shows only its length.
 
 With --upstream-ref, a line finding is suppressed when the blamed commit that
 introduced the line is an ancestor of that ref and the flagged line is still
-present verbatim in the ref's version of the file. This exempts content the
-pull request carries from the named upstream history (for a fork, upstream's
-own public commits) without weakening any other check: PR text, commit
-messages, paths, binary findings, other encodings of the same file, and
-fork-authored lines are never exempted, and an unresolvable ref fails the
-scan. Carried lines exempt only the UTF-8 view of a textual file in the
-per-file re-scan, never the whole file. The ref must name a commit the
-scanner can read; the hosted workflow fetches the fork's upstream main into
-one as pure git data.
+present verbatim in the ref's version of the file. A path finding on an added,
+renamed or copied file is likewise suppressed when the blob the pull request
+carries at that path is identical to the ref's blob at the same path: then the
+whole file, name included, is the ref's own public content. This exempts
+content the pull request carries from the named upstream history (for a fork,
+upstream's own public commits) without weakening any other check: PR text,
+commit messages, paths the fork authored or re-shaped, binary findings, other
+encodings of the same file, and fork-authored lines are never exempted, and an
+unresolvable ref fails the scan. Carried lines exempt only the UTF-8 view of
+a textual file in the per-file re-scan, never the whole file. The ref must
+name a commit the scanner can read; the hosted workflow fetches the fork's
+upstream main into one as pure git data.
 """
 import argparse
 import os
@@ -421,6 +424,26 @@ def carried_by_upstream(repo, head, path, line_no, text, upstream_ref, cache):
     return text.rstrip("\r\n") in upstream_lines
 
 
+def path_blob_carried_by_upstream(repo, head_oid, upstream_ref, path):
+    """Whether a flagged added/renamed/copied path names upstream's exact blob.
+
+    True only when upstream_ref resolves the path and its blob is identical to
+    the pull request's blob there, so the whole file — name included — is the
+    upstream's own public content and the fork added nothing of its own under
+    that name. Any doubt (missing path upstream, changed or unreadable blob)
+    is False: a fork could otherwise park a private file behind a name the
+    upstream also uses.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", f"{upstream_ref}:{path}"],
+        cwd=repo, check=False, capture_output=True, timeout=120,
+    )
+    if result.returncode != 0:
+        return False
+    upstream_oid = result.stdout.decode("ascii", errors="replace").strip()
+    return upstream_oid == head_oid
+
+
 def scan_pull_request(repo, base, head, title, body, terms, upstream_ref=None):
     """Return location strings. Terms themselves are redacted out of each one."""
     carried_cache = {}
@@ -454,7 +477,8 @@ def scan_pull_request(repo, base, head, title, body, terms, upstream_ref=None):
     for status, path, base_oid, head_oid, head_mode in raw_changes:
         if status in ("A", "R", "C"):
             path_hit = path_match(path, terms)
-            if path_hit:
+            if path_hit and not (upstream_ref is not None and path_blob_carried_by_upstream(
+                    repo, head_oid, upstream_ref, path)):
                 findings.append(f"file {shown_path(path, terms)}: {masked(path_hit[1])}")
         if head_mode == "160000":
             if status == "A":
