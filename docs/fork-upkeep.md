@@ -126,7 +126,7 @@ of main `9cd20975`). Nine paths conflicted, resolved as follows:
   wording was merged into it.
 - `cli/src/lib/daemonState.ts`, `cli/src/lib/engineBin.ts` — import unions
   (both sides added imports).
-- `cli/src/engines/launchOverrides.spec.ts`,
+- `cli/src/lib/launchOverrides.spec.ts`,
   `desktop/design/workspace-status-bar.md`,
   `desktop/lib/widgets/desktop_workspace_tab.dart` — saved resolutions from
   the sync worktree applied (Windows close control kept alongside upstream's
@@ -139,8 +139,9 @@ pull-request-line test is red natively on Windows (its settings-path mock uses a
 POSIX literal), the inherited class; `flutter analyze` 0 errors with the issue
 set identical to the base (5 unused-import warnings, 48 info lints); `git diff
 --check` exit 0. The privacy gate flags one upstream-carried term in this batch
-(upstream's own public content; see the gate's upstream-carried exemption that
-landed as PR #69). Hosted Ubuntu
+(upstream's own public content). It is handled by the gate's `--upstream-ref`
+exemption (PR #69), which must merge to main before this branch's hosted scan
+can pass. Hosted Ubuntu
 CI is the full-suite authority; a merge commit retains the upstream parent.
 
 ## Evidence snapshot: 2026-10-06
