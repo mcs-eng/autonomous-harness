@@ -1,12 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { readProcessEnv } from '../../lib/processEnv.js'
-import { processArgvIsBoundaryFaithful, processRows } from '../../lib/tmux.js'
+import { launchArgs, processArgvIsBoundaryFaithful, processRows } from '../../lib/tmux.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
 import { createGridAssignments } from './gridAssignments.js'
 
 vi.mock('../../lib/processEnv.js', () => ({ readProcessEnv: vi.fn(async () => ({ ANTHROPIC_BASE_URL: 'https://grid.example/relay' })) }))
-vi.mock('../../lib/tmux.js', () => ({ processRows: vi.fn(async () => []), processArgvIsBoundaryFaithful: vi.fn(() => true) }))
+vi.mock('../../lib/tmux.js', () => ({ processRows: vi.fn(async () => []), processArgvIsBoundaryFaithful: vi.fn(() => true), launchArgs: vi.fn(() => '') }))
 const assignment = { baseUrl: 'https://grid.example/relay', model: 'chosen' }
 const row = (id = 'a'): RegisteredSession => ({ agentId: id, engine: 'claude', sessionId: 'session', registeredAt: 1, boundAt: 2,
   active: true, primaryRuntimeKey: 'tmux:%1', processIdentity: { pid: 123, startMarker: 'start', executable: 'claude' },
@@ -184,8 +184,11 @@ it('refresh reads boundary-faithful argv and otherwise offers models only the ex
 })
 
 it("reads a Pi whose environment cannot be read from how it was launched, and only when that names a grid", async () => {
-  // Pi renames its process, and `ps` then shows neither its environment nor its argv (2026-10-14): what is left is
-  // its launcher's command line. Moved onto a grid, that names the extension, and the switch is confirmed at once.
+  // Pi renames its process, and `ps` then shows neither its environment nor its argv (2026-10-14).
+  // This case puts the launcher's command line on the process's own row, i.e. boundary-faithful argv:
+  // moved onto a grid, that names the extension, and the switch is confirmed at once. The
+  // single-token-title case, where the launch command is read from the parent launcher, is the
+  // next test.
   const s = setup()
   s.rows[0] = { ...s.rows[0], engine: 'pi', grid: undefined }
   const identity = s.rows[0].processIdentity!
@@ -204,6 +207,26 @@ it("reads a Pi whose environment cannot be read from how it was launched, and on
   await flush()
   expect(s.rows[0].grid).toEqual(assignment)
   expect(s.models.gridAssignments).toHaveBeenCalledOnce()
+})
+
+it('refreshes a Pi whose ps title is one word from its parent launcher, without faithful argv', async () => {
+  // macOS: `ps` lists the renamed Pi process under a single-token title with no argv boundaries, so the
+  // launch command is read from the parent launcher's validated command line (tmux.ts `launchArgs`).
+  const s = setup()
+  s.rows[0] = { ...s.rows[0], engine: 'pi', grid: undefined }
+  const identity = s.rows[0].processIdentity!
+  const launcher = "zsh -lic . 'launch.sh' harness-engine /w /bin/pi --session s --model grid/chosen -e /c/grid-provider.ts"
+  vi.mocked(readProcessEnv).mockResolvedValueOnce(null)
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValueOnce(false)
+  vi.mocked(processRows).mockResolvedValueOnce([
+    { ...identity, parentPid: 1, args: 'pi' },
+    { ...identity, pid: 1, parentPid: 0, args: launcher },
+  ])
+  vi.mocked(launchArgs).mockReturnValueOnce(launcher)
+  s.service.refresh(s.rows[0])
+  await flush()
+  expect(vi.mocked(launchArgs)).toHaveBeenCalledOnce()
+  expect(s.pending[0].processes).toEqual([{ key: expect.any(String), engine: 'pi', env: {}, args: '-e /c/grid-provider.ts --model grid/chosen' }])
 })
 
 it('marks only a local profile launch with its own endpoint, on discovery and on refresh', async () => {

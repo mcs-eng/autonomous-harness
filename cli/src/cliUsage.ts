@@ -6,8 +6,16 @@ import { tildify } from './lib/displayPath.js'
 import { ENGINE_CLI_COMMANDS, PROCESS_ENGINES } from './lib/engineCommands.js'
 import { VERSION } from './version.js'
 
+// Upstream (#1354) wraps this text in agentClient/help.ts's helpFor, printing the curated agent
+// screen inline when the caller is an agent. helpFor's module pulls the whole agent-command graph
+// (newCommand, messages/command, agentClient/commands) into this route, which is exactly what the
+// fork's usage split (PR #66) keeps `--help` out of — architecture.spec's fast-route closure. So
+// the fork prints upstream's pointer line for everyone; an agent caller gets the curated screen
+// from `harness help agents` (cli.ts prints it there).
+const AGENT_POINTER = 'An agent? Run: harness help agents\n'
+
 export function usage(exitCode = 0): never {
-  console.log(`harness v${VERSION} — connect this computer to your machine
+  console.log(AGENT_POINTER + `harness v${VERSION} — connect this computer to your machine
 
 Agents — after "harness start", run the vendor CLI directly inside tmux. Harness discovers supported
 top-level processes automatically; it does not launch them or change their permission flags:

@@ -839,10 +839,14 @@ void main() {
       expect(app.bootError, isNull);
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
-      expect(find.text('Continue with Google'), findsNothing);
+      // Upstream #1276 (this batch): a signed-out result lands on the mandatory
+      // sign-in step over the ready guest state, not the old in-desk sign-in
+      // button.
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.byType(SignInStep), findsOneWidget);
       expect(
         find.byKey(const ValueKey('swarm-sign-in-button')),
-        findsOneWidget,
+        findsNothing,
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();
@@ -881,9 +885,12 @@ void main() {
         findsNothing,
       );
       expect(find.text('Continue with Google'), findsOneWidget);
+      // Upstream #1276 (this batch): sign-in is required at the login wall, so
+      // the wall offers no account-free way back to the desk.
+      expect(find.byType(SignInStep), findsOneWidget);
       expect(
         find.byKey(const Key('use-without-account-button')),
-        findsOneWidget,
+        findsNothing,
       );
       await tester.pumpWidget(const SizedBox());
       app.dispose();

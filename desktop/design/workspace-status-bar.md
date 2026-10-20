@@ -129,8 +129,9 @@ smaller tabs while preserving their controls.
 Windows tabs reserve space for an always-visible × close control because the OS
 uses Meta-W for Widgets. It closes the tab's views and keeps its harnesses running.
 On other targets, hovering a tab reveals × at its right;
-its status stays. Tabs show no shortcut hint, and holding Command changes nothing
-on them. A tab shows nothing of
+its status stays. Holding Command replaces
+the status with the original small shortcut label (⌘1, ⌘2, ⌘3…), using the current
+keymap. Release or window deactivation restores the status. A tab shows nothing of
 [Agent Messages](../../docs/design/2026-10-10-agent-messages.md), at rest or
 hovered: traffic between its agents shows nothing on it, since messages arrive
 when they arrive, and there is no on/off on the tab. Its 💬 beside × was easy to

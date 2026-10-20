@@ -211,7 +211,6 @@ class _Action extends StatefulWidget {
   const _Action({
     required this.notifier,
     required this.waiting,
-    this.offerLocalMode = false,
     required this.compact,
     this.prominent = false,
     this.offerPhone = true,
@@ -219,7 +218,6 @@ class _Action extends StatefulWidget {
 
   final AppNotifier notifier;
   final bool waiting;
-  final bool offerLocalMode;
 
   /// A short window: the ways in close up, so the line under them — which is
   /// where an expired session and a failed sign-out are explained — stays on
@@ -358,17 +356,6 @@ class _ActionState extends State<_Action> {
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
-          if (widget.offerLocalMode) ...[
-            const SizedBox(height: 16),
-            TextButton(
-              key: const Key('use-without-account-button'),
-              onPressed: notifier.continueWithoutAccount,
-              style: TextButton.styleFrom(
-                foregroundColor: grid.AppPalette.textSecondary,
-              ),
-              child: const Text('Use this computer without an account'),
-            ),
-          ],
         ],
       );
     }

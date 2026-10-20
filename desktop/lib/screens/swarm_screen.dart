@@ -8166,8 +8166,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
                       ),
                     Expanded(
                       child: _workspaceWithSidebar(
-                        Stack(
-                        fit: StackFit.expand,
+                        Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           _tabActivityDock(),
                           Expanded(

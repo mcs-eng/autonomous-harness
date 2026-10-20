@@ -321,9 +321,12 @@ agent-settings switches (`agents-start-agents`, `pull-request-line`,
 they stay off, and `harness settings` answers with a sign-in prompt instead of
 changing them. The foot of the
 projects sidebar and **Settings → Account** say **Local mode** and offer
-**Sign in**; linking another machine asks for the sign-in too. If a sign-in is
-cancelled or fails, the sign-in screen offers **Use this computer without an
-account** to return to the desk.
+**Sign in**; linking another machine asks for the sign-in too. Since the
+October 20 sync batch (upstream #1276), sign-in is required at the Desktop
+login wall: a cancelled or failed sign-in leaves the sign-in screen up, and the
+wall offers no account-free button back to the desk. The local desk itself is
+unchanged once the app is running, and **Sign out** and ended sessions still
+land on it as described below.
 
 **Sign out** in **Settings → Account** runs `harness logout`, which clears this
 computer's saved sign-in and restarts a running daemon signed out, for this
@@ -692,4 +695,34 @@ experiment of the signed-in account, each off by default (Settings ▸
 Experimental, or `harness settings`). Signed out, the local desk still runs,
 but changing one of these returns a sign-in prompt instead of a local toggle —
 the fork adopts this as upstream designed it.
+This is a source change; it does not update an installed desktop or daemon.
+
+
+## October 20 upstream sync batch 2
+
+This source snapshot incorporates upstream `dd16a4bba` (476 commits since the
+`0130b6c18` batch-1 cut) on fork main `2f9722a3f` as a true merge, with 18
+conflicts resolved under the fork's union principle: the grid fleet
+(`trustedBaseUrl`, local grid profiles, the Pi `-e` extension evidence), the
+Windows webview/tab contract (visible tab close, WebView2 viewers, Ctrl+C
+copy-when-selected), the Projects sidebar, and the CLI usage modularization all
+stay, while upstream semantics that supersede fork behavior are adopted.
+
+The one visible behavior change is upstream #1276: sign-in is now required at
+the Desktop login wall. The wall no longer offers **Use this computer without
+an account**; a cancelled or failed sign-in leaves the sign-in screen up. The
+local desk itself is unchanged once the app is running — **Sign out** and ended
+sessions still land on it, the projects sidebar and **Settings → Account**
+still say **Local mode**, and the WSL CLI's signed-out daemon below is
+unchanged. The login tests that drove the removed button went with it, and the
+wall's tests now pin the mandatory sign-in step.
+
+Also in this batch: `harness --help` opens with upstream's agent pointer
+(**An agent? Run: harness help agents** — the curated agent screen that
+command prints stays one command away, so the fast `--help` route keeps clear
+of the full command graph), the tab bar's hold-Command shortcut label is
+back alongside the Windows visible close control, and the three launch goldens
+are re-recorded on hosted Linux CI (a Windows recording writes Windows paths
+into them); `launch-argv` keeps upstream's override records, whose former call
+order its spec pins on purpose.
 This is a source change; it does not update an installed desktop or daemon.
