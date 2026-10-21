@@ -75,6 +75,67 @@ void main() {
     );
   }
 
+  test('an older server that names no agent experiment keeps the others, and those off and unavailable', () async {
+    // What agents may do reached the app before every backend had it (owner, 2026-10-12).
+    const agents = [
+      ExperimentalFeature.agentsStartAgents,
+      ExperimentalFeature.agentPullRequestLine,
+      ExperimentalFeature.agentMessages,
+    ];
+    final server = AccountSettings('a')..features[share.id] = true;
+    for (final feature in agents) {
+      server.features.remove(feature.id);
+    }
+    final store = await open(server);
+    expect(store.loaded, isTrue);
+    expect(store.enabled(share), isTrue);
+    for (final feature in agents) {
+      expect(store.enabled(feature), isFalse);
+      expect(store.isAvailable(feature), isFalse);
+    }
+    // A server that names one wrongly is still a bad answer.
+    server.readOverride = () async => {
+      ...server.snapshot,
+      'revision': 1,
+      'features': {
+        ...server.features,
+        ExperimentalFeature.agentMessages.id: 'on',
+      },
+    };
+    await store.refresh();
+    expect(store.error, isNotNull);
+    expect(store.enabled(ExperimentalFeature.agentMessages), isFalse);
+  });
+
+  testWidgets(
+    'Super Tab coordination no longer needs account experiment switches',
+    (tester) async {
+      final server = AccountSettings('a');
+      final store = await open(server);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: ExperimentalSection(store: store)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Focus-bar creature'), findsOneWidget);
+      expect(find.text('Share button'), findsOneWidget);
+      for (final feature in ExperimentalFeature.values.where(
+        (f) => !f.visibleInSettings,
+      )) {
+        expect(find.text(feature.label), findsNothing);
+        expect(
+          find.byKey(ValueKey('experimental-${feature.id}')),
+          findsNothing,
+        );
+      }
+      // Opening the simplified settings must not enable account-wide execution or
+      // change an older tab's saved sharing choices.
+      expect(server.writes, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   test('a pending save is not presented as saved, and a failed save can be retried', () async {
     final server = AccountSettings('a');
     final store = await open(server);
@@ -197,6 +258,49 @@ void main() {
     final reads = server.reads;
     await tester.pump(const Duration(seconds: 30));
     expect(server.reads, reads);
+  });
+
+  testWidgets('the 30 s poll notifies only when what it shows changes', (
+    tester,
+  ) async {
+    // Every read used to notify, rebuilding each pane header and the
+    // workspace twice a minute while nothing had changed.
+    final server = AccountSettings('a');
+    final store = ExperimentalFeaturesStore();
+    store.bind('a', transport: server);
+    await tester.pump();
+    var notified = 0;
+    store.addListener(() => notified++);
+    for (var i = 0; i < 3; i++) {
+      await tester.pump(const Duration(seconds: 30));
+    }
+    // A newer revision that changes no choice is nothing new either.
+    server.revision++;
+    await tester.pump(const Duration(seconds: 30));
+    expect(server.reads, 5);
+    expect(notified, 0);
+    server.features[share.id] = true;
+    server.revision++;
+    await tester.pump(const Duration(seconds: 30));
+    expect((notified, store.enabled(share)), (1, true));
+    // An older backend that no longer names one: unavailable is news.
+    server.features.remove(ExperimentalFeature.agentMessages.id);
+    await tester.pump(const Duration(seconds: 30));
+    expect(notified, 2);
+    expect(store.isAvailable(ExperimentalFeature.agentMessages), isFalse);
+    server.readOverride = () => Future.error(StateError('offline'));
+    await tester.pump(const Duration(seconds: 30));
+    expect(notified, 3);
+    expect(store.error, isNotNull);
+    // The same failure again shows nothing new.
+    await tester.pump(const Duration(seconds: 30));
+    expect(notified, 3);
+    server.readOverride = null;
+    await tester.pump(const Duration(seconds: 30));
+    expect(notified, 4);
+    expect(store.error, isNull);
+    // The poll's timer must not outlive the test (fake async checks it).
+    store.dispose();
   });
 
   testWidgets(

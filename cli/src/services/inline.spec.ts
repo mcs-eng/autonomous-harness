@@ -8,6 +8,7 @@ import { engineTranscriptFor } from '../engines/transcripts.js'
 import { liveFor } from '../engines/live.js'
 import { runtimeFor } from '../engines/runtime.js'
 import { startGateway } from '../gateway/start.js'
+import { startAgentCleanup } from './agentCleanup.js'
 import { startMemory } from './memory.js'
 import { startConnectors } from './connectors.js'
 import { startDevices } from './devices.js'
@@ -17,13 +18,17 @@ import { startModels } from './models.js'
 import { startMessagesInCore } from './messages.js'
 import { startMonitor } from './monitor.js'
 import { startOrchestrator } from './orchestrator.js'
+import { startOsDevice } from './osDevice.js'
 import { startProjects } from './projects.js'
 import { startRecaps } from './recaps.js'
 import { startRouter } from './router.js'
+import { startCloud } from './cloud.js'
 import { startSearch } from './search.js'
 import { startShell } from './shell.js'
+import { startSharedMachines } from './sharedMachines.js'
 import { startSharing } from './sharing.js'
 import { startStoreInCore } from './store.js'
+import { startSuperTabs } from './superTabs.js'
 import { startUsageInCore } from './usage.js'
 import { startViewers } from './viewers.js'
 import { startWifi } from './wifi.js'
@@ -32,6 +37,6 @@ import { startWorkspaces } from './workspaces.js'
 
 describe('the services the core runs in its own process only when they do not run in theirs', () => {
   it('are their own starts, unchanged: the same services either way', () => {
-    expect({ ...inline }).toEqual({ engineTranscriptFor, liveFor, runtimeFor, screenFor, submissionFor, nativeControlFor, modelControlFor, questionControlFor, startConnectors, startDevices, startHandoff, startGateway, startMemory, startModels, startMonitor, startOrchestrator, startProjects, startRecaps, startRouter, startSearch, startSharing, startShell, startStoreInCore, startMessagesInCore, startUsageInCore, startViewers, startWifi, startWindowNames, startWorkspaces })
+    expect({ ...inline }).toEqual({ engineTranscriptFor, liveFor, runtimeFor, screenFor, submissionFor, nativeControlFor, modelControlFor, questionControlFor, startAgentCleanup, startCloud, startConnectors, startDevices, startHandoff, startGateway, startMemory, startModels, startMonitor, startOrchestrator, startOsDevice, startProjects, startRecaps, startRouter, startSearch, startSharedMachines, startSharing, startShell, startStoreInCore, startSuperTabs, startMessagesInCore, startUsageInCore, startViewers, startWifi, startWindowNames, startWorkspaces })
   })
 })

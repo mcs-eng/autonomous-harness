@@ -1,3 +1,5 @@
+import { VERSION, IS_RELEASE_BUILD } from '../version.js'
+import { gatewayResourceSample } from './productHealth.js'
 /**
  * The gateway, started: everything that holds this machine's keys or speaks for them, built in one place
  * so that it runs the same in the core's process (`HARNESSD_SERVICES=none`, or a master that does not run
@@ -17,6 +19,8 @@
 import { renameSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { createProductUsage } from './productUsage.js'
 import { env } from '../config/env.js'
 import type { GatewayAccount, GatewayEvents, GatewayOps, HttpAnswer, WindowRelay } from '../core/api.js'
 import { AutonomousDeviceDirect } from '../lib/autonomous-device/direct.js'
@@ -29,6 +33,7 @@ import { DeviceLogStore } from '../lib/e2ee/deviceLogStore.js'
 import { DeviceLogSyncer, type DeviceKeysSeen, type DeviceLogFetched, type DeviceLogTrustOutcome } from '../lib/e2ee/deviceLogSyncer.js'
 import { GroupSyncer, relayRequester, SELF_STAMP } from '../lib/e2ee/groupSyncer.js'
 import { MachinePeerStore } from '../lib/e2ee/machinePeers.js'
+import { applySharedTrust, isSharedKey } from './sharedTrust.js'
 import { E2eeStore } from '../lib/e2ee/store.js'
 import { TrustGroupStore, type GroupMember } from '../lib/e2ee/trustGroup.js'
 import { RemoteRelayPool } from '../lib/remoteRelay.js'
@@ -36,6 +41,9 @@ import { HarnessShareRelay, type SharedMachineReference } from '../sharing/relay
 import { RelayGateway } from './gateway.js'
 import { LaneSessions } from './lane.js'
 import { observerKey } from './observerKey.js'
+import { TabSessions } from './tabKey.js'
+import { TabRelaySockets } from './tabRelay.js'
+import { openVault, sealVault } from '../lib/e2ee/connectorVault.js'
 import { shareWindows } from './share.js'
 import { createAccountHttp } from './accountHttp.js'
 
@@ -68,6 +76,13 @@ export interface StartedGateway {
 /** A key is looked up in the device key log at most this often for a hello: a client that retries its
  *  hello every few seconds, or a relay replaying one, reads the log once, not each time. */
 const UNKNOWN_HELLO_EVERY_MS = 10_000
+
+/** How long a read of the log waits for the acknowledgements ("It's mine" said on another device): it is
+ *  part of every read while a key is new here, and a hello from a key not paired here waits on a read
+ *  (`trustFromLog`), so a backend slow to answer them must not hold that up for long. */
+const ACK_READ_TIMEOUT_MS = 5_000
+/** How long "It's mine" waits for the backend to keep it; the person's own dismissal is already saved. */
+const ACK_POST_TIMEOUT_MS = 10_000
 
 /** What `trustFromLog` found, as the log line says it. */
 const TRUST_OUTCOME: Record<DeviceLogTrustOutcome, string> = {
@@ -126,6 +141,16 @@ export function startGateway(host: GatewayHost): StartedGateway {
   const gateway = new RelayGateway({
     machineId: host.machineId, auth: host.tokens, computerId: host.computerId, autonomousEnv: host.autonomousEnv, core: host.events,
   })
+  // Account separation is local only. Neither this filename nor the machine identity is uploaded.
+  const usage = host.signedIn ? createProductUsage({
+    file: join(env.ADAPTER_DATA_DIR, 'product-usage', createHash('sha256').update(host.autonomousEnv + ':' + host.machineId).digest('hex') + '.json'),
+    request: (method, path, body) => accountHttp.backend(method, path, body, 5_000),
+    context: { surface: 'cli', release: VERSION, platform: process.platform === 'darwin' ? 'macos' : process.platform === 'linux' ? 'linux' : process.platform === 'win32' ? 'windows' : 'other', channel: host.autonomousEnv === 'prod' && IS_RELEASE_BUILD ? 'production' : 'development' },
+    sample: gatewayResourceSample(),
+  }) : null
+  // The choice is read at once, so collection starts with the gateway; its first report waits for its first
+  // tick, a random 10 to 60 seconds on (gateway/productUsage.ts), rather than the second a release started it.
+  if (usage) { gateway.productUsage = usage; void usage.sync(false) }
 
   /** The identity this machine was removed under is never used again: the next start mints a new one. */
   const spendIdentity = (): void => {
@@ -142,6 +167,13 @@ export function startGateway(host: GatewayHost): StartedGateway {
   const lane = new LaneSessions(() => relayIdentityStore.getIdentity())
   // Share's owner's welcomes, signed with the same identity (gateway/observerKey.ts).
   const ownerKey = observerKey(() => relayIdentityStore.getIdentity())
+  // Shared tabs' rosters and their sessions to other accounts' machines, with the same identity (gateway/tabKey.ts).
+  const tabKey = new TabSessions(() => relayIdentityStore.getIdentity(), () => host.machineId)
+  // Their relay: a socket per shared tab, signed in as this machine, what it hears told to the core (gateway/tabRelay.ts).
+  const tabRelay = new TabRelaySockets({
+    base: env.BACKEND_WS_URL, environment: host.autonomousEnv, machineId: () => host.machineId,
+    accessToken: (o) => host.tokens.accessToken(o), emit: (e) => host.events.tabFrame(e),
+  })
   // The trust group and the device key log are built below; the pool's callbacks reach them through these.
   let groupSyncer: GroupSyncer | null = null
   let devLogSyncer: DeviceLogSyncer | null = null
@@ -155,6 +187,9 @@ export function startGateway(host: GatewayHost): StartedGateway {
       // A machine the account's device key log names under this very key will trust us as soon as it
       // reads the log: keep its pin through a few denials, and nudge it (and us) to read.
       expectsTrust: (machineId, pub) => {
+        // A machine shared with this account trusts it once its own daemon has read who it is shared
+        // with (gateway/sharedTrust.ts): its pin stays until sharing takes it back.
+        if (relayPeers.get(machineId)?.shared && relayPeers.get(machineId)?.pub === pub) return true
         const m = devLogSyncer?.list().members.find((x) => x.pub === pub)
         const expected = !!m && m.kind === 'machine' && m.machineId === machineId && !devLogSyncer?.suspendedKeys().includes(pub)
         if (expected) void devLogSyncer?.refresh()
@@ -196,6 +231,7 @@ export function startGateway(host: GatewayHost): StartedGateway {
     suspended: () => new Set(devLogSyncer?.suspendedKeys() ?? []),
     // Only a list the backend answered says who is offline; otherwise try every member.
     reachable: () => reachable,
+    shared: (pub) => isSharedKey(gateway.pairedPeers(), pub),
     ready: () => devLogSyncer?.current() ?? false,
     log: (line) => console.log(line),
   })
@@ -252,6 +288,20 @@ export function startGateway(host: GatewayHost): StartedGateway {
       if (!data || typeof data.acct !== 'string' || !Array.isArray(data.entries) || typeof head?.seq !== 'number'
         || !Number.isSafeInteger(head.seq) || head.seq < 0 || typeof head.hash !== 'string') return null
       return { acct: data.acct, head: { seq: head.seq, hash: head.hash }, entries: data.entries }
+    },
+    // "It's mine", once for the account (deviceAck.ts): beside the log, over REST like its reads. Not over
+    // this machine's socket like an append: an acknowledgement's authority is its signature by a key
+    // active on the log, which every device checks itself, so the channel ties nothing to it.
+    fetchAcks: async (since) => {
+      // A short deadline: the read of the log that asked waits on it (ACK_READ_TIMEOUT_MS).
+      const r = await accountHttp.backend('GET', `/api/device-keys/acks?since=${since}`, undefined, ACK_READ_TIMEOUT_MS)
+      const acks = r.status === 200 ? (r.body.data as { acks?: unknown } | undefined)?.acks : undefined
+      return Array.isArray(acks) ? acks : null
+    },
+    postAck: async (ack) => {
+      const r = await accountHttp.backend('POST', '/api/device-keys/acks', { ack }, ACK_POST_TIMEOUT_MS)
+      if (r.status !== 200 && r.status !== 404) console.log(`[devlog] the backend did not keep "It's mine" (${r.status}: ${String((r.body.error as { code?: unknown } | undefined)?.code ?? '')})`)
+      return r.status === 200
     },
     append: async (entry) => {
       const p = await gateway.appendDeviceLog(entry as unknown as Record<string, unknown>)
@@ -370,6 +420,11 @@ export function startGateway(host: GatewayHost): StartedGateway {
   const refusal = (error: unknown): { refused: { code: string; message: string } } =>
     ({ refused: { code: String((error as { code?: unknown }).code ?? 'INTERNAL'), message: error instanceof Error ? error.message : String(error) } })
   const devicePairs = () => gateway.listPairs().filter((p) => p.role === 'device')
+  /** The account's machines the connections are sealed for and opened from: the verified log's, neither
+   *  suspended nor pending (lib/e2ee/connectorVault.ts). */
+  const vaultMachines = (): string[] => devlog.list().members
+    .filter((m) => m.kind === 'machine' && !m.suspended && !m.pending)
+    .map((m) => m.pub)
 
   const ops: GatewayOps = {
     backend: accountHttp.backend,
@@ -422,7 +477,11 @@ export function startGateway(host: GatewayHost): StartedGateway {
       return { status, body: { error: r.error, ...(r.detail ? { detail: r.detail } : {}) } }
     },
     devicesHistory: async () => ({ status: 200, body: { ...(await devlog.history()) } }),
-    devicesDismiss: async (body) => { devlog.dismiss(body); return { status: 200, body: { ok: true } } },
+    // `shared`: an "It's mine" (`confirm`) reached the backend for the account's other devices.
+    devicesDismiss: async (body) => {
+      const shared = await devlog.dismiss(body)
+      return { status: 200, body: { ok: true, ...(body.confirm ? { shared } : {}) } }
+    },
     devicesRebaseline: async (confirm, head) => {
       const r = await devlog.rebaseline(confirm, head)
       if (r && 'error' in r) return { status: 409, body: { error: r.error } }
@@ -456,6 +515,10 @@ export function startGateway(host: GatewayHost): StartedGateway {
     },
     revokeIdentity: (identity) => { gateway.e2ee.revoke(fingerprint(b64d(identity))) },
     account: (next) => {
+      // Tokens may change before this process restarts. Never send the previous account's queue
+      // under a new sign-in, even when both accounts happen to have the same preference revision.
+      if (next.machineId !== account.machineId || next.autonomousEnv !== account.autonomousEnv
+          || next.signIn?.epoch !== account.signIn?.epoch || next.signIn?.acct !== account.signIn?.acct) void usage?.stop(true)
       account = next
       startGroup()
       registerAndSweep()
@@ -463,6 +526,33 @@ export function startGateway(host: GatewayHost): StartedGateway {
     reachable: (machineIds) => { reachable = machineIds ? new Set(machineIds) : null },
     lane,
     observerKey: ownerKey,
+    tabKey,
+    tabRelay,
+    sharedTrust: async (desired) => applySharedTrust({
+      peers: relayPeers,
+      paired: () => gateway.pairedPeers(),
+      trust: (peer) => gateway.trustPeer(peer),
+      untrust: (pub) => { gateway.untrustPeer(pub) },
+      dropSessions: (machineId) => { relayPool.invalidate(machineId); relayPool.invalidateIsolated(machineId) },
+      selfPub: () => b64e(relayIdentityStore.getIdentity().pub),
+    }, desired),
+    connectorVault: {
+      // Sealed for every machine the verified log holds, this one included, but never a key a fork
+      // suspended or one nobody has yet said is theirs (pending): a device added by whoever got hold of
+      // the account must not be handed its connections.
+      seal: async (plaintext) => {
+        if (devlog.list().frozen) throw new Error('the device key log is frozen: review your devices first')
+        return { ...sealVault(plaintext, relayIdentityStore.getIdentity(), vaultMachines()) }
+      },
+      open: async (envelope) => {
+        const identity = relayIdentityStore.getIdentity()
+        const machines = vaultMachines()
+        const plaintext = openVault(envelope, identity, new Set([...machines, b64e(identity.pub)]))
+        if (plaintext === null) return null
+        const sealedFor = new Set(Object.keys((envelope as { keys?: Record<string, unknown> }).keys ?? {}))
+        return { plaintext, complete: machines.every((pub) => sealedFor.has(pub)) }
+      },
+    },
   }
 
   return {
@@ -470,13 +560,24 @@ export function startGateway(host: GatewayHost): StartedGateway {
     ops,
     windowRelay,
     stop: async () => {
+      // Shutdown never waits for the optional disk queue. The stopped collector cannot upload. Its final, clean
+      // state is on disk when stop() returns (written synchronously), so a process that exits next keeps it. A write
+      // already on its way can still rename an older snapshot over it and put the final state back after: waited for
+      // below, at most half a second, so an exit in between does not read as an unclean restart (review of #1393).
+      const usageStopped = usage?.stop()
       clearInterval(devlogTimer)
       syncer.stop()
       direct?.stop()
       relayPool.close()
       shareRelay.close()
       lane.clear()
+      tabKey.clear()
+      tabRelay.closeAll()
       await gateway.stop()
+      if (usageStopped) {
+        await Promise.race([usageStopped.catch(() => false),
+          new Promise<void>(resolve => { setTimeout(resolve, 500).unref?.() })])
+      }
     },
   }
 }

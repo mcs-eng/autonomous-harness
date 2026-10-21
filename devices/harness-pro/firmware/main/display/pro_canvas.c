@@ -2,23 +2,10 @@
 #include <string.h>
 #include "pod/pod_draw.h"
 
-enum { PRO_TEXT = 1, PRO_RECT, PRO_IMAGE };
+enum { PRO_TEXT = 1, PRO_RECT, PRO_IMAGE, PRO_RECT_AA, PRO_RECT_AA_STROKE };
 static int min_(int a, int b) { return a < b ? a : b; }
 static int max_(int a, int b) { return a > b ? a : b; }
-static uint16_t over(uint16_t fg, uint16_t bg, unsigned a)
-{
-    if (a == 255) return fg;
-    unsigned b = 255 - a;
-    // Exact rounded division by255 for these bounded channel products. This
-    // avoids the wide multiply used for a constant division on the P4's RV32.
-    unsigned r = (fg >> 11) * a + (bg >> 11) * b + 128;
-    unsigned g = ((fg >> 5) & 63) * a + ((bg >> 5) & 63) * b + 128;
-    unsigned v = (fg & 31) * a + (bg & 31) * b + 128;
-    r = (r + (r >> 8)) >> 8;
-    g = (g + (g >> 8)) >> 8;
-    v = (v + (v >> 8)) >> 8;
-    return (uint16_t)((r << 11) | (g << 5) | v);
-}
+static inline uint16_t over(uint16_t fg, uint16_t bg, unsigned a) { return ht_pro_over(fg, bg, a); }
 
 static void fill_span(uint16_t *dst, int count, uint16_t ink)
 {
@@ -80,6 +67,9 @@ static unsigned code(const ht_pro_font_t *f, uint32_t cp)
     int vietnamese = ht_pro_vietnamese_index(cp);
     if (vietnamese >= 0 && f->last - f->first + 1 + vietnamese < f->glyph_count)
         return f->last + 1 + (unsigned)vietnamese;
+    int extra = ht_pro_extra_pos(f, cp);   // marks the face was baked with, after the Vietnamese entries
+    if (extra >= 0 && f->last - f->first + 1 + 102 + extra < f->glyph_count)
+        return f->last + 1 + 102 + (unsigned)extra;
     if (cp == 0x2018 || cp == 0x2019) cp = '\'';
     if (cp == 0x201c || cp == 0x201d) cp = '"';
     if (cp >= 0x2010 && cp <= 0x2015) cp = '-';
@@ -103,7 +93,7 @@ int ht_pro_width(const ht_pro_font_t *f, const char *text)
     // Measurement follows the same display normalization as wrapping/raster:
     // fractions and unsupported characters may expand to several glyphs.
     char visible[4096];
-    ht_display_text(visible, sizeof visible, text);
+    ht_display_text_ex(visible, sizeof visible, text, f);
     return visible_width(f, visible);
 }
 static ht_run_t *run(ht_scene_t *s, int kind, int x, int y, int w, int h)
@@ -122,7 +112,7 @@ bool ht_pro_text(ht_scene_t *s, int x, int y, int width, const ht_pro_font_t *fo
     if (!r) return false;
     r->pro_font = font; r->fg = ink;
     char normalized[HT_TEXT_BYTES * 4];
-    bool complete = ht_display_text(normalized, sizeof normalized, text);
+    bool complete = ht_display_text_ex(normalized, sizeof normalized, text, font);
     const char *p = normalized;
     int used = 0, advance = 0, extent = 0;
     while (*p && *p != '\n') {
@@ -153,72 +143,94 @@ bool ht_pro_text(ht_scene_t *s, int x, int y, int width, const ht_pro_font_t *fo
     r->w = ink_width > 0 ? ink_width : 1;
     return true;
 }
-/* Return a bounded UTF-8 line and advance past one word-wrap boundary. */
-static void line(const char **cursor, const ht_pro_font_t *font, int width, char out[HT_TEXT_BYTES])
-{
-    const char *begin = *cursor, *p, *last_space = NULL, *end;
-    while (*begin == ' ') begin++;
-    p = end = begin;
-    int advance = 0, extent = 0;
-    while (*p && *p != '\n') {
-        const char *start = p;
-        unsigned cp = code(font, ht_utf8_next(&p));
-        const ht_pro_glyph_t *g = &font->glyphs[cp - font->first];
-        int next_extent = max_(extent, advance + g->width);
-        if (max_(next_extent, advance + g->advance) > width || p - begin >= HT_TEXT_BYTES) {
-            p = start;
-            if (last_space) p = last_space;
-            break;
-        }
-        advance += g->advance; extent = next_extent; end = p;
-        if (cp == ' ') last_space = start;
-    }
-    if (!*p || *p == '\n') end = p;
-    else if (p > begin) end = p;
-    if (end == begin && *p && *p != '\n') { ht_utf8_next(&p); end = p; }
-    size_t bytes = (size_t)(end - begin);
-    if (bytes >= HT_TEXT_BYTES) bytes = HT_TEXT_BYTES - 1;
-    memcpy(out, begin, bytes); out[bytes] = 0;
-    while (bytes && out[bytes-1] == ' ') out[--bytes] = 0;
-    p = end;
-    if (*p == '\n') p++; else while (*p == ' ') p++;
-    *cursor = p;
-}
-int ht_pro_text_rows(const char *text, const ht_pro_font_t *font, int width)
-{
-    if (!font || width <= 0 || !text || !*text) return 0;
-    char visible[4096], row[HT_TEXT_BYTES];
-    ht_display_text(visible, sizeof visible, text);
-    const char *p = visible; int count = 0;
-    while (*p) { line(&p, font, width, row); count++; }
-    return count;
-}
-int ht_pro_wrap(ht_scene_t *s, int x, int y, int width, int rows, int skip,
-                const ht_pro_font_t *font, uint16_t ink, const char *text)
-{
-    if (!font || width <= 0 || rows <= 0 || !text) return 0;
-    char visible[4096], row[HT_TEXT_BYTES];
-    ht_display_text(visible, sizeof visible, text);
-    const char *p = visible; int shown = 0;
-    while (*p && skip-- > 0) line(&p, font, width, row);
-    while (*p && shown < rows) {
-        line(&p, font, width, row);
-        ht_pro_text(s, x, y + shown * font->height, width, font, ink, row);
-        shown++;
-    }
-    return shown;
-}
-void ht_pro_center(ht_scene_t *s, int y, const ht_pro_font_t *f, uint16_t ink, const char *text)
-{
-    int width = min_(ht_pro_width(f, text), HT_WIDTH - 80);
-    ht_pro_text(s, (HT_WIDTH-width)/2, y, width, f, ink, text);
-}
 bool ht_pro_rect(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t ink)
 {
     ht_run_t *r = run(s, PRO_RECT, x, y, w, h);
     if (!r) return false;
     r->fg = ink; r->radius = min_(max_(0, radius), min_(w,h)/2);
     return true;
+}
+bool ht_pro_rect_aa(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t ink)
+{
+    ht_run_t *r = run(s, PRO_RECT_AA, x, y, w, h);
+    if (!r) return false;
+    r->fg = ink; r->radius = min_(max_(0, radius), min_(min_(w,h)/2, 255));
+    return true;
+}
+// A filled rounded rect with a one-pixel border in one run: exactly what ht_pro_rect_aa(ink, rad) followed by
+// ht_pro_rect_aa(fill, inset by 1, rad - 1) draws, without painting the inner area twice. The fill colour rides in text[0..1].
+bool ht_pro_rect_aa_stroke(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t ink, uint16_t fill)
+{
+    if (w < 3 || h < 3) return ht_pro_rect_aa(s, x, y, w, h, radius, ink);   // no inner rect: the border fill alone
+    ht_run_t *r = run(s, PRO_RECT_AA_STROKE, x, y, w, h);
+    if (!r) return false;
+    r->fg = ink; r->radius = min_(max_(0, radius), min_(min_(w,h)/2, 255));
+    memcpy(r->text, &fill, sizeof fill);
+    return true;
+}
+static void rect_aa_raster(const ht_run_t *r, int x0, int y0, int x1, int y1, ht_rect_t clip, uint16_t *out)
+{
+    int rad = r->radius;
+    for (int y = y0; y < y1; y++) {
+        int dy = y - r->y;
+        uint16_t *row = out + (y-clip.y)*clip.w - clip.x;
+        int cy = dy < rad ? dy : dy >= r->pro_height-rad ? r->pro_height-1-dy : -1;   // corner row, mirrored
+        if (cy < 0) { fill_span(row + x0, x1-x0, r->fg); continue; }
+        // A corner row: the coverage only varies in the two corner columns; the straight middle is one span.
+        const int ml = max_(x0, r->x + rad), mr = min_(x1, r->x + r->w - rad);
+        for (int x = x0; x < x1; x++) {
+            if (x == ml && mr > ml) { fill_span(row + ml, mr - ml, r->fg); x = mr - 1; continue; }
+            int dx = x - r->x, cx = dx < rad ? dx : dx >= r->w-rad ? r->w-1-dx : -1;
+            unsigned cov = cx < 0 ? 16 : ht_pro_corner_cover(rad, cx, cy);
+            if (cov >= 16) row[x] = r->fg;
+            else if (cov) row[x] = over(r->fg, row[x], cov*255/16);
+        }
+    }
+}
+// The coverage of pixel (dx, dy) of a w x h AA rect of corner radius rad (the corner circle's, mirrored into each corner).
+static unsigned rect_cover(int rad, int w, int h, int dx, int dy)
+{
+    int cy = dy < rad ? dy : dy >= h-rad ? h-1-dy : -1;
+    int cx = dx < rad ? dx : dx >= w-rad ? w-1-dx : -1;
+    return cx < 0 || cy < 0 ? 16 : ht_pro_corner_cover(rad, cx, cy);
+}
+static void blend_px(uint16_t *p, uint16_t ink, unsigned cov)
+{
+    if (cov >= 16) *p = ink;
+    else if (cov) *p = over(ink, *p, cov*255/16);
+}
+static void rect_aa_stroke_raster(const ht_run_t *r, int x0, int y0, int x1, int y1, ht_rect_t clip, uint16_t *out)
+{
+    int rad = r->radius, inner = rad > 0 ? rad-1 : 0, w = r->w, h = r->pro_height;
+    uint16_t ink = r->fg, fill;
+    memcpy(&fill, r->text, sizeof fill);
+    for (int y = y0; y < y1; y++) {
+        int dy = y - r->y;
+        uint16_t *row = out + (y-clip.y)*clip.w - clip.x;
+        if (dy >= 1 && dy < h-1 && dy >= rad && dy < h-rad) {   // straight rows: border, fill, border
+            if (x0 <= r->x) row[r->x] = ink;
+            int lo = max_(x0, r->x+1), hi = min_(x1, r->x+w-1);
+            if (hi > lo) fill_span(row + lo, hi-lo, fill);
+            if (x1 > r->x+w-1 && x0 <= r->x+w-1) row[r->x+w-1] = ink;
+            continue;
+        }
+        // Border and corner rows: the corner pixels take the border fill and then the inner one over it, per pixel; between
+        // the corners (dx in [rad, w-rad)) the row is plain: the border on the top and bottom edges, the fill under them.
+        uint16_t mid = dy == 0 || dy == h-1 ? ink : fill;
+        for (int x = x0; x < x1;) {
+            int dx = x - r->x;
+            if (dx >= rad && dx < w-rad) {
+                int e = min_(x1, r->x + w - rad);
+                fill_span(row + x, e - x, mid);
+                x = e;
+                continue;
+            }
+            blend_px(row + x, ink, rect_cover(rad, w, h, dx, dy));
+            if (dx >= 1 && dx < w-1 && dy >= 1 && dy < h-1)
+                blend_px(row + x, fill, rect_cover(inner, w-2, h-2, dx-1, dy-1));
+            x++;
+        }
+    }
 }
 // An image drawn at `opacity` (1..254 of 255; anything else is plain): the run's radius holds it.
 bool ht_pro_image_faded(ht_scene_t *s, int x, int y, const ht_pro_bitmap_t *bitmap, unsigned opacity)
@@ -252,6 +264,10 @@ void ht_pro_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
             int left = max_(x0, r->x + inset), right = min_(x1, r->x + r->w - inset);
             if (right > left) fill_span(out + (y-clip.y)*clip.w + left-clip.x, right-left, r->fg);
         }
+    } else if (r->pro_kind == PRO_RECT_AA) {
+        rect_aa_raster(r, x0, y0, x1, y1, clip, out);
+    } else if (r->pro_kind == PRO_RECT_AA_STROKE) {
+        rect_aa_stroke_raster(r, x0, y0, x1, y1, clip, out);
     } else if (r->pro_kind == PRO_IMAGE) {
         for (int y=y0;y<y1;y++) {
             size_t src=(size_t)(y-r->y)*r->bitmap.width+x0-r->x;
@@ -272,9 +288,12 @@ void ht_pro_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
         while (*p && gx < x1) {
             const ht_pro_glyph_t *g=&f->glyphs[code(f,ht_utf8_next(&p))-f->first];
             int left=max_(x0,gx), right=min_(x1,gx+g->width);
-            if (right > left) for(int y=y0;y<y1;y++)
+            if (right > left) for(int y=y0;y<y1;y++) {
+                int row=y-r->y;
+                if (g->rows) { row-=g->top; if (row<0 || row>=g->rows) continue; }
                 glyph_span(out+(y-clip.y)*clip.w+left-clip.x, f->alpha+g->offset,
-                           (size_t)(y-r->y)*g->width+left-gx, right-left, r->fg);
+                           (size_t)row*g->width+left-gx, right-left, r->fg);
+            }
             gx+=g->advance;
         }
     }

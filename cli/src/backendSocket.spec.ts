@@ -419,8 +419,8 @@ describe('viewer forwarding authentication', () => {
     role.mockReturnValue('web')
     await dispatchDown(socket, sealed, 'remote')
     expect(routed).toEqual([
-      { type: 'memory_snapshot', asker: { local: false, owner: false, connection: 'remote', requestId: 'one' } },
-      { type: 'memory_snapshot', asker: { local: false, owner: true, connection: 'remote', requestId: 'one' } },
+      { type: 'memory_snapshot', asker: { local: false, owner: false, accountOwner: false, connection: 'remote', requestId: 'one' } },
+      { type: 'memory_snapshot', asker: { local: false, owner: true, accountOwner: false, connection: 'remote', requestId: 'one' } },
     ])
     expect(ownerCommands).not.toHaveBeenCalled()
     expect(sealedReply).toHaveBeenCalledWith('remote', 'memory_snapshot_result', 'one', { memories: [] })
@@ -757,6 +757,21 @@ describe('BackendSocket outbound queue', () => {
     await socket.stop()
   })
 
+  it('gives a shell result card to the devices tee and never to the relay', async () => {
+    const socket = relaySocket('token')
+    const tee = vi.fn()
+    socket.onOutboundCommander = tee
+    socket.connect()
+    wsMock.instances[0].open()
+    const relayed = vi.fn()
+    vi.spyOn(socket as unknown as { toGateway(what: string, call: (g: unknown) => void): void }, 'toGateway')
+      .mockImplementation((_what, call) => call({ commander: relayed }))
+    socket.sendCommander({ type: 'commander_event', agentId: 's1', dbSessionId: 's1', payload: { kind: 'tool_end', id: 't1', outputTail: 'x' } })
+    expect(tee).toHaveBeenCalledTimes(1)
+    expect(relayed).not.toHaveBeenCalled()
+    await socket.stop()
+  })
+
   it('sends a frame though the orchestrator watching the frames cannot read its state', async () => {
     // A full disk: reading the orchestrator's state makes its folder, and that threw out of every send,
     // so a turn's end never reached a window (e2e/diskfull.e2e.ts).
@@ -1054,13 +1069,13 @@ describe('BackendSocket outbound queue', () => {
     await vi.waitFor(() => {
       expect(wrapReply).toHaveBeenCalledWith('web-1', 'session_search_result', 's-1', { hits: [], indexed: 3, pending: 0, ready: true, tookMs: 1 })
     })
-    expect(routed[0]).toEqual({ type: 'session_search', payload: { requestId: 's-1', query: 'dial scroll', limit: 12 }, asker: { local: false, owner: true, connection: 'web-1', requestId: 's-1' } })
+    expect(routed[0]).toEqual({ type: 'session_search', payload: { requestId: 's-1', query: 'dial scroll', limit: 12 }, asker: { local: false, owner: true, accountOwner: false, connection: 'web-1', requestId: 's-1' } })
 
     // A device's session may not act as the owner, and the service is told so.
     role.mockReturnValue('device')
     ask('session_search', { requestId: 's-2', query: 'dial' })
     await vi.waitFor(() => expect(routed).toHaveLength(2))
-    expect(routed[1].asker).toEqual({ local: false, owner: false, connection: 'web-1', requestId: 's-2' })
+    expect(routed[1].asker).toEqual({ local: false, owner: false, accountOwner: false, connection: 'web-1', requestId: 's-2' })
 
     // A type no service declared is the socket's own: an unknown one is refused at once, in the clear,
     // as a reply that carries nothing is.
@@ -2045,6 +2060,42 @@ describe('BackendSocket outbound queue', () => {
     }
   })
 
+  it('tells the gateway a launch\'s engine and the agent it created, and then that agent\'s start failing', async () => {
+    // A create whose engine then did not start was counted as a launch that worked: the reply had said created
+    // (core/agents/newPane.ts; production counters, 2026-10-16). Only fixed names and the agent's id leave here.
+    const socket = relaySocket('token')
+    bindLaunchRequests(socket)
+    const signals: unknown[] = []
+    vi.spyOn(gatewayOf(socket), 'usageLaunch').mockImplementation((signal) => { signals.push(signal) })
+    const states: unknown[][] = []
+    gatewayOf(socket).productUsage = { observe: vi.fn(), opened: vi.fn(), presence: vi.fn(), launchState: (...args) => { states.push(args) } }
+    socket.registerLocalClient('local:measured', { sendFrame: () => true, sendBinary: () => true })
+    const session: RegisteredSession = {
+      schemaVersion: 2, active: true, launch: { state: 'starting' },
+      agentId: 'measured-agent', sessionId: '', boundAt: null, engine: 'claude',
+      transcriptPath: null, projectDir: 'work', cwd: '/tmp/work',
+      runtimes: [{ backend: 'tmux', paneId: '%measured' }], primaryRuntimeKey: 'tmux/%measured', tmuxPane: '%measured',
+      source: null, title: 'PRIVATE_CANARY', model: null, cliVersion: null, processIdentity: null,
+      registeredAt: 1, touchedAt: 1, lastHookAt: 1, lastTranscriptAt: 1,
+    }
+    vi.spyOn(registry, 'byAgent').mockReturnValue(session)
+    socket.onCreateAgent = vi.fn(async () => ({ ok: true as const, session }))
+    const creationId = randomUUID()
+    try {
+      socket.handleLocalFrame('local:measured', { type: 'agent_create', payload: { requestId: 'measured', creationId, engine: 'claude', cwd: '/tmp/work' } })
+      await vi.waitFor(() => expect(signals).toHaveLength(2))
+      expect(signals).toEqual([{ id: creationId, phase: 'start', engine: 'claude' }, { id: creationId, phase: 'created', agent: 'measured-agent' }])
+      socket.send({ type: 'agent_synced', payload: { agent: { ...await socket.toProject(session),
+        launch: { state: 'failed', error: 'ENGINE_DID_NOT_START', detail: 'PRIVATE_CANARY could not start' } } } })
+      socket.send({ type: 'agent_synced', payload: { agent: await socket.toProject({ ...session, launch: { state: 'ready' } }) } })
+      expect(states).toEqual([['measured-agent', 'failed', 'engine_did_not_start'], ['measured-agent', 'ready', undefined]])
+      expect(JSON.stringify([signals, states])).not.toContain('PRIVATE_CANARY')
+    } finally {
+      await socket.unregisterLocalClient('local:measured')
+      await socket.stop()
+    }
+  })
+
   it('explains invalid repository choices without echoing credentials or preparing a folder', async () => {
     const socket = relaySocket('token')
     bindLaunchRequests(socket)
@@ -2426,18 +2477,19 @@ describe('BackendSocket outbound queue', () => {
     vi.advanceTimersByTime(15_000)
     expect(kinds(ws)).toEqual(['open', 'ping'])
 
-    // A second window is a session in its own right — up at once, floor or not.
+    // A second connection while one is attached is the same app session: the desktop holds one per
+    // machine and redials on every reconnect, so it opens nothing new.
     expect(socket.registerLocalClient('local:2', sink)).toBe(true)
-    expect(kinds(ws)).toEqual(['open', 'ping', 'open'])
+    expect(kinds(ws)).toEqual(['open', 'ping'])
     // Registering the same window twice is refused, and says nothing.
     expect(socket.registerLocalClient('local:2', sink)).toBe(false)
-    expect(kinds(ws)).toHaveLength(3)
+    expect(kinds(ws)).toHaveLength(2)
 
     // Every window gone: the tick falls silent.
     await socket.unregisterLocalClient('local:1')
     await socket.unregisterLocalClient('local:2')
     vi.advanceTimersByTime(120_000)
-    expect(kinds(ws)).toHaveLength(3)
+    expect(kinds(ws)).toHaveLength(2)
 
     // A window that came and went while the link was down was never a session the backend can hear
     // about — the next link is told nothing. Both remaining windows gone first, so the count is clean.
@@ -2606,6 +2658,25 @@ describe('desk_changed relay', () => {
     await socket.stop()
   })
 
+  it('hands the backend\'s connectors_changed on, for the connectors service to merge, and only the backend\'s', async () => {
+    const socket = relaySocket('token')
+    const heard: unknown[] = []
+    socket.onAccountNotice = (notice) => { heard.push(notice) }
+    socket.registerLocalClient('local:vault', { sendFrame: () => true, sendBinary: () => true })
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    ws.message({ t: 'down', connId: '', frame: { type: 'connectors_changed', payload: { revision: 6 } } })
+    await vi.waitFor(() => expect(heard).toContainEqual({ type: 'connectors_changed', revision: 6 }))
+    // A client relayed with its own connId is not the backend.
+    ws.message({ t: 'down', connId: 'web-1', frame: { type: 'connectors_changed', payload: { revision: 99 } } })
+    socket.handleLocalFrame('local:vault', { type: 'connectors_changed', payload: { revision: 98 } })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(heard).toHaveLength(1)
+    await socket.unregisterLocalClient('local:vault')
+    await socket.stop()
+  })
+
   it('hands the backend\'s zoo_changed to the window as its own frame, and only the backend\'s', async () => {
     const socket = relaySocket('token')
     const frames: Array<Record<string, unknown>> = []
@@ -2686,7 +2757,7 @@ describe('agent_fork RPC', () => {
       lookup.mockReturnValue(undefined)
       ask('agent_fork', 'deleted')
       await vi.waitFor(() => expect(frames).toContainEqual({
-        type: 'agent_fork_result', payload: { requestId: 'deleted', creationId, state: 'unavailable' },
+        type: 'agent_fork_result', payload: { requestId: 'deleted', creationId, state: 'unavailable', createdAgentId: FORK.agentId },
       }))
       expect(fork).toHaveBeenCalledTimes(1)
     } finally {
@@ -3809,6 +3880,61 @@ describe('agent_recent replies', () => {
   })
 })
 
+describe('request sources', () => {
+  // The counter a request starts with, for a remote `web` client: the phone only by its own word.
+  async function startedFor(payload: Record<string, unknown>) {
+    const socket = relaySocket('token')
+    socket.connect()
+    const ws = wsMock.instances.at(-1)!
+    ws.open()
+    const counted: string[] = []
+    vi.spyOn(gatewayOf(socket), 'usageCounter').mockImplementation((metric) => { counted.push(metric) })
+    vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue({
+      type: 'session_search', payload: { requestId: 'search-1', query: 'llama', ...payload },
+    })
+    vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
+    vi.spyOn(gatewayOf(socket).e2ee, 'sessionRole').mockReturnValue('web')
+    ws.message({ t: 'down', connId: 'conn-1', frame: { type: 'session_search', payload: { __e2e: { v: 1, k: 's', n: 1, ct: 'ciphertext' } } } })
+    await vi.waitFor(() => expect(counted).toContain('search_requests'))
+    await socket.stop()
+    vi.restoreAllMocks()
+    return counted
+  }
+
+  it('counts a phone\'s request as the phone\'s, and the browser\'s as an app\'s as before', async () => {
+    const phone = await startedFor({ usageSurface: 'phone' })
+    expect(phone).toContain('request_phone_search_started')
+    expect(phone).not.toContain('request_app_search_started')
+    expect(await startedFor({})).toContain('request_app_search_started')
+  })
+
+  it('counts what became of a phone\'s message, which nothing answers, under the phone', async () => {
+    const socket = relaySocket('token')
+    socket.connect()
+    const ws = wsMock.instances.at(-1)!
+    ws.open()
+    const counted: string[] = []
+    vi.spyOn(gatewayOf(socket), 'usageCounter').mockImplementation((metric) => { counted.push(metric) })
+    const message = { type: 'message', payload: { agentId: 'a1', content: 'PRIVATE_TEXT', usageSurface: 'phone' } }
+    vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue(message)
+    vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
+    vi.spyOn(gatewayOf(socket).e2ee, 'sessionRole').mockReturnValue('web')
+    const handed: Array<[Record<string, unknown>, ((outcome: 'started' | 'held') => void) | undefined]> = []
+    socket.messageProvider = (payload, receipt) => { handed.push([payload, receipt]) }
+    for (const n of [1, 2]) {
+      ws.message({ t: 'down', connId: 'conn-1', frame: { type: 'message', payload: { __e2e: { v: 1, k: 's', n, ct: 'ciphertext' } } } })
+    }
+    await vi.waitFor(() => expect(handed).toHaveLength(2))
+    expect(counted).toEqual(['request_phone_message_started', 'request_phone_message_started'])
+    handed[0]![1]!('started')
+    handed[1]![1]!('held')
+    expect(counted.slice(2)).toEqual(['request_phone_message_ok', 'request_phone_message_failed', 'request_phone_message_error_conflict'])
+    expect(JSON.stringify(counted)).not.toContain('PRIVATE')
+    await socket.stop()
+    vi.restoreAllMocks()
+  })
+})
+
 describe('machines_changed relay', () => {
   // Earlier suites in this file leave their sockets in the mock's list; index 0 must be ours.
   beforeEach(() => { wsMock.instances.length = 0 })
@@ -4061,7 +4187,7 @@ describe('relay down-frames are default-deny: sealed, or the backend\'s own', ()
     const serviceRouter = vi.fn(() => true)
     socket.serviceRouter = serviceRouter
     await dispatch(sealedDown(socket, 'web-1', 'dsh_install', { requestId: 'r', id: 'acme/some-dsh' }).frame, 'web-1')
-    expect(serviceRouter).toHaveBeenCalledWith('dsh_install', expect.objectContaining({ id: 'acme/some-dsh' }), { local: false, owner: expect.any(Boolean), connection: 'web-1', requestId: 'r' }, expect.any(Function))
+    expect(serviceRouter).toHaveBeenCalledWith('dsh_install', expect.objectContaining({ id: 'acme/some-dsh' }), { local: false, owner: expect.any(Boolean), accountOwner: false, connection: 'web-1', requestId: 'r' }, expect.any(Function))
   })
 
   it('refuses a plaintext RPC even from the backend itself (connId \'\'), which would read the reply', async () => {
@@ -4136,8 +4262,58 @@ describe('relay down-frames are default-deny: sealed, or the backend\'s own', ()
     bindMessageRequest(socket, onMessage)
     socket.registerLocalClient('local:app', { sendFrame: () => true, sendBinary: () => true })
     await dispatch({ type: 'message', payload: { content: 'hi', agentId: 'a1' } }, 'local:app', 'local')
-    expect(onMessage).toHaveBeenCalledWith('a1', 'hi')
+    // With what became of it, for its measurement.
+    expect(onMessage).toHaveBeenCalledWith('a1', 'hi', undefined, expect.any(Function))
     await dispatch({ type: 'message', payload: { content: 'task in A', agentId: 'a1', tabId: 'swarm-a' } }, 'local:app', 'local')
-    expect(onMessage).toHaveBeenLastCalledWith('a1', 'task in A')
+    expect(onMessage).toHaveBeenLastCalledWith('a1', 'task in A', undefined, expect.any(Function))
+  })
+})
+
+describe('opening the app', () => {
+  // The desktop app holds one local connection per machine it shows, and dials again on every
+  // reconnect and every five-second link retry: counted per connection, prod's first day read 5,675
+  // desktop opens across 68 active installations.
+  it('counts a surface opening once, however many connections its windows hold', async () => {
+    const socket = new BackendSocket('fixture')
+    const opened: string[] = []
+    socket.useGateway({ holdRequests: () => {}, serveThisComputerOnly: () => {}, localClients: () => {},
+      windowOpened: (surface: string) => { opened.push(surface) } } as never)
+    const sink = { sendFrame: () => true, sendBinary: () => true }
+    for (const id of ['local:a', 'local:b', 'local:c']) socket.registerLocalClient(id, sink)
+    socket.registerLocalClient('local:tui', sink, { surface: 'tui' })
+    socket.registerLocalClient('local:tool', sink, { tool: true })
+    expect(opened).toEqual(['desktop', 'tui'])
+
+    await socket.unregisterLocalClient('local:b')
+    socket.registerLocalClient('local:b2', sink)
+    expect(opened).toEqual(['desktop', 'tui'])
+
+    for (const id of ['local:a', 'local:b2', 'local:c']) await socket.unregisterLocalClient(id)
+    socket.registerLocalClient('local:again', sink)
+    expect(opened).toEqual(['desktop', 'tui', 'desktop'])
+  })
+
+  it('counts hn\'s own observations from hn alone, as fixed counters', async () => {
+    const socket = new BackendSocket('fixture')
+    const counted: string[] = []
+    socket.useGateway({ holdRequests: () => {}, serveThisComputerOnly: () => {}, localClients: () => {}, windowOpened: () => {},
+      usageCounter: (metric: string) => { counted.push(metric) } } as never)
+    const sink = { sendFrame: () => true, sendBinary: () => true }
+    socket.registerLocalClient('local:tui', sink, { surface: 'tui' })
+    socket.registerLocalClient('local:app', sink)
+    socket.registerLocalClient('local:tool', sink, { tool: true })
+    const flow = { flow: 'remote_connect', outcome: 'failed', durationMs: 12_000 }
+    for (const id of ['local:app', 'local:tool', 'web-1', 'local:gone']) socket.observeProduct(id, flow)
+    expect(counted).toEqual([])
+    socket.observeProduct('local:tui', { flow: 'remote_connect' })
+    socket.observeProduct('local:tui', flow)
+    socket.observeProduct('local:tui', { measure: 'funnel_workspace_ready' })
+    socket.observeProduct('local:tui', { measure: 'PRIVATE_CANARY' })
+    socket.observeProduct('local:tui', { ...flow, agentId: 'PRIVATE_CANARY' })
+    expect(counted).toEqual(['ui_tui_remote_connect_started', 'ui_tui_remote_connect_failed', 'ui_tui_remote_connect_10s_to_1m',
+      'health_tui_funnel_workspace_ready'])
+    await socket.unregisterLocalClient('local:tui')
+    socket.observeProduct('local:tui', flow)
+    expect(counted).toHaveLength(4)
   })
 })

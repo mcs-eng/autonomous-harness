@@ -1,6 +1,8 @@
-import { withoutUpdate } from './lib/cardUpdate.js'
+import { messageReceipt, productObservation, productUsageIntent, productUsageLaunch, productUsageRequest, productUsageSource } from './lib/productUsageSignals.js'
+import type { MessageReceipt } from './lib/sessionInput.js'
+import { isLocalOnly, withoutUpdate } from './lib/cardUpdate.js'
 import type { PurgeAgentService } from './lib/purgeAgentService.js'
-import { MESSAGES_REQUESTS, SHARE_REQUESTS, type Asker, type LocalWindows, type WindowSurface, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport } from './core/api.js'
+import { MESSAGES_REQUESTS, SHARE_REQUESTS, type Asker, type LocalWindows, type WindowSurface, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport, type TabFrame } from './core/api.js'
 import { ServiceUnavailableError } from './core/serviceHost.js'
 import { countWindows } from './lib/windowSurfaces.js'
 import type { ViewerStreams } from './core/viewerStreams.js'
@@ -28,7 +30,9 @@ import { ENGINES, type AgentEngine } from './engines/types.js'
 import { gridCliPresence } from './lib/gridBinary.js'
 import { GRID_FLEET_PROTOCOL, GRID_FLEET_MAX_TIMEOUT_MS } from './lib/gridFleetProtocol.js'
 import { isApiLaunch, parseGridLaunchOverride, type GridLaunchOverride } from './lib/gridLaunchWire.js'
+import type { LaunchModel } from './lib/launchModel.js'
 import type { ScmLaunchRecord } from './scm/types.js'
+import type { StartedBy } from './lib/agentAttribution.js'
 import { probeEngines } from './lib/engineProbe.js'
 import { engineInstallRecipe } from './lib/engineInstall.js'
 import { agentFrame, type AgentDshContext, type AgentFrame } from './lib/agentFrame.js'
@@ -40,6 +44,7 @@ import type { TerminalStreamManager } from './lib/terminalStreamManager.js'
 import { encodeTerminalLocal, type TerminalBinaryClear } from './lib/terminalBinary.js'
 import { BACKEND_ONLY_DOWN_TYPES, GATEWAY_REQUEST_TYPES, isLocalClientId, logSafeType, PAIR_REQUESTS, PLATE_REQUEST, rpcResultType, type DownTransport } from './lib/relayFrames.js'
 import { sid, logFrame } from './lib/log.js'
+import { eventAgentId, GUEST_REFUSALS, guestVerdict } from './core/guestPolicy.js'
 
 export { isLocalClientId, type DownTransport }
 
@@ -153,6 +158,9 @@ export class BackendSocket {
     /** A mode from `PERMISSION_MODES` for this engine; null when the client sent only
      *  `bypassPermission`, which then decides. Validated here (`INVALID_PERMISSION_MODE`). */
     permissionMode: string | null
+    /** The model and effort to launch the engine with, for that session only (lib/launchModel.ts); absent when the
+     *  engine should open on its own. Validated here, and only for an engine that declares the flags. */
+    launchModel?: LaunchModel | null
     /** A conversation Harness did not start, to open this harness ON: the engine resumes it, in its own
      *  folder (lib/sessionSearch/external.ts). Null for a new conversation. Shape-checked here; cli.ts
      *  checks it is one it found, not open elsewhere, and not already a harness. */
@@ -164,6 +172,12 @@ export class BackendSocket {
     /** What the SCM that prepared `cwd` needs on every relaunch (registry `scmLaunch`). Present only
      *  when this create prepared a folder, and null when no SCM made it (a new folder, a clone). */
     scmLaunchRecord?: ScmLaunchRecord | null
+    /** `agent` when another agent started it (`harness new` from its pane); absent for the person. Kept on the
+     *  row: every launch of it adds a line to the pull requests it opens (lib/agentAttribution.ts). */
+    startedBy?: StartedBy | null
+    /** The harness here whose agent started it, when one in a Harness pane did (registry `parentAgentId`); only with
+     *  `startedBy: 'agent'`. The windows open the new harness beside it and say who started it. */
+    parentAgentId?: string | null
   }) =>
     Promise<{ ok: true; session: RegisteredSession } | { ok: false; error: string; detail?: string }>) | null = null
   /** Called on `remote_terminal_handoff` — cli.ts names the agent whose tile is that tmux pane, or null. */
@@ -192,6 +206,8 @@ export class BackendSocket {
   /** The account's notices the backend announces (`desk_changed`, …), for the experiments that hear them
    *  (Agent Messages reads its tabs again), as well as the windows here. */
   onAccountNotice: ((notice: BackendNotice) => void) | null = null
+  /** What a shared tab's relay said (gateway/tabRelay.ts), for Agent Messages. */
+  onTabFrame: ((event: TabFrame) => void) | null = null
   /**
    * Called on `agent_retarget` — cli.ts re-execs an EXISTING agent's pane against a different grid,
    * or, when `grid` is null, back onto its own login.
@@ -209,9 +225,9 @@ export class BackendSocket {
   /** The requests that start an agent's process, answered through their last argument: `agent_create`,
    *  `agent_create_status`, `agent_resume` and `agent_restart`, and `agent_fork` (cli.ts binds
    *  core/agents/launches.ts). Null answers UNSUPPORTED_ON_REMOTE, or UNSUPPORTED for a status. */
-  createProvider: ((payload: Record<string, unknown>, asker: { local: boolean; owner: boolean }, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
-  createStatusProvider: ((payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
-  cancelCreateProvider: ((payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
+  createProvider: ((payload: Record<string, unknown>, asker: Pick<Asker, 'local' | 'owner' | 'guest'>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
+  createStatusProvider: ((payload: Record<string, unknown>, asker: Pick<Asker, 'local' | 'guest'>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
+  cancelCreateProvider: ((payload: Record<string, unknown>, asker: Pick<Asker, 'local' | 'guest'>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
   restartProvider: ((type: string, payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
   forkProvider: ((payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
   /** Opens a NEW agent that starts with `agentId`'s whole history (lib/forkAgent.ts), exactly as
@@ -225,8 +241,9 @@ export class BackendSocket {
   /** Called when the web/device sends chat input to an agent terminal. */
   onMessage: ((sessionId: string, content: string, deliveryId?: string) => void) | null = null
   /** Takes a `message` frame: text a person typed for an agent, into its pane (cli.ts binds core/input.ts).
-   *  Agent Messages and the orchestrator deliver through `onMessage` above. */
-  messageProvider: ((payload: Record<string, unknown>) => void) | null = null
+   *  Agent Messages and the orchestrator deliver through `onMessage` above. [receipt]: what became of it, for
+   *  its request's measurement (lib/productUsageSignals.ts `messageReceipt`). */
+  messageProvider: ((payload: Record<string, unknown>, receipt?: MessageReceipt) => void) | null = null
   /** Answers `agent_update` through its last argument, before the windows hear of the change: a rename, a
    *  model and effort, or an app opening the agent (cli.ts binds core/agents/update.ts). */
   agentUpdateProvider: ((payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
@@ -250,7 +267,10 @@ export class BackendSocket {
    *  asked for (cli.ts binds core/agents/list.ts). The second argument reads the asker's paired role.
    *  Null answers UNSUPPORTED. */
   agentsProvider: ((payload: Record<string, unknown>, sessionRole: () => string | null,
-    reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
+    reply: (result: Record<string, unknown>) => void, guest?: string) => Promise<void>) | null = null
+  /** The guest (email) an agent was started for, or null for the owner's own (registry `guest`): what a
+   *  guest session may act on (core/guestPolicy.ts). Null treats every agent as the owner's. */
+  agentGuest: ((agentId: string) => string | null) | null = null
   /** Answers `session_get` with the whole reply: a conversation's history, a page at a time (cli.ts binds
    *  core/transcripts/history.ts). Null answers UNSUPPORTED. */
   historyProvider: ((payload: Record<string, unknown>) => Promise<Record<string, unknown>>) | null = null
@@ -270,6 +290,12 @@ export class BackendSocket {
   /** Answers `theme_set` with the whole reply: the desktop's pane colours, to become this machine's tmux
    *  `window-style` (cli.ts binds core/terminals/requests.ts). Null answers UNSUPPORTED. */
   themeProvider: ((payload: Record<string, unknown>) => Record<string, unknown>) | null = null
+  /** A page a program in a harness's pane opens, and the sign-in a phone brings back from it
+   *  (core/terminals/browser.ts, bound by core/main.ts). Null answers UNSUPPORTED. */
+  browserProvider: {
+    open: (payload: Record<string, unknown>) => Record<string, unknown>
+    callback: (payload: Record<string, unknown>, connId: string) => Promise<Record<string, unknown>>
+  } | null = null
   tokenUsageProvider: ((session: RegisteredSession) => AgentTokenUsage | null) | null = null
   runtimeProfileProvider: ((session: RegisteredSession) => string | null) | null = null
   /** Backend-resolved machine id, persisted by the SSO login preflight. */
@@ -394,6 +420,7 @@ export class BackendSocket {
     device: (connId, frame, opened) => this.wifi?.request(connId, frame, opened),
     deviceRevoked: (identity) => this.wifi?.revoked(identity),
     toWindows: (frame) => this.sendLocal(frame),
+    tabFrame: (event) => this.onTabFrame?.(event),
   }
 
   /** The Wi-Fi device's sessions and requests, as the gateway hands them on, for its service with the
@@ -499,7 +526,17 @@ export class BackendSocket {
     for (const [connId, sink] of this.localClients) {
       if (!sink.sendFrame(frame)) void this.unregisterLocalClient(connId)
     }
-    if (!this.thisComputerOnly) this.toGateway('web', (gateway) => gateway.broadcast(frame))
+    if (!this.thisComputerOnly) {
+      const guest = this.frameGuest(frame)
+      this.toGateway('web', (gateway) => gateway.broadcast(frame, guest ?? undefined))
+    }
+  }
+
+  /** The guest whose harness a frame is about (registry `guest`, through `agentGuest`), or null for the
+   *  owner's own and for a frame about no harness. Its sessions are sent it sealed for each (gateway.ts). */
+  private frameGuest(frame: Frame): string | null {
+    const id = this.agentGuest ? eventAgentId(frame) : null
+    return id ? this.agentGuest!(id) : null
   }
 
   /** Signed out: the cloud link is never dialed in this process's life (a sign-in restarts it), so nothing
@@ -594,6 +631,7 @@ export class BackendSocket {
    *  the group key, so the backend relays only ciphertext; system/presence frames pass through. */
   sendCommander(frame: Frame): void {
     this.onOutboundCommander?.(frame)
+    if (isLocalOnly(frame)) return
     if (env.LOG_FRAMES) logFrame('→', 'device', frame)
     // The sentence a processing card carries for the Pro's cable stays on this computer (onOutboundCommander).
     this.toGateway('device', (gateway) => gateway.commander(withoutUpdate(frame)))
@@ -602,13 +640,18 @@ export class BackendSocket {
   /** Attach one authenticated loopback desktop client to the same RPC and event plane as cloud web. */
   registerLocalClient(connId: string, sink: LocalClientSink, opts: { tool?: boolean; surface?: WindowSurface } = {}): boolean {
     if (!isLocalClientId(connId) || this.localClients.has(connId)) return false
+    const surface = opts.surface ?? 'desktop'
+    // The app holds a connection per machine and dials again on every reconnect and link retry:
+    // an open is its surface going from no window to one, not each connection (5,675 "desktop opens"
+    // across 68 active installations on the first measured day).
+    const firstOfSurface = !opts.tool && this.localWindows()[surface] === 0
     this.localClients.set(connId, sink)
     if (opts.tool) this.toolClients.add(connId)
     else if (opts.surface === 'tui') this.tuiClients.add(connId)
     this.gatewayPort?.localClients(this.localWindows())
     if (opts.tool) return true
     // The window is the person's session: the backend counts it, now or when the link next comes up.
-    this.gatewayPort?.windowOpened(opts.surface ?? 'desktop')
+    if (firstOfSurface) this.gatewayPort?.windowOpened(surface)
     this.onLocalClient?.(connId, true)
     return true
   }
@@ -621,6 +664,14 @@ export class BackendSocket {
 
   /** The windows attached right now — for a listener that arrives after some of them did. */
   localClientIds(): string[] { return [...this.localClients.keys()].filter((connId) => !this.toolClients.has(connId)) }
+
+  /** hn's own measurement of its flows (`product_observe`, consumed by localWsServer.ts): counted only
+   *  for a connection that selected this computer as hn, into the gateway's product-usage queue, which
+   *  counts nothing while it has none (signed out) or the account's choice is off. Never answered. */
+  observeProduct(connId: string, payload: unknown): void {
+    if (!this.tuiClients.has(connId)) return
+    for (const metric of productObservation(payload)) this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric))
+  }
 
   /** Routes a request to the service that answers it, in its own process (core/serviceLinks.ts) or in
    *  this one (core/serviceHost.ts): false when none does and the socket answers it itself. */
@@ -742,7 +793,7 @@ export class BackendSocket {
   private emitReply(connId: string, type: string, requestId: unknown, payload: Record<string, unknown>): void {
     const resultType = rpcResultType(type)
     // Before the E2EE wrap: an RPC reply is only readable here.
-    if (env.LOG_FRAMES && !MESSAGE_REQUESTS.has(type) && !ROUTE_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'connectors' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
+    if (env.LOG_FRAMES && !MESSAGE_REQUESTS.has(type) && !ROUTE_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'connectors' && type !== 'os_device' && type !== 'browser_open' && type !== 'browser_callback' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
     if (this.localClients.has(connId)) {
       this.sendTo(connId, { type: resultType, payload: { requestId, ...payload } })
       return
@@ -776,6 +827,8 @@ export class BackendSocket {
     // sending and being dispatched used to leave `localClients.has()` false, and its already-queued
     // frames were then read as the BACKEND's. The transport half closes that, because it is stamped
     // at enqueue by the caller that had just verified membership. Either one being true is local.
+    // A local client is this OS user's: the Unix socket is 0600, and a TCP one showed the daemon's local
+    // credential at the door (lib/localCredential.ts, hookServer.ts and localWsServer.ts).
     const local = transport === 'local' || this.localClients.has(connId)
     if (local) {
       // ⚠️ The backend's own instructions, refused from anywhere else. See BACKEND_ONLY_DOWN_TYPES.
@@ -801,13 +854,30 @@ export class BackendSocket {
     // actually asked for rather than as an opaque __e2e envelope.
     // Terminal frames contain raw keystrokes, paste text and screen bytes after
     // unwrap. Never pass them to the frame logger, even in diagnostic mode.
-    if (env.LOG_FRAMES && !MESSAGE_REQUESTS.has(type) && !ROUTE_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'connectors' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
+    if (env.LOG_FRAMES && !MESSAGE_REQUESTS.has(type) && !ROUTE_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'connectors' && type !== 'os_device' && type !== 'browser_open' && type !== 'browser_callback' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
       logFrame('←', connId ? `conn:${sid(connId)}` : 'backend', frame)
     }
-    const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => this.emitReply(connId, t, rid, p)
+    const launchMeasured = productUsageLaunch(type, (frame.payload as { creationId?: unknown } | undefined)?.creationId,
+      signal => this.toGateway('usage', gateway => gateway.usageLaunch?.(signal)), (frame.payload as { engine?: unknown } | undefined)?.engine)
+    const usageSource = productUsageSource(local, !!connId && this.toolClients.has(connId), role, frame.payload)
+    const measured = productUsageRequest(type, (metric) => this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric)), Date.now, usageSource,
+      (frame.payload as { userAction?: unknown } | undefined)?.userAction === true)
+    productUsageIntent(type, (frame.payload as { usageIntent?: unknown } | undefined)?.usageIntent,
+      (frame.payload as { agentId?: unknown } | undefined)?.agentId, usageSource,
+      signal => this.toGateway('usage', gateway => gateway.usageLaunch?.(signal)))
+    const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => {
+      if (t === type) {
+        measured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, !!p.agent, p.ok)
+        // The agent frame itself: a created launch's agent is watched until it starts (gateway/productUsage.ts).
+        launchMeasured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, p.agent, (p.held as { service?: unknown } | undefined)?.service)
+      }
+      this.emitReply(connId, t, rid, p)
+    }
+    // A guest: a session trusted only because this machine is shared with its account (gateway/gateway.ts).
+    const guest = local ? undefined : this.remoteClient(connId)?.guest
     // Who may act as this machine's owner: a process here, or the owner's own paired app or browser, whose
-    // session the gateway says is a `web` one. A device or an observer may not.
-    const owner = local || role === 'web'
+    // session the gateway says is a `web` one. A device, an observer or a guest may not.
+    const owner = local || (role === 'web' && guest === undefined)
     const lifecycleTarget = (frame.payload as { agentId?: unknown } | undefined)?.agentId
     if (typeof lifecycleTarget === 'string' && this.purgeAgentService?.busy(lifecycleTarget)
       && ['agent_close', 'agent_delete', 'agent_resume', 'agent_restart', 'agent_retarget', 'agent_update'].includes(type)) {
@@ -816,6 +886,17 @@ export class BackendSocket {
     const payload = (frame.payload ?? {}) as Record<string, unknown>
     const requestId = payload.requestId
     const answer = (result: Record<string, unknown>): void => reply(type, requestId, result)
+
+    // A guest gets its own space and nothing of the owner's: default-deny (core/guestPolicy.ts), before
+    // anything else answers it — the services and the terminal streams included.
+    if (guest !== undefined) {
+      const verdict = guestVerdict(type, payload, guest, (agentId) => this.agentGuest?.(agentId) ?? null)
+      if (!verdict.allow) {
+        console.warn(`[guest] refused ${logSafeType(type)} from conn:${sid(connId)} — ${verdict.error}`)
+        if (requestId !== undefined) reply(type, requestId, { error: verdict.error, message: GUEST_REFUSALS[verdict.error] })
+        return
+      }
+    }
 
     // A paired owner can run the machine's orchestrator; observers and device sessions cannot.
     // Both requests and replies are encrypted, including project artifacts.
@@ -868,7 +949,9 @@ export class BackendSocket {
     // A request a service answers, in its own process or in this one: routed to it, or answered
     // SERVICE_UNAVAILABLE while it is off. Never waited on in line: the next frame is not held for it.
     // Who asked is established here, after the gates above, and the service trusts only that.
-    const asker: Asker = { local, owner, connection: connId, ...(typeof requestId === 'string' ? { requestId } : {}) }
+    const asker: Asker = { local, owner, ...(!local ? { accountOwner: this.remoteClient(connId)?.accountOwner === true } : {}),
+      ...(guest !== undefined ? { guest } : {}),
+      connection: connId, ...(typeof requestId === 'string' ? { requestId } : {}) }
     // A window that draws row state asks for the models list with `rowState`, and the list's changes are
     // pushed to it in that form (`pushGridModels`). Noted here, by connection: the models service answers
     // the list, and a request reaches it without its connection.
@@ -897,7 +980,7 @@ export class BackendSocket {
 
         // The agents on this machine, live and, when asked, stopped (core/agents/list.ts, bound by cli.ts).
         case 'agents_list':
-          if (this.agentsProvider) await this.agentsProvider(payload, () => (local ? null : role), answer)
+          if (this.agentsProvider) await this.agentsProvider(payload, () => (local ? null : role), answer, guest)
           else reply(type, requestId, { error: 'UNSUPPORTED' })
           return
 
@@ -983,12 +1066,12 @@ export class BackendSocket {
 
         // What became of a launch a creationId names (core/agents/launches.ts, bound by cli.ts).
         case 'agent_create_status':
-          if (this.createStatusProvider) await this.createStatusProvider(payload, answer)
+          if (this.createStatusProvider) await this.createStatusProvider(payload, asker, answer)
           else answer({ error: 'UNSUPPORTED' })
           return
 
         case 'agent_create_cancel':
-          if (this.cancelCreateProvider) await this.cancelCreateProvider(payload, answer)
+          if (this.cancelCreateProvider) await this.cancelCreateProvider(payload, asker, answer)
           else answer({ error: 'UNSUPPORTED' })
           return
 
@@ -1120,6 +1203,20 @@ export class BackendSocket {
           return
 
         // What a harness's pane runs and where (core/terminals/requests.ts, bound by cli.ts).
+        // The `BROWSER` shim in a harness's pane, asking whether a phone takes the page. A process on this
+        // computer only: from anywhere else it would be a way to put a page on someone's phone.
+        case 'browser_open':
+          if (!local) { answer({ error: 'LOCAL_ONLY' }); return }
+          answer(this.browserProvider ? this.browserProvider.open(payload) : { handled: false })
+          return
+
+        // The redirect a phone caught for that page, replayed to the program waiting on this computer.
+        case 'browser_callback':
+          if (!owner) { answer({ error: 'OWNER_REQUIRED' }); return }
+          if (!this.browserProvider) { answer({ error: 'UNSUPPORTED' }); return }
+          answer(await this.browserProvider.callback(payload, connId))
+          return
+
         case 'terminal_info':
           if (this.terminalInfoProvider) this.terminalInfoProvider(payload, answer)
           else reply(type, requestId, { error: 'UNSUPPORTED' })
@@ -1135,7 +1232,7 @@ export class BackendSocket {
 
         // Text typed for an agent, into its pane (core/input.ts, bound by cli.ts).
         case 'message':
-          if (this.messageProvider) this.messageProvider(payload)
+          if (this.messageProvider) this.messageProvider(payload, messageReceipt(measured))
           else console.warn('[backend] message handler is not wired; terminal input was not dispatched')
           return
 

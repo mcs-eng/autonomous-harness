@@ -1,11 +1,12 @@
 /**
  * The Harness Store in its own process, beside the viewers (harnessd/services.ts `SERVICE_HOSTS`), on the
- * real daemon. The harnesses the release bundles are put in place by the Store's start; an install from a
+ * real daemon, started once something needs it (core/viewersWake.ts; e2e/viewersOnDemand.e2e.ts). The harnesses
+ * the release bundles are put in place by the Store's start; an install from a
  * repository runs there, its progress reaches the window as `dsh_install_status` through the core, and an
  * agent created on the harness the moment the install answers finds it installed, though the core keeps
  * the installed index for two seconds (dsh/installed.ts). Whatever happens to the process costs the Store
- * and the viewers alone: killed, a list asked meanwhile is answered SERVICE_UNAVAILABLE at once, agents go
- * on, and the master brings it back.
+ * and the viewers alone: killed, a list asked meanwhile waits for the master to bring it back, within a start's
+ * wait (core/serviceLinks.ts `waitsThroughRestart`), and agents go on.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -46,6 +47,7 @@ const viewersPid = (d: IsolatedDaemon): number | null => {
   return started.length ? Number(started[started.length - 1][1]) : null
 }
 const connected = (d: IsolatedDaemon) => d.log().split('[services] store connected').length - 1
+const disconnected = (d: IsolatedDaemon) => d.log().split('[services] store disconnected').length - 1
 const row = async (client: LocalClient, agentId: string) =>
   ((await client.request<{ agents: Array<Record<string, any>> }>('agents_list', { includeStopped: true }, 30_000)).agents)
     .find((agent) => agent.id === agentId)
@@ -73,6 +75,10 @@ describe('the Store in its own process, beside the viewers', () => {
     daemon = d
     onTestFailed(() => { console.log(`---- daemon log\n${d.log().split('\n').slice(-150).join('\n')}`) })
     await d.start()
+    // Its process runs once something needs it (core/viewersWake.ts): the list asks for it, as a window's does.
+    const window = await LocalClient.connect(d)
+    expect(Array.isArray((await window.request('dsh_list', {}, 60_000)).dsh)).toBe(true)
+    window.close()
     await until('the Store to connect to the core', () => connected(d) >= 1 || null, 30_000, 200)
     return d
   }
@@ -123,14 +129,18 @@ describe('the Store in its own process, beside the viewers', () => {
     client.close()
   })
 
-  it('killed outright: asked meanwhile it says so at once, agents go on, and the master brings it back', async () => {
+  it('killed outright: asked meanwhile it waits for the master to bring it back, within a start, and agents go on', async () => {
     const d = await fresh()
     const client = await LocalClient.connect(d)
     const agent = await create(d, client, 'store-killed')
-    const pid = viewersPid(d)!
+    const pid = viewersPid(d)!, gone = disconnected(d)
     process.kill(pid, 'SIGKILL')
+    await until('the core to see the Store go', () => disconnected(d) > gone || null, 10_000, 50)
+    // Asked while it is down: held while the master restarts it (core/serviceLinks.ts `waitsThroughRestart`) and
+    // answered by it once it is back. It was answered SERVICE_UNAVAILABLE at once (7 Store lists on 2026-10-16).
     const listed = await client.request('dsh_list', {}, 30_000)
-    if (listed.error) expect(listed).toMatchObject({ error: 'SERVICE_UNAVAILABLE', service: 'store', retryable: true })
+    expect(listed.error, JSON.stringify(listed)).toBeUndefined()
+    expect(Array.isArray(listed.dsh)).toBe(true)
     await turn(client, agent.id, 'while the Store was gone')
     await until('the Store to be back', () => connected(d) >= 2 || null, 30_000, 200)
     await until('the Store to list again', async () => Array.isArray((await client.request('dsh_list', {}, 60_000)).dsh) || null, 60_000, 500)
@@ -184,7 +194,9 @@ describe('the Store in its own process, beside the viewers', () => {
     await turn(client, plain.id, 'ready without the Store')
     const cwd = join(d.projectsDir, 'refused-package')
     mkdirSync(cwd)
-    const refused = await client.request('agent_create', { engine: 'claude', cwd, dsh: HARNESS, bypassPermission: true }, 10_000)
+    // The Store has not connected to this core since it started: on demand, a request waits for it as long as a
+    // start (core/serviceLinks.ts `ON_DEMAND_START_MS`), and is then refused, as every one after it is at once.
+    const refused = await client.request('agent_create', { engine: 'claude', cwd, dsh: HARNESS, bypassPermission: true }, 30_000)
     expect(refused).toMatchObject({ error: 'DSH_UNAVAILABLE' })
     expect(readdirSync(cwd)).toEqual([])
     for (const agent of agents) expect(await row(client, agent.id)).toMatchObject({ launch: { state: 'held' } })

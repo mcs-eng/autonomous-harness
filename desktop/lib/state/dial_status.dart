@@ -40,6 +40,7 @@ class DeviceSettings {
   final int face;
   final bool muted, quiet, straightTitle, focusFace, scrollReversed, round;
   final String voiceLang;
+
   final bool? followCompanion;
   final String? companion;
   final int? companionProtocol;

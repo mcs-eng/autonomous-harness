@@ -1,30 +1,108 @@
 /**
- * `harness settings`: what the person lets agents do on this computer (lib/agentSettings.ts), the same switches as
- * Settings ▸ Agents, for a terminal or a machine with no window.
+ * `harness settings`: what the person lets agents do (lib/agentSettings.ts), the account's three experiments in
+ * Settings ▸ Experimental, for a terminal or a machine with no window. Each is off until the person turns it on.
  *
  *     harness settings                          every setting and its state
- *     harness settings agents-start-agents off  turn one on or off
+ *     harness settings agents-start-agents on   turn one on or off, for the account
+ *
+ * It asks this computer's daemon (`/api/agent-settings`), which reads them as this computer keeps them and writes a
+ * change through to the account (core/experiments.ts `createAgentSettingsSync`): the copy is the daemon's alone.
  */
-import { AGENT_SETTING_NAMES, readAgentSettings, writeAgentSettings, type AgentSettings } from '../lib/agentSettings.js'
+import { AGENT_SETTING_NAMES, type AgentSettings } from '../lib/agentSettings.js'
+import { localCredentialHeaders } from '../lib/localCredential.js'
+import { env } from '../config/env.js'
+import { daemonUnreachableText } from '../lib/daemonState.js'
+import { outsideCaller } from './model.js'
+
+/** A refusal, as the agent verbs exit (commands.ts `EXIT.refused`): not a failure to retry. */
+const REFUSED = 5
+
+/** Said to an agent that tries to turn a setting on: the person's consent is theirs to give. */
+export const settingsOnlyThePerson = (name: string, value: 'on' | 'off' = 'on'): string =>
+  `Only the person turns this ${value}: it is their consent to what agents may do. Ask them to run \`harness settings ${name} ${value}\` `
+  + `in their own terminal, or to ${value === 'on' ? 'turn it on' : 'change it'} in Harness Settings ▸ Experimental.`
+
+/** The value of a setting that widens what is shared or allowed, which only the person gives. Every setting is granted by `on`
+ *  but the summary switch, which is stored inverted: it widens sharing when it is turned off. */
+const GRANTING: Partial<Record<keyof AgentSettings, 'off'>> = { agentMessagesHideSummary: 'off' }
 
 export const SETTINGS_USAGE = `Usage: harness settings [<name> on|off]
 
-What agents may do on this computer, as Settings ▸ Agents shows it:
-  agents-start-agents   agents may start, wait for and close harnesses of their own, and are told how (on by default)`
+What agents may do, as Settings ▸ Experimental shows it: experiments of your account, the same on each of its
+computers, and each off until you turn it on:
+  agents-start-agents   agents may start, wait for and close harnesses of their own, and are told how
+  pull-request-line     a harness another agent starts says so in the pull requests it opens: one line beside the
+                        engine's own
+  agent-messages        agents in the same tab may message each other with harness send
+  agent-messages-hide-summary
+                        keep the one-line summary of what a harness does from a shared tab's other accounts
+                        (on hides it; it is shared while this is off)`
 
 const ABOUT: Record<keyof AgentSettings, string> = {
   agentsStartAgents: 'agents may start, wait for and close harnesses of their own',
+  pullRequestLine: 'a harness another agent starts says so in the pull requests it opens',
+  agentMessages: 'agents in the same tab may message each other',
+  agentMessagesHideSummary: 'the one-line summary of what a harness does is kept from a shared tab\'s other accounts',
 }
 
-export function settingsCommand(argv: readonly string[], dataDir: string, out: (line: string) => void = console.log, err: (line: string) => void = console.error): number {
+export const SETTINGS_SIGNED_OUT = 'Signed out: these are experiments of your account. Sign in (harness login) to turn them on.'
+
+export interface SettingsDeps {
+  /** This computer's daemon's port (lib/daemonState.ts `daemonPort`). */
+  port: number
+  /** Its data dir, where its local credential is (lib/localCredential.ts). */
+  dataDir?: string
+  /** Who runs it, by what its shell says (model.ts `outsideCaller`): an agent may not turn a setting on. */
+  env?: NodeJS.ProcessEnv
+  fetch?: typeof fetch
+  out?: (line: string) => void
+  err?: (line: string) => void
+}
+
+type Answer = { status: number; body: Record<string, unknown> }
+
+export async function settingsCommand(argv: readonly string[], deps: SettingsDeps): Promise<number> {
+  const out = deps.out ?? console.log
+  const err = deps.err ?? console.error
   if (argv.includes('--help') || argv.includes('-h')) { out(SETTINGS_USAGE); return 0 }
-  const show = (settings: AgentSettings) => Object.entries(AGENT_SETTING_NAMES)
-    .map(([name, key]) => `${name.padEnd(22)}${settings[key] ? 'on ' : 'off'}  ${ABOUT[key]}`).join('\n')
-  if (!argv.length) { out(show(readAgentSettings(dataDir))); return 0 }
-  const [name, value, ...rest] = argv
-  const key = AGENT_SETTING_NAMES[name]
-  if (!key || (value !== 'on' && value !== 'off') || rest.length) { err(SETTINGS_USAGE); return 2 }
-  const next = writeAgentSettings(dataDir, { [key]: value === 'on' })!
-  out(`${name} is ${next[key] ? 'on' : 'off'}.`)
+  let change: Record<string, boolean> | null = null
+  if (argv.length) {
+    const [name, value, ...rest] = argv
+    const key = AGENT_SETTING_NAMES[name]
+    if (!key || (value !== 'on' && value !== 'off') || rest.length) { err(SETTINGS_USAGE); return 2 }
+    change = { [key]: value === 'on' }
+    // An agent refused a start would otherwise turn on the setting that refused it, and the person's say would be its
+    // own. Its shell says it is one (Claude Code, Codex, AI_AGENT), in a Harness pane or not. Turning one off is safe, but for the one stored inverted.
+    const granting = GRANTING[key] ?? 'on'
+    if (value === granting && outsideCaller(deps.env ?? process.env, '')) { err(settingsOnlyThePerson(name, granting)); return REFUSED }
+  }
+  let answer: Answer
+  try {
+    const response = await (deps.fetch ?? fetch)(`http://127.0.0.1:${deps.port}/api/agent-settings`, {
+      method: change ? 'PATCH' : 'GET',
+      // The local API's CSRF gate: a write must say it comes from this computer.
+      headers: { 'x-adapter-local': '1', ...localCredentialHeaders(deps.dataDir ?? env.ADAPTER_DATA_DIR), ...(change ? { 'content-type': 'application/json' } : {}) },
+      ...(change ? { body: JSON.stringify(change) } : {}),
+      signal: AbortSignal.timeout(20_000),
+    })
+    answer = { status: response.status, body: (await response.json().catch(() => ({}))) as Record<string, unknown> }
+  } catch (error) {
+    err(daemonUnreachableText((error as { cause?: unknown }).cause ?? error))
+    return 1
+  }
+  if (answer.status !== 200) {
+    const error = answer.body.error as { message?: unknown } | undefined
+    err(typeof error?.message === 'string' ? error.message : `Harness could not ${change ? 'change' : 'read'} the settings (${answer.status}).`)
+    return 1
+  }
+  if (change) {
+    const [key] = Object.keys(change) as Array<keyof AgentSettings>
+    const name = Object.keys(AGENT_SETTING_NAMES).find((each) => AGENT_SETTING_NAMES[each] === key)!
+    out(`${name} is ${answer.body[key] === true ? 'on' : 'off'} for your account.`)
+    return 0
+  }
+  out(Object.entries(AGENT_SETTING_NAMES)
+    .map(([name, key]) => `${name.padEnd(28)}${answer.body[key] === true ? 'on ' : 'off'}  ${ABOUT[key]}`).join('\n'))
+  if (answer.body.signedIn === false) out(SETTINGS_SIGNED_OUT)
   return 0
 }

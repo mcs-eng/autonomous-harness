@@ -35,11 +35,13 @@ code = r'''
 #include "app/pro_voice.h"
 #include "audio/audio_capture.h"
 #include "audio/pro_recorder.h"
+#include "cable/cable_link.h"
 #include "cable/pro_cable.h"
 #include "pro_app_api.h"
 #include "pro_canvas.h"
 #include "sys/config_store.h"
 #include "sys/ram_telemetry.h"
+#include "sys/last_words.h"
 #include "app/pro_touch.h"
 #include "pro_display.h"
 #include "pro_frame.h"
@@ -84,6 +86,8 @@ void vTaskDelay(TickType_t t) { (void)t; }
 uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t t) { (void)t; return 0; }
 esp_err_t esp_task_wdt_add(void *t) { (void)t; return ESP_OK; }
 esp_err_t esp_task_wdt_reset(void) { return ESP_OK; }
+void last_words_phase(lw_task_t t, const char *p) { (void)t; (void)p; }
+void last_words_rx(uint32_t ms) { (void)ms; }
 size_t heap_caps_get_free_size(unsigned c) { (void)c; return 0; }
 size_t heap_caps_get_largest_free_block(unsigned c) { (void)c; return 0; }
 uint8_t config_load_brightness(void) { return 220; }
@@ -95,7 +99,7 @@ void config_load_voicelang(char *out, size_t cap) { snprintf(out, cap, "vi"); }
 void ram_telemetry_periodic(const char *tag) { (void)tag; }
 bool fw_was_updated(char *version, size_t cap) { (void)version; (void)cap; return false; }
 void pro_frame_init(void) {}
-uint32_t pro_frame_present(const ht_scene_t *p, const ht_scene_t *n) { (void)p; (void)n; return 0; }
+uint32_t pro_frame_present(const ht_scene_t *p, const ht_scene_t *n, uint32_t *px) { (void)p; (void)n; if (px) *px = 1; return 0; }
 void pro_display_set_brightness(uint8_t l) { (void)l; }
 void pro_display_power(bool on) { (void)on; }
 uint32_t esp_random(void) { static uint32_t n = 0x1000; return n++; }
@@ -108,6 +112,8 @@ bool pro_cable_send_open(const char *id) { CHECK(LOCK_DEPTH == 0); (void)id; CAB
 bool pro_cable_send_scroll(pro_scroll_phase_t p, int dy, int v) { CHECK(LOCK_DEPTH == 0); (void)p; (void)dy; (void)v; return true; }
 bool pro_cable_request_library(int offset, uint32_t request) { CHECK(LOCK_DEPTH == 0); (void)offset; (void)request; return true; }
 bool pro_cable_library_supported(void) { return false; }
+cable_link_stats_t cable_link_stats(void) { return (cable_link_stats_t){0}; }
+void pro_cable_counters(uint32_t *bad, uint32_t *unknown) { *bad = 0; *unknown = 0; }
 bool pro_cable_voice_cancel(const char *id) { CHECK(LOCK_DEPTH == 0); CAB.cancels++; snprintf(CAB.cancel_id, sizeof CAB.cancel_id, "%s", id); return true; }
 
 // The recorder: the capture and sender tasks are replaced by flags the test flips.
@@ -159,8 +165,23 @@ static pod_out_t tap_at_(int x, int y) {
     render();
     return (pod_out_t){0};
 }
+// No screen draws a Talk button or a tab's agent list: a still press on an agent starts the recording (the lift keeps it, hands
+// free; a later tap sends), and a tab's agents open through the nav, as a tap on one would.
+static void hold_press(void) {
+    now += 16;
+    CHECK(pro_app_touch(true, 360, 400));
+    now += 450;
+    CHECK(pro_app_touch(true, 360, 400));   // the still sample that finds the deadline
+    now += 16;
+    CHECK(pro_app_touch(false, 360, 400));
+    CHECK(LOCK_DEPTH == 0);
+    render();
+}
 static void tap(pod_action_t a, int arg) {
     const pod_hit_t *h = hit(a, arg);
+    if (!h && a == POD_A_BACK) { pro_app_button_press(); render(); return; }   // the side button: back one level, a recording discarded
+    if (!h && (a == POD_A_OPEN_TAB || a == POD_A_OPEN_AGENT)) { pod_nav_act(&U.nav, &U.model, a, arg, now); render(); return; }
+    if (!h && a == POD_A_TALK && (top() == POD_V_AGENT || top() == POD_V_RECAP)) { hold_press(); return; }
     CHECK(h);
     tap_at_(h->x + h->w / 2, h->y + h->h / 2);
 }
@@ -208,6 +229,13 @@ static void to_agent(int n) {
 static void press(void) {
     tap(POD_A_TALK, 0);
 }
+// No Talk button is drawn. A stale TALK hit, drawn before the agent asked, still
+// reaches the app's voice gate, which is what these replays check.
+static void press_stale(void) {
+    CHECK(U.frame.hit_count < 32);
+    U.frame.hits[U.frame.hit_count++] = (pod_hit_t){0, 0, 720, 720, POD_A_TALK, 0, {0}};
+    tap(POD_A_TALK, 0);
+}
 static_assert(A_VOICE == 9, "A_VOICE value 9 is Pod's plain voice");
 static bool recording_for(const char *id) { return REC.active && REC.recording && !strcmp(REC.agent, id); }
 
@@ -244,9 +272,10 @@ static void booting(void) {   // no machines.end yet: the gate does not wait for
 }
 static void question_agent_says_why(void) {
     situation(); to_agent(1);
-    pro_app_question("a2", "Which one?");
+    pro_app_question("a2", "r1", "Which one?");
     render();
-    press();
+    CHECK(!hit(POD_A_TALK, 0));
+    press_stale();
     CHECK(!REC.active && REC.starts == 0 && top() == POD_V_AGENT);
     CHECK(U.notice_on && !strcmp(U.notice, "Answer its question first."));
 }
@@ -263,10 +292,11 @@ static void busy_cable_says_why(void) {   // the cable is still carrying the las
     mic_opens();
     tap(POD_A_TALK, 0);                   // Done: the clip goes; its reply is awaited
     CHECK(pro_voice_waiting() && top() == POD_V_TALK && U.nav.sending);
-    press();                              // the voice screen is sending: a tap on it starts nothing
+    tap_at_(360, 400);                    // the voice screen is sending: a tap on it starts nothing
     CHECK(REC.starts == 1 && top() == POD_V_TALK && !U.notice_on);
     pro_app_turn("a1", "started", "", 0); // the turn begins before the reply: back on the Agent screen
     CHECK(top() == POD_V_AGENT);
+    render();
     press();                              // a new press while the last one is on the wire
     CHECK(REC.starts == 1 && top() == POD_V_AGENT);
     CHECK(U.notice_on && !strcmp(U.notice, "Still sending the last message"));
@@ -313,6 +343,7 @@ static void send_and_reply(void) {
     CHECK(top() == POD_V_TALK);
     pro_app_turn("a1", "started", "", 0);                    // the daemon's real turn: the Agent screen, working
     CHECK(top() == POD_V_AGENT && !U.nav.sending);
+    render();
     press();                               // the next recording starts
     CHECK(REC.starts == 2 && recording_for("a1"));
 }
@@ -398,6 +429,7 @@ static void voice_link_drop_ends_talk(void) {
     pro_app_link(true, "mac");
     pro_app_agents(ROWS, 3);
     machines("online", "online");
+    render();
     press();
     CHECK(recording_for("a1"));
 }
@@ -499,7 +531,7 @@ def check_sources():
 check_sources()
 cc = os.environ.get("CC", "cc")
 sanitize = "-fsanitize=" + os.environ.get("SANITIZERS", "undefined,bounds")
-include = ["-I", str(APP), "-I", str(MAIN), "-I", str(DISP), "-I", str(HERE / "host_esp"), "-I", str(HERE / "host_stubs"),
+include = ["-I", str(APP), "-I", str(MAIN), "-I", str(DISP), "-I", str(HERE / "host_esp"),
            "-I", str(POD)]
 failures = []
 with tempfile.TemporaryDirectory(prefix="harness-pro-voice-") as directory:
@@ -512,13 +544,13 @@ with tempfile.TemporaryDirectory(prefix="harness-pro-voice-") as directory:
     subprocess.run([sys.executable, str(FW / "scripts" / "gen_fonts.py"), *font_args, "--out", str(fonts)], check=True)
     source = directory / "pro_voice_test.c"
     source.write_text(code)
-    modules = sorted(POD.glob("*.c")) + [APP / "pod_glue.c", APP / "pro_app.c", APP / "pro_touch.c", AUDIO / "pro_voice.c", DISP / "scroll.c",
+    modules = sorted(POD.glob("*.c")) + sorted(POD.glob("*/*.c")) + [APP / "pod_glue.c", APP / "pro_app.c", APP / "pro_touch.c", AUDIO / "pro_voice.c", DISP / "scroll.c",
                                          DISP / "pro_canvas.c", DISP / "terminal.c", fonts]
-    # The voice state machine runs on the touch, render and cable_link tasks (6 KB stack): no frame past 1 KB.
+    # The voice state machine runs on the touch, render and cable_link tasks: no frame past 1 KB.
     subprocess.run([cc, "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra", "-Werror", "-Wframe-larger-than=1024", "-O1", "-DHT_FACE_PX=720",
                     "-DPRO_VOICE_TEST_HOOK", *include, "-c", str(AUDIO / "pro_voice.c"), "-o", os.devnull], check=True)
     executable = directory / "pro_voice_gate"
-    subprocess.run([cc, "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-O1", "-g", sanitize,
+    subprocess.run([cc, "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra", "-Werror", "-O1", "-g", sanitize,
                     "-DHT_FACE_PX=720", "-DPRO_VOICE_TEST_HOOK", *include, str(source), *map(str, modules), "-lpthread", "-o", str(executable)],
                    check=True)
     result = subprocess.run([str(executable)], text=True, capture_output=True)

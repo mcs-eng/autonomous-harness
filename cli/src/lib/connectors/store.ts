@@ -23,6 +23,12 @@ export class ConnectorError extends Error {}
 
 export type Source = 'dcr' | 'gateway' | 'custom'
 export interface McpEntry { url: string, headers: Record<string, string> }
+/**
+ * A service reached by its own REST API with a key, for Harness itself rather than for the agents: the cloud
+ * agents' service calls Devin's and Cursor's APIs through the bridge (`/<key>/<code>/api/…`, bridge.ts), which
+ * adds the key. With no MCP server or REST tools beside it, `transport` is `none`, so no agent is given it.
+ */
+export interface ApiEntry { origin: string }
 export interface Token {
   access_token?: string
   refresh_token?: string
@@ -41,6 +47,7 @@ export interface Token {
   rest_entry?: RestEntry
   /** The gateway's word on which of the two agents use. */
   transport?: Transport
+  api_entry?: ApiEntry
 }
 export interface Client {
   client_id: string
@@ -183,6 +190,12 @@ export function cleanToken(entry: unknown): Token {
   const rest = cleanRestEntry(raw.rest_entry)
   if (rest) result.rest_entry = rest
   if (raw.transport === 'mcp' || raw.transport === 'rest' || raw.transport === 'none') result.transport = raw.transport
+  const api = raw.api_entry
+  if (api) {
+    if (typeof api !== 'object' || Array.isArray(api)) throw new ConnectorError('Invalid connection server.')
+    // Only the origin: a path or query saved here would be where a request was bent somewhere else.
+    result.api_entry = { origin: new URL(cleanUrl((api as Record<string, unknown>).origin)).origin }
+  }
   if (!result.access_token && !result.mcp_entry) throw new ConnectorError('No access token was supplied.')
   return result
 }
@@ -264,6 +277,16 @@ export class Store {
 
   save(code: string, entry: Token): void { locked(this.root, () => this.put(code, entry)) }
 
+  /** Remove one connection another computer disconnected: no disconnect of this computer's is recorded.
+   *  Call inside locked(). */
+  drop(code: string): void {
+    validateCode(code)
+    const data = this.file('tokens.json')
+    if (!(code in data)) return
+    delete data[code]
+    writePrivate(join(this.root, 'tokens.json'), data)
+  }
+
   disconnect(code: string): void {
     validateCode(code)
     const names = [code, ...Object.entries(RENAMED).filter(([, now]) => now === code).map(([old]) => old)]
@@ -272,8 +295,24 @@ export class Store {
       if (names.some(name => name in data)) {
         for (const name of names) delete data[name]
         writePrivate(join(this.root, 'tokens.json'), data)
+        // When: the account's other computers drop it too, unless one connected it again since (vaultSync.ts).
+        this.putRemoved({ ...this.removed(), [code]: Math.floor(Date.now() / 1000) })
       }
     })
+  }
+
+  /** Connections disconnected here, and when (epoch seconds), for the account's other computers. */
+  removed(): Record<string, number> {
+    const result: Record<string, number> = {}
+    for (const [code, at] of Object.entries(this.file('removed.json'))) {
+      if (CODE.test(code) && typeof at === 'number' && Number.isInteger(at) && at > 0) result[code] = at
+    }
+    return result
+  }
+
+  /** Call inside locked(). */
+  putRemoved(removed: Record<string, number>): void {
+    writePrivate(join(this.root, 'removed.json'), removed)
   }
 
   client(issuer: string): Client | undefined {
@@ -281,12 +320,13 @@ export class Store {
     return entry && typeof entry === 'object' ? entry as Client : undefined
   }
 
-  saveClient(issuer: string, client: Client): void {
-    locked(this.root, () => {
-      const data = this.file('clients.json')
-      data[issuer] = client
-      writePrivate(join(this.root, 'clients.json'), data)
-    })
+  saveClient(issuer: string, client: Client): void { locked(this.root, () => this.putClient(issuer, client)) }
+
+  /** Call inside locked(). */
+  putClient(issuer: string, client: Client): void {
+    const data = this.file('clients.json')
+    data[issuer] = client
+    writePrivate(join(this.root, 'clients.json'), data)
   }
 
   status(code: string, label: string, token?: Token): Status {

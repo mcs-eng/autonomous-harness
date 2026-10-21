@@ -209,6 +209,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.size = (area.width, area.height);
         app.fit_panes();
     }
+    crate::account::enforce_entry(app);
+    if crate::account::entry_required(app) {
+        app.overlay_drawn = Some(area);
+        if let Some(pane) = crate::os_welcome::entry_wifi(app).and_then(|id| app.panes.get_mut(&id)) {
+            if let Some(cursor) = pane_body(frame.buffer_mut(), pane, area, true, (None, None)) {
+                frame.set_cursor_position(cursor);
+            }
+        } else if let Some(Modal::Picker { kind: PickerKind::Account, mut picker }) = app.modal.take() {
+            crate::account::draw(frame.buffer_mut(), app, area, &mut picker);
+            app.modal = Some(Modal::Picker { kind: PickerKind::Account, picker });
+        }
+        return;
+    }
     // The status lines (tmux's status: off, on, 2 … 5), at the bottom or (status-position) the top.
     let lines = app.status_lines().max(1).min(area.height);
     let status = Rect::new(0, if app.status_top { 0 } else { area.height.saturating_sub(lines) }, area.width, lines);
@@ -405,6 +418,7 @@ pub fn prompt_dialog<'a>(app: &App, p: &'a crate::modal::Prompt, row: &'a crate:
     let mut d = crate::dialog::Dialog::new(&p.title, body, row, c);
     d.border = dialog_border(&lines);
     d.input = Some(crate::dialog::Input { label: &p.field, value: &p.value, caret: p.cursor, select: None, secret: p.secret, focused: !p.buttons, width: crate::dialog::INPUT_W });
+    if !p.error.is_empty() { d.message = crate::dialog::wrap(&p.error, room.min(crate::dialog::INPUT_W), c.danger) }
     if !d.fit(over.height) { return None }
     Some((d.place(over), d))
 }
@@ -3068,7 +3082,8 @@ fn pane_body(buf: &mut Buffer, pane: &mut Pane, area: Rect, active: bool, window
     match &pane.phase {
         // Opening: nothing to show yet. Lost (the machine's link down), the last screen is kept, as
         // ssh and mosh keep it — below.
-        Phase::Connecting(note) if pane.last_seq.is_none() => { card(buf, area, &[(note.clone(), Style::default().add_modifier(Modifier::DIM))]); return None }
+        // A frozen pane taking its terminal back still has its last frame: kept, under the notice.
+        Phase::Connecting(note) if pane.last_seq.is_none() && !pane.frozen => { card(buf, area, &[(note.clone(), Style::default().add_modifier(Modifier::DIM))]); return None }
         Phase::Card { title, detail, keys } => {
             let mut lines = vec![(title.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))];
             for row in detail.lines() { lines.push((row.to_string(), Style::default())) }
@@ -3153,6 +3168,17 @@ fn pane_body(buf: &mut Buffer, pane: &mut Pane, area: Rect, active: bool, window
             .remove_modifier(Modifier::DIM | Modifier::REVERSED).add_modifier(Modifier::BOLD);
         buf.set_style(row, notice);
         buf.set_stringn(area.x, area.y, format!("{:w$}", format!(" ! {note}"), w = area.width as usize), area.width as usize, notice);
+        return None;
+    }
+    // Taken by another client (a phone): its last frame here, at this screen's size, and one row
+    // saying who has it and how to have it back — the desktop app's band.
+    if let (true, Phase::Watching(who)) = (pane.frozen, &pane.phase) {
+        let who = if who.is_empty() { "Another window" } else { who.as_str() };
+        let row = Rect::new(area.x, area.y, area.width, 1);
+        let notice = Style::default().fg(window.0.unwrap_or(Color::Reset)).bg(window.1.unwrap_or(Color::Reset))
+            .remove_modifier(Modifier::DIM | Modifier::REVERSED).add_modifier(Modifier::BOLD);
+        buf.set_style(row, notice);
+        buf.set_stringn(area.x, area.y, format!("{:w$}", format!(" ! {who} is using this terminal — type to take it back"), w = area.width as usize), area.width as usize, notice);
         return None;
     }
     // Local echo, drawn over the grid: underlined until the far side confirms it.
@@ -4295,6 +4321,25 @@ mod prompt_dialog_tests {
             let (s, _) = screen(&mut app);
             assert!(s.contains("┌─Title") && s.contains(&format!("[ Cancel ]  [ {action} ]")), "{action}:\n{s}");
         }
+    }
+
+    /// Add API's key step: its lines (the URL, where to get a key), the key as dots, what was wrong
+    /// under it, and Save; typing clears what was wrong. Esc goes back to the Models view.
+    #[test]
+    fn an_api_key_is_asked_masked_with_what_was_wrong() {
+        let mut app = app((120, 30));
+        let draft = crate::models::ApiDraft { id: None, provider: "openrouter".into(), name: "OpenRouter".into(), base_url: "https://openrouter.ai/api/v1".into(),
+            key_url: "https://openrouter.ai/settings/keys".into(), key_env: String::new(), header: String::new(), prefix: String::new(), step: crate::models::ApiStep::Key };
+        let mut p = crate::modal::Prompt::status(crate::modal::PromptKind::Api(Box::new(draft)), "", "sk-secret");
+        (p.title, p.field, p.body, p.secret, p.error) = ("Add OpenRouter".into(), "Key".into(), "https://openrouter.ai/api/v1\nGet a key: https://openrouter.ai/settings/keys".into(), true, "Paste the API key.".into());
+        app.modal = Some(Modal::Prompt(p));
+        let (s, _) = screen(&mut app);
+        for want in ["┌─Add OpenRouter", "https://openrouter.ai/api/v1", "Get a key: https://openrouter.ai/settings/keys", "Paste the API key.", "•••••••••", "[ Cancel ]  [ Save ]"] { assert!(s.contains(want), "{want}:\n{s}") }
+        assert!(!s.contains("sk-secret"), "the key is never drawn:\n{s}");
+        press(&mut app, KeyCode::Char('x'));
+        assert!(open(&app).is_some_and(|p| p.error.is_empty()), "typing clears what was wrong");
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.modal, Some(Modal::Picker { kind: crate::modal::PickerKind::Models, .. })), "Esc goes back to Models");
     }
 
     /// tmux's own prompts (C-b , and every command-prompt, choose-tree's) stay on the status line.

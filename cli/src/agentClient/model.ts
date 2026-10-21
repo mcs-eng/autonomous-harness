@@ -18,6 +18,14 @@ export interface Frame {
   project?: { cwd?: string; root?: string; branch?: string | null; worktree?: boolean } | null
   createdAt?: string
   updatedAt?: string
+  /** The harness here whose agent started this one (registry `parentAgentId`); null for the rest. */
+  parentAgentId?: string | null
+  /** `agent` when another agent started it, here or from another machine or outside Harness. */
+  startedBy?: string | null
+  /** `cloud`: a harness in its maker's cloud (lib/cloudAgents.ts), with no pane and no session. Its state and words are
+   *  the cloud service's: `cloud.state` and `cloud_transcript`. */
+  location?: string
+  cloud?: { state?: string; links?: Array<{ label: string; url: string }> } | null
 }
 
 /** The agent running the verb: a harness in its own pane, or an agent outside Harness. Null for a person at a terminal. */
@@ -27,9 +35,12 @@ export interface Caller extends LedgerMember {
   /** An agent Harness did not start (in a terminal app, an editor, the person's own tmux): no pane, so nothing can
    *  message it, and it is told apart by the session its shell names. */
   outside?: boolean
+  /** Another agent started this harness, as the core's row says (`startedBy`, `parentAgentId`): one level down. */
+  startedByAgent?: boolean
 }
 
-export type State = 'working' | 'idle' | 'needs-input' | 'stopped' | 'offline' | 'unknown'
+/** `installing`, `starting`, `failed`: a harness asked for that has not started (commands.ts `Asked`). */
+export type State = 'working' | 'idle' | 'needs-input' | 'stopped' | 'offline' | 'unknown' | 'installing' | 'starting' | 'failed'
 
 export interface Row {
   name: string
@@ -56,9 +67,16 @@ export const STOPPED_WITHIN_MS = 7 * 24 * 60 * 60_000
 
 export const isAgent = (frame: Frame): boolean => !!frame.id && frame.engine !== 'terminal'
 
+/** A cloud harness's `cloud.state` (lib/cloudAgents.ts `CloudState`). Its frame's activity says idle while it asks the
+ *  person, so a wait read it as done (lampOS, #1444). */
+const CLOUD_STATES: Record<string, State> = {
+  starting: 'starting', working: 'working', needs_input: 'needs-input', idle: 'idle', failed: 'failed', stopped: 'stopped',
+}
+
 export function stateOf(frame: Frame): State {
   if (frame.status === 'stopped') return 'stopped'
   if (frame.status === 'offline') return 'offline'
+  if (frame.location === 'cloud') return CLOUD_STATES[frame.cloud?.state ?? ''] ?? 'unknown'
   const state = frame.activity?.state
   return state === 'working' ? 'working' : state === 'idle' ? 'idle' : 'unknown'
 }
@@ -74,7 +92,7 @@ export function callerOf(frames: Frame[], pane: string | undefined, machineId: s
   const on = frames.filter((f) => f.tmuxPane === pane)
   const frame = on.find((f) => f.status === 'active') ?? on.filter(isAgent).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0]
   if (!frame || !isAgent(frame)) return null
-  return { machineId, agentId: frame.id, name: frame.name || frame.id.slice(0, 8), engine: frame.engine ?? '' }
+  return { machineId, agentId: frame.id, name: frame.name || frame.id.slice(0, 8), engine: frame.engine ?? '', ...(frame.startedBy === 'agent' || frame.parentAgentId ? { startedByAgent: true } : {}) }
 }
 
 /**
@@ -144,6 +162,16 @@ export function rowsOf(frames: Frame[], ctx: RowContext): Row[] {
   return rows.sort((a, b) => rank(a) - rank(b) || (b.lastActive ?? '').localeCompare(a.lastActive ?? ''))
 }
 
+/** How many rows an agent's `ps` shows unless asked for all: on the owner's Mac, 40 rows became about 8 to read. */
+export const AGENT_ROWS = 15
+
+/** An agent's `ps`: its own first, then those working or waiting on the person, then the rest; [max] at most. */
+export function forAgent(rows: readonly Row[], max = AGENT_ROWS): { shown: Row[]; more: number } {
+  const busy = (r: Row) => r.state === 'working' || r.state === 'needs-input'
+  const ordered = [...rows.filter((r) => r.yours), ...rows.filter((r) => !r.yours && busy(r)), ...rows.filter((r) => !r.yours && !busy(r))]
+  return { shown: ordered.slice(0, max), more: Math.max(0, ordered.length - max) }
+}
+
 /** The rows [name] means: a whole name, else a name's start, else an id's start (six characters or more). */
 export function matching<T extends { name: string; id: string }>(name: string, rows: T[]): T[] {
   const wanted = name.trim().toLowerCase()
@@ -170,6 +198,17 @@ export interface LastTurn {
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')
 
 /**
+ * What a harness was asked, as the person said it: without the markers Claude Code puts around a paste. `ps` and
+ * `show` printed `asked: another agent release: <pasted_content id="1c18"> #1242 is merged…` (October 12, 2026).
+ * What was pasted stays: it was said. A marker on a line of its own goes with its line; one inside a line, as the
+ * daemon keeps an ask (on one line), leaves a space.
+ */
+const PASTE_TAG = '<\\/?pasted_content\\b[^>]*>'
+const PASTE_LINE = new RegExp(`^[^\\S\\n]*${PASTE_TAG}[^\\S\\n]*\\n?`, 'gm')
+const PASTE_INLINE = new RegExp(`[^\\S\\n]*${PASTE_TAG}[^\\S\\n]*`, 'g')
+export const asSaid = (ask: string): string => ask.replace(PASTE_LINE, '').replace(PASTE_INLINE, ' ').replace(/\n{3,}/g, '\n\n').trim()
+
+/**
  * The last turn in [events], oldest first: the last ask, and the answer, which is the text after the turn's last
  * tool call (the narration before it is the working, not the result). Null when the page holds no ask.
  *
@@ -187,7 +226,17 @@ export function lastTurn(events: HistoryEvent[]): LastTurn | null {
   turn.forEach((e, i) => { if (e.type === 'tool_start') tools++; if (e.type === 'tool_end' || e.type === 'tool_start') lastTool = i })
   const said = (from: number) => turn.slice(from).filter((e) => e.type === 'text_delta').map((e) => text(e.payload?.content)).join('').trim()
   const final = said(lastTool + 1)
-  return { ask: text(events[start].payload?.content).trim() || null, answer: final || said(0), tools, answered: !!final }
+  return { ask: asSaid(text(events[start].payload?.content)) || null, answer: final || said(0), tools, answered: !!final }
+}
+
+/** A cloud harness's last turn from its conversation (`cloud_transcript`): the person's last words and everything the
+ *  agent said after them. */
+export function cloudTurn(messages: ReadonlyArray<{ from?: unknown; text?: unknown }>): LastTurn | null {
+  let start = -1
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].from === 'person') { start = i; break }
+  if (start < 0) return null
+  const answer = messages.slice(start + 1).filter((m) => m.from === 'agent').map((m) => text(m.text).trim()).filter(Boolean).join('\n\n')
+  return { ask: text(messages[start].text) || null, answer, tools: 0, answered: !!answer }
 }
 
 export const clip = (value: string, max: number): string => (value.length > max ? `${value.slice(0, max - 1)}…` : value)

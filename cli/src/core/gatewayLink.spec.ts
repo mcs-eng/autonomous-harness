@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { decodeGatewayBinary, encodeGatewayBinary, GatewayBinary, GATEWAY_CALLS } from '../lib/gatewayWire.js'
 import { RelayConnectError } from '../lib/relayFrames.js'
 import { decodeTerminalLocal, encodeTerminalLocal, TerminalBinaryKind, type TerminalBinaryClear } from '../lib/terminalBinary.js'
-import type { GatewayEvents, LaneSeal } from './api.js'
-import { createGatewayLink, GATEWAY_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, OWED_MAX, PAIR_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
+import { TAB_KEY_OFF, type GatewayEvents, type LaneSeal, type TabKey, type TabRelay } from './api.js'
+import { createGatewayLink, GATEWAY_BUFFER_LIMIT, GATEWAY_USAGE_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, OWED_MAX, tabKeyOf, tabRelayOf, PAIR_WAIT_MS, TAB_RELAY_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
 import { ON_DEMAND_START_MS } from './serviceLinks.js'
 
 const STREAM = '00000000-0000-4000-8000-000000000001'
@@ -13,7 +13,7 @@ function events(): { [K in keyof GatewayEvents]: ReturnType<typeof vi.fn> } {
   return {
     frame: vi.fn(), binary: vi.fn(), client: vi.fn(), disconnected: vi.fn(), observer: vi.fn(), toLocal: vi.fn(), status: vi.fn(),
     linkDown: vi.fn(), commanders: vi.fn(), commanderJoined: vi.fn(), meta: vi.fn(), notice: vi.fn(), revoked: vi.fn(), busy: vi.fn(),
-    device: vi.fn(), deviceRevoked: vi.fn(), toWindows: vi.fn(),
+    device: vi.fn(), deviceRevoked: vi.fn(), toWindows: vi.fn(), tabFrame: vi.fn(),
   }
 }
 
@@ -97,18 +97,39 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(link.port.device('phone-1', 'autonomous_device_result', { c: 3 })).toBe(true)
     link.port.deviceClient('phone-1', 'PUB')
     link.port.windowOpened('tui')
+    link.port.usageCounter?.('create_requests')
+    link.port.usageLaunch?.({ id: 'creation-fixture-1', phase: 'start' })
     await link.port.local('local:w', { type: 'e2ee_pairings_list', payload: {} })
     expect(link.port.terminalBinary('phone-1', bytesOf('hi'))).toBe(true)
     // An id the binary frame cannot carry: refused, never sent half-framed.
     register(link, 'x'.repeat(300))
     expect(link.port.terminalBinary('x'.repeat(300), bytesOf('hi'))).toBe(false)
-    expect(kinds().slice(1)).toEqual(['broadcast', 'commander', 'user', 'reply', 'target', 'terminal', 'observer', 'device', 'deviceClient', 'windowOpened', 'localFrame'])
+    expect(kinds().slice(1)).toEqual(['broadcast', 'commander', 'user', 'reply', 'target', 'terminal', 'observer', 'device', 'deviceClient', 'windowOpened', 'usageCounter', 'usageLaunch', 'localFrame'])
     expect(sent[4]).toEqual({ kind: 'reply', connId: 'phone-1', type: 'agents_list', requestId: 'r-1', payload: { agents: [] } })
     const framed = decodeGatewayBinary(binary[0])!
     expect(framed).toMatchObject({ kind: GatewayBinary.remote, id: 'phone-1' })
     expect(decodeTerminalLocal(framed.bytes)).toEqual(bytesOf('hi'))
     await link.stop()
     expect(kinds().at(-1)).toBe('stop')
+  })
+
+  it('drops optional measurement before relay traffic and never wakes a stopped gateway', () => {
+    const { link, kinds, setBuffered, want } = setup()
+    link.port.usageCounter?.('create_requests')
+    expect(kinds()).toEqual([])
+    expect(want).not.toHaveBeenCalled()
+    link.connected()
+    setBuffered(GATEWAY_USAGE_BUFFER_LIMIT)
+    link.port.usageCounter?.('create_requests')
+    link.port.usageLaunch?.({ id: 'creation-fixture-1', phase: 'start' })
+    link.port.broadcast({ type: 'turn_started' })
+    expect(kinds()).toEqual(['start', 'broadcast'])
+    // About a guest's harness: the gateway is told whose, to seal it for that guest's sessions.
+    link.port.broadcast({ type: 'turn_started', agentId: 'g' }, 'kim@acme.io')
+    expect(kinds().at(-1)).toBe('broadcast')
+    setBuffered(0)
+    link.port.usageCounter?.('create_requests')
+    expect(kinds().at(-1)).toBe('usageCounter')
   })
 
   it('drops what would pile up on the socket to a gateway that reads nothing, and says so once a minute', () => {
@@ -152,6 +173,8 @@ describe('the gateway in its own process, as the core sees it', () => {
     link.notice({ kind: 'device', connId: 'dial-1', frame: { type: 'autonomous_device_request' }, opened: null })
     link.notice({ kind: 'deviceRevoked', identity: 'PUB' })
     link.notice({ kind: 'toWindows', frame: { type: 'device_key_added' } })
+    link.notice({ kind: 'tabFrame', event: { sharedTabId: 'a1b2c3d4e5f6a1b2c3d4e5f6', from: { machineId: 'alice-mac', userId: 'u' }, payload: { a: 1 }, extra: 'x' } })
+    link.notice({ kind: 'tabFrame', event: { from: { machineId: 'alice-mac', userId: 'u' } } })
     link.notice({ kind: 'mystery' })
     expect(heard.frame.mock.calls).toEqual([['phone-1', { type: 'message' }, 'p2p', 'web'], ['dial-1', {}, 'relay', 'device']])
     expect(heard.client).toHaveBeenCalledWith('phone-1', null)
@@ -169,6 +192,8 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(heard.device.mock.calls).toEqual([['dial-1', { type: 'autonomous_device_request' }, { type: 'hello' }], ['dial-1', { type: 'autonomous_device_request' }, null]])
     expect(heard.deviceRevoked).toHaveBeenCalledWith('PUB')
     expect(heard.toWindows).toHaveBeenCalledWith({ type: 'device_key_added' })
+    // What a shared tab's relay said, read as the shape it must be; one that names no tab is not handed on.
+    expect(heard.tabFrame.mock.calls).toEqual([[{ sharedTabId: 'a1b2c3d4e5f6a1b2c3d4e5f6', from: { machineId: 'alice-mac', userId: 'u' }, payload: { a: 1 } }]])
   })
 
   it('hands on a remote client\'s terminal bytes, and drops what it cannot read', () => {
@@ -342,6 +367,99 @@ describe('the gateway in its own process, as the core sees it', () => {
     }
   })
 
+  it('tabKey calls the gateway with its method and arguments, and says no key is held while it cannot answer', async () => {
+    const link1 = { sharedTabId: 'a1b2c3d4e5f6a1b2c3d4e5f6', machineId: 'bob-mini', peerPub: 'UEVFUg==' }
+    let answer: Record<string, unknown> = { result: 'c2ln' }
+    const { link, call } = setup({ call: async () => answer })
+    expect(await link.ops.tabKey.publicKey()).toBe('c2ln')
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabKey, { method: 'publicKey', args: [] }, LANE_WAIT_MS)
+    expect(await link.ops.tabKey.signRoster(link1.sharedTabId, 2, '{}')).toBe('c2ln')
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabKey, { method: 'signRoster', args: [link1.sharedTabId, 2, '{}'] }, LANE_WAIT_MS)
+    expect(await link.ops.tabKey.signKeyChange(link1.sharedTabId, 'UEVFUg==')).toBe('c2ln')
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabKey, { method: 'signKeyChange', args: [link1.sharedTabId, 'UEVFUg=='] }, LANE_WAIT_MS)
+    answer = { result: { ephemeral: 'e', signature: 's' } }
+    expect(await link.ops.tabKey.hello(link1)).toEqual({ ephemeral: 'e', signature: 's' })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabKey, { method: 'hello', args: [link1] }, LANE_WAIT_MS)
+    answer = { result: true }
+    expect(await link.ops.tabKey.welcome(link1, { ephemeral: 'e' })).toBe(true)
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabKey, { method: 'welcome', args: [link1, { ephemeral: 'e' }] }, LANE_WAIT_MS)
+    answer = { result: { welcome: { ephemeral: 'w' } } }
+    expect(await link.ops.tabKey.accept(link1, { ephemeral: 'h' })).toEqual({ welcome: { ephemeral: 'w' } })
+    answer = { result: { frame: { __e2e: 1 } } }
+    expect(await link.ops.tabKey.seal(link1, { type: 'ping' })).toEqual({ frame: { __e2e: 1 } })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabKey, { method: 'seal', args: [link1, { type: 'ping' }] }, LANE_WAIT_MS)
+    answer = { result: { frame: { type: 'ping' } } }
+    expect(await link.ops.tabKey.open(link1, { __e2e: 1 })).toEqual({ frame: { type: 'ping' } })
+    answer = { result: { unreadable: true } }
+    expect(await link.ops.tabKey.open(link1, { __e2e: 1 })).toEqual({ unreadable: true })
+    answer = {}
+    link.ops.tabKey.drop(link1)
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabKey, { method: 'drop', args: [link1] }, LANE_WAIT_MS)
+    answer = { error: 'not a key' }
+    await expect(link.ops.tabKey.signKeyChange(link1.sharedTabId, 'AAAA')).rejects.toThrow('not a key')
+    for (const error of ['SERVICE_UNAVAILABLE', 'SERVICE_FAILED', undefined]) {
+      answer = error ? { error } : {}
+      await expect(link.ops.tabKey.publicKey()).rejects.toThrow(/not running/)
+      await expect(link.ops.tabKey.hello(link1)).rejects.toThrow(/not running/)
+      expect(await link.ops.tabKey.welcome(link1, {})).toBe(false)
+      expect(await link.ops.tabKey.accept(link1, {})).toEqual({ refused: true })
+      expect(await link.ops.tabKey.seal(link1, {})).toEqual({ lost: true })
+      expect(await link.ops.tabKey.open(link1, {})).toEqual({ lost: true })
+    }
+  })
+
+  it('tabRelay calls the gateway with its method and arguments, and sends nothing while it cannot answer', async () => {
+    const TAB = 'a1b2c3d4e5f6a1b2c3d4e5f6'
+    let answer: Record<string, unknown> = {}
+    const { link, call } = setup({ call: async () => answer })
+    await link.ops.tabRelay.open(TAB)
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabRelay, { method: 'open', args: [TAB] }, TAB_RELAY_WAIT_MS)
+    answer = { result: true }
+    expect(await link.ops.tabRelay.send(TAB, 'alice-mac', { sealed: 1 })).toBe(true)
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabRelay, { method: 'send', args: [TAB, 'alice-mac', { sealed: 1 }] }, TAB_RELAY_WAIT_MS)
+    link.ops.tabRelay.close(TAB)
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.tabRelay, { method: 'close', args: [TAB] }, TAB_RELAY_WAIT_MS)
+    // A send waits for the relay to admit its socket (5 s) and for its turn within the relay's rate.
+    expect(TAB_RELAY_WAIT_MS).toBe(10_000)
+    for (const away of [{ error: 'SERVICE_UNAVAILABLE' }, {}]) {
+      answer = away
+      expect(await link.ops.tabRelay.send(TAB, 'alice-mac', {})).toBe(false)
+    }
+  })
+
+  it('asks the gateway to seal and open the account\'s connections, and says none is sealed while it cannot answer', async () => {
+    let answer: Record<string, unknown> = { envelope: { v: 1 } }
+    const { link, call } = setup({ call: async () => answer })
+    expect(await link.ops.connectorVault.seal('{}')).toEqual({ v: 1 })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.connectorVault, { op: 'seal', plaintext: '{}' }, LANE_WAIT_MS)
+    answer = { error: 'the device key log is frozen' }
+    await expect(link.ops.connectorVault.seal('{}')).rejects.toThrow('frozen')
+    for (const error of ['SERVICE_UNAVAILABLE', undefined]) {
+      answer = error ? { error } : {}
+      await expect(link.ops.connectorVault.seal('{}')).rejects.toThrow(/not running/)
+    }
+    answer = { plaintext: '{"v":1}', complete: true }
+    expect(await link.ops.connectorVault.open({ v: 1 })).toEqual({ plaintext: '{"v":1}', complete: true })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.connectorVault, { op: 'open', envelope: { v: 1 } }, LANE_WAIT_MS)
+    answer = { plaintext: 'x' }
+    expect(await link.ops.connectorVault.open({})).toEqual({ plaintext: 'x', complete: false })
+    answer = {}
+    expect(await link.ops.connectorVault.open({})).toBeNull()
+  })
+
+  it('asks the gateway to hold what sharing trusts, and says it could not while the gateway is not running', async () => {
+    let answer: Record<string, unknown> = { pins: 1, keys: 2 }
+    const { link, call } = setup({ call: async () => answer })
+    expect(await link.ops.sharedTrust({ pins: [], keys: [] })).toEqual({ pins: 1, keys: 2 })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.sharedTrust, { pins: [], keys: [] }, LANE_WAIT_MS)
+    answer = { error: 'stores unwritable' }
+    await expect(link.ops.sharedTrust({})).rejects.toThrow('stores unwritable')
+    for (const error of ['SERVICE_UNAVAILABLE', undefined]) {
+      answer = error ? { error } : {}
+      await expect(link.ops.sharedTrust({})).rejects.toThrow(/not running/)
+    }
+  })
+
   it('carries the fleet\'s lane to the gateway\'s sessions, every step a call in order, and never a frame back unsealed', async () => {
     let answer: Record<string, unknown> = {}
     const { link, call } = setup({ call: async () => answer })
@@ -369,6 +487,84 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(await lane.welcome('m2', {})).toBe(false)
     expect(await lane.seal('m2', { type: 'message', payload: { content: 'hi' } })).toEqual({ lost: true })
     expect(await lane.open('m2', { type: 'agents_list_result' })).toEqual({ lost: true })
+  })
+
+  it('hands the core\'s services the gateway\'s tab keys as they are when each is called', async () => {
+    const link1 = { sharedTabId: 't', machineId: 'm', peerPub: 'P' }
+    const one = { ...TAB_KEY_OFF, publicKey: vi.fn(async () => 'one'), signRoster: vi.fn(async () => 'r'), signKeyChange: vi.fn(async () => 'k'),
+      hello: vi.fn(async () => ({ ephemeral: 'e' })), welcome: vi.fn(async () => true), accept: vi.fn(async () => ({ welcome: {} })),
+      seal: vi.fn(async () => ({ lost: true as const })), open: vi.fn(async () => ({ unreadable: true as const })), drop: vi.fn() } satisfies TabKey
+    let current: TabKey = one
+    const key = tabKeyOf(() => current)
+    expect(await key.publicKey()).toBe('one')
+    expect(await key.signRoster('t', 1, '{}')).toBe('r')
+    expect(await key.signKeyChange('t', 'P')).toBe('k')
+    expect(await key.hello(link1)).toEqual({ ephemeral: 'e' })
+    expect(await key.welcome(link1, { a: 1 })).toBe(true)
+    expect(await key.accept(link1, { b: 2 })).toEqual({ welcome: {} })
+    expect(await key.seal(link1, { type: 't' })).toEqual({ lost: true })
+    expect(await key.open(link1, { type: 't' })).toEqual({ unreadable: true })
+    key.drop(link1)
+    expect(one.signRoster).toHaveBeenCalledWith('t', 1, '{}')
+    expect(one.signKeyChange).toHaveBeenCalledWith('t', 'P')
+    expect(one.welcome).toHaveBeenCalledWith(link1, { a: 1 })
+    expect(one.accept).toHaveBeenCalledWith(link1, { b: 2 })
+    expect(one.drop).toHaveBeenCalledWith(link1)
+    current = { ...one, publicKey: vi.fn(async () => 'two') }
+    expect(await key.publicKey()).toBe('two')
+  })
+
+  it('hands the core\'s services the gateway\'s tab relay as it is when each is called', async () => {
+    const one = { open: vi.fn(async () => {}), send: vi.fn(async () => true), close: vi.fn() } satisfies TabRelay
+    let current: TabRelay = one
+    const relay = tabRelayOf(() => current)
+    await relay.open('t')
+    expect(await relay.send('t', 'm', { a: 1 })).toBe(true)
+    relay.close('t')
+    expect(one.open).toHaveBeenCalledWith('t')
+    expect(one.send).toHaveBeenCalledWith('t', 'm', { a: 1 })
+    expect(one.close).toHaveBeenCalledWith('t')
+    current = { ...one, send: vi.fn(async () => false) }
+    expect(await relay.send('t', 'm', {})).toBe(false)
+  })
+
+  it('opens again, as the gateway connects again, every shared tab the core saw opened and not closed', async () => {
+    const one = { open: vi.fn(async () => {}), send: vi.fn(async () => true), close: vi.fn() } satisfies TabRelay
+    let current: TabRelay = one
+    const relay = tabRelayOf(() => current)
+    await relay.open('a'); await relay.open('b'); await relay.open('c'); await relay.open('d')
+    // Its first connection: the gateway was never there to have dropped a socket, and every open went to it then.
+    relay.connected()
+    expect(one.open.mock.calls).toEqual([['a'], ['b'], ['c'], ['d']])
+    relay.close('b')
+    relay.heard({ sharedTabId: 'c', closed: { code: 4409, reason: 'taken over' } })
+    relay.heard({ sharedTabId: 'd', closed: { code: 4403, reason: 'not in the tab' } })
+    // What is not a close keeps the tab: the relay said it is ready, or carried a frame.
+    relay.heard({ sharedTabId: 'a', ready: true })
+    relay.heard({ sharedTabId: 'a', from: { machineId: 'm', userId: 'u' }, payload: { kind: 'knock' } })
+    // A gateway-only restart: the new gateway holds no socket, and Agent Messages never heard the old one go.
+    const two = { open: vi.fn(async () => {}), send: vi.fn(async () => true), close: vi.fn() } satisfies TabRelay
+    current = two
+    relay.connected()
+    expect(two.open.mock.calls).toEqual([['a']])
+    // And again on the next restart, for what is still open.
+    relay.connected()
+    expect(two.open.mock.calls).toEqual([['a'], ['a']])
+  })
+
+  it('closes every shared tab it saw opened when Agent Messages out of the core\'s process goes, which opens them again as it starts', async () => {
+    const one = { open: vi.fn(async () => {}), send: vi.fn(async () => true), close: vi.fn() } satisfies TabRelay
+    const relay = tabRelayOf(() => one)
+    await relay.open('a'); await relay.open('b')
+    relay.close('b')
+    one.close.mockClear()
+    relay.closeOpened()
+    expect(one.close.mock.calls).toEqual([['a']])
+    // Closed, they are not opened again as the gateway reconnects: the process that wants them asks again.
+    relay.connected(); relay.connected()
+    relay.closeOpened()
+    expect(one.open.mock.calls).toEqual([['a'], ['b']])
+    expect(one.close.mock.calls).toEqual([['a']])
   })
 
   it('hands the core\'s services the gateway\'s lane as it is when each is called', async () => {

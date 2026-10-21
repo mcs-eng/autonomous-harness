@@ -8,6 +8,7 @@ import 'package:xterm/xterm.dart';
 
 import '../core/crash_log.dart';
 import '../core/sleep_aware.dart';
+import '../logging/app_log.dart';
 import 'terminal_binary.dart';
 import 'terminal_input.dart';
 import 'terminal_viewport.dart';
@@ -151,7 +152,13 @@ class TerminalSession extends ChangeNotifier {
   final TerminalBinarySender sendBinary;
 
   final Duration resyncTimeout;
-  final bool readOnly;
+  final bool _readOnly;
+  bool get readOnly => _readOnly || _watchOnly;
+  String? _inputContext;
+  String? _openedInputContext;
+  bool _watchOnly;
+  bool _openedWatchOnly = false;
+  String? get inputContext => _inputContext;
 
   // A controllable clock keeps coalescing tests independent of host scheduling.
   final DateTime Function() _now;
@@ -212,10 +219,19 @@ class TerminalSession extends ChangeNotifier {
     this.client,
     this.onOpenStalled,
     this.takeover = true,
-    this.readOnly = false,
+    bool readOnly = false,
+    String? inputContext,
+    bool watchOnly = false,
     this.resyncTimeout = const Duration(seconds: 4),
     DateTime Function()? now,
-  }) : _now = now ?? DateTime.now {
+  }) : _now = now ?? DateTime.now,
+       // ignore: prefer_initializing_formals
+       _readOnly = readOnly,
+       // The public parameter deliberately omits the private field's underscore.
+       // ignore: prefer_initializing_formals
+       _inputContext = inputContext,
+       // ignore: prefer_initializing_formals
+       _watchOnly = watchOnly {
     terminal = _newTerminal();
   }
 
@@ -235,6 +251,10 @@ class TerminalSession extends ChangeNotifier {
   String? linkMode;
   String? errorCode;
   String? errorMessage;
+
+  /// This app ended the stream itself ([close]). A dead stream is reattached automatically
+  /// (`AppNotifier` pane retries); one this app closed on purpose is not. Cleared by the next open.
+  bool closedHere = false;
 
   /// Who took this terminal, while [status] is [TerminalSessionStatus.takenOver]
   /// and the daemon said (`terminal_closed.takenBy`); null from an older daemon
@@ -300,7 +320,10 @@ class TerminalSession extends ChangeNotifier {
 
   bool get acceptsInput =>
       !readOnly &&
+      !_watchOnly &&
       !watching &&
+      _inputContext == _openedInputContext &&
+      _watchOnly == _openedWatchOnly &&
       status == TerminalSessionStatus.controlling &&
       streamId != null;
 
@@ -328,6 +351,31 @@ class TerminalSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// An opaque provenance hint, never an access grant. Staging a new scope
+  /// immediately withholds input until its replacement stream is ready.
+  void stageInputContext(String? value, {bool watchOnly = false}) {
+    if (_inputContext == value && _watchOnly == watchOnly) return;
+    _inputContext = value;
+    _watchOnly = watchOnly;
+    _inputBytes.clear();
+  }
+
+  Future<void> setInputContext(String? value, {bool watchOnly = false}) async {
+    stageInputContext(value, watchOnly: watchOnly);
+    if (_disposed ||
+        (_openedInputContext == value && _openedWatchOnly == watchOnly)) {
+      return;
+    }
+    await _open(
+      initialCols: _measuredViewport?.cols ?? cols,
+      initialRows: _measuredViewport?.rows ?? rows,
+      waitForViewportSize: false,
+      resetRecovery: true,
+      preserveTerminal: true,
+      allowRedial: false,
+    );
+  }
+
   Future<void> open({
     int initialCols = 80,
     int initialRows = 24,
@@ -344,7 +392,9 @@ class TerminalSession extends ChangeNotifier {
   /// Input resumes only after the replacement stream's first keyframe.
   /// [force] is a person asking: it arms one takeover and reopens a stream this
   /// session is merely watching, which is what the band's "Take control" does.
-  Future<void> reopen({bool force = false}) async {
+  /// [redial] false keeps an unanswered open from forcing a fresh dial of the machine's link
+  /// ([onOpenStalled]): an automatic retry must not knock the machine's other panes over.
+  Future<void> reopen({bool force = false, bool redial = true}) async {
     if (force) takeover = true;
     if (_disposed ||
         status == TerminalSessionStatus.opening ||
@@ -358,6 +408,7 @@ class TerminalSession extends ChangeNotifier {
       waitForViewportSize: false,
       resetRecovery: true,
       preserveTerminal: true,
+      allowRedial: redial,
     );
   }
 
@@ -369,8 +420,10 @@ class TerminalSession extends ChangeNotifier {
     required bool waitForViewportSize,
     required bool resetRecovery,
     required bool preserveTerminal,
+    bool allowRedial = true,
   }) async {
     if (_disposed) return;
+    closedHere = false;
     final generation = ++_generation;
     _cancelTimers();
     _abortActiveUpload();
@@ -401,7 +454,7 @@ class TerminalSession extends ChangeNotifier {
     _resyncAttempts = 0;
     if (resetRecovery) {
       _autoReopenAttempts = 0;
-      _openStallRecovered = false;
+      _openStallRecovered = !allowRedial;
     }
     cols = _clampCols(initialCols);
     rows = _clampRows(initialRows);
@@ -443,11 +496,15 @@ class TerminalSession extends ChangeNotifier {
       'rows': rows,
       'compression': const ['zlib', 'none'],
       if (client != null) 'client': client!.toJson(),
+      if (_inputContext != null) 'inputContext': _inputContext,
+      if (_watchOnly) 'watchOnly': true,
       // Absent is the takeover an open has always been; `false` asks the daemon
       // to leave whoever holds the terminal alone and hand this one a watcher.
       if (!takeover) 'takeover': false,
     };
     _openAskedTakeover = takeover;
+    _openedInputContext = _inputContext;
+    _openedWatchOnly = _watchOnly;
     var sent = await send('terminal_open', openPayload);
     if (!_isCurrent(generation) ||
         status != TerminalSessionStatus.opening ||
@@ -705,6 +762,13 @@ class TerminalSession extends ChangeNotifier {
             _inputBytes.clear();
             unawaited(_recoverByReopen(reason: 'TERMINAL_INPUT_INVALID'));
           }
+          return true;
+        }
+        // The daemon no longer holds this stream (it closed it while its link to the backend was
+        // down, say) and said so because this session asked (`reportMissing`). Reopen in place now
+        // rather than waiting out 15 s of silence and three resyncs (2026-10-16).
+        if (errorCode == 'TERMINAL_STREAM_NOT_FOUND') {
+          unawaited(_recoverByReopen(reason: 'TERMINAL_STREAM_NOT_FOUND'));
           return true;
         }
         // A polite open, refused: another client is driving this terminal and
@@ -1026,6 +1090,8 @@ class TerminalSession extends ChangeNotifier {
       'content': content,
       'agentId': agentId,
       'mode': 'auto',
+      if (_inputContext != null) 'inputContext': _inputContext,
+      if (!kIsWeb && client?.kind == 'desktop') 'usageIntent': 'interactive',
     });
   }
 
@@ -1492,7 +1558,11 @@ class TerminalSession extends ChangeNotifier {
     // the same gap — instead of declaring TERMINAL_STREAM_TIMEOUT and throwing away typed input.
     if (afterSleep) _lastStreamActivityAt = _now();
     final generation = _generation;
-    final sent = await send('terminal_alive', {'streamId': streamId});
+    final sent = await send('terminal_alive', {
+      'streamId': streamId,
+      // Ask the daemon to say so if it no longer holds this stream (CLI `reportMissing`).
+      'reportMissing': true,
+    });
     if (!sent && _isCurrent(generation)) {
       transportLost('Terminal heartbeat was not sent');
       return;
@@ -1551,6 +1621,7 @@ class TerminalSession extends ChangeNotifier {
       'streamId': currentStream,
       'attempt': _resyncAttempts,
       'reason': errorCode,
+      'reportMissing': true,
     });
     if (!_isCurrent(generation) ||
         streamId != currentStream ||
@@ -1587,8 +1658,9 @@ class TerminalSession extends ChangeNotifier {
       return;
     }
     _autoReopenAttempts++;
-    debugPrint(
-      '[terminal-session] recovery_reopen agent=$agentId stream=$previousStream',
+    appLog.info(
+      'terminal',
+      'reopen machine=$machineId agent=$agentId stream=$previousStream reason=$reason',
     );
     if (previousStream != null) {
       unawaited(send('terminal_close', {'streamId': previousStream}));
@@ -1603,6 +1675,7 @@ class TerminalSession extends ChangeNotifier {
   }
 
   Future<void> close() async {
+    closedHere = true;
     _generation++;
     final closingStream = streamId;
     _cancelTimers();
@@ -1629,6 +1702,10 @@ class TerminalSession extends ChangeNotifier {
         status == TerminalSessionStatus.takenOver) {
       return;
     }
+    appLog.warn(
+      'terminal',
+      'transport lost machine=$machineId agent=$agentId message=$message',
+    );
     _generation++;
     _cancelTimers();
     _inputBytes.clear();
@@ -1643,6 +1720,12 @@ class TerminalSession extends ChangeNotifier {
 
   void _fail(String code, String? message) {
     if (_disposed) return;
+    // Why a pane shows Reconnect was only ever in debugPrint, invisible on a person's machine (2026-10-16).
+    appLog.warn(
+      'terminal',
+      'failed machine=$machineId agent=$agentId stream=$streamId code=$code'
+          '${message == null ? '' : ' message=$message'}',
+    );
     _generation++;
     _cancelTimers();
     _inputBytes.clear();

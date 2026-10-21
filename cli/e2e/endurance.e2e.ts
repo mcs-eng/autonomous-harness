@@ -33,6 +33,7 @@ import { IsolatedDaemon, until } from './harness/daemon.js'
 import { Desk } from './harness/desk.js'
 import { alive, everyPid, forget, harnessdProcesses, slopes, startSampler, strays, tmuxClients, TurnLedger, type Sample } from './harness/endurance.js'
 import { askAndAnswer, compareAnswers, engineAnswers, QUESTION_KINDS, summarizeAnswers, type QuestionEngine, type QuestionOutcome } from './harness/questionWork.js'
+import { ON_DEMAND_START_MS } from '../src/core/serviceLinks.js'
 
 const ON = process.env.SOAK === '1'
 function knob(name: string, fallback: number, min: number, max: number): number {
@@ -51,6 +52,9 @@ const SEED = knob('SOAK_SEED', 20261007, 0, 0xffffffff)
 const OUT = process.env.SOAK_OUT ?? (ON ? mkdtempSync(join(tmpdir(), 'harness-soak-')) : '')
 /** How long a request to a service that is down may take to be answered: at once, not after its wait. */
 const FAST_MS = 5_000
+/** The Store's list instead waits for the viewers' process to come back, as long as a start (core/serviceLinks.ts
+ *  `waitsThroughRestart`): a window's Store was answered unavailable while the master restarted it (2026-10-16). */
+const DOWN_MS: Record<string, number> = { viewers: ON_DEMAND_START_MS + FAST_MS }
 const PROTOCOL = 3
 const MARK = /soak-[a-z0-9]+-\d+/
 
@@ -84,10 +88,9 @@ const PROBES: Record<string, { type: string; payload: Record<string, unknown> }>
   models: { type: 'models_list', payload: {} },
   devices: { type: 'harness_devices_list', payload: {} },
   orchestrator: { type: 'orchestrator', payload: { action: 'list' } },
-  messages: { type: 'agent_messages', payload: { action: 'history' } },
 }
 /** The service names a process's comings and goings are logged under (`[services] <name> connected`). */
-const LINKS: Record<string, string> = { 'engine-claude': 'engine-claude', 'engine-codex': 'engine-codex', search: 'search', viewers: 'viewers', edge: 'monitor', gateway: 'gateway', models: 'models', devices: 'devices', orchestrator: 'orchestrator', messages: 'messages', sharing: 'sharing' }
+const LINKS: Record<string, string> = { 'engine-claude': 'engine-claude', 'engine-codex': 'engine-codex', search: 'search', viewers: 'viewers', edge: 'monitor', gateway: 'gateway', models: 'models', devices: 'devices', orchestrator: 'orchestrator', sharing: 'sharing' }
 const down = (answer: Record<string, unknown>) => answer.error === 'SERVICE_UNAVAILABLE' || answer.error === 'SERVICE_FAILED' || answer.error === 'GATEWAY_UNAVAILABLE' || answer.error === 'ENGINE_UNAVAILABLE' || answer.error === 'ENGINE_STALE_REPLY' || answer.error === 'ENGINE_BUSY'
 
 const acceptable = (name: string, answer: Record<string, unknown>): boolean => answer.error === undefined
@@ -242,7 +245,7 @@ async function deskLoop(d: IsolatedDaemon, agentIds: string[], deadline: () => b
           if (drawn.length) window.send('terminal_ack', { streamId, lastSeq: drawn[drawn.length - 1].seq })
         }
         const service = Object.keys(PROBES)[Math.floor(rand() * Object.keys(PROBES).length)]
-        if (rand() < 0.4 && !['orchestrator', 'messages'].includes(service)) await ask(window, service)
+        if (rand() < 0.4 && service !== 'orchestrator') await ask(window, service)
         forget(window)
         await sleep(2_000)
       }
@@ -410,7 +413,7 @@ describe.skipIf(!ON)('the daemon over time, every service in its own process', (
     const starts = (name: string) => [...d.log().matchAll(new RegExp(`\\[harnessd\\] service ${name} started \\(pid (\\d+)\\)`, 'g'))].map((match) => Number(match[1]))
     const linked = (name: string) => d.log().split(`[services] ${LINKS[name]} connected`).length - 1
 
-    /** Asked while it is down: answered at once. Frozen: answered by the time the master has found it hung
+    /** Asked while it is down: answered at once, or for the Store's list once its process is back (`DOWN_MS`). Frozen: answered by the time the master has found it hung
      *  and killed it, never left waiting. Back: answered by it again. */
     const probe = async (name: string, phase: 'down' | 'frozen' | 'back'): Promise<void> => {
       const spec = PROBES[name]
@@ -418,7 +421,7 @@ describe.skipIf(!ON)('the daemon over time, every service in its own process', (
       const asked = Date.now()
       const answer = await waker.request(spec.type, spec.payload, 60_000).catch((error) => ({ error: `no answer: ${String(error)}` }))
       const ms = Date.now() - asked
-      if (phase === 'down' && ms > FAST_MS) findings.lines.push(`${name} down: ${spec.type} answered after ${ms} ms: ${JSON.stringify(answer).slice(0, 160)}`)
+      if (phase === 'down' && ms > (DOWN_MS[name] ?? FAST_MS)) findings.lines.push(`${name} down: ${spec.type} answered after ${ms} ms: ${JSON.stringify(answer).slice(0, 160)}`)
       if (!acceptable(name, answer) && (phase === 'back' || !down(answer))) findings.lines.push(`${name} ${phase}: ${spec.type}: ${JSON.stringify(answer).slice(0, 160)}`)
       events[events.length - 1][`${phase}Ms`] = ms
     }

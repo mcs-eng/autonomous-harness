@@ -12,7 +12,10 @@ import type { LocalRecord, PictureState } from './gridPicture.js'
 import { displayModelName } from './gridReader.js'
 import { readEnvExports } from './gridWake.js'
 import { MIN_CODING_CONTEXT } from './codingContext.js'
+import type { GpuProcess } from './gpuProcesses.js'
+import { downloadedBytes, removeDownload, unfinishedDownload } from './modelFiles.js'
 import { APP_LABEL, AppStartError, GRID_LABEL, appContext, readAppRecords, writeAppRecords, type AppEngine, type AppEngineOps, type AppEngineRecord, type AppModel } from './appModels.js'
+import { osToken, type OsToken } from './osToken.js'
 
 // Its own module, so the API launches the core keeps need not load this one (codingContext.ts).
 export { MIN_CODING_CONTEXT }
@@ -82,14 +85,34 @@ export interface LocalModel {
   /** What it runs in: `Grid` for a model Grid's llama.cpp serves, or the app whose folder holds it
    *  (`Ollama`, `LM Studio`, `llama.cpp`, [AppModel]). Absent for a catalog model not downloaded yet. */
   app?: string
+  /** The names the grid lists it under while its engine runs here — what a harness on it names as its
+   *  model. A catalog model is served under its file (`Qwen3.8-27B-UD-Q4_K_M`), not its name
+   *  (`Qwen3.8-27B`): matched by name alone, the apps listed it twice, the second time as the grid's,
+   *  and could not move a harness onto it from its own row. */
+  servedAs?: string[]
+  /** Every grid this computer serves it on, with what this computer's engine answered there over the
+   *  grid's window (grid's `answered.by_model`, the figures `grid stats` reads). A grid that sleeps, or
+   *  whose node is not in its listing yet, is named with no figures. Absent: served on no grid. */
+  servedOn?: ServedOn[]
 }
+/** [servedAs]: the names that grid lists it under — what a harness moves onto it there by, as
+ *  [LocalModel.servedAs] is on the own grid. [tokensOut]: what the engine wrote; [tokensIn]: what was sent
+ *  to it; [tokensCached]: the part of [tokensIn] its prompt cache served (grid's `read_answered` figures). */
+export interface ServedOn { grid: string; servedAs: string[]; requests?: number; tokensOut?: number; tokensIn?: number; tokensCached?: number; windowSeconds?: number }
 export interface ModelOperation {
   id: string; modelId: string; action: 'download' | 'start' | 'stop'; phase: 'running' | 'done' | 'failed'
   stage: 'checking' | 'downloading' | 'updating' | 'starting' | 'verifying' | 'stopping'
   progress?: number; error?: string; updatedAt: string
 }
 export interface LocalModelsSnapshot {
+  /** [memoryBytes]: the machine's RAM — on an NVIDIA machine not what a model runs in. */
   models: LocalModel[]; memoryBytes?: number; hardware?: string
+  /** What the catalog fits models to ([modelBudget]) and what memory that is: an NVIDIA card's free
+   *  VRAM (`vram`), an Apple Silicon Mac's unified memory, or system RAM where there is no usable
+   *  GPU. The apps say VRAM, and judge "fits" against it, where a model runs on the card. */
+  fitBytes?: number; fitMemory?: 'vram' | 'unified' | 'ram'
+  /** An NVIDIA machine's cards' VRAM, all of it (grid's `gpus[].memory_total_mb`). */
+  gpuMemoryBytes?: number
   /** A sentence to show BESIDE the list — never `error`. On this protocol an `error` field fails
    * the whole request: the app's RPC layer drops the reply and keeps nothing of it, so a list sent
    * with a warning in `error` arrived as no list at all and the Local tab read 0. */
@@ -98,6 +121,11 @@ export interface LocalModelsSnapshot {
   supportsDownload?: boolean
   /** Free space where downloads land, so a download's size can be read against it. */
   freeDiskBytes?: number
+  /** The OS grid this computer claims, by grid's own rule ([osToken]); absent for no OS grid. */
+  os?: OsToken
+  /** The community grid of that OS this account is in (`grid ls`'s `os-community` grid, `Omagrid`):
+   *  where a start with `community` runs a model. Absent: in none. */
+  osGrid?: string
 }
 export interface Candidate {
   id: string; name: string; pull: string; file: string; files: string[]; size: number; quant: string
@@ -114,7 +142,7 @@ export interface Candidate {
 }
 /** `live`: its heartbeat sidecar is fresh (the grid is hearing from it). `pidAlive`: the process its run
  *  record names exists — the only liveness that holds while the grid sleeps and the sidecar goes stale. */
-interface Owned { file: string; selector: string; aliases: string[]; nodeId: string; name: string; live: boolean; pidAlive: boolean; siblings: number }
+interface Owned { file: string; selector: string; aliases: string[]; nodeId: string; name: string; live: boolean; pidAlive: boolean; dead: boolean; siblings: number }
 interface Receipt { spec: 1; grid: string; operation?: ModelOperation }
 /** What the grid says is running on it, read WITHOUT waking it (`gridModels.gridInventory`): the
  * overview's node objects while it is awake, nothing while it sleeps — and its owner status (`running`,
@@ -127,11 +155,20 @@ interface Options {
    * one it takes the host name — so a model started here read `mac.lan` under "On your machines"
    * while Machines called the same computer `M2`. */
   machineName?: () => string | null | undefined
-  run?: (args: string[], output?: (chunk: string) => void, timeout?: number) => Promise<GridFleetResult>
+  run?: (args: string[], output?: (chunk: string) => void, timeout?: number, signal?: AbortSignal) => Promise<GridFleetResult>
+  /** How long a download's files may stop growing before it is called stalled, and how often they are
+   *  looked at ([PULL_STALL_MS], [PULL_WATCH_MS]); a test shortens both. */
+  pullStallMs?: number
+  pullWatchMs?: number
   request?: typeof fetch
   /** Injected, never a `grid engines` call: that read carries the grid credential, and a signed-in read
    * of a sleeping grid WAKES it — once a tick, for as long as the panel is open. */
   inventory: (grid: string, force: boolean) => Promise<GridInventory>
+  /** Another grid's nodes, read the same way without taking it for the own grid (`gridModels.gridServingNodes`):
+   *  what this computer serves on the account's other grids. Absent: only the own grid is read. */
+  servingNodes?: (grid: string) => Promise<GridInventory>
+  /** The OS grid this computer claims ([osToken]); a test names one. */
+  os?: () => OsToken | undefined
   /** Told when a start or stop has finished, so the model lists are read again. */
   onChanged?: () => void
   /** Models other apps downloaded here ([scanAppModels]), and the engines that start them. Absent: none. */
@@ -139,7 +176,15 @@ interface Options {
   appEngines?: AppEngineOps
   /** How long a scan is waited for ([APP_SCAN_MS]); a test shortens it. */
   appScanMs?: number
+  /** The processes holding NVIDIA VRAM here ([nvidiaComputeApps]), so the catalog counts what this
+   *  picker's own engine holds as the next model's ([LocalModels.withOwnVram]). Absent: not counted. */
+  gpuProcesses?: () => Promise<GpuProcess[]>
 }
+
+/** A download whose files have not grown in this long has stalled ([LocalModels.perform]): long enough for a
+ *  slow mirror's pauses, short of the 30 minutes a command may run. Looked at every [PULL_WATCH_MS]. */
+const PULL_STALL_MS = 3 * 60_000
+const PULL_WATCH_MS = 10_000
 
 /** One concrete, machine-fitted version per model. Non-chat and unprobed offline
  * catalog rows are never called compatible. Split GGUF files stay one model.
@@ -211,6 +256,22 @@ export function modelBudget(device: Record<string, any>): number | undefined {
   if (usable === undefined) return undefined
   if (device.backend === 'cuda' || total === undefined) return usable
   return Math.min(usable, Math.floor(total * GiB * MODEL_MEMORY_SHARE))
+}
+
+/** What the catalog fits to on [device] and what memory that is ([LocalModelsSnapshot.fitBytes]). */
+export function fitOf(device: Record<string, any>): Pick<LocalModelsSnapshot, 'fitBytes' | 'fitMemory' | 'gpuMemoryBytes'> {
+  const fit = modelBudget(device)
+  const backend = str(device.backend)
+  const fitMemory = backend === 'cuda' ? 'vram' as const : backend === 'metal' ? 'unified' as const : backend ? 'ram' as const : undefined
+  const cards = backend === 'cuda' && Array.isArray(device.gpus) ? device.gpus : []
+  const gpuMemoryBytes = cards.reduce((sum: number, gpu: unknown) => sum + (num(obj(gpu).memory_total_mb) ?? 0), 0) * 1024 ** 2
+  return { ...(fit === undefined ? {} : { fitBytes: fit }), ...(fitMemory ? { fitMemory } : {}), ...(gpuMemoryBytes > 0 ? { gpuMemoryBytes } : {}) }
+}
+
+/** An engine record of a Jev decision model's (`jev:` ids — ggml-org's Kev and Laya, Ollama's tev1),
+ *  from before #1141 removed them: [LocalModels.records] forgets it. */
+export function isJevRecord(record: Pick<AppEngineRecord, 'modelId'>): boolean {
+  return record.modelId.startsWith('jev:')
 }
 
 /** Catalog models that are not for running an agent on: safety classifiers such as gpt-oss-safeguard
@@ -296,6 +357,8 @@ export class LocalModels {
   private readonly processEnv: NodeJS.ProcessEnv
   private readonly home: string
   private readonly run: NonNullable<Options['run']>
+  private readonly pullStallMs: number
+  private readonly pullWatchMs: number
   private readonly request: typeof fetch
   private candidates: Candidate[] = []
   private device: Record<string, any> = {}
@@ -307,21 +370,31 @@ export class LocalModels {
   private cached?: { at: number; grid: string; value: LocalModelsSnapshot }
   /** The models the last read of each grid found running — kept past `cached`, which any save clears. */
   private readonly runningAtLastRead = new Map<string, Set<string>>()
-  private active?: { grid: string; operation: ModelOperation; done: Promise<void> }
+  private active?: { grid: string; operation: ModelOperation; done: Promise<void>; pull: AbortController; cancelled: boolean }
   private receipt?: Receipt
   private receiptScope?: string
   private knownByGrid = new Map<string, Candidate[]>()
   private blockers = new Map<string, string>()
   private appsRead?: { at: number; value: AppModel[] }
   private appsPending?: Promise<AppModel[]>
+  /** Read once: a computer does not change its OS while the daemon runs. */
+  private osRead?: { value: OsToken | undefined }
+  /** The last operation finished, and its grid: a list of another grid (the own one, after a start on the
+   *  community grid) still says how it ended. */
+  private elsewhere?: { grid: string; operation: ModelOperation }
 
   constructor(private readonly options: Options) {
     this.processEnv = options.processEnv ?? process.env
     this.home = dirname(gridCredentialsPath(this.processEnv))
     const rpc = new GridFleetRpc(this.processEnv)
-    this.run = options.run ?? ((args, output, timeout = 30_000) =>
-      rpc.run('local-models', randomUUID(), { args, timeoutMs: timeout, thinking: false }, output, 4 * 1024 * 1024))
+    this.run = options.run ?? ((args, output, timeout = 30_000, signal) => {
+      const id = randomUUID()
+      signal?.addEventListener('abort', () => rpc.cancel('local-models', id), { once: true })
+      return rpc.run('local-models', id, { args, timeoutMs: timeout, thinking: false }, output, 4 * 1024 * 1024)
+    })
     this.request = options.request ?? fetch
+    this.pullStallMs = options.pullStallMs ?? PULL_STALL_MS
+    this.pullWatchMs = options.pullWatchMs ?? PULL_WATCH_MS
   }
 
   private async json(args: string[]): Promise<any> {
@@ -372,7 +445,7 @@ export class LocalModels {
     if (!force && this.catalogAt && Date.now() - this.catalogAt < 5 * 60_000) return
     return this.catalogPending ??= (async () => {
       try {
-        this.device = obj(await this.json(['device-info', '--json']))
+        this.device = await this.withOwnVram(obj(await this.json(['device-info', '--json'])))
         const catalog = obj(await this.catalog(this.device))
         this.candidates = rankForCoding(compatibleModels(catalog).filter(candidate => !NOT_FOR_AGENTS.test(candidate.id)))
         // Prefer an already downloaded fitting quant rather than downloading
@@ -396,30 +469,78 @@ export class LocalModels {
     })().finally(() => { this.catalogPending = undefined })
   }
 
+  /** An NVIDIA card's `usable_bytes` is the VRAM free on it now: less what the model this picker runs
+   *  holds. One local model runs at a time and a start stops the running one first, so that VRAM is the
+   *  next model's too, and it is counted back in. Left out, the catalog was fitted to what was left
+   *  beside our own model (2.9 GB of a 24 GB card running a 27B): it offered nothing to get, and the
+   *  running model fell out of it, so its row came back under its file name (`Qwen3.8-27B-UD-Q4_K_M`)
+   *  and the Use that had started it lost the row and never moved the harness. Grid's engine is known by
+   *  its binary; an app's engine this picker started by its record. Everyone else's VRAM (a desktop, a
+   *  browser, a llama-server of the person's own) stays taken. */
+  private async withOwnVram(device: Record<string, any>): Promise<Record<string, any>> {
+    const usable = num(device.usable_bytes)
+    if (device.backend !== 'cuda' || usable === undefined || !this.options.gpuProcesses) return device
+    const records = await this.records()
+    const engines = new Set([join(this.home, 'bin', 'llama-server'), ...records.map(record => record.binary)])
+    const pids = new Set(records.map(record => record.pid))
+    const ours = (await this.options.gpuProcesses()).filter(p => engines.has(p.name) || pids.has(p.pid)).reduce((sum, p) => sum + p.bytes, 0)
+    if (!ours) return device
+    const cards = fitOf(device).gpuMemoryBytes
+    return { ...device, usable_bytes: cards ? Math.min(usable + ours, cards) : usable + ours }
+  }
+
   private async downloaded(candidate: Candidate): Promise<boolean> {
     if (candidate.appPath) return stat(candidate.appPath).then(s => s.isFile() && s.size === candidate.size, () => false)
+    // A `.part` beside it is a download that did not finish — its projector, say, while its weights did.
+    // Read as downloaded, it could not be got again, and the rest of it was never fetched.
+    if (await unfinishedDownload(join(this.home, 'models'), candidate.file)) return false
     const sizes = await Promise.all(candidate.files.map(file => stat(join(this.home, 'models', file)).then(s => s.isFile() ? s.size : 0).catch(() => 0)))
     return sizes.every(size => size > 0) && sizes.reduce((sum, size) => sum + size, 0) === candidate.size
   }
 
+  /** The run records whose process is gone ([Owned.dead]), left: grid's leave of a dead engine tears its
+   *  identity down, so the join a start makes next is a fresh one, not a union respawned with a model
+   *  nobody asked for. Best effort — the start goes on either way, the record read as nothing. */
+  private async clearDead(grid: string): Promise<void> {
+    for (const dead of (await this.owned(grid)).filter(instance => instance.dead)) {
+      await this.run(['--remote', 'leave', grid, '--engine', dead.selector], undefined, 60_000)
+    }
+  }
+
   /** Grid's non-secret run records distinguish locally owned --serve processes
    * from external endpoints. Stop delegates identity checks and teardown to Grid. */
-  private async owned(grid: string): Promise<Owned[]> {
+  private async owned(grid: string, grids?: Record<string, any>[]): Promise<Owned[]> {
     this.blockers.delete(grid)
     if (!validArg(grid)) return []
-    const grids = rows(await this.json(['--remote', 'ls', '--json']))
+    grids ??= rows(await this.json(['--remote', 'ls', '--json']))
     const gridId = str(grids.find(g => g.grid === grid)?.id)
-    if (!gridId || basename(gridId) !== gridId) return []
+    const { owned, blocker } = await this.engineRecords(gridId)
+    if (blocker) this.blockers.set(grid, blocker)
+    return owned
+  }
+
+  /** The engines this computer runs on the grid [gridId] (`grid ls`'s `id`), from Grid's run records,
+   * and why another local model cannot start beside them (the last record's reason). */
+  private async engineRecords(gridId: string): Promise<{ owned: Owned[]; blocker?: string }> {
+    if (!gridId || basename(gridId) !== gridId) return { owned: [] }
     const folder = join(this.home, 'run', 'engines', gridId)
     const names = await readdir(folder).catch(() => [])
     const result: Owned[] = []
+    let blocker: string | undefined
     for (const name of names.filter(n => n.endsWith('.json'))) {
       let record: Record<string, any>
       try { record = obj(JSON.parse(await readFile(join(folder, name), 'utf8'))) } catch { continue }
       const heartbeat = await stat(join(folder, name.replace(/\.json$/, '.heartbeat'))).catch(() => null)
       const live = heartbeat !== null && Date.now() - heartbeat.mtimeMs < 90_000
       const specs = rows(record.engines)
-      if (specs.length || record.media) this.blockers.set(grid, 'Open Model Manager to add a model alongside those already running.')
+      // A record whose process is gone serves nothing: the computer restarted, or the engine died, and grid
+      // keeps the record (run/engines survives a reboot) until something leaves it. Read as an engine, it
+      // held its model forever — not startable ("It cannot start now. Try again in a moment.", after an NVIDIA
+      // machine restarted), and every other model behind "Stop … first". A start clears it ([clearDead]).
+      const pid = recordPid(record)
+      const pidAlive = pid !== null && processExists(pid)
+      const dead = pid !== null && !pidAlive
+      if ((specs.length || record.media) && !dead) blocker = 'Open Model Manager to add a model alongside those already running.'
       for (const spec of specs) {
         if (spec.endpoint_url || spec.api_kind || !Array.isArray(spec.models) || spec.models.length !== 1) continue
         const file = str(spec.models[0])
@@ -430,13 +551,12 @@ export class LocalModels {
         const named = 'advertise_as' in spec ? spec.advertise_as : specs.length === 1 ? record.advertise_as : undefined
         const advertised = Array.isArray(named) ? named.filter((v: unknown) => typeof v === 'string' && v.length > 0) : []
         const aliases: string[] = advertised.length ? advertised : [file]
-        const pid = recordPid(record)
         result.push({ file: basename(file), selector: file, aliases, nodeId: str(record.node_id), name: str(record.meta_name), live,
-          pidAlive: pid !== null && processExists(pid), siblings: specs.length + (record.media ? 1 : 0) })
-        this.blockers.set(grid, `Stop ${cleanName(aliases[0])} first to start another local model.`)
+          pidAlive, dead, siblings: specs.length + (record.media ? 1 : 0) })
+        if (!dead) blocker = `Stop ${cleanName(aliases[0])} first to start another local model.`
       }
     }
-    return result
+    return { owned: result, blocker }
   }
 
   /** Keep models imported from an existing Grid setup after Stop removes its
@@ -627,6 +747,30 @@ export class LocalModels {
 
   private get appRecordsFile(): string { return join(this.options.stateDir, 'app-engines.json') }
 
+  /** The engines this daemon started — less any left by the Jev decision models Harness no longer has
+   *  (#1141). Their records name models no list knows, and as engine records each one blocked every
+   *  chat model's start ("Stop laya-english first to start another local model."), its engine long
+   *  gone or not, and listed itself as a model to use that cannot chat. Each is forgotten the first
+   *  time it is read, its engine stopped and taken off its grid first should it still run. */
+  private async records(): Promise<AppEngineRecord[]> {
+    const all = await readAppRecords(this.appRecordsFile)
+    const left = all.filter(isJevRecord)
+    if (!left.length) return all
+    const kept = all.filter(record => !isJevRecord(record))
+    await writeAppRecords(this.appRecordsFile, kept)
+    for (const record of left) void this.retire(record)
+    return kept
+  }
+
+  /** A Jev engine still running: stopped, and off its grid (best effort — its record is already gone). */
+  private async retire(record: AppEngineRecord): Promise<void> {
+    try {
+      if (!await this.options.appEngines?.alive(record)) return
+      await this.options.appEngines?.stop(record)
+      await this.run(['--remote', 'leave', record.grid, '--engine', record.alias], undefined, 60_000)
+    } catch { /* forgotten either way */ }
+  }
+
   async list(grid: string | null, force = false): Promise<LocalModelsSnapshot> {
     if (!grid) return { models: [], notice: 'Sign in to find models for this computer.', observedAt: new Date().toISOString(), busy: false }
     if (!force && this.cached?.grid === grid && Date.now() - this.cached.at < 2500) return this.cached.value
@@ -641,9 +785,15 @@ export class LocalModels {
   private async readList(grid: string, force: boolean): Promise<LocalModelsSnapshot> {
     await Promise.all([this.loadCatalog(force), this.readReceipt(grid)])
     let owned: Owned[] = [], nodes: Record<string, any>[] = [], inventoryError: string | undefined, asleep = false
+    // `grid ls` once: the own grid's records, and every other grid this computer may serve on.
+    let grids: Record<string, any>[] = []
+    const ownedHere = async () => {
+      grids = validArg(grid) ? rows(await this.json(['--remote', 'ls', '--json'])) : []
+      return this.owned(grid, grids)
+    }
     try {
       let inventory: GridInventory
-      [owned, inventory] = await Promise.all([this.owned(grid), this.options.inventory(grid, force)])
+      [owned, inventory] = await Promise.all([ownedHere(), this.options.inventory(grid, force)])
       // A grid that is down — its owner status says stopped or asleep (DOWN) — runs nothing: an answer,
       // not a gap, so Start stays enabled (and brings it back up). Asleep says so even to a member, in
       // the grid's own answer. Only a read that failed some other way is "could not be checked".
@@ -651,9 +801,15 @@ export class LocalModels {
       asleep = inventory.state === 'asleep' || inventory.status === 'asleep'
       nodes = inventory.state === 'awake' ? rows(inventory.nodes) : []
     } catch { inventoryError = 'Running models could not be checked. Try again.' }
-    const operation = this.active?.grid === grid ? this.active.operation : this.receipt?.grid === grid ? this.receipt.operation : undefined
+    // (A dead engine's record holds nothing: its model reads as downloaded, and starts.)
+    owned = owned.filter(instance => !instance.dead)
+    // The operation under way, on whichever grid (a model started on the community grid shows its progress
+    // here too), else the last one finished when that was on another grid — the latest there is — else
+    // this grid's receipt.
+    const elsewhere = this.elsewhere?.grid !== grid ? this.elsewhere?.operation : undefined
+    const operation = this.active?.operation ?? elsewhere ?? (this.receipt?.grid === grid ? this.receipt.operation : undefined)
     const apps = await this.apps(force)
-    const records = (await readAppRecords(this.appRecordsFile)).filter(record => record.grid === grid)
+    const records = (await this.records()).filter(record => record.grid === grid)
     // An engine this daemon started is read from its record, whatever a later scan makes of the model: a
     // scan that missed the person's llama-server (busy serving, it answered `--version` late) once listed
     // a running engine as Grid's, and Stop then had nothing to stop.
@@ -671,18 +827,16 @@ export class LocalModels {
     const owners = new Map(owned.map(instance => [instance.file,
       choices.find((candidate, index) => candidate.file === instance.file && downloaded[index])
         ?? choices.find(candidate => candidate.file === instance.file)]))
-    const servingNode = (instance?: Owned): Record<string, any> | undefined => {
-      const matches = instance?.live ? nodes.filter(n => n.online === true &&
-        (str(n.node_id || n.id) ? str(n.node_id || n.id) === instance.nodeId :
-          !!instance.name && str(n.name) === instance.name) &&
-        instance.aliases.every(alias => (Array.isArray(n.models) ? n.models : []).some((m: unknown) =>
-          modelKey(str(typeof m === 'string' ? m : obj(m).model)) === modelKey(alias)))) : []
-      return matches.length === 1 ? matches[0] : undefined
-    }
+    const servingNode = (instance?: Owned) => nodeServing(nodes, instance)
     // A parked engine: its grid sleeps, so the grid lists nothing, but the process that serves it is alive
     // here and rejoins the moment the grid wakes. Liveness is the record's pid — never the heartbeat
     // sidecar, which goes stale while a healthy provider is parked.
     const parked = (instance?: Owned): boolean => asleep && !!instance?.pidAlive
+    // Every grid each file is served on here, given to the one row its engine is attributed to (as [owners]).
+    const served = await this.servedOn(grid, grids, inventoryError ? undefined : { owned, nodes, asleep })
+    const fileOwner = (file: string) => choices.find((candidate, index) => candidate.file === file && downloaded[index])
+      ?? choices.find(candidate => candidate.file === file)
+    const servedOn = (file: string): Partial<LocalModel> => served.has(file) ? { servedOn: served.get(file) } : {}
     const models = choices.map((candidate, index): LocalModel => {
       const instance = owned.find(o => owners.get(o.file) === candidate)
       const node = servingNode(instance)
@@ -693,6 +847,7 @@ export class LocalModels {
       const single = Array.isArray(node?.models) && node.models.length === 1
       return { id: candidate.id, name: candidate.name, state: running ? 'running' : available ? 'downloaded' : 'available',
         sizeBytes: candidate.size, quant: candidate.quant, recommended: index === 0,
+        ...(instance ? { servedAs: instance.aliases.map(displayModelName) } : {}),
         ...(candidate.context ? { contextWindow: candidate.context } : {}),
         ...(candidate.estTokS ? { estTokS: candidate.estTokS } : {}),
         ...(candidate.paramsB ? { paramsB: candidate.paramsB } : {}),
@@ -704,14 +859,15 @@ export class LocalModels {
         operation: operation?.modelId === candidate.id ? operation : undefined,
         ...(!node && parked(instance) ? { gridAsleep: true } : {}),
         // Grid serves it — its own download, or another app's file linked in because that app is not here.
-        ...(running || available ? { app: GRID_LABEL } : {}) }
+        ...(running || available ? { app: GRID_LABEL } : {}),
+        ...(fileOwner(candidate.file) === candidate ? servedOn(candidate.file) : {}) }
     })
     for (const instance of owned.filter(o => !choices.some(c => c.file === o.file))) {
       const serving = !!servingNode(instance)
-      models.push({ id: `local:${instance.file}`, name: cleanName(instance.aliases[0]),
+      models.push({ id: `local:${instance.file}`, name: cleanName(instance.aliases[0]), servedAs: instance.aliases.map(displayModelName),
         state: serving || parked(instance) ? 'running' : 'available', canStart: false, canStop: !inventoryError,
         operation: operation?.modelId === `local:${instance.file}` ? operation : undefined,
-        ...(!serving && parked(instance) ? { gridAsleep: true } : {}), app: GRID_LABEL })
+        ...(!serving && parked(instance) ? { gridAsleep: true } : {}), app: GRID_LABEL, ...servedOn(instance.file) })
     }
     // Models in their own apps, started there: running when that engine is up and the grid lists it (or
     // the grid sleeps — parked, as above). A record whose model has since gone keeps a row to stop it by.
@@ -721,7 +877,7 @@ export class LocalModels {
       const alive = record && this.options.appEngines ? await this.options.appEngines.alive(record) : false
       const listed = !!record && listedHere(record.alias)
       const running = alive && (listed || asleep)
-      return { id, name, app: APP_LABEL[app], state: running ? 'running' : 'downloaded', ...extra,
+      return { id, name, app: APP_LABEL[app], state: running ? 'running' : 'downloaded', ...extra, ...(record ? { servedAs: [record.alias] } : {}),
         canStart: !inventoryError && !record, canStop: !inventoryError && !!record,
         operation: operation?.modelId === id ? operation : undefined, ...(running && !listed ? { gridAsleep: true } : {}) }
     }
@@ -735,12 +891,61 @@ export class LocalModels {
     const freeDiskBytes = await statfs(join(this.home, 'models')).catch(() => statfs(this.home))
       .then(disk => disk.bavail * disk.bsize, () => undefined)
     const value: LocalModelsSnapshot = { models: withoutCopiesOfOwned(models), memoryBytes: num(obj(this.device.memory).total_gb) === undefined ? undefined : this.device.memory.total_gb * GiB,
+      ...fitOf(this.device),
       hardware: str(obj(this.device.machine).model || obj(this.device.cpu).brand), notice: inventoryError || this.catalogError,
       observedAt: new Date().toISOString(), busy: !!this.active, supportsDownload: true,
-      ...(freeDiskBytes === undefined ? {} : { freeDiskBytes }) }
+      ...(freeDiskBytes === undefined ? {} : { freeDiskBytes }), ...this.osField(), ...communityOf(grids) }
     this.cached = { grid, at: Date.now(), value }
     this.runningAtLastRead.set(grid, new Set(models.filter(model => model.state === 'running').map(model => model.id)))
     return value
+  }
+
+  /** Every grid this computer serves each file on (by file), with what its engine answered there: the own
+   * grid [grid] from what [readList] already read ([own]; absent when that read failed), every other grid
+   * in `grid ls` with a run record here from [Options.servingNodes]. A node that is not listed while its
+   * grid sleeps is named with no figures; a record with no node and no sleep is not serving. On another
+   * grid, an engine whose process is alive is named with no figures too, its grid's read or not: before
+   * that grid lists it, or while its read fails, it still serves there — and a second engine of the same
+   * model must not start on the own grid for want of seeing it (review, 2026-10-13). */
+  private async servedOn(grid: string, grids: Record<string, any>[],
+    own: { owned: Owned[]; nodes: Record<string, any>[]; asleep: boolean } | undefined): Promise<Map<string, ServedOn[]>> {
+    const served = new Map<string, ServedOn[]>()
+    const add = (name: string, owned: Owned[], nodes: Record<string, any>[], asleep: boolean, elsewhere = false) => {
+      for (const instance of owned) {
+        const node = nodeServing(nodes, instance)
+        if (!node && !((asleep || elsewhere) && instance.pidAlive)) continue
+        const answered = obj(node?.answered)
+        const perModel = rows(answered.by_model).find(a => instance.aliases.some(alias => modelKey(alias) === modelKey(str(a.model))))
+        const figures = node ? { requests: num(perModel?.requests), tokensOut: num(perModel?.tokens_out), tokensIn: num(perModel?.tokens_in),
+          tokensCached: num(perModel?.tokens_cached), windowSeconds: num(answered.window_seconds) } : {}
+        const entry: ServedOn = { grid: name, servedAs: instance.aliases.map(displayModelName),
+          ...Object.fromEntries(Object.entries(figures).filter(([, v]) => v !== undefined)) }
+        served.set(instance.file, [...(served.get(instance.file) ?? []), entry])
+      }
+    }
+    if (own) add(grid, own.owned, own.nodes, own.asleep)
+    const read = this.options.servingNodes
+    if (!read) return served
+    for (const row of grids) {
+      const name = str(row.grid)
+      if (!validArg(name) || name === grid) continue
+      const { owned } = await this.engineRecords(str(row.id))
+      if (!owned.length) continue
+      const inventory = await read(name).catch(() => undefined)
+      add(name, owned, inventory?.state === 'awake' ? rows(inventory.nodes) : [], inventory?.state === 'asleep' || inventory?.status === 'asleep', true)
+    }
+    return served
+  }
+
+  private osField(): { os?: OsToken } {
+    this.osRead ??= { value: (this.options.os ?? osToken)() }
+    return this.osRead.value ? { os: this.osRead.value } : {}
+  }
+
+  /** The community grid of this computer's OS that the account is in (`grid ls`), for a start or stop
+   *  with `community`; null in none. */
+  async communityGrid(): Promise<string | null> {
+    return communityOf(rows(await this.json(['--remote', 'ls', '--json']))).osGrid ?? null
   }
 
   /** What `grid info` says of [grid]: `running`, `stopped`, `asleep`. */
@@ -752,18 +957,27 @@ export class LocalModels {
    * A different model waits: starts/stops must not race on the machine's budget. */
   async act(grid: string | null, modelId: unknown, action: 'download' | 'start' | 'stop'): Promise<{ operation?: ModelOperation; error?: string }> {
     if (!grid || typeof modelId !== 'string') return { error: 'The model is unavailable. Refresh and try again.' }
+    // Stop on a model that is downloading cancels the download, and what it downloaded goes ([perform]).
+    // Without it, a download that hung (its connection stalled after the disk filled) held the view on
+    // "Downloading 36%" with nothing to press but Wait.
+    const running = this.active
+    if (action === 'stop' && running?.grid === grid && running.operation.modelId === modelId && running.operation.stage === 'downloading') {
+      running.cancelled = true
+      running.pull.abort()
+      return { operation: running.operation }
+    }
     if (this.active) return this.active.grid === grid && this.active.operation.modelId === modelId && this.active.operation.action === action
       ? { operation: this.active.operation } : { error: 'Wait for the current model operation to finish.' }
     const operation: ModelOperation = { id: randomUUID(), modelId, action, stage: action === 'stop' ? 'stopping' : 'checking', phase: 'running', updatedAt: new Date().toISOString() }
     // Reserve before any await; independent RPCs may arrive on separate connections.
-    const active = { grid, operation, done: Promise.resolve() }
+    const active = { grid, operation, done: Promise.resolve(), pull: new AbortController(), cancelled: false }
     this.active = active
     try { await this.save(grid, operation) } catch { this.active = undefined; return { error: 'Setup could not be saved. Try again.' } }
     active.done = this.perform(grid, operation).catch(async error => {
       operation.phase = 'failed'
       operation.error = error instanceof ModelError ? error.message : 'The model could not finish. Start again to retry.'
       await this.save(grid, operation).catch(() => {})
-    }).finally(() => { this.active = undefined; this.cached = undefined; this.options.onChanged?.() })
+    }).finally(() => { this.active = undefined; this.elsewhere = { grid, operation }; this.cached = undefined; this.options.onChanged?.() })
     return { operation }
   }
 
@@ -778,14 +992,15 @@ export class LocalModels {
     const change = async (stage: ModelOperation['stage']) => {
       operation.stage = stage; delete operation.progress; await this.save(grid, operation)
     }
-    const must = async (args: string[], message: string, output?: (chunk: string) => void) => {
-      if (!(await this.run(args, output, 30 * 60_000)).ok) throw new ModelError(message)
+    const must = async (args: string[], message: string, output?: (chunk: string) => void, signal?: AbortSignal) => {
+      if (!(await this.run(args, output, 30 * 60_000, signal)).ok) throw new ModelError(message)
     }
     if (operation.action !== 'stop') await this.loadCatalog()
     if (operation.action === 'start') {
       // Leaving the last engine removes Grid's local registration. Restore the
       // account's existing grids before resolving ownership or joining again.
       await must(['--remote', 'sync'], 'Models could not be checked. Try again.')
+      await this.clearDead(grid)
     }
     // The last scan has every model a person could have clicked; a model it lacks waits for a new one.
     let apps = operation.modelId.startsWith('app:') ? await this.apps() : []
@@ -793,13 +1008,16 @@ export class LocalModels {
     const app = apps.find(a => a.id === operation.modelId)
     // An engine this daemon started is stopped the way it was started, whatever its id: a record left by a kind of
     // model the picker no longer offers keeps a row (and holds the next start), so its Stop must take it down.
-    const started = (await readAppRecords(this.appRecordsFile)).some(r => r.modelId === operation.modelId && r.grid === grid)
+    const started = (await this.records()).some(r => r.modelId === operation.modelId && r.grid === grid)
     if (started || (operation.modelId.startsWith('app:') && app?.engine !== 'grid')) {
       return this.performApp(grid, operation, app?.engine === 'grid' ? undefined : app)
     }
-    const owned = await this.owned(grid)
+    const owned = (await this.owned(grid)).filter(instance => !instance.dead)
     const appServed = this.appCandidates(apps)
-    const candidate = [...this.candidates, ...await this.known(grid, owned, appServed), ...appServed].find(c => c.id === operation.modelId)
+    // A model this computer knows from another grid's list too: a file imported on the own grid starts on the
+    // community grid by the same id (each grid keeps its own `known`).
+    const elsewhere = [...this.knownByGrid].filter(([other]) => other !== grid).flatMap(([, known]) => known)
+    const candidate = [...this.candidates, ...await this.known(grid, owned, appServed), ...appServed, ...elsewhere].find(c => c.id === operation.modelId)
     if (candidate?.appPath && operation.action === 'start') await this.linkApp(candidate)
     const instance = owned.find(o => candidate ? o.file === candidate.file : operation.modelId === `local:${o.file}`)
     if (operation.action === 'stop') {
@@ -834,14 +1052,36 @@ export class LocalModels {
           if (disk.bavail * disk.bsize < candidate.size + GiB) throw new ModelError('Free up disk space, then start again.')
           await change('downloading')
           let last = 0, progressWrites = Promise.resolve()
-          await must(['pull', candidate.pull], 'The download stopped. Start again to resume.', chunk => {
-            const matches = [...chunk.matchAll(/(\d+(?:\.\d+)?)\s*%/g)]
-            const percent = matches.length ? Number(matches.at(-1)![1]) : NaN
-            if (Number.isFinite(percent) && percent >= 0 && percent <= 100 && Date.now() - last > 500) {
-              last = Date.now(); operation.progress = percent / 100
-              progressWrites = progressWrites.then(() => this.save(grid, operation)).catch(() => {})
+          // The pull is watched by what it writes: grid reads its download with no read timeout, so a
+          // connection that stops sending holds it forever — after a full disk on an NVIDIA machine, 30
+          // minutes at 36% with nothing to press. Files that stop growing for [PULL_STALL_MS] end it.
+          const active = this.active!, pull = active.pull
+          let size = -1, grewAt = Date.now(), stalled = false
+          const watch = setInterval(() => void downloadedBytes(join(this.home, 'models'), candidate.file).then(bytes => {
+            if (bytes !== size) { size = bytes; grewAt = Date.now() } else if (Date.now() - grewAt >= this.pullStallMs) { stalled = true; pull.abort() }
+          }), this.pullWatchMs)
+          try {
+            await must(['pull', candidate.pull], 'The download stopped. Start again to resume.', chunk => {
+              const matches = [...chunk.matchAll(/(\d+(?:\.\d+)?)\s*%/g)]
+              const percent = matches.length ? Number(matches.at(-1)![1]) : NaN
+              if (Number.isFinite(percent) && percent >= 0 && percent <= 100 && Date.now() - last > 500) {
+                last = Date.now(); operation.progress = percent / 100
+                progressWrites = progressWrites.then(() => this.save(grid, operation)).catch(() => {})
+              }
+            }, pull.signal)
+          } catch (error) {
+            if (active.cancelled) {
+              await progressWrites
+              // (The model was not on this computer before: a download starts only for one [downloaded] says
+              // is not, so what goes is only what this download wrote.)
+              await removeDownload(join(this.home, 'models'), candidate.file)
+              // A cancel is a stop that finished, not a failure: the row goes back to Get.
+              operation.action = 'stop'; operation.stage = 'stopping'; operation.phase = 'done'; delete operation.progress
+              await this.save(grid, operation)
+              return
             }
-          })
+            throw stalled ? new ModelError('The download stalled. Start again to resume.') : error
+          } finally { clearInterval(watch) }
           await progressWrites
           if (!await this.downloaded(candidate)) throw new ModelError('The download is incomplete. Start again to resume.')
         }
@@ -943,7 +1183,7 @@ export class LocalModels {
    *  address, answered through the grid, and held to the 64K floor by what the engine says it loaded. */
   private async performApp(grid: string, operation: ModelOperation, app: AppModel | undefined): Promise<void> {
     const ops = this.options.appEngines
-    const records = await readAppRecords(this.appRecordsFile)
+    const records = await this.records()
     const record = records.find(r => r.modelId === operation.modelId && r.grid === grid)
     const without = (gone: AppEngineRecord) => writeAppRecords(this.appRecordsFile, records.filter(r => r !== gone))
     const takeDown = async (started: AppEngineRecord) => {
@@ -976,7 +1216,7 @@ export class LocalModels {
       await writeAppRecords(this.appRecordsFile, [...records.filter(r => !(r.modelId === app.id && r.grid === grid)), started])
       const failed = async (message: string): Promise<never> => {
         await takeDown(started)
-        await writeAppRecords(this.appRecordsFile, (await readAppRecords(this.appRecordsFile)).filter(r => !(r.modelId === app.id && r.grid === grid)))
+        await writeAppRecords(this.appRecordsFile, (await this.records()).filter(r => !(r.modelId === app.id && r.grid === grid)))
         throw new ModelError(message)
       }
       const named = this.options.machineName?.()?.trim()
@@ -1002,15 +1242,22 @@ export class LocalModels {
     const { baseUrl, apiKey } = readEnvExports(info.stdout)
     if (!info.ok || !baseUrl || !apiKey) throw new ModelError('The model is starting, but could not be checked. Try again shortly.')
     const deadline = Date.now() + 180_000
+    let maxTokens = 8
     do {
       try {
         const response = await this.request(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
           method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with the single word: ok' }], max_tokens: 8 }),
-          signal: AbortSignal.timeout(30_000), redirect: 'error',
+          body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with the single word: ok' }], max_tokens: maxTokens }),
+          signal: AbortSignal.timeout(maxTokens === THINKING_TEST_TOKENS ? 90_000 : 30_000), redirect: 'error',
         })
         const body = response.ok ? obj(await response.json()) : {}
-        if (/^\s*ok[.!]?\s*$/i.test(str(obj(rows(body.choices)[0]?.message).content))) return
+        const message = obj(rows(body.choices)[0]?.message)
+        if (/^\s*ok[.!]?\s*$/i.test(str(message.content))) return
+        // A model that thinks first spends a reply this short thinking: Muse-Glimmer-30B (which thinks
+        // whatever --reasoning-budget says) put all 8 tokens in its reasoning, its content stayed empty,
+        // and every start of it failed after 3 minutes of "Testing" while it answered each try. Asked
+        // again with room to finish thinking, it says ok. A real reply is still what passes.
+        if (!str(message.content).trim() && str(message.reasoning_content || message.reasoning).trim()) maxTokens = THINKING_TEST_TOKENS
       } catch { /* registration and first warmup take time; status remains verifying */ }
       await new Promise(resolve => setTimeout(resolve, 1500))
     } while (Date.now() < deadline)
@@ -1019,8 +1266,30 @@ export class LocalModels {
 }
 class ModelError extends Error {}
 
+/** The reply a model that thinks first is given to finish thinking and answer the start's test in
+ *  ([LocalModels.verify]): Muse-Glimmer-30B needed under 200. */
+const THINKING_TEST_TOKENS = 512
+
 /** More names than any one engine advertises: a record past it is cut, never trusted to be small. */
 const MAX_RECORD_IDS = 64
+
+/** The `os-community` grid among [grids] (`grid ls`): the one grid of this computer's OS the account is in
+ * (grid admits a machine to its own OS's grid alone, ADR 0039). */
+function communityOf(grids: Record<string, any>[]): { osGrid?: string } {
+  const name = str(grids.find(g => g.type === 'os-community' && validArg(str(g.grid)))?.grid)
+  return name ? { osGrid: name } : {}
+}
+
+/** The one online node in [nodes] that is [instance]'s engine — its record's node id (or, with no ids,
+ * its name) and every name it serves under; none while its heartbeat is stale or two nodes would match. */
+function nodeServing(nodes: Record<string, any>[], instance?: Owned): Record<string, any> | undefined {
+  const matches = instance?.live ? nodes.filter(n => n.online === true &&
+    (str(n.node_id || n.id) ? str(n.node_id || n.id) === instance.nodeId :
+      !!instance.name && str(n.name) === instance.name) &&
+    instance.aliases.every(alias => (Array.isArray(n.models) ? n.models : []).some((m: unknown) =>
+      modelKey(str(typeof m === 'string' ? m : obj(m).model)) === modelKey(alias)))) : []
+  return matches.length === 1 ? matches[0] : undefined
+}
 
 /** A run record's pid while a process holds it; null while a join is mid-spawn (`grid join` writes 0). */
 function recordPid(record: Record<string, any>): number | null {

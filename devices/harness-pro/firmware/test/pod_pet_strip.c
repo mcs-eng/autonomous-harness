@@ -1,7 +1,7 @@
 // Dev helper (not run by run.sh): rasters each scene of claude, codex and muse at 4 clock points to a PPM.
 // Build and run from devices/harness-pro/firmware, with fonts from scripts/gen_fonts.py --out $g:
 //   h=main/display; p=main/pod; g=/tmp/pro_fonts.c
-//   cc -std=c11 -O1 -DHT_FACE_PX=720 -I $h -I main -I test/host_stubs \
+//   cc -std=c11 -O1 -DHT_FACE_PX=720 -I $h -I main \
 //      -o /tmp/claude-503/pod_pet_strip test/pod_pet_strip.c $p/{engine_logos,pets,pod_draw,pod_pet}.c \
 //      $h/{pro_canvas,terminal}.c $g
 //   /tmp/claude-503/pod_pet_strip /tmp/claude-503/pod_pets.ppm
@@ -24,7 +24,7 @@ int main(int argc, char **argv)
         for (int k = 0; k < 6; k++)
             for (int c = 0; c < COLS; c++) {
                 ht_scene_t s; ht_scene_clear(&s, 0);
-                pod_pet_draw(&s, c * S, (e * 6 + k) * S, S, eng[e], (pod_scene_t)k, at[c], 0);
+                pod_pet_draw(&s, c * S, (e * 6 + k) * S, S, eng[e], (pod_scene_t)k, at[c], 0, 8);
                 ht_rect_t clip = {c * S, (e * 6 + k) * S, S, S};
                 uint16_t *tile = calloc((size_t)S * S, 2);
                 for (int i = 0; i < s.count; i++) {

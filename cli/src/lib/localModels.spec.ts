@@ -3,9 +3,10 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, statfs, readlin
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { rmSync, writeFileSync } from 'node:fs'
+import { existsSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { baseModel, compatibleModels, contextLadder, LocalModels, modelBudget, modelFamily, rankForCoding, readRunRecords, type GridInventory } from './localModels.js'
+import type { GpuProcess } from './gpuProcesses.js'
+import { baseModel, compatibleModels, contextLadder, fitOf, LocalModels, modelBudget, modelFamily, rankForCoding, readRunRecords, type GridInventory } from './localModels.js'
 import { GridFleetRpc, type GridFleetResult } from './gridFleetRpc.js'
 import { AppStartError, type AppEngineOps, type AppEngineRecord, type AppModel } from './appModels.js'
 import { encryptDownFrame, encryptRpcResult } from './e2ee/applicationFrames.js'
@@ -129,6 +130,7 @@ describe('local model discovery and lifecycle', () => {
     const snapshot = await service.list('home')
     expect(snapshot.models).toMatchObject([{ name: 'Small', state: 'available', sizeBytes: 64, canStart: true, canStop: false }])
     expect(snapshot.memoryBytes).toBe(64 * 1024 ** 3)
+    expect(snapshot).toMatchObject({ fitBytes: 32 * 1024 ** 3, fitMemory: 'unified' })
     expect(calls.some(args => ['pull', 'join', 'leave', 'install'].some(a => args.includes(a)))).toBe(false)
     expect(JSON.stringify(snapshot)).not.toContain('test-only-token')
   })
@@ -148,11 +150,14 @@ describe('local model discovery and lifecycle', () => {
   })
 
   it('downloads, loads and verifies without another user step', async () => {
+    // Not running: nothing serves it, so no name a harness could be on.
+    expect((await service.list('home')).models[0]).not.toHaveProperty('servedAs')
     const ack = await service.act('home', 'org/Small-GGUF', 'start')
     expect(ack.operation?.phase).toBe('running')
     await service.settled()
     const snapshot = await service.list('home')
-    expect(snapshot.models[0]).toMatchObject({ state: 'running', canStop: true,
+    // Shown as the catalog's `Small`, served under its file's name — the one the grid lists, and a harness on it says.
+    expect(snapshot.models[0]).toMatchObject({ name: 'Small', state: 'running', canStop: true, servedAs: ['Small-Q4'],
       tokensPerSecond: 17.6, requests: 4, windowSeconds: 3600, operation: { phase: 'done', stage: 'verifying' } })
     expect(snapshot.models[0]).not.toHaveProperty('memoryBytes')
     expect(calls.find(args => args.includes('join'))).toEqual(['--remote', 'join', 'home', '--serve', 'Small-Q4.gguf', '--max-concurrency', '1', '--parallel', '1', '--ctx-size', '131072', '--endpoint-port', expect.stringMatching(/^\d+$/), '--reasoning-budget', '0'])
@@ -321,7 +326,7 @@ describe('local model discovery and lifecycle', () => {
       engines: [{ endpoint_url: null, models: ['Small-Q4.gguf'] }], advertise_as: ['Small-Q4.gguf'] }))
     await writeFile(join(records, 'remote.heartbeat'), '')
     const first = await service.list('home')
-    expect(first.models[0]).toMatchObject({ id: 'local:Small-Q4.gguf', state: 'running', canStop: true })
+    expect(first.models[0]).toMatchObject({ id: 'local:Small-Q4.gguf', state: 'running', canStop: true, servedAs: ['Small-Q4'] })
     await service.act('home', first.models[0].id, 'stop'); await service.settled()
     const fresh = modelFixture({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch , inventory })
     expect((await fresh.list('home')).models[0]).toMatchObject({ state: 'downloaded', canStart: true })
@@ -593,6 +598,15 @@ describe('local model discovery and lifecycle', () => {
   it("gives the catalog all of an NVIDIA card's free VRAM, whatever the system RAM", () => {
     // A 24 GB card in a 32 GB PC: VRAM is not system RAM, and nothing else is waiting for it.
     expect(modelBudget({ backend: 'cuda', usable_bytes: 23 * 1024 ** 3, memory: { total_gb: 32 } })).toBe(23 * 1024 ** 3)
+    // What the apps are told with it: an NVIDIA card's free VRAM and all its VRAM, not the PC's RAM.
+    expect(fitOf({ backend: 'cuda', usable_bytes: 22 * 1024 ** 3, memory: { total_gb: 64 }, gpus: [{ backend: 'cuda', memory_total_mb: 24576 }] }))
+      .toEqual({ fitBytes: 22 * 1024 ** 3, fitMemory: 'vram', gpuMemoryBytes: 24 * 1024 ** 3 })
+    expect(fitOf({ backend: 'metal', usable_bytes: 54 * 1024 ** 3, memory: { total_gb: 64 }, gpus: [{ backend: 'metal', memory_total_mb: 65536 }] }))
+      .toEqual({ fitBytes: 32 * 1024 ** 3, fitMemory: 'unified' })
+    expect(fitOf({ backend: 'cpu', usable_bytes: 20 * 1024 ** 3, memory: { total_gb: 32 } })).toEqual({ fitBytes: 16 * 1024 ** 3, fitMemory: 'ram' })
+    expect(fitOf({})).toEqual({})
+    // A card that names no memory adds none, and none at all is no GPU figure.
+    expect(fitOf({ backend: 'cuda', usable_bytes: 7 * 1024 ** 3, gpus: [{ backend: 'cuda' }] })).toEqual({ fitBytes: 7 * 1024 ** 3, fitMemory: 'vram' })
     // Two 24 GB cards in a 64 GB PC.
     expect(modelBudget({ backend: 'cuda', usable_bytes: 46 * 1024 ** 3, memory: { total_gb: 64 } })).toBe(46 * 1024 ** 3)
   })
@@ -849,6 +863,21 @@ describe('local model discovery and lifecycle', () => {
     expect(request.mock.calls.some(([url]) => String(url).includes(RELAY_CHAT))).toBe(false)
   })
 
+  it('gives a model that thinks first room to finish, and starts it on its real reply', async () => {
+    // As Muse-Glimmer-30B: 8 tokens are all thinking, its content empty; with room it answers ok.
+    const original = request.getMockImplementation()!
+    const asked: number[] = []
+    request.mockImplementation(async (url, init) => {
+      if (!String(url).includes(RELAY_CHAT)) return original(url, init)
+      const tokens = JSON.parse(String(init?.body)).max_tokens as number
+      asked.push(tokens)
+      return response({ choices: [{ message: tokens < 512 ? { content: '', reasoning_content: 'Reply with the single word' } : { content: 'ok', reasoning_content: 'Probably just ok.' } }] })
+    })
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect((await service.list('home')).models[0].operation).toMatchObject({ action: 'start', phase: 'done' })
+    expect(asked).toEqual([8, 512])
+  })
+
   it.each(['reasoning only', 'http error', 'network error'])('requires a real test reply and bounds retries for %s', async scenario => {
     const original = request.getMockImplementation()!
     let attempted!: () => void
@@ -944,6 +973,41 @@ describe('local model discovery and lifecycle', () => {
     // Half of its 64 GB, not the 54 GB grid reports free: the rest stays for everything else it runs.
     expect(JSON.parse(String(sent[1]?.body)).device).toEqual({ device_class: 'apple-silicon', usable_bytes: 32 * 1024 ** 3,
       backend: 'metal', mem_bandwidth_gbps: 400, compute_gflops: 15600 })
+  })
+
+  it("counts the VRAM this picker's own engine holds as the next model's, on an NVIDIA card", async () => {
+    // A 24 GB card running our 27B: 2.7 GB free beside it. Starting another model stops ours first, so
+    // the catalog is fitted to what ours holds as well, never to what is left beside it.
+    const MiB = 1024 ** 2, original = run.getMockImplementation()!
+    const card = { device_class: 'nvidia', backend: 'cuda', usable_bytes: 2746 * MiB, memory: { total_gb: 16 }, gpus: [{ backend: 'cuda', memory_total_mb: 24564 }] }
+    const grid = { pid: 30956, name: join(home, 'bin', 'llama-server'), bytes: 21000 * MiB }
+    const browser = { pid: 2014, name: '/usr/lib/chromium/chromium', bytes: 300 * MiB }
+    // An app's engine this picker started, known by its record: its binary, or its pid.
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(join(stateDir, 'app-engines.json'), JSON.stringify([{ spec: 1, modelId: 'app:llama.cpp:Other.gguf', grid: 'home',
+      name: 'Other', engine: 'llama.cpp', served: 'other', alias: 'other', port: 9000, binary: '/opt/llama/llama-server', pid: 4242 }]))
+    const fitted = async (device: Record<string, unknown>, processes?: GpuProcess[]): Promise<number | undefined> => {
+      run.mockImplementation(async (args, output) => args[0] === 'device-info' ? ok(device) : original(args, output))
+      request.mockClear()
+      const models = modelFixture({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch, inventory,
+        ...(processes ? { gpuProcesses: async () => processes } : {}) })
+      const snapshot = await models.list('home')
+      const sent = JSON.parse(String(request.mock.calls.find(([url]) => String(url).includes('/catalog'))![1]?.body)).device.usable_bytes
+      expect(snapshot.fitBytes).toBe(sent)
+      return sent
+    }
+    expect(await fitted(card, [grid, browser])).toBe((2746 + 21000) * MiB)
+    expect(await fitted(card, [{ pid: 777, name: '/opt/llama/llama-server', bytes: 4000 * MiB }, { pid: 4242, name: 'ollama', bytes: 1000 * MiB }]))
+      .toBe((2746 + 5000) * MiB)
+    // Never more than the card has, and with no card's size to hold it to, all of it.
+    expect(await fitted(card, [{ ...grid, bytes: 30000 * MiB }])).toBe(24564 * MiB)
+    expect(await fitted({ ...card, gpus: [] }, [grid])).toBe((2746 + 21000) * MiB)
+    // Nothing of ours on it, no way to tell, no figure to add to, or no NVIDIA card: as grid says.
+    expect(await fitted(card, [browser])).toBe(2746 * MiB)
+    expect(await fitted(card)).toBe(2746 * MiB)
+    expect(await fitted({ ...card, usable_bytes: undefined }, [grid])).toBeUndefined()
+    expect(await fitted({ device_class: 'apple-silicon', backend: 'metal', usable_bytes: 54 * 1024 ** 3, memory: { total_gb: 64 } }, [grid]))
+      .toBe(32 * 1024 ** 3)
   })
 
   it('leaves out a measurement the machine did not report, so the catalog falls back to its own', async () => {
@@ -1061,6 +1125,89 @@ describe('local model discovery and lifecycle', () => {
   })
 })
 
+describe('a run record its engine did not outlive', () => {
+  // As on an NVIDIA machine after a restart: grid's record of the engine survives in run/engines, its
+  // process does not, and the model read as held by it — "It cannot start now. Try again in a moment."
+  it('holds nothing: the model reads downloaded and starts, the record cleared before the join', async () => {
+    await writeFile(join(home, 'models', 'Small-Q4.gguf'), Buffer.alloc(64))
+    await writeFile(join(records, 'remote.json'), JSON.stringify({ node_id: 'local-node', meta_name: 'harness', pid: deadPid(),
+      engines: [{ endpoint_url: null, models: ['Small-Q4.gguf'] }], advertise_as: [] }))
+    expect((await service.list('home', true)).models[0]).toMatchObject({ id: 'org/Small-GGUF', state: 'downloaded', canStart: true, canStop: false })
+    const ack = await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(ack.error).toBeUndefined()
+    const leave = calls.findIndex(args => args.join(' ') === '--remote leave home --engine Small-Q4.gguf')
+    const joined = calls.findIndex(args => args.includes('join'))
+    expect(leave).toBeGreaterThanOrEqual(0)
+    expect(joined).toBeGreaterThan(leave)
+    expect((await service.list('home', true)).models[0]).toMatchObject({ state: 'running', operation: { phase: 'done' } })
+  })
+
+  it('a start goes on when the record cannot be left, and nothing stands in another model\'s way', async () => {
+    await writeFile(join(home, 'models', 'Small-Q4.gguf'), Buffer.alloc(64))
+    await writeFile(join(records, 'stale.json'), JSON.stringify({ node_id: 'old-node', pid: deadPid(),
+      engines: [{ endpoint_url: null, models: ['Other-Q4.gguf'] }], advertise_as: [] }))
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => { if (!args.includes('leave')) return original(args, output); calls.push(args); return { ...ok(), ok: false } })
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    expect(calls).toContainEqual(['--remote', 'leave', 'home', '--engine', 'Other-Q4.gguf'])
+    expect(calls.some(args => args.includes('join'))).toBe(true)
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ phase: 'done' })
+  })
+})
+
+describe('a download that stops, or is cancelled', () => {
+  /** A pull that sends nothing more, as grid's did when its connection stalled (no read timeout): it ends
+   *  only when it is aborted. */
+  const hang = () => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args: string[], output?: (s: string) => void, _timeout?: number, signal?: AbortSignal) => {
+      if (args[0] !== 'pull') return original(args, output)
+      calls.push(args)
+      await writeFile(join(home, 'models', 'Small-Q4.gguf.part'), Buffer.alloc(24))
+      output?.('36%')
+      return new Promise<GridFleetResult>(resolve => signal?.addEventListener('abort', () => resolve({ ok: false, code: 124, stdout: '', stderr: '', error: 'interrupted' })))
+    })
+  }
+
+  it('is not downloaded while a part of it is unfinished — its projector, say — and can be got again', async () => {
+    await writeFile(join(home, 'models', 'Small-Q4.gguf'), Buffer.alloc(64))
+    await writeFile(join(home, 'models', 'Small-Q4.mmproj.gguf.part'), Buffer.alloc(8))
+    expect((await service.list('home', true)).models[0]).toMatchObject({ id: 'org/Small-GGUF', state: 'available', canStart: true })
+    await rm(join(home, 'models', 'Small-Q4.mmproj.gguf.part'))
+    expect((await service.list('home', true)).models[0]).toMatchObject({ state: 'downloaded' })
+  })
+
+  it('that has stalled is ended, to be started again where it stopped', async () => {
+    hang()
+    service = modelFixture({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch, inventory, pullStallMs: 40, pullWatchMs: 5 })
+    await service.act('home', 'org/Small-GGUF', 'download'); await service.settled()
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ action: 'download', phase: 'failed', error: 'The download stalled. Start again to resume.' })
+    // What it got is kept: a start again resumes from it.
+    expect(existsSync(join(home, 'models', 'Small-Q4.gguf.part'))).toBe(true)
+  })
+
+  it('is cancelled by a stop, and what it downloaded goes: the row is one to get again, not a failure', async () => {
+    hang()
+    await writeFile(join(home, 'models', 'Small-Q4.mmproj.gguf.part'), Buffer.alloc(8))
+    await writeFile(join(home, 'models', 'Other-Q4.gguf'), Buffer.alloc(8))
+    const started = await service.act('home', 'org/Small-GGUF', 'download')
+    await vi.waitFor(() => expect(calls.some(args => args[0] === 'pull')).toBe(true))
+    const stop = await service.act('home', 'org/Small-GGUF', 'stop')
+    expect(stop.operation?.id).toBe(started.operation?.id)
+    await service.settled()
+    expect((await readdir(join(home, 'models'))).sort()).toEqual(['Other-Q4.gguf'])
+    const [model] = (await service.list('home', true)).models
+    expect(model).toMatchObject({ state: 'available', operation: { action: 'stop', phase: 'done' } })
+    expect(model.operation).not.toHaveProperty('error')
+    // Another model's operation is not cancelled by a stop of this one.
+    hang()
+    await service.act('home', 'org/Small-GGUF', 'download')
+    await vi.waitFor(() => expect(calls.filter(args => args[0] === 'pull')).toHaveLength(2))
+    expect(await service.act('home', 'org/Other-GGUF', 'stop')).toEqual({ error: 'Wait for the current model operation to finish.' })
+    await service.act('home', 'org/Small-GGUF', 'stop'); await service.settled()
+  })
+})
+
 /** A pid that existed a moment ago and no longer does. */
 function deadPid(): number {
   return Number(spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout)
@@ -1091,7 +1238,7 @@ describe('the Model Manager while its grid sleeps (grid-reads-without-waking iss
     expect((await service.list('home')).models).toEqual([expect.objectContaining({ id: 'local:Small-Q4.gguf', state: 'running', gridAsleep: true, canStop: true })])
   })
 
-  it.each([['a process that is gone', () => deadPid()], ['a join mid-spawn (pid 0)', () => 0], ['no pid at all', () => 'x']])(
+  it.each([['a join mid-spawn (pid 0)', () => 0], ['no pid at all', () => 'x']])(
     'does not call %s parked', async (_name, pid) => {
       gridState = 'asleep'; catalogCards = []
       await writeFile(join(records, 'remote.json'), parkedRecord(pid()))
@@ -1099,6 +1246,12 @@ describe('the Model Manager while its grid sleeps (grid-reads-without-waking iss
       expect(row).toMatchObject({ id: 'local:Small-Q4.gguf', state: 'available', canStop: true })
       expect(row).not.toHaveProperty('gridAsleep')
     })
+
+  it('does not call a process that is gone parked, nor offer it at all: nothing of it is left to stop', async () => {
+    gridState = 'asleep'; catalogCards = []
+    await writeFile(join(records, 'remote.json'), parkedRecord(deadPid()))
+    expect((await service.list('home')).models).toEqual([])
+  })
 
   it('an engine the awake grid lists is running with no asleep flag', async () => {
     serving = true
@@ -1777,6 +1930,27 @@ describe('models other apps downloaded, started in their own app', () => {
       .toMatchObject({ state: 'running', canStop: true })
   })
 
+  it('forgets the engines the Jev decision models left, which blocked every chat model\'s start', async () => {
+    // As on a computer that ran them before #1141: laya-english's engine long gone, kev's still up.
+    const jev = (modelId: string, name: string, port: number): AppEngineRecord => ({ spec: 1, modelId, grid: 'home', name,
+      engine: 'llama.cpp', served: name, alias: name, port, binary: '/opt/llama-server', pid: 4300 + port % 100 })
+    const laya = jev('jev:ggml-org/Laya-GGUF', 'laya-english', 52954), kev = jev('jev:ggml-org/Kev-0.8B-GGUF', 'kev-0.8b', 60437)
+    up.add(kev.modelId); joinedAliases.add(kev.alias)
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(join(stateDir, 'app-engines.json'), JSON.stringify([laya, kev]))
+    service = appService()
+    const snapshot = await service.list('home', true)
+    expect(snapshot.models.map(m => m.name)).not.toEqual(expect.arrayContaining(['laya-english']))
+    expect(snapshot.models.some(m => m.id.startsWith('jev:'))).toBe(false)
+    expect(JSON.parse(await readFile(join(stateDir, 'app-engines.json'), 'utf8'))).toEqual([])
+    await vi.waitFor(() => expect(ops.stop).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ modelId: kev.modelId })))
+    await vi.waitFor(() => expect(joinedAliases.has(kev.alias)).toBe(false))
+    // A chat model starts: nothing left to "stop first".
+    const started = await service.act('home', ollama.id, 'start'); await service.settled()
+    expect(started.operation).not.toMatchObject({ phase: 'failed' })
+    expect(ops.start).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: ollama.id }), expect.anything(), expect.anything())
+  })
+
   it.each(['join refused', 'credentials unavailable', 'credentials threw'])('takes an app engine down after %s, retaining another grid\'s record', async scenario => {
     service = appService()
     const elsewhere: AppEngineRecord = { spec: 1, modelId: studio.id, grid: 'elsewhere', name: studio.name,
@@ -1953,7 +2127,7 @@ describe('models other apps downloaded, started in their own app', () => {
       engine: 'ollama', served: ollama.ref, alias: ollama.name, port: 41000, binary: ollama.binary, pid: 4242 }]))
     service = appService({ appEngines: undefined })
     expect((await service.list('home')).models.find(model => model.id === ollama.id))
-      .toMatchObject({ state: 'downloaded', canStart: false, canStop: true })
+      .toMatchObject({ state: 'downloaded', canStart: false, canStop: true, servedAs: [ollama.name] })
     const result = await service.act('home', ollama.id, 'stop'); await service.settled()
     expect(result.operation?.phase).toBe('done')
     expect(calls).toContainEqual(['--remote', 'leave', 'home', '--engine', ollama.name])
@@ -2002,4 +2176,117 @@ describe('models other apps downloaded, started in their own app', () => {
     expect(calls.find(args => args.includes('--at'))).not.toContain('--name')
   })
 
+})
+
+describe('the grids this computer serves a model on', () => {
+  /** Omagrid beside the own grid: `grid ls` lists both, and this computer's engine for Small-Q4 has a run
+   *  record there too (as `grid join` on Omagrid writes it). */
+  const onOmagrid = async (record: Record<string, unknown> = {}) => {
+    const folder = join(home, 'run', 'engines', 'grid-oma')
+    await mkdir(folder, { recursive: true })
+    await writeFile(join(folder, 'remote.json'), JSON.stringify({ node_id: 'oma-node', engines: [{ endpoint_url: null, models: ['Small-Q4.gguf'] }], advertise_as: ['Small-Q4'], ...record }))
+    await writeFile(join(folder, 'remote.heartbeat'), '')
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('ls')
+      ? ok([{ grid: 'home', id: 'grid-home' }, { grid: 'Omagrid', id: 'grid-oma' }]) : original(args, output))
+  }
+  /** Omagrid's overview: a stranger's node serving the same model, and this computer's. */
+  const omagrid = (): GridInventory => ({ state: 'awake', status: null, nodes: [
+    { node_id: 'stranger', online: true, models: ['small-q4'], answered: { window_seconds: 86400, requests: 900, by_model: [{ model: 'small-q4', requests: 900, tokens_out: 9_000_000 }] } },
+    { node_id: 'oma-node', online: true, models: ['small-q4'], answered: { window_seconds: 86400, requests: 268, by_model: [{ model: 'small-q4', requests: 268, tokens_out: 1_100_000, tokens_in: 2_400_000, tokens_cached: 1_800_000 }] } },
+  ] })
+  const withServingNodes = (servingNodes: (grid: string) => Promise<GridInventory>, extra: Partial<ConstructorParameters<typeof LocalModels>[0]> = {}) =>
+    modelFixture({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch, inventory, servingNodes, ...extra })
+
+  it('names the own grid and every other grid it serves on, with only its own engine’s figures there', async () => {
+    const servingNodes = vi.fn(async () => omagrid())
+    service = withServingNodes(servingNodes)
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    await onOmagrid()
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([
+      // Each with the name that grid lists it under — what a harness moves onto it there by.
+      { grid: 'home', servedAs: ['Small-Q4'], requests: 4, windowSeconds: 3600 },
+      { grid: 'Omagrid', servedAs: ['Small-Q4'], requests: 268, tokensOut: 1_100_000, tokensIn: 2_400_000, tokensCached: 1_800_000, windowSeconds: 86400 },
+    ])
+    // Read as another grid's nodes, never through the own grid's inventory, which takes a grid for the account's own.
+    expect(servingNodes.mock.calls).toEqual([['Omagrid']])
+    expect(inventory.mock.calls.every(([grid]) => grid === 'home')).toBe(true)
+  })
+
+  it('names no grid for a model it serves nowhere, and reads no other grid without a run record here', async () => {
+    const servingNodes = vi.fn(async () => omagrid())
+    service = withServingNodes(servingNodes)
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('ls')
+      ? ok([{ grid: 'home', id: 'grid-home' }, { grid: 'Omagrid', id: 'grid-oma' }]) : original(args, output))
+    expect((await service.list('home')).models[0]).not.toHaveProperty('servedOn')
+    expect(servingNodes).not.toHaveBeenCalled()
+  })
+
+  it('names a grid that sleeps while its engine here is alive, with no figures; not one whose engine is gone', async () => {
+    service = withServingNodes(async () => ({ state: 'asleep', status: 'asleep', nodes: [] }))
+    await onOmagrid({ pid: process.pid })
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'Omagrid', servedAs: ['Small-Q4'] }])
+    await onOmagrid({ pid: 0 })
+    expect((await service.list('home', true)).models[0]).not.toHaveProperty('servedOn')
+  })
+
+  it('names a grid whose overview does not list this computer’s engine yet, or could not be read, while its process is alive', async () => {
+    // No process for its record (gone, or mid-spawn): not serving there.
+    service = withServingNodes(async () => ({ state: 'awake', status: null, nodes: [omagrid().nodes[0]] }))
+    await onOmagrid()
+    expect((await service.list('home', true)).models[0]).not.toHaveProperty('servedOn')
+    service = withServingNodes(async () => { throw new Error('unreachable') })
+    expect((await service.list('home', true)).models[0]).not.toHaveProperty('servedOn')
+    // Its process alive: serving there, figures unknown — so the own grid never starts a second engine of it.
+    await onOmagrid({ pid: process.pid })
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'Omagrid', servedAs: ['Small-Q4'] }])
+    service = withServingNodes(async () => ({ state: 'awake', status: null, nodes: [omagrid().nodes[0]] }))
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'Omagrid', servedAs: ['Small-Q4'] }])
+  })
+
+  it('starts a model this computer knows from another grid’s list on the community grid by the same id', async () => {
+    // Small-Q4 served on the own grid, then its run record gone: known there as `local:Small-Q4.gguf` only.
+    catalogCards = []
+    await writeFile(join(home, 'models', 'Small-Q4.gguf'), Buffer.alloc(64))
+    await writeFile(join(records, 'remote.json'), JSON.stringify({ node_id: 'local-node', engines: [{ endpoint_url: null, models: ['Small-Q4.gguf'] }], advertise_as: [] }))
+    expect((await service.list('home', true)).models.map(m => m.id)).toContain('local:Small-Q4.gguf')
+    await rm(join(records, 'remote.json'))
+    await service.act('Omagrid', 'local:Small-Q4.gguf', 'start'); await service.settled()
+    expect(calls.find(args => args.includes('join'))?.slice(0, 5)).toEqual(['--remote', 'join', 'Omagrid', '--serve', 'Small-Q4.gguf'])
+  })
+
+  it('reads only the own grid for a caller that gives no other grid’s reader (as before)', async () => {
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    await onOmagrid()
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'home', servedAs: ['Small-Q4'], requests: 4, windowSeconds: 3600 }])
+  })
+
+  it('says which OS grid this computer claims, and nothing for none', async () => {
+    expect((await withServingNodes(async () => omagrid(), { os: () => 'omarchy' }).list('home')).os).toBe('omarchy')
+    expect(await withServingNodes(async () => omagrid(), { os: () => undefined }).list('home')).not.toHaveProperty('os')
+  })
+
+  it('names the community grid of this computer’s OS that the account is in, for a start there', async () => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('ls') ? ok([
+      { grid: 'home', id: 'grid-home', type: 'permissioned-public' }, { grid: '--flag', id: 'x', type: 'os-community' },
+      { grid: 'Omagrid', id: 'grid-oma', type: 'os-community' },
+    ]) : original(args, output))
+    expect((await service.list('home')).osGrid).toBe('Omagrid')
+    expect(await service.communityGrid()).toBe('Omagrid')
+    run.mockImplementation(original)
+    expect(await service.communityGrid()).toBeNull()
+    expect(await service.list('home', true)).not.toHaveProperty('osGrid')
+  })
+
+  it('a list of the own grid says how a start on the community grid goes, and how it ended', async () => {
+    const ack = await service.act('Omagrid', 'org/Small-GGUF', 'start')
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ id: ack.operation!.id, phase: 'running' })
+    await service.settled()
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ id: ack.operation!.id, phase: 'done' })
+    // An operation on the own grid after it: its own receipt again.
+    const own = await service.act('home', 'org/Small-GGUF', 'stop'); await service.settled()
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ id: own.operation!.id, action: 'stop' })
+  })
 })

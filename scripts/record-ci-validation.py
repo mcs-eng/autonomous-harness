@@ -31,13 +31,17 @@ SCOPES["full"] = CLI_JOBS | TUI_JOBS | SCOPES["backend"] | DESKTOP_JOBS | {"comp
 # whole workflow/action and helper trees: a changed test, toolchain pin, cache
 # recipe or source contract must invalidate earlier evidence too.
 SOURCE_INPUTS = {
-    "process": (".github/", "scripts/", "desktop/scripts/", ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),
+    # The CLI's and the backend's release commands are here for scripts/tests/test_release_contains_last.py,
+    # which runs all four release commands; the desktop's and the web's are in desktop/scripts/.
+    "process": (".github/", "scripts/", "desktop/scripts/", "cli/scripts/release-cli.sh", "backend/scripts/release-be.sh",
+                ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),
     # VM tests also read CLI protocol definitions, shared layout fixtures,
     # daemon metadata and store catalog/artwork, including docs/images posters,
-    # the Hub's publication rules that desktop/lib/community/hub_contract.dart mirrors, and the
+    # the Hub's publication rules that desktop/lib/community/hub_contract.dart mirrors, its usage
+    # counters that desktop/lib/measurement/hub_usage.dart sends (test/hub_usage_contract_test.dart), and the
     # phone's P2P/E2EE sources the web's copies are checked against (test/p2p/mobile_parity_test.dart).
     "desktop": (".github/", "scripts/", "desktop/", "cli/", "tests/", "daemons/", "store/", "docs/images/",
-                "mobile/pubspec.lock", "backend/src/lib/communityContract.ts",
+                "mobile/pubspec.lock", "backend/src/lib/communityContract.ts", "backend/src/lib/hubMetricsContract.ts",
                 "mobile/lib/p2p/terminal_p2p_plugin.dart", "mobile/lib/p2p/terminal_p2p_link.dart", "mobile/lib/p2p/terminal_p2p_policy.dart",
                 "mobile/lib/ws/terminal_transport_plugin.dart", "mobile/lib/ws/relay_codec.dart", "mobile/lib/e2ee/relay_session_crypto.dart",
                 ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),

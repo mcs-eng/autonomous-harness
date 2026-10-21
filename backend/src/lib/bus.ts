@@ -218,6 +218,31 @@ export function publishShareChanged(id: string): Promise<number> {
   return safePublish(`harness-share:${id}`, '{}')
 }
 
+/** A shared tab changed (roster, member, stop): its relay sockets re-check who may stay. No content. */
+export function subscribeAgentMessageShareChanged(id: string, cb: () => void): Promise<() => void> {
+  return addSub(`amsg-share:${id}`, cb)
+}
+export function publishAgentMessageShareChanged(id: string): Promise<number> {
+  return safePublish(`amsg-share:${id}`, '{}')
+}
+
+/** Frames between daemons of a shared tab, by tab and machine: sealed, never read here. */
+export function subscribeTabRelay(share: string, machineId: string, cb: (msg: unknown) => void): Promise<() => void> {
+  return addSub(`amsg:${share}:${machineId}`, cb as Cb)
+}
+export function publishTabRelay(share: string, machineId: string, msg: unknown): Promise<number> {
+  return safePublish(`amsg:${share}:${machineId}`, JSON.stringify(msg))
+}
+
+/** A machine's sharing changed (routes/machineShares.ts): a session another account holds to it on any
+ *  instance asks again whether it may stay (lib/webWs.ts). No content on this channel. */
+export function subscribeMachineShareChanged(machineId: string, cb: () => void): Promise<() => void> {
+  return addSub(`machine-share:${machineId}`, cb)
+}
+export function publishMachineShareChanged(machineId: string): Promise<number> {
+  return safePublish(`machine-share:${machineId}`, '{}')
+}
+
 export function publishUp(machineId: string, msg: UpBusMsg): Promise<number> {
   const type = (msg.frame as { type?: unknown } | undefined)?.type
   if (typeof type === 'string' && STATUS_TYPES.has(type)) void safePublish(statusChannel(machineId), JSON.stringify(msg.frame))
@@ -680,6 +705,20 @@ export function publishZooChanged(userId: string, msg: ZooChangedMsg): Promise<n
 
 export function subscribeZooChanged(userId: string, cb: (msg: ZooChangedMsg) => void): Promise<() => void> {
   return addSub(zooChannel(userId), cb as Cb)
+}
+
+// Per-USER connector vault invalidation: some computer wrote the account's sealed connections
+// (routes/connectorVault.ts); every daemon of that user re-reads and merges it.
+export interface ConnectorsChangedMsg { revision: number }
+
+const connectorsChannel = (userId: string): string => `connvault:${userId}`
+
+export function publishConnectorsChanged(userId: string, msg: ConnectorsChangedMsg): Promise<number> {
+  return safePublish(connectorsChannel(userId), JSON.stringify(msg))
+}
+
+export function subscribeConnectorsChanged(userId: string, cb: (msg: ConnectorsChangedMsg) => void): Promise<() => void> {
+  return addSub(connectorsChannel(userId), cb as Cb)
 }
 
 // Per-USER device key log invalidation: an entry was appended to the account's log (lib/deviceKeyLog.ts).

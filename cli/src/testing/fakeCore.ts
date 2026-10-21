@@ -4,7 +4,7 @@
  * one (docs/design/2026-10-03-harnessd.md, the core boundary).
  */
 import { vi } from 'vitest'
-import { CONVERSATIONS_OFF, TERMINALS_OFF, type CoreApi } from '../core/api.js'
+import { CONVERSATIONS_OFF, TAB_KEY_OFF, TAB_RELAY_OFF, TERMINALS_OFF, type CoreApi } from '../core/api.js'
 
 type Overrides = { [K in keyof CoreApi]?: CoreApi[K] extends object ? Partial<CoreApi[K]> : CoreApi[K] }
 
@@ -36,11 +36,14 @@ export function fakeCore(over: Overrides = {}): CoreApi {
       create: vi.fn(async () => ({ ok: false as const, error: 'UNSUPPORTED' })),
       dsh: vi.fn(() => null),
       activityText: vi.fn(async () => null),
+      activity: vi.fn(async () => ({})),
+      summaries: vi.fn(async () => ({})),
       ...over.agents,
     },
     turns: {
       send: vi.fn(), stop: vi.fn(), recent: vi.fn(async () => []), asks: vi.fn(async () => []),
       deliver: vi.fn(), cancelDelivery: vi.fn(() => false), onDelivery: vi.fn(() => () => {}),
+      leaseDeliveries: vi.fn(async () => true),
       ...over.turns,
     },
     questions: { answer: vi.fn(), answerReviewed: vi.fn(async () => false), ...over.questions },
@@ -60,7 +63,11 @@ export function fakeCore(over: Overrides = {}): CoreApi {
       privateGridName: vi.fn(async () => null),
       machineName: vi.fn(() => null),
       backend: vi.fn(async () => ({ status: 200, body: {} })),
+      identity: vi.fn(async () => null),
       observerKey: { publicKey: vi.fn(async () => 'cHVi'), signWelcome: vi.fn(async () => 'c2ln') },
+      tabKey: TAB_KEY_OFF,
+      tabRelay: TAB_RELAY_OFF,
+      connectorVault: { seal: vi.fn(async () => ({})), open: vi.fn(async () => null) },
       onNotice: vi.fn(() => () => {}),
       signedIn: vi.fn(() => true),
       environment: vi.fn(() => 'prod'),
@@ -84,5 +91,7 @@ export function fakeCore(over: Overrides = {}): CoreApi {
       transcripts: vi.fn(), watching: vi.fn(), streams: vi.fn(),
       ...over.wifi,
     },
+    // Only a spec that gives the cloud agents doors has them, as only a core that offers them does.
+    ...(over.cloud ? { cloud: Object.assign({ publish: vi.fn(), ask: vi.fn(), unask: vi.fn() }, over.cloud) } : {}),
   }
 }

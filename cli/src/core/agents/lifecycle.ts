@@ -14,6 +14,7 @@ import { AgentStopError, createStopAgentService, type StopAgentServiceDeps } fro
 import { IdentityReadUnavailable } from '../../engines/kit/identityScan.js'
 
 import type { ResumeAgent } from './launches.js'
+import { GUEST_HARNESS_REFUSAL } from '../guestPolicy.js'
 
 export interface LifecycleDeps {
   settlePane?: StopAgentServiceDeps['settlePane']
@@ -42,12 +43,15 @@ export interface LifecycleDeps {
   attachDsh: ResumeAgentServiceDeps['attachDsh']
   attachSession: ResumeAgentServiceDeps['attachSession']
   relaunchMarks?: ResumeAgentServiceDeps['relaunchMarks']
+  /** An agent was stopped: closed (`agent_close`), Stop Harness, or purged. The harnesses it started close with it
+   *  (services/agentCleanup.ts `closed`). */
+  stopped?: (agentId: string) => void
 }
 
 export function createAgentLifecycle({
   registry, stoppedAgents, restartJobs, tmuxBackend, agentReconciler, forgetSession, markDeleted, clearDeleted, stopNative, settlePane, cancelExternal,
   sessionCheckpoints, mirror, sessionSearch, send, pinnedControls, retainExitedSession, announceSession,
-  relaunchOverrides, prepareSessionResume, refreshGridWebSearch, attachDsh, attachSession, relaunchMarks,
+  relaunchOverrides, prepareSessionResume, refreshGridWebSearch, attachDsh, attachSession, relaunchMarks, stopped,
 }: LifecycleDeps) {
   /**
    * Stop Harness (`agent_delete`) archives its conversation and launch settings, removes the live
@@ -55,10 +59,19 @@ export function createAgentLifecycle({
    * SIGTERM/SIGKILL fallback. Engine conversation files, recaps and the Harness name remain on disk.
    */
   const stopJobs = new Map<string, Promise<void>>()
-  const stopAgent = createStopAgentService({
+  const stop = createStopAgentService({
     registry, stoppedAgents, restartJobs, stopJobs, tmuxBackend, agentReconciler,
     forgetSession, markDeleted, clearDeleted, stopNative, settlePane, cancelExternal,
   })
+  /**
+   * Every stop goes through here: a window's close and Stop Harness, `harness close`, a purge. Told once the stop is
+   * done, never while it can still fail: a harness closed takes the harnesses it started with it, so none of them
+   * goes on working, spending the person's tokens, for a starter that will never read it (owner, October 12).
+   */
+  const stopAgent: typeof stop = (target, options) => {
+    const agentId = registry.resolve(target)?.agentId ?? target
+    return stop(target, options).then(() => { stopped?.(agentId) })
+  }
   const purgeAgentService = new PurgeAgentService({
     live: id => registry.byAgent(id), sessions: () => [...registry.list(), ...stoppedAgents.list()],
     stopped: stoppedAgents, checkpoints: sessionCheckpoints, stop: stopAgent,
@@ -75,8 +88,10 @@ export function createAgentLifecycle({
     retainExitedSession, announceSession, relaunchOverrides, prepareSessionResume,
     refreshGridWebSearch, clearDeleted, attachDsh, attachSession, relaunchMarks,
   })
-  const resumeAgent: ResumeAgent = (id, permissionMode) => purgeAgentService.busy(id) || purgeAgentService.blocksFolder(stoppedAgents.get(id)?.cwd)
-    ? Promise.resolve({ ok: false, error: 'AGENT_BUSY' }) : resume(id, permissionMode)
+  const resumeAgent: ResumeAgent = (id, permissionMode) => (stoppedAgents.get(id) ?? registry.byAgent(id))?.guest
+    ? Promise.resolve(GUEST_HARNESS_REFUSAL)
+    : purgeAgentService.busy(id) || purgeAgentService.blocksFolder(stoppedAgents.get(id)?.cwd)
+      ? Promise.resolve({ ok: false, error: 'AGENT_BUSY' }) : resume(id, permissionMode)
   return { stopJobs, stopAgent, purgeAgentService, resumeAgent }
 }
 

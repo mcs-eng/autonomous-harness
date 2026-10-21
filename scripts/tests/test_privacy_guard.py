@@ -1,5 +1,6 @@
 """Privacy guard tests. Terms in this file are fake stand-ins, not real names."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -7,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "privacy-guard.py"
@@ -489,6 +491,255 @@ class RepositoryScanTests(unittest.TestCase):
                         self.assertNotIn(prefix, result.stderr)
                     else:
                         self.assertIn("public??::warning::injected.bin", result.stderr)
+
+
+class UpstreamCarriedTests(unittest.TestCase):
+    """--upstream-ref exempts carried lines and identical carried file paths."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "fixture@example.test")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "commit.gpgsign", "false")
+        self.write("README.md", "hello example\n")
+        self.base = self.commit("base")
+
+    def git(self, *args):
+        return subprocess.check_output(["git", *args], cwd=self.root,
+                                       stderr=subprocess.PIPE, text=True).strip()
+
+    def write(self, path, value):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(value)
+
+    def write_bytes(self, path, value):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(value)
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def upstream_commit_adding(self, message="upstream adds carried text"):
+        self.git("checkout", "-q", "-b", "upstream-work")
+        carried = self.commit(message)
+        self.git("checkout", "-q", "main")
+        return carried
+
+    def merge_upstream(self, ref):
+        self.git("merge", "--no-edit", "-q", ref)
+        return self.git("rev-parse", "HEAD")
+
+    def scan(self, head, terms=None, upstream_ref=None, title="", body=""):
+        return guard.scan_pull_request(
+            self.root, self.base, head, title, body,
+            terms if terms is not None else FAKE_TERMS, upstream_ref=upstream_ref)
+
+    def run_guard(self, args):
+        env = os.environ.copy()
+        env.pop("PRIVATE_TERMS_FILE", None)
+        env.update(PRIVATE_TERMS=",".join(FAKE_TERMS), GITHUB_ACTIONS="true",
+                   PYTHONIOENCODING="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo", str(self.root),
+             "--base", self.base, *args],
+            env=env, capture_output=True, stdin=subprocess.DEVNULL, text=True,
+            encoding="utf-8", check=False,
+        )
+
+    def test_line_carried_from_upstream_is_suppressed_only_with_the_ref(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        flagged = self.scan(head)
+        self.assertEqual(flagged, ["file carried.txt line 1 column 7: [redacted 11 chars]"])
+        self.assertEqual(self.scan(head, upstream_ref=carried), [])
+
+    def test_pr_text_and_commit_messages_are_never_exempted(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        findings = self.scan(head, upstream_ref=carried,
+                             title="hosting on ExampleHost", body="see sampleboard")
+        self.assertEqual(findings, [
+            "PR title: [redacted 11 chars]",
+            "PR body: [redacted 11 chars]",
+        ])
+
+    def test_fork_modified_line_is_not_exempted(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write("carried.txt", "hello examplehost today\n")
+        head = self.commit("fork rewords the carried line")
+        self.assertEqual(len(self.scan(head, upstream_ref=carried)), 1)
+
+    def test_line_removed_upstream_is_not_exempted(self):
+        self.write("carried.txt", "hello examplehost\nkeep me\n")
+        carried = self.upstream_commit_adding()
+        self.git("checkout", "-q", "upstream-work")
+        self.write("carried.txt", "keep me\n")
+        upstream_tip = self.commit("upstream drops the line")
+        self.git("checkout", "-q", "main")
+        head = self.merge_upstream(carried)
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream_tip)), 1)
+
+    def test_carried_binary_blob_is_not_exempted(self):
+        self.write_bytes("carried.bin", "hello examplehost\n".encode("utf-16-le"))
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.bin: [redacted 11 chars]"])
+
+    def test_path_match_on_blob_carried_verbatim_from_upstream_is_suppressed(self):
+        self.write("docs/examplehost-notes.md", "public upstream notes\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        self.assertEqual(self.scan(head), ["file [redacted path]: [redacted 11 chars]"])
+        self.assertEqual(self.scan(head, upstream_ref=carried), [])
+
+    def test_path_blob_exemption_requires_a_canonical_path(self):
+        path = "docs/examplehost-notes.md"
+        self.write(path, "public upstream notes\n")
+        carried = self.upstream_commit_adding()
+        oid = self.git("rev-parse", f"{carried}:{path}")
+        self.assertTrue(
+            guard.path_blob_carried_by_upstream(self.root, oid, carried, path))
+        for noncanonical in (
+            "",
+            f"/{path}",
+            f"{path}/",
+            f"./x/../{path}",
+            f"./{path}",
+            f".//{path}",
+            f"../{path}",
+            "docs//examplehost-notes.md",
+            "docs/./examplehost-notes.md",
+            "docs/../docs/examplehost-notes.md",
+        ):
+            with self.subTest(path=noncanonical):
+                self.assertFalse(
+                    guard.path_blob_carried_by_upstream(
+                        self.root, oid, carried, noncanonical))
+
+    def test_path_lookup_timeout_keeps_carried_path_finding(self):
+        path = "docs/examplehost-notes.md"
+        self.write(path, "public upstream notes\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        real_run = guard.subprocess.run
+
+        def run_with_timeout(argv, *args, **kwargs):
+            if argv[:4] == ["git", "rev-parse", "-q", "--verify"]:
+                raise subprocess.TimeoutExpired(argv, timeout=120)
+            return real_run(argv, *args, **kwargs)
+
+        with mock.patch.object(guard.subprocess, "run", side_effect=run_with_timeout) as run:
+            findings = self.scan(head, upstream_ref=carried)
+        run.assert_any_call(
+            ["git", "rev-parse", "-q", "--verify", f"{carried}:{path}"],
+            cwd=self.root, check=False, capture_output=True, timeout=120,
+        )
+        self.assertEqual(findings, ["file [redacted path]: [redacted 11 chars]"])
+
+    def test_main_timeout_does_not_print_path_or_term(self):
+        path = "docs/examplehost-notes.md"
+        error = subprocess.TimeoutExpired(
+            ["git", "rev-parse", "-q", "--verify", f"upstream:{path}"], timeout=120,
+        )
+        with mock.patch.object(guard, "run_pull_request", side_effect=error):
+            with mock.patch.object(guard.sys, "stderr", new_callable=io.StringIO) as stderr:
+                result = guard.main(["--pull-request"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr.getvalue(), "privacy guard: a git command timed out\n")
+        self.assertNotIn(path, stderr.getvalue())
+        self.assertNotIn("examplehost", stderr.getvalue().lower())
+
+    def test_path_match_with_content_different_from_upstream_is_not_exempted(self):
+        self.write("docs/examplehost-notes.md", "public upstream notes\n")
+        carried = self.upstream_commit_adding()
+        # No merge: the fork adds the same name with its own, different content.
+        self.write("docs/examplehost-notes.md", "fork notes\n")
+        head = self.commit("fork parks its own file under the upstream-coinciding name")
+        self.assertEqual(len(self.scan(head, upstream_ref=carried)), 1)
+
+    def test_path_match_absent_upstream_is_not_exempted(self):
+        self.write("docs/examplehost-notes.md", "fork notes\n")
+        head = self.commit("fork adds a matching name upstream never used")
+        self.assertEqual(len(self.scan(head, upstream_ref=self.base)), 1)
+
+    def test_missing_upstream_ref_fails_closed(self):
+        self.write("notes.txt", "hello examplehost\n")
+        head = self.commit("public change")
+        result = self.run_guard(["--head", head, "--title", "", "--body", "",
+                                 "--upstream-ref", "refs/data/nope"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failing closed", result.stderr)
+        self.assertNotIn("examplehost", combined(result).lower())
+
+    def test_cli_upstream_ref_exempts_carried_line(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        head = self.merge_upstream(carried)
+        result = self.run_guard(["--head", head, "--title", "", "--body", "",
+                                 "--upstream-ref", carried])
+        self.assertEqual(result.returncode, 0, combined(result))
+        self.assertNotIn("examplehost", combined(result).lower())
+        self.write("notes.txt", "hello examplehost\n")
+        fork = self.commit("fork change")
+        result = self.run_guard(["--head", fork, "--title", "", "--body", "",
+                                 "--upstream-ref", carried])
+        self.assertEqual(result.returncode, 1)
+
+    def test_carried_line_does_not_hide_utf16_tail(self):
+        pad = ("x" * 99 + "\n") * 90  # > 8000 NUL-free bytes: git treats it as text
+        tail = "sampleboard\n".encode("utf-16-le")
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write_bytes("carried.txt", b"hello examplehost\n" + pad.encode() + tail)
+        head = self.commit("fork appends a utf16 tail")
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.txt: [redacted 11 chars]"])
+
+    def test_ancestry_check_decides_when_line_text_exists_upstream(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.merge_upstream(carried)
+        self.write("carried.txt", "hello examplehost\nhello examplehost\n")
+        head = self.commit("fork duplicates an upstream line")
+        findings = self.scan(head, upstream_ref=carried)
+        self.assertEqual(findings, ["file carried.txt line 2 column 7: [redacted 11 chars]"])
+
+    def test_conflict_resolution_line_is_not_exempted(self):
+        self.write("lines.txt", "one\ntwo\nthree\n")
+        self.git("checkout", "-q", "-b", "upstream-work")
+        self.write("lines.txt", "one\ntwo upstream\nthree\n")
+        upstream = self.commit("upstream edits line two")
+        self.git("checkout", "-q", "main")
+        self.write("lines.txt", "one\ntwo main\nthree\n")
+        self.commit("fork edits line two")
+        subprocess.run(["git", "merge", "--no-edit", upstream], cwd=self.root,
+                       check=False, capture_output=True)
+        self.write("lines.txt", "one\ntwo resolved examplehost\nthree\n")
+        head = self.commit("resolve with a private term")
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream)), 1)
+
+    def test_file_deleted_upstream_is_not_exempted(self):
+        self.write("carried.txt", "hello examplehost\n")
+        carried = self.upstream_commit_adding()
+        self.git("checkout", "-q", "upstream-work")
+        self.git("rm", "-q", "carried.txt")
+        upstream_tip = self.commit("upstream deletes the file")
+        self.git("checkout", "-q", "main")
+        head = self.merge_upstream(carried)
+        self.assertEqual(len(self.scan(head, upstream_ref=upstream_tip)), 1)
 
 
 class CliTests(unittest.TestCase):

@@ -3,7 +3,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Ledger, ledgerPath } from './ledger.js'
-import { callerOf, clip, lastTurn, matching, outsideCaller, rowsOf, stateOf, STOPPED_WITHIN_MS, type Frame } from './model.js'
+import { asSaid, callerOf, clip, forAgent, lastTurn, matching, outsideCaller, rowsOf, stateOf, STOPPED_WITHIN_MS, type Frame, type Row } from './model.js'
+
+describe('forAgent', () => {
+  const row = (name: string, over: Partial<Row> = {}): Row => ({ name, id: name, agent: 'Codex', machine: 'm', state: 'idle', folder: null, branch: null,
+    startedBy: 'person', yours: false, self: false, lastActive: null, ...over })
+  it('puts its own first, then the working and the ones needing the person, then the rest, and counts the rest past 15', () => {
+    const rows = [...Array.from({ length: 30 }, (_, i) => row(`idle${i}`)), row('busy', { state: 'working' }), row('mine1', { yours: true }), row('mine2', { yours: true })]
+    const { shown, more } = forAgent(rows)
+    expect(shown.map((r) => r.name).slice(0, 3)).toEqual(['mine1', 'mine2', 'busy'])
+    expect(shown).toHaveLength(15)
+    expect(more).toBe(18)
+  })
+  it('shows every row when there are 15 or fewer', () => {
+    expect(forAgent([row('a'), row('b')])).toEqual({ shown: [row('a'), row('b')], more: 0 })
+  })
+})
 
 const dirs: string[] = []
 const ledger = (): Ledger => {
@@ -86,6 +101,16 @@ describe('a harness as the agent verbs show it', () => {
     expect(all.find((r) => r.name === 'kid')).toMatchObject({ startedBy: 'lead', yours: false })
   })
 
+  it('names every agent as the app does, never by its id', () => {
+    // `harness ps` listed a Kilo harness as "kilo": the table here knew six agents and passed the rest through.
+    const named = (engine: string) => rowsOf([frame('a', { engine })], { machineId: 'm', machine: 'mac', caller: null, ledger: ledger(), now: NOW, all: false })[0]!.agent
+    expect(['claude', 'codex', 'opencode', 'cursor', 'grok', 'pi'].map(named)).toEqual(['Claude Code', 'Codex', 'OpenCode', 'Cursor', 'Grok', 'pi'])
+    expect(['kilo', 'amp', 'copilot', 'devin', 'hermes', 'muse', 'commandcode', 'agy'].map(named))
+      .toEqual(['Kilo', 'Amp', 'Copilot', 'Devin', 'Hermes', 'Muse', 'Command Code', 'Antigravity'])
+    // One Harness does not know yet is still said, as it calls itself.
+    expect(named('newagent')).toBe('newagent')
+  })
+
   it('finds a harness by its whole name, a name\'s start, or an id\'s start', () => {
     const rows = [{ name: 'Reviewer', id: 'aaaaaaaa-1' }, { name: 'reviewer-2', id: 'bbbbbbbb-2' }, { name: 'fixer', id: 'cccccccc-3' }]
     expect(matching('reviewer', rows).map((r) => r.id)).toEqual(['aaaaaaaa-1'])
@@ -116,6 +141,18 @@ describe('a harness as the agent verbs show it', () => {
       .toEqual({ ask: 'go', answer: '', tools: 1, answered: false })
     expect(lastTurn([ev('user_message'), ev('text_delta', { content: 'Hi.' })])).toEqual({ ask: null, answer: 'Hi.', tools: 0, answered: true })
     expect(lastTurn([ev('user_message', { content: 'x' }), ev('text_delta', { content: 7 })])).toEqual({ ask: 'x', answer: '', tools: 0, answered: false })
+  })
+
+  it('reads an ask without the markers around a paste, and keeps what was pasted', () => {
+    const ev = (type: string, payload: Record<string, unknown> = {}) => ({ type, payload })
+    const pasted = 'another agent release: \n\n<pasted_content id="1c18">\n#1242 is merged\n  and released\n</pasted_content id="1c18">\n'
+    expect(lastTurn([ev('user_message', { content: pasted }), ev('text_delta', { content: 'ok' })])?.ask)
+      .toBe('another agent release: \n\n#1242 is merged\n  and released')
+    expect(asSaid('<pasted_content id="aa">\nfirst\n</pasted_content id="aa">\n\n\n<pasted_content id="bb">\nsecond\n</pasted_content id="bb">')).toBe('first\n\nsecond')
+    expect(asSaid('<pasted_content id="aa"> one line </pasted_content id="aa"> then more')).toBe('one line then more')
+    // Only a paste's markers: an ask that is nothing else is no ask, and other tags were said.
+    expect(lastTurn([ev('user_message', { content: '<pasted_content id="aa">\n</pasted_content id="aa">' })])?.ask).toBeNull()
+    expect(asSaid('make <b>this</b> bold, in a pasted_content test')).toBe('make <b>this</b> bold, in a pasted_content test')
   })
 
   it('clips long text with an ellipsis', () => {

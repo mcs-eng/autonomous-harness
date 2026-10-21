@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'package:harness/agent_messages/shared_tabs.dart';
 import 'package:harness/api/api_client.dart';
 import 'package:harness/app_shell.dart';
 import 'package:harness/auth/auth_session.dart';
@@ -16,8 +17,8 @@ import 'package:harness/auth/cli_login.dart';
 import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/bootstrap/environment_provisioner.dart';
 import 'package:harness/core/config.dart';
+import 'package:harness/core/models.dart';
 import 'package:harness/core/test_run.dart';
-import 'package:harness/screens/login_screen.dart';
 import 'package:harness/screens/swarm_screen.dart';
 import 'package:harness/settings/settings_screen.dart';
 import 'package:harness/settings/settings_section.dart';
@@ -26,6 +27,7 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/swarm_catalog.dart';
 import 'package:harness/widgets/setup_tour.dart';
 import 'package:harness/widgets/sign_in_step.dart';
+import 'package:harness/ws/ws_conn.dart';
 
 import '../test/support/capture.dart';
 import '../test/support/guest_app.dart';
@@ -33,8 +35,8 @@ import '../test/swarm_state_test.dart' show MemoryStore;
 
 /// The sign-in step and the tab row's account control in the real macOS
 /// window: a computer new to Harness goes from the tour to the sign-in page,
-/// and from there — by Skip, or by an account — to a workspace whose native
-/// title bar ends in Sign in or in the account's initial.
+/// and from there, after successful sign-in, to a workspace whose native
+/// title bar ends in the account's initial.
 ///
 /// Run with FLUTTER_TEST=1 (`--no-enable-impeller` on Intel). Setup, the CLI's
 /// sign-in and the account are fixtures: nothing is installed, no browser
@@ -77,7 +79,10 @@ Future<Map<String, dynamic>> _native(
 }
 
 Future<void> _shot(WidgetTester tester, String name) async {
-  if (!_driven) return;
+  if (!_driven) {
+    await captureWindow(tester, _shotsDir, '$name-flutter-only');
+    return;
+  }
   // What is on screen now, not a frame behind it.
   await tester.pump(const Duration(milliseconds: 250));
   final answer = await _native(tester, 'shot', name);
@@ -210,6 +215,9 @@ class _Api extends ApiClient {
 
   @override
   Future<Map<String, dynamic>?> desk() async => null;
+
+  @override
+  Future<Map<String, dynamic>?> daemonDevices() async => null;
 }
 
 /// A computer whose probe finds no Harness CLI, and whose install puts it in.
@@ -274,7 +282,96 @@ Future<void> _mount(WidgetTester tester, AppNotifier app) async {
   );
 }
 
-final _skip = find.byKey(const Key('sign-in-step-skip'));
+/// This computer's daemon answering `agent_messages` `shares` (1c) with one
+/// roster: [tabId] (set once the app exists), owned by this account and shared from this computer, with
+/// [harnesses] harnesses. Everything else answers nothing.
+class _SharesDaemon extends WsConn {
+  _SharesDaemon({required this.harnesses})
+    : super(
+        wsBaseUrl: 'ws://fixture.invalid',
+        autonomousEnv: 'test',
+        machineId: 'm',
+        accessTokenProvider: (_, _) async => '',
+        onAuthFailure: (_) {},
+        onEvent: (_) {},
+        onStatus: (_) {},
+      );
+
+  String tabId = '';
+  final int harnesses;
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String type, {
+    Map<String, dynamic> payload = const {},
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    if (type != 'agent_messages' || payload['action'] != 'shares') {
+      return const {};
+    }
+    const me = {'accountId': 'me', 'email': 'me@example.com', 'machineId': 'm'};
+    return {
+      'api': 2,
+      'me': me,
+      'rosters': [
+        {
+          'sharedTabId': 'st-1',
+          'tabId': tabId,
+          'version': 1,
+          'name': 'app',
+          'owner': {...me, 'machinePublicKey': 'k'},
+          'leader': null,
+          'members': [],
+          'invites': [],
+          'harnesses': [
+            for (var i = 0; i < harnesses; i++)
+              {
+                'accountId': 'me',
+                'machineId': 'm',
+                'agentId': 'h$i',
+                'name': 'h$i',
+                'engine': 'claude',
+              },
+          ],
+        },
+      ],
+      'invites': [],
+      'alerts': [],
+      'pending': [],
+      'notices': [],
+      'untrusted': [],
+      'activity': [],
+    };
+  }
+}
+
+/// A signed-in computer whose daemon ([daemon]) is this one: a workspace
+/// with one tab, "app".
+class _SharedApp extends AppNotifier {
+  _SharedApp(WsConn daemon)
+    : super(
+        config: AppConfig.dev,
+        authSession: AuthSession(storage: MemoryStore()),
+        configStore: null,
+        connectionForTest: (_) => daemon,
+      ) {
+    const machine = Machine(
+      machineId: 'm',
+      authMode: MachineAuthMode.remote,
+      name: 'Fixture',
+    );
+    machines = [machine];
+    machineStates['m'] = MachineState(machine)
+      ..nodeOnline = true
+      ..localOnly = true
+      ..connectionStatus = ConnectionStatus.connected
+      ..agentLoadStatus = AgentLoadStatus.loaded
+      ..agents = [const Agent(id: 'a', name: 'h0', terminalAvailable: true)];
+    rememberOpenedHarness('m', 'a');
+    renameSwarm(activeSwarmId, 'app');
+  }
+}
+
 final _email = find.byKey(const Key('sign-in-step-email'));
 final _google = find.byKey(const Key('login-continue-google'));
 final _apple = find.byKey(const Key('login-continue-apple'));
@@ -305,8 +402,8 @@ void main() {
     if (_driven) File('$_driverDir/done').writeAsStringSync('');
   });
 
-  testWidgets('native: a new computer goes from the tour to the sign-in page, and Skip '
-      'opens a workspace whose title bar ends in Sign in', (tester) async {
+  testWidgets('native: the tour leads to mandatory sign-in, with cancellation '
+      'and failure keeping the workspace closed', (tester) async {
     final (:app, :cli) = _newComputer();
     addTearDown(app.dispose);
     await _mount(tester, app);
@@ -336,22 +433,18 @@ void main() {
     for (final benefit in signInStepBenefits) {
       expect(find.text(benefit.line), findsOneWidget);
     }
-    expect(find.text('Harness is ready.'), findsOneWidget);
-    // In this window's own type: Skip starts where the buttons start, and
-    // Continue with email ends where they end, under the card.
+    expect(find.text('Sign in to continue.'), findsOneWidget);
+    // Email is centered under the standalone buttons, and no Skip remains.
     final google = tester.getRect(_google);
     expect(tester.getRect(_apple).left, google.left);
+    expect(find.text('Skip'), findsNothing);
     expect(
-      tester.getRect(find.text('Skip')).left,
-      moreOrLessEquals(google.left, epsilon: 0.5),
+      tester.getRect(find.text('Continue with email')).center.dx,
+      moreOrLessEquals(google.center.dx, epsilon: 0.5),
     );
     expect(
-      tester.getRect(find.text('Continue with email')).right,
-      moreOrLessEquals(google.right, epsilon: 0.5),
-    );
-    expect(
-      tester.getRect(find.text('Skip')).top,
-      greaterThan(tester.getRect(_apple).bottom + 20),
+      tester.getRect(_email).top,
+      greaterThan(tester.getRect(_apple).bottom),
     );
     expect(tester.takeException(), isNull);
     await _shot(tester, '2-sign-in-page');
@@ -377,76 +470,41 @@ void main() {
     expect(cli.cancels, 1);
     expect(find.byType(SignInStep), findsOneWidget);
 
-    // Skip: the workspace, without an account, and the waiting sign-in ended.
-    await tester.tap(_skip);
+    // Escape and a cancelled browser flow cannot enter the workspace.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    app.cancelLogin();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(SignInStep), findsOneWidget);
+    expect(find.byType(SwarmScreen), findsNothing);
+    expect(app.signingIn, isFalse);
+    expect(cli.cancels, 2);
+
+    // A failed attempt explains why and lets the person try again.
+    await tester.tap(_email);
+    await tester.pump(const Duration(milliseconds: 300));
+    cli.pending!.completeError(
+      StateError('The sign-in page could not be reached.'),
+    );
+    await _until(
+      tester,
+      () => find.textContaining('could not be reached').evaluate().isNotEmpty,
+      reason: 'the required page shows the sign-in error',
+    );
+    expect(find.byType(SwarmScreen), findsNothing);
+    await _shot(tester, '4-sign-in-error');
+
+    await tester.tap(_email);
+    await tester.pump(const Duration(milliseconds: 300));
+    cli.pending!.complete();
     await _until(
       tester,
       () => find.byType(SwarmScreen).evaluate().isNotEmpty,
-      reason: 'Skip opens the workspace',
+      reason: 'successful sign-in opens the workspace',
     );
     expect(find.byType(SignInStep), findsNothing);
-    expect(app.isGuest, isTrue);
-    expect(app.signingIn, isFalse);
-    expect(cli.cancels, 2);
-    await tester.pump(const Duration(milliseconds: 600));
-
-    final reachable = await _rowReachable(tester);
-    await _shot(tester, '4-workspace-not-signed-in');
-    if (reachable) {
-      // AppKit's row, as accessibility reads it: three icons, then Sign in.
-      final buttons = await _nativeButtons(tester);
-      expect(
-        buttons.keys,
-        containsAll(['Open Harness', 'Devices', 'Harness Store', 'Sign in']),
-      );
-      expect(buttons.containsKey('Account'), isFalse);
-      final search = buttons['Open Harness']!;
-      final devices = buttons['Devices']!;
-      final store = buttons['Harness Store']!;
-      final signIn = buttons['Sign in']!;
-      final window = signIn['window'] as Map;
-      final edge = (window['x'] as num) + (window['w'] as num) - 12;
-      for (final icon in [search, devices, store]) {
-        expect(_width(icon), _about(32), reason: "an icon's slot: $icon");
-        expect(icon['enabled'], isTrue);
-      }
-      expect(_right(search), _about(_left(devices)), reason: 'side by side');
-      expect(_right(devices), _about(_left(store)), reason: 'side by side');
-      expect(
-        _left(signIn) - _right(store),
-        _about(8),
-        reason: 'one gap, no line',
-      );
-      expect(_right(signIn), _about(edge), reason: 'Sign in ends the row');
-      // A word and its padding: wider than any icon.
-      expect(_width(signIn), greaterThan(56));
-      expect(signIn['enabled'], isTrue);
-      expect(signIn['help'], 'Sign in to Harness');
-    }
-
-    // A real press on the native button opens the sign-in over the desk.
-    await _press(
-      tester,
-      reachable: reachable,
-      label: 'Sign in',
-      action: 'signIn',
-    );
-    await _until(
-      tester,
-      () => find.byType(LoginScreen).evaluate().isNotEmpty,
-      reason: 'the native Sign in opens the sign-in',
-    );
-    expect(find.text('Continue with Google'), findsOneWidget);
-    expect(find.byKey(const Key('login-continue-email')), findsOneWidget);
-    await _shot(tester, '5-sign-in-from-the-title-bar');
-    await tester.tap(find.byKey(const Key('login-close-button')));
-    await _until(
-      tester,
-      () => find.byType(LoginScreen).evaluate().isEmpty,
-      reason: 'the sign-in closes back to the desk',
-    );
-    expect(find.byType(SwarmScreen), findsOneWidget);
+    expect(app.signedIn, isTrue);
     expect(tester.takeException(), isNull);
+    await _shot(tester, '5-workspace-after-retry');
     await tester.pumpWidget(const SizedBox());
   }, timeout: const Timeout(Duration(minutes: 3)));
 
@@ -533,7 +591,7 @@ void main() {
       );
       for (final row in const [
         'Add Phone',
-        'Customize Harness',
+        'Appearance',
         'Notifications',
         'Settings',
         'Sign out',
@@ -581,8 +639,34 @@ void main() {
         reason: 'Settings closes',
       );
 
-      // Sign out: this computer is without an account again, and its row
-      // ends in Sign in again.
+      // A rejected session returns to the same required page, even mid-work.
+      app.expireSessionForTest(
+        'Your session ended. Sign in again to continue.',
+      );
+      await _until(
+        tester,
+        () => find.byType(SignInStep).evaluate().isNotEmpty,
+        reason: 'session expiry requires sign-in again',
+      );
+      expect(find.byType(SwarmScreen), findsNothing);
+      expect(
+        find.text('Your session ended. Sign in again to continue.'),
+        findsOneWidget,
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byType(SignInStep), findsOneWidget);
+      await _shot(tester, 'session-expired');
+      await tester.tap(_google);
+      await tester.pump(const Duration(milliseconds: 300));
+      cli.pending!.complete();
+      await _until(
+        tester,
+        () => find.byType(SwarmScreen).evaluate().isNotEmpty,
+        reason: 'signing in again restores the workspace',
+      );
+
+      // Explicit sign-out returns to the required sign-in page.
       await openMenu();
       await tester.tap(find.byKey(const ValueKey('account-menu-signOut')));
       await _until(
@@ -593,19 +677,64 @@ void main() {
       );
       await _until(
         tester,
-        () => find.byType(SwarmScreen).evaluate().isNotEmpty,
-        reason: 'the desk stays, as a guest',
+        () => find.byType(SignInStep).evaluate().isNotEmpty,
+        reason: 'sign-out requires sign-in again',
       );
       await tester.pump(const Duration(milliseconds: 600));
-      if (reachable) {
-        final after = await _nativeButtons(tester);
-        expect(after.containsKey('Sign in'), isTrue, reason: '${after.keys}');
-        expect(after.containsKey('Account'), isFalse);
-      }
-      // The page that asked once does not come back.
-      expect(find.byType(SignInStep), findsNothing);
+      expect(find.byType(SwarmScreen), findsNothing);
+      expect(find.text('Skip'), findsNothing);
+      expect(find.text('Sign in to continue.'), findsOneWidget);
       await _shot(tester, '9-after-sign-out');
       expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    timeout: const Timeout(Duration(minutes: 3)),
+  );
+
+  testWidgets(
+    'native: a shared tab says so on its select button — "Shared tab, 3 '
+    'harnesses" — and keeps its "Select <name>" label',
+    (tester) async {
+      final daemon = _SharesDaemon(harnesses: 3);
+      final shared = _SharedApp(daemon);
+      addTearDown(shared.dispose);
+      // The roster names the desk tab it shares: this app's active tab.
+      daemon.tabId = shared.activeSwarmId;
+      final projects = SwarmProjectStore();
+      addTearDown(projects.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: grid.buildAppTheme(brightness: Brightness.dark),
+          home: SwarmScreen(
+            notifier: shared,
+            nativeTabs: true,
+            projectStore: projects,
+          ),
+        ),
+      );
+      await shared.sharedTabs.refresh();
+      await _until(
+        tester,
+        () => shared.sharedTabs.state == SharedTabsState.ready,
+        reason: 'the daemon\'s shares are read',
+      );
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(tester.takeException(), isNull);
+
+      final reachable = await _rowReachable(tester);
+      await _shot(tester, '10-shared-tab-mark');
+      if (!reachable) {
+        // Nothing outside the app can read AppKit's row: its help line is
+        // `swarm_titlebar_checks.swift`'s then (C1), and this run checks
+        // only that the app came up shared.
+        debugPrint('Native row not reachable: the help line is not read.');
+      } else {
+        final buttons = await _nativeButtons(tester);
+        final select = buttons['Select app'];
+        expect(select, isNotNull, reason: '${buttons.keys}');
+        expect(select!['help'], 'Shared tab, 3 harnesses');
+      }
       await tester.pumpWidget(const SizedBox());
     },
     timeout: const Timeout(Duration(minutes: 3)),

@@ -14,34 +14,13 @@ import { promisify } from 'node:util'
 import { env } from '../config/env.js'
 import { ENGINES, PROCESS_ENGINES, type AgentEngine } from '../engines/types.js'
 import { engineInstallPaths, engineInstallRecipe } from './engineInstall.js'
+import { ENGINE_CLI_COMMANDS } from './engineCommands.js'
+import { currentUserShell } from './userShell.js'
 
 // Keep this historical import surface for callers, but never duplicate the
 // catalog here. `engines/types.ts` is the one iterable source of truth.
 export { ENGINES, PROCESS_ENGINES }
-
-/** Public vendor command shown to users and matched by the real-binary smoke matrix. */
-export const ENGINE_CLI_COMMANDS: Readonly<Record<AgentEngine, string>> = {
-  claude: 'claude',
-  codex: 'codex',
-  // Cursor and Grok both publish `agent`; Cursor's documented, unambiguous command is
-  // `cursor-agent`, so creation must use that and keep `agent` for discovery only.
-  cursor: 'cursor-agent',
-  opencode: 'opencode',
-  pi: 'pi',
-  hermes: 'hermes',
-  commandcode: 'cmd',
-  devin: 'devin',
-  muse: 'muse',
-  amp: 'amp',
-  kilo: 'kilo',
-  grok: 'grok',
-  agy: 'agy',
-  copilot: 'copilot',
-  cline: 'cline',
-  // A terminal has no command: the pane runs the user's login shell (engineLaunch.ts). The empty
-  // string is what keeps every "is this binary installed" probe honest — nothing to look for.
-  terminal: '',
-}
+export { ENGINE_CLI_COMMANDS } from './engineCommands.js'
 
 export interface ExecutableFileIdentity {
   path: string
@@ -103,8 +82,8 @@ const execFileAsync = promisify(execFile)
  */
 function interactivePathEntries(): string[] {
   if (process.env.NODE_ENV === 'test') return []
-  const shell = process.env.SHELL
-  if (!shell || !isAbsolute(shell)) return []
+  const shell = currentUserShell()
+  if (!shell) return []
   const daemonPath = process.env.PATH ?? ''
   if (interactivePathCache?.shell === shell && interactivePathCache.daemonPath === daemonPath) {
     return interactivePathCache.value
@@ -475,14 +454,14 @@ export function opencodeBin(): string {
 export async function opencodeBinAsync(): Promise<string> {
   const configured = env.OPENCODE_PATH
   if (configured) return configured
-  const ownPath = processPathEntries(), shell = process.env.SHELL, daemonPath = process.env.PATH ?? ''
+  const ownPath = processPathEntries(), shell = currentUserShell(), daemonPath = process.env.PATH ?? ''
   const installed = join(homedir(), '.opencode', 'bin', 'opencode')
   for (const entry of ownPath) {
     const file = join(entry, 'opencode')
     try { accessSync(file, constants.X_OK); return file } catch { /* next candidate */ }
   }
   let extra: string[] = []
-  if (process.env.NODE_ENV !== 'test' && shell && isAbsolute(shell)) {
+  if (process.env.NODE_ENV !== 'test' && shell) {
     if (interactivePathCache?.shell === shell && interactivePathCache.daemonPath === daemonPath && interactivePathCache.value.length) {
       extra = interactivePathCache.value
     } else {

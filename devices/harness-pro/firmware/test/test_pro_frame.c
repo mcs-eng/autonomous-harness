@@ -1,7 +1,6 @@
-// pro_frame.c's strip and turn math: whatever the damage, every damaged pixel reaches the panel exactly as a direct
-// full raster of the new scene would draw it (turned when built with -DPOD_PANEL_TURN=180), and every pixel of a damage
-// rectangle is written once. The panel is a host fake: it keeps a 720 x 720 "glass" and applies the real pro_turn.h
-// rules (the same inline functions pro_display.c calls once), and it checks the A/B overlap discipline.
+// pro_frame.c's strip math: whatever the damage, every damaged pixel reaches the panel exactly as a direct
+// full raster of the new scene would draw it, and every pixel of a damage rectangle is written once. The panel is a
+// host fake: it keeps a 720 x 720 "glass", and it checks the A/B overlap discipline.
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +9,6 @@
 #include "pro_canvas.h"
 #include "pro_display.h"
 #include "pro_frame.h"
-#include "pro_turn.h"
 
 static int checks;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); exit(1); } checks++; } while (0)
@@ -18,29 +16,26 @@ static int checks;
 int64_t esp_timer_get_time(void) { static int64_t t; return t += 3; }
 
 enum { N = PRO_DISPLAY_PX };
-static uint16_t glass[N * N];            // the panel's framebuffer, in panel (turned) coordinates
+static uint16_t glass[N * N];            // the panel's framebuffer, in glass coordinates
 static unsigned char writes[N * N];      // how often each panel pixel was written during one present
 static uint16_t strips[2][PRO_STRIP_PX];
 static int in_flight_buf = -1, overlaps, submits;
 
-uint16_t *pro_panel_strip(int which) { return strips[which & 1]; }
-void pro_panel_prepare(uint16_t *buf, int w, int h)
+uint16_t *pro_panel_strip(int which)
 {
-    // The raster of the next strip is done while the previous DMA may still own the other buffer: never this one.
-    if (in_flight_buf >= 0) { CHECK(buf != strips[in_flight_buf]); overlaps++; }
-    pro_turn_pixels(buf, (size_t)w * h);
+    // The next strip is rasterised while the previous DMA may still own the other buffer: never this one.
+    if (in_flight_buf >= 0) { CHECK((which & 1) != in_flight_buf); overlaps++; }
+    return strips[which & 1];
 }
 void pro_panel_submit(int x, int y, int w, int h, const uint16_t *buf)
 {
     CHECK(in_flight_buf < 0);   // the caller waited for the previous submit first
     CHECK(buf == strips[0] || buf == strips[1]);
     CHECK(x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= N && y + h <= N && (size_t)w * h <= PRO_STRIP_PX);
-    int px, py;
-    pro_turn_rect(x, y, w, h, &px, &py);
     for (int r = 0; r < h; r++)
         for (int c = 0; c < w; c++) {
-            glass[(py + r) * N + px + c] = buf[r * w + c];
-            writes[(py + r) * N + px + c]++;
+            glass[(y + r) * N + x + c] = buf[r * w + c];
+            writes[(y + r) * N + x + c]++;
         }
     in_flight_buf = buf == strips[0] ? 0 : 1;
     submits++;
@@ -52,7 +47,7 @@ static void paint_all(const ht_scene_t *s)   // put a whole scene on the glass a
 {
     ht_raster(s, (ht_rect_t){0, 0, N, N}, full);
     for (int y = 0; y < N; y++)
-        for (int x = 0; x < N; x++) glass[pro_turn_coord(y) * N + pro_turn_coord(x)] = full[y * N + x];
+        for (int x = 0; x < N; x++) glass[y * N + x] = full[y * N + x];
 }
 
 static void scene(ht_scene_t *s, int n, const int (*r)[5])   // r: x, y, w, h, colour
@@ -70,13 +65,16 @@ static void replay(const ht_scene_t *prev, const ht_scene_t *next, int expect_ov
     in_flight_buf = -1; overlaps = submits = 0;
     ht_damage_t damage;
     ht_damage(prev, next, &damage);
-    (void)pro_frame_present(prev, next);
+    uint32_t pushed = 0xdeadbeef;
+    (void)pro_frame_present(prev, next, &pushed);
+    CHECK(pushed == damage.pixels);   // the heartbeat counts a frame only when something was pushed: identical scenes push 0
+    if (prev && !memcmp(prev, next, sizeof *prev)) CHECK(pushed == 0);
     CHECK(in_flight_buf < 0);   // the last DMA was waited for before returning
     ht_raster(next, (ht_rect_t){0, 0, N, N}, full);
     for (int y = 0; y < N; y++)
         for (int x = 0; x < N; x++) {
-            const int g = pro_turn_coord(y) * N + pro_turn_coord(x);
-            CHECK(glass[g] == full[y * N + x]);          // the turn is applied exactly once
+            const int g = y * N + x;
+            CHECK(glass[g] == full[y * N + x]);
             int covered = 0;
             for (int i = 0; i < damage.count; i++) {
                 const ht_rect_t d = damage.rect[i];
@@ -117,12 +115,12 @@ int main(void)
     // 6. Identical scenes: nothing is pushed.
     replay(&a, &a, 0);
     CHECK(submits == 0);
-    printf("test_pro_frame (%s): %d checks passed\n",
-#if defined(POD_PANEL_TURN) && POD_PANEL_TURN == 180
-           "turned 180",
-#else
-           "upright",
-#endif
-           checks);
+    // 7. No turn: a full paint lands at (x, y), exactly.
+    replay(NULL, &a, 1);
+    replay(&a, &b, 1);   // and a damage repaint on top of a glass drawn that way
+    ht_raster(&b, (ht_rect_t){0, 0, N, N}, full);
+    for (int y = 0; y < N; y += 7)
+        for (int x = 0; x < N; x += 5) CHECK(glass[y * N + x] == full[y * N + x]);
+    printf("test_pro_frame: %d checks passed\n", checks);
     return 0;
 }

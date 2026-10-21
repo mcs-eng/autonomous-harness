@@ -26,8 +26,14 @@ model CommunityHarness {
   credits       Json     @default("[]")
   deletedAt     DateTime?
   createdAt     DateTime @default(now())
+  // Set when its author edits it (routes/communityEdit.ts); never on publishing.
+  updatedAt     DateTime?
+  // Its likes, moved with each one saved (lib/communityLikes.ts) and reconciled at worker boot: what a
+  // popular feed orders by, instead of counting every publication's likes for each page.
+  likeCount     Int      @default(0)
 
   @@index([autonomousEnv, deletedAt, createdAt])
+  @@index([autonomousEnv, deletedAt, likeCount, createdAt])
   @@index([autonomousEnv, authorId])
   @@index([autonomousEnv, forkedFrom])
   @@index([autonomousEnv, category, deletedAt, createdAt])
@@ -43,6 +49,8 @@ model CommunityLike {
 
   @@unique([autonomousEnv, harnessId, userId])
   @@index([autonomousEnv, harnessId])
+  // A trending feed reads only the last week's likes.
+  @@index([autonomousEnv, createdAt])
   @@map("community_likes")
 }
 
@@ -62,6 +70,60 @@ model CommunityComment {
   @@index([autonomousEnv, harnessId, createdAt])
   @@index([autonomousEnv, userId, createdAt])
   @@map("community_comments")
+}
+
+/// One reader's report of a publication or a comment (lib/communityReports.ts). It hides that one from
+/// its reader at once; reports from three readers hide it from everyone (CommunityHidden).
+model CommunityReport {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  autonomousEnv String   @default("prod")
+  targetType    String   // 'harness' | 'comment'
+  targetId      String
+  harnessId     String   // the publication, or the one the comment is on
+  userId        String
+  reason        String
+  createdAt     DateTime @default(now())
+
+  @@unique([autonomousEnv, targetType, targetId, userId])
+  @@index([autonomousEnv, userId, targetType])
+  @@index([autonomousEnv, targetType, targetId, createdAt])
+  @@map("community_reports")
+}
+
+/// A publication or comment hidden from everyone after reports, until a reviewer restores it (kept,
+/// with `restoredAt`: only reports after that count again) or removes it.
+model CommunityHidden {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  autonomousEnv String    @default("prod")
+  targetType    String
+  targetId      String
+  harnessId     String
+  createdAt     DateTime  @default(now())
+  restoredAt    DateTime?
+
+  @@unique([autonomousEnv, targetType, targetId])
+  @@index([autonomousEnv, targetType, restoredAt])
+  @@map("community_hidden")
+}
+
+/// Something that happened to a creator's work on the Hub, for their bell (lib/communityNotifications.ts):
+/// a comment on their harness, a reply to their comment, a fork of their harness. It names who did it and
+/// where, never what they wrote.
+model CommunityNotification {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  autonomousEnv String    @default("prod")
+  userId        String    // who is told
+  kind          String    // 'comment' | 'reply' | 'fork'
+  harnessId     String    // the harness commented on, or the one forked
+  harnessTitle  String
+  actorName     String
+  targetId      String    // the comment, or the fork
+  createdAt     DateTime  @default(now())
+  readAt        DateTime?
+
+  @@index([autonomousEnv, userId, createdAt])
+  @@index([autonomousEnv, userId, readAt])
+  @@map("community_notifications")
 }
 
 model CommunityFollow {
@@ -455,11 +517,53 @@ model Subdomain {
   @@map("subdomains")
 }
 
-/// Harness Analytics — ADDITIVE counters only (see docs/design/harness-analytics.md).
-/// Safe to sum along engine, mode, origin, machine, and day. A union of intervals or a distinct
-/// count must NEVER live here: splitting one by engine and re-summing double-counts concurrency,
-/// which is the exact error the wall-clock metric exists to prevent. Those live on
-/// AnalyticsDailyMachine at (machine, day) granularity instead.
+/// Account control only; no report times, usage counters or machine inventory.
+model ProductUsagePreference {
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  userId   String  @unique
+  enabled  Boolean
+  revision Int     @default(1)
+
+  @@map("product_usage_preferences")
+}
+
+/// Only fleet-wide counters. Never add an account, machine, agent, location or event timestamp.
+model ProductUsageTotal {
+  id     String   @id @default(auto()) @map("_id") @db.ObjectId
+  dayUtc DateTime
+  metric String
+  value  Int
+
+  @@unique([dayUtc, metric])
+  @@map("product_usage_totals")
+}
+
+/// Random report receipt, used only to prevent retries counting twice. No identity or report body.
+model ProductUsageReceipt {
+  id        String   @id @map("_id")
+  expiresAt DateTime
+
+  @@map("product_usage_receipts")
+}
+
+/// One UTC day a person used Harness while sharing product usage, under a keyed pseudonym
+/// (HMAC of the user id; never the id itself). Expires 10 days after the day; the hourly rollup
+/// keeps only anonymous `people_*` totals. Deleted at once when the person turns sharing off.
+model ProductUsageActivity {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  subject   String
+  dayUtc    DateTime
+  surfaces  String[]
+  worked    Boolean  @default(false)
+  signupDay DateTime
+  staff     Boolean
+  expiresAt DateTime
+
+  @@unique([subject, dayUtc])
+  @@map("product_usage_activity")
+}
+
+/// Legacy individual counters. New ingestion is disabled; dayUtc TTL removes these after 35 days.
 model AnalyticsDailyBucket {
   id               String   @id @default(auto()) @map("_id") @db.ObjectId
   userId           String
@@ -487,6 +591,7 @@ model AnalyticsDailyBucket {
   @@map("analytics_daily_buckets")
 }
 
+/// Legacy, no longer written. Retained only until the 35-day dayUtc expiry.
 /// Harness Analytics — NON-ADDITIVE metrics plus the reporting heartbeat. Exactly one row per
 /// machine per day. A row with all-zero counters means "the machine was up and idle"; a MISSING row
 /// means "we have no data". The UI must never render those two states the same way.
@@ -533,9 +638,8 @@ model AnalyticsMachineState {
   @@map("analytics_machine_states")
 }
 
-/// Presence/remote-usage tracking — separate from the Analytics family above (not opt-in, not
-/// collector-reported; derived directly from the relays: web-ws in src/lib/webWs.ts, device-ws in
-/// src/lib/deviceWs.ts, adapter-ws in src/lib/adapterWs.ts).
+/// Legacy presence histories: new writes are disabled and dayUtc expires after 35 days.
+/// The comments below document old records for historical readers, not current collection.
 
 /// Per-day record of whether a user had the desktop app open, and on which machine. One row per
 /// (user, machine, UTC day): "user online that day" is therefore a DISTINCT count of `userId`, while
@@ -574,7 +678,8 @@ model UserDailyPresence {
 /// Per-day record of a user on a surface other than the desktop app — `UserDailyPresence` stays the
 /// desktop app's alone. One row per (user, surface, UTC day); DAU is a distinct `userId`.
 /// `surface`: 'tui' (`harness tui`, reported by the local daemon like a desktop window: adapter-ws
-/// `app_presence { surface: 'tui' }`, src/lib/adapterWs.ts), 'mobile' / 'web' (the app's and the
+/// `app_presence { surface: 'tui' }`, src/lib/adapterWs.ts) — 'harness-os' / 'harness-os-pi' when that
+/// TUI is Harness OS on a PC / on an Orange Pi (cli lib/windowSurfaces.ts) —, 'mobile' / 'web' (the app's and the
 /// browser's own web-ws sockets, declared with `?client=` — src/lib/webWs.ts; the daemon's relay
 /// socket declares nothing and is never counted). `connections` = sessions opened that day (for
 /// mobile/web one per machine socket); a session spanning midnight gives the next day `0`.
@@ -712,6 +817,8 @@ model HarnessReview {
 /// Discovery metadata for one account-bound, view-only invitation. Content remains on the owner
 /// daemon, which independently authorizes every observer against its durable local grant list.
 model HarnessShare {
+  /// A session view derived from this Super Tab; membership is rechecked at admission.
+  superTabId     String?
   id             String    @id @map("_id")
   ownerId        String
   machineId      String
@@ -732,6 +839,46 @@ model HarnessShare {
   @@map("harness_shares")
 }
 
+/// A whole machine its owner shares with other accounts (docs/plans/2026-10-15-share-machine-plan.md):
+/// with these addresses, and with everyone at `domain` when the owner turned that on. Off by default, so
+/// a machine with no row is shared with no one. The backend's copy decides who is LISTED the machine and
+/// who may select it on the relay; the machine's own daemon keeps the policy it published and trusts
+/// only the keys of accounts that policy names (cli services/sharedMachines.ts), as Share's owner does.
+model MachineShare {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  machineId     String   @unique
+  ownerId       String
+  autonomousEnv String
+  /// Normalized (trimmed, lower case), never the owner's own.
+  emails        String[]
+  /// The owner's email domain while "Everyone at @domain" is on; null when off. Written by the backend
+  /// from the owner's verified address, never taken from the client, and never a public domain.
+  domain        String?
+  /// Stable while an email/domain grant continues; a removed and restored grant
+  /// gets a new version so old Super Tab contributions cannot resume silently.
+  grantVersions Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([emails, autonomousEnv])
+  @@index([domain, autonomousEnv])
+  @@index([ownerId])
+  @@map("machine_shares")
+}
+
+/// Someone at a machine's domain added it to their machines (a domain share takes one click to add; an
+/// address the owner named needs none). Only the accounts that added it are trusted by the machine.
+model MachineShareAdd {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  machineId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@unique([machineId, userId])
+  @@index([userId])
+  @@map("machine_share_adds")
+}
+
 /// The account's DESK: its tabs, in order, and the agents each holds — one document per user, the
 /// same on every computer the person signs in on (owner, 2026-09-21: "tab là global"). Holds only
 /// what the person would call "my tabs": ids, names, order, `(machineId, agentId)` pairs. Nothing
@@ -750,6 +897,19 @@ model Desk {
   @@map("desks")
 }
 
+/// The account's connected services (Linear, GitHub…), sealed by a daemon for every machine of the account
+/// (cli/src/lib/e2ee/connectorVault.ts): only those machines can open it. The backend keeps the latest
+/// envelope and a revision for compare-and-set, and tells every computer when it changed.
+model ConnectorVault {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @unique
+  revision  Int      @default(0)
+  envelope  Json
+  updatedAt DateTime @updatedAt
+
+  @@map("connector_vaults")
+}
+
 /// Agent Messages, per tab (docs/design/2026-10-10-agent-messages.md): whether the harnesses in one desk tab
 /// may message each other. Absence means off. Kept beside the desk, never in its tab JSON: a backend pod that
 /// has not upgraded drops a tab whose JSON it does not know (lib/desk.ts parseTabs). A deterministic _id makes
@@ -759,6 +919,9 @@ model AgentMessageTab {
   userId    String
   tabId     String
   enabled   Boolean  @default(false)
+  /// The tab's leader: a pane of the tab on one of the owner's machines. Written as explicit nulls at create.
+  leaderMachineId String?
+  leaderAgentId   String?
   revision  Int      @default(0)
   updatedAt DateTime @updatedAt
 
@@ -766,13 +929,245 @@ model AgentMessageTab {
   @@map("agent_message_tabs")
 }
 
+/// A tab its owner shared with other accounts (docs/superpowers/specs/2026-10-15-agent-messages-across-accounts-design.md).
+/// `roster` is the owner's signed blob, stored and never read: members verify it against the owner's key.
+model AgentMessageShare {
+  id             String    @id @map("_id") // sharedTabId: sha256(['amsg-share', ownerUserId, tabId])[:24]
+  ownerUserId    String
+  ownerMachineId String
+  tabId          String
+  autonomousEnv  String
+  rosterVersion  Int       @default(0)
+  roster         Json?
+  stoppedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([ownerUserId, tabId])
+  @@map("agent_message_shares")
+}
+
+model AgentMessageInvite {
+  id             String    @id @map("_id")
+  shareId        String
+  ownerUserId    String
+  ownerMachineId String
+  email          String
+  autonomousEnv  String
+  expiresAt      DateTime
+  acceptedBy     String?
+  acceptedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@unique([shareId, email])
+  @@index([email, autonomousEnv, expiresAt])
+  @@map("agent_message_invites")
+}
+
+model AgentMessageMember {
+  id         String    @id @map("_id") // sha256(['amsg-member', shareId, userId])[:24]
+  shareId    String
+  userId     String
+  email      String
+  inviteId   String
+  acceptedAt DateTime  @default(now())
+  removedAt  DateTime?
+
+  @@index([userId])
+  @@index([shareId])
+  @@map("agent_message_members")
+}
+
 /// Explicit account opt-ins; missing choices stay off. Each write changes one feature.
+// Super Tabs own their roster and history independently of desktop pane layout. Revision writes
+// serialize membership changes, commands and delivery claims inside Mongo transactions.
+model SuperTab {
+  id             String   @id @map("_id")
+  ownerId        String
+  autonomousEnv  String
+  memberIds      String[]
+  invitedEmails  String[]
+  machineIds     String[]
+  revision       Int      @default(0)
+  state          Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([autonomousEnv, memberIds])
+  @@index([autonomousEnv, invitedEmails])
+  @@index([autonomousEnv, machineIds])
+}
+
+// A terminal retains its history when removed from a roster. These bindings
+// prevent contributing a private session to another project's audience later.
+model SuperTabSessionScope {
+  id           String   @id @map("_id")
+  scopeIds     String[]
+  privateScope String?
+
+  @@index([scopeIds])
+}
+
+model SuperTabMessage {
+  id              String   @id @map("_id")
+  tabId           String
+  conversationId  String
+  sequence        Int
+  author          Json
+  source          Json?
+  text            String
+  replyTo         String?
+  recipientIds    String[]
+  createdAt       DateTime @default(now())
+
+  @@index([tabId, conversationId, sequence])
+}
+
+model SuperTabOperation {
+  id           String   @id @map("_id")
+  tabId        String
+  actorKey     String
+  requestHash  String
+  revision     Int
+  result       Json
+  createdAt    DateTime @default(now())
+
+  @@index([tabId])
+}
+
+// A conversation-scoped provenance receipt. It grants no terminal access.
+// Only the recorded execution host can append observations, and every append
+// rechecks the person's membership and both machine grants.
+model SuperTabNativeContext {
+  id              String   @id @map("_id")
+  tabId           String
+  conversationId  String
+  agentId         String
+  userId          String
+  binding         Json
+  lastEventId     String?
+  revoked         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  @@index([tabId, revoked])
+}
+
+model SuperTabDelivery {
+  id                    String   @id @map("_id")
+  tabId                 String
+  conversationId        String
+  messageId             String
+  nativeContextId       String?
+  assignmentId          String?
+  agentId               String
+  machineId             String
+  machineOwnerId        String?
+  membershipGeneration  String
+  authorKind            String
+  authorId              String
+  authorGeneration      String
+  status                String   @default("queued")
+  claimId               String?
+  receipt               String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([tabId, agentId, status, createdAt])
+  @@index([machineId, status])
+}
+
+// One independent harness owns at most one active assignment across all Super Tabs.
+model SuperTabRun {
+  id            String   @id @map("_id")
+  tabId         String
+  assignmentId  String   @unique
+  machineId     String
+  harnessId     String
+  createdAt     DateTime @default(now())
+}
+
+// One routing policy document per account and environment (superTabs/routingPolicy.ts).
+model RoutingPolicy {
+  id            String   @id @map("_id")
+  userId        String
+  autonomousEnv String
+  revision      Int      @default(0)
+  policy        Json
+  updatedAt     DateTime @updatedAt
+
+  @@unique([userId, autonomousEnv])
+}
+
+model SuperTabAttempt {
+  id              String   @id @map("_id")
+  tabId           String
+  conversationId  String
+  snapshot        Json
+  createdAt       DateTime @default(now())
+
+  @@index([tabId, conversationId, createdAt])
+}
+
+/// One `harness super-tab route` decision (superTabs/routeRecord.ts). Pruned after 90 days on write.
+model SuperTabRouteDecision {
+  id             String    @id @map("_id")
+  tabId          String
+  conversationId String
+  record         Json
+  final          Json?
+  override       Json?
+  assignmentId   String?
+  outcome        String?
+  outcomeAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([tabId, createdAt])
+  @@index([tabId, conversationId, outcome])
+  @@index([tabId, assignmentId])
+}
+
+model SuperTabStopReceipt {
+  id              String   @id @map("_id")
+  tabId           String
+  assignmentId    String
+  machineId       String
+  harnessId       String
+  machineOwnerId  String
+  receipt         String
+  createdAt       DateTime @default(now())
+
+  @@unique([tabId, assignmentId])
+}
+
+// Configuration observations stay outside the tab snapshot so a long-running
+// assignment keeps its complete history without making every tab read grow.
+model SuperTabConfiguration {
+  id             String   @id @map("_id")
+  tabId          String
+  agentId        String
+  revision       Int
+  configuration  Json
+  assignmentIds  String[]
+  actorKey       String
+  observedAt     DateTime
+
+  @@index([tabId, agentId, revision])
+}
+
 model ExperimentalSettings {
   id               String  @id @map("_id") @db.ObjectId
   userId           String
   focusBarCreature Boolean @default(false)
   shareButton      Boolean @default(false)
   devicesTab       Boolean @default(false)
+  /// What agents may do with Harness, per account (owner, 2026-10-12): each computer's daemon keeps a copy
+  /// it reads at every launch (cli/src/lib/agentSettings.ts). Off until the person turns one on.
+  agentsStartAgents    Boolean @default(false)
+  agentPullRequestLine Boolean @default(false)
+  agentMessages        Boolean @default(false)
+  /// Inverted on purpose: off shares a one-line summary of what each harness does with the shared tab's other accounts.
+  agentMessagesHideSummary Boolean @default(false)
   revision         Int     @default(0)
 
   @@index([userId])
@@ -877,6 +1272,30 @@ model DeviceKeyLogState {
   updatedAt DateTime @updatedAt
 
   @@map("device_key_log_state")
+}
+
+/// A device's signed "It's mine" for another key on the account's device key log (lib/deviceAckCore.ts):
+/// once one trusted device confirms a new one, the account's other devices stop showing it as New.
+/// Kept beside `device_key_log` and never in its chain — an op the chain does not know would make every
+/// older client freeze the whole log — so a client that predates it never sees one.
+///
+/// `ack` is the JSON the device sent, kept verbatim; its signature covers a binary encoding of its
+/// fields, and every device checks it against its own verified log, never this table's word. The unique
+/// `(userId, pub, signer)` makes appending idempotent: one acknowledgement per key per signer.
+model DeviceKeyAck {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String
+  /// The acknowledged key, and the seq of the log entry that added it.
+  pub       String
+  addSeq    Int
+  /// The key that acknowledged it (and signed `ack`).
+  signer    String
+  ack       String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, pub, signer])
+  @@index([userId, addSeq])
+  @@map("device_key_acks")
 }
 
 /// Public/private link metadata only. The owner daemon keeps the final policy and encrypted discussion.

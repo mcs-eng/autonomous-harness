@@ -4,7 +4,11 @@ name: Privacy guard
 # the added lines of the diff. The term list is the PRIVATE_TERMS repository
 # secret (newline- or comma-separated). It is not stored in this repository.
 # A match fails the job and prints only the location and a masked length,
-# never the term.
+# never the term. A flagged line is exempt only when it is carried verbatim
+# from the fork's upstream history (fetched as git data; see the scanner's
+# --upstream-ref).
+# A flagged path of an added, renamed or copied file is exempt only when
+# upstream main carries the identical blob at the same canonical path.
 #
 # Trust model: this runs on pull_request_target, so the workflow file and the
 # scanner both come from the base branch. The pull request's commits are
@@ -44,7 +48,11 @@ jobs:
   scan:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Upstream sync pull requests carry hundreds of commits and thousands of
+    # files, and scan time grows with the range. A timed-out scan reports
+    # nothing, so size the cap for the largest sync batch rather than an
+    # ordinary pull request.
+    timeout-minutes: 45
     steps:
       # pull_request_target checks out the base branch, which is trusted.
       - uses: actions/checkout@v7
@@ -63,6 +71,15 @@ jobs:
           git fetch --no-tags "$REPO_URL" "pull/${PR_NUMBER}/head"
           git cat-file -e "$BASE_SHA^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
+      - name: Fetch the fork's upstream main as data
+        # Same trust model as the pull request fetch above: the objects are
+        # data, read by git only; no upstream code is checked out or run. The
+        # scanner exempts a flagged line only when the commit that introduced
+        # it is an ancestor of this ref and the line is still present verbatim
+        # in the ref's version of the file. A fetch failure fails the job.
+        # A flagged path of an added, renamed or copied file is exempt only when
+        # upstream main carries the identical blob at the same canonical path.
+        run: git fetch --no-tags https://github.com/autonomous-ai/openharness.git "+main:refs/data/upstream-main"
       - name: Scan for private terms
         env:
           PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
@@ -70,4 +87,4 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/privacy-guard.py --pull-request
+        run: python3 scripts/privacy-guard.py --pull-request --upstream-ref refs/data/upstream-main

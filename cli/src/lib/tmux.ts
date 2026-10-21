@@ -22,6 +22,7 @@ import { processStartTicks } from './processLiveness.js'
 import { nativeProcessImages } from './nativeProcessImages.js'
 import { neutralizePasteControls } from './pasteText.js'
 import { patientDeadline, patientExec } from './patientExec.js'
+import { probeExecFile } from './offThreadExec.js'
 import { inTmuxRoom } from './tmuxControlGate.js'
 import { tmuxFeatures, type TmuxFeatures } from './tmuxVersion.js'
 import { processIdentityOf, sameProcessIdentity } from './terminalRuntime.js'
@@ -55,7 +56,6 @@ function cleanPaneTitle(title: string): string | null {
  * splits on `/` only. Every base-name read in this module must go through this helper so a row
  * parses identically on any host.
  */
-/** A drive-letter prefix in either slash dialect marks a Windows-authored path. */
 const isWindowsDialectPath = (path: string): boolean => /^[A-Za-z]:[\\/]/.test(path)
 
 function basename(path: string): string {
@@ -129,7 +129,7 @@ export function argvTokens(args: string): string[] {
         token += args[index]
         index++
       }
-      if (index < args.length) index++ // consume the closing quote
+      if (index < args.length) index++
       tokens.push(token)
     } else {
       let token = ''
@@ -177,7 +177,7 @@ function argvPrefix(args: string, nativeArgv?: readonly string[]): () => string 
         token += args[index]
         index++
       }
-      if (index < args.length) index++ // consume the closing quote
+      if (index < args.length) index++
     } else {
       while (index < args.length && !/\s/.test(args[index])) {
         token += args[index]
@@ -429,7 +429,6 @@ export function repairInteropRowFromCmdline(
     argv.pop() // one artifact: the terminating NUL of the final argv element
   }
   if (argv[0] !== '/init') return {}
-  // `/init <program> <args…>` — without the relayed program there is nothing to expose.
   if (argv.length < 2) return {}
   // WSL-interop qualification, not just an `/init` head. On a native Linux host `/init` is a real
   // program (docker-init, systemd's shim) whose cmdline can name ANY child —
@@ -590,6 +589,34 @@ export async function processArgs(identity: ProcessIdentity): Promise<string> {
   return rows?.find((row) => sameProcessIdentity(row, identity))?.args ?? ''
 }
 
+/**
+ * The command line [row]'s engine was launched with, for reading how it was launched (its grid).
+ *
+ * Its own, unless that is a bare title: Pi renames its process, which on macOS overwrites its argv and environment
+ * in `ps` with `pi` (2026-10-14), and nothing it was launched with can be read there. Then the launcher this daemon
+ * started it under still holds the command (`… harness-engine [cwd] <engine binary> <args>`, lib/engineLaunch.ts),
+ * and is read when it is the direct parent in the same table, naming a binary of that title right after
+ * `harness-engine`. Anything else is '': not known, never another process's command line.
+ */
+export function launchArgs(rows: readonly ProcessRow[], row: ProcessRow): string {
+  const title = row.args.trim()
+  if (/\s/.test(title)) return row.args
+  const parent = rows.find((candidate) => candidate.pid === row.parentPid)
+  if (!title || !parent) return ''
+  const tokens = argvTokens(parent.args)
+  const at = tokens.indexOf('harness-engine')
+  if (at < 0) return ''
+  const named = (token: string | undefined) => !!token && basename(token) === title
+  return named(tokens[at + 1]) || named(tokens[at + 2]) ? parent.args : ''
+}
+
+/** [launchArgs] for the process [identity] names, read from a fresh table; '' once it is not that process. */
+export async function processLaunchArgs(identity: ProcessIdentity): Promise<string> {
+  const rows = await processRows()
+  const row = rows?.find((candidate) => sameProcessIdentity(candidate, identity))
+  return rows && row ? launchArgs(rows, row) : ''
+}
+
 /** The process table, or null when `ps` itself failed — "we could not look" is not "nothing is there". */
 export function processRows(): Promise<ProcessRow[] | null> {
   if (processRowsInFlight) return processRowsInFlight
@@ -633,7 +660,7 @@ function execText(command: string, args: string[], timeout: number): Promise<str
     // timeout, for a deadline shared across calls: `killed` without an error is that timeout throwing
     // away an answer that had arrived (patientExec.ts), so it is no answer, not an empty one.
     let child: { killed?: boolean } | undefined
-    child = execFile(command, args, { timeout }, (err, stdout) => resolve((err && !stdout) || child?.killed ? null : stdout))
+    child = probeExecFile(execFile)(command, args, { timeout }, (err, stdout) => resolve((err && !stdout) || child?.killed ? null : stdout))
   })
 }
 
@@ -1232,7 +1259,6 @@ export function bypassPermissionActiveFromArgv(
 ): boolean {
   const flags = BYPASS_PERMISSION_FLAGS[engine]
   if (!flags) return false
-  // Flattened `ps` args can never prove a bypass flag: refuse to persist state from them.
   if (!boundaryFaithful) return false
   // A named mode says exactly how much the engine approves on its own (`full` — the old
   // skip-everything flag — included); only an argv naming none falls back to the bare flag check.
@@ -1264,7 +1290,7 @@ function permissionModeFromTokens(engine: RegisteredSession['engine'], tokens: r
   if (!modes) return null
   // `full` is checked ahead of the rest where the engine has it: its flag is a single token no other
   // mode shares, and an argv carrying both it and `--permission-mode` is running without permissions
-  // whatever else it says. `ask` is empty and can never be "found".
+  // whatever else it says. `ask` is empty for most engines and can never be "found"; Claude Code's names its mode.
   const names = ['full', ...Object.keys(modes).filter((mode) => mode !== 'full')]
   for (const mode of names) {
     const flags = modes[mode]
@@ -1363,7 +1389,6 @@ export function resumeSessionId(engine: RegisteredSession['engine'], args: strin
   for (let index = 0; index < optionTokens.length; index++) {
     const token = optionTokens[index]
     for (const flag of spec.flags) {
-      // `--resume=<id>` spellings carry the value inside the flag token itself.
       if (token.toLowerCase() === flag.toLowerCase() && index + 1 < optionTokens.length) {
         const value = optionTokens[index + 1]
         if (spec.id.test(value)) return value

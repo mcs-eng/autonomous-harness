@@ -29,8 +29,9 @@ import {
   refusePermissionFlagIfUnsupported, supportsFirstPrompt, supportsNamedAgent, NamedAgentUnsupportedError,
 } from '../../lib/engineLaunch.js'
 import { setUpWithin } from '../../lib/setUpWithin.js'
+import { agentLaunchArgs, joinedInstructions } from '../../lib/agentAttribution.js'
 import { writeGridConfigDir } from '../../lib/gridConfigDir.js'
-import { describeGridLaunch, gridConflictingEnvToClear, type GridLaunchAnswer, type GridLaunchMachine, type GridLaunchRequest, type GridWebSearchStatus } from '../../lib/gridLaunchWire.js'
+import { describeGridLaunch, gridConfigHandOff, gridConflictingEnvToClear, type GridLaunchAnswer, type GridLaunchMachine, type GridLaunchRequest, type GridWebSearchStatus } from '../../lib/gridLaunchWire.js'
 import { profileEnvironment } from '../../lib/engineHomes.js'
 import { DEFAULT_HARNESS_PERMISSION, freshHarnessEnvironment } from '../../lib/harnessDefaults.js'
 import { buildHarnessSessionLabel } from '../../lib/harnessSessionLabel.js'
@@ -98,7 +99,7 @@ export function createAgentCreator({
     if (input.resumeSessionId) return { ok: true, dispatch: () => externalResume(input) }
     const stale = () => ({ ok: false as const, error: 'LAUNCH_AUTHORITY_CHANGED', unavailable: 'launch', detail: 'Waiting for the original launch request’s authority.' })
     if (!authority.current()) return stale()
-    let { engine, cwd, bypassPermission, permissionMode, grid, codexHome, dsh, prompt, name, agent, scmLaunchRecord } = input
+    let { engine, cwd, bypassPermission, permissionMode, grid, codexHome, dsh, prompt, name, agent, scmLaunchRecord, startedBy, parentAgentId, launchModel } = input
     if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
     if (blocksFolder(cwd)) return { ok: false, error: 'WORKTREE_BUSY' }
     const workspaceIdentity = () => { const info = statSync(cwd); return `${info.dev}:${info.ino}:${realpathSync(cwd)}` }
@@ -124,7 +125,12 @@ export function createAgentCreator({
       bypassPermission = permissionModeApproves(pinnedMode)
     }
     const inspected = await inspectNative?.(engine, { ...input, permissionMode, bypassPermission }, authority)
-    if (inspected && !inspected.ok) return inspected
+    // An engine that ran and failed, or whose install for this request failed, is refused with its own
+    // reason. Held, a creation retried every two seconds and could start, task and all, whenever the
+    // engine was repaired: a Codex installed with npm on a computer without Node (fresh Ubuntu VM,
+    // 2026-10-11) held for good, and `harness new` said only that it could not confirm. A relaunch,
+    // which nobody is waiting on, still holds.
+    if (inspected && !inspected.ok) return inspected.refusal ? { ok: false, error: inspected.refusal, detail: inspected.detail } : inspected
     const native = inspected?.ok ? inspected.launch : undefined
     if (engine === 'codex' && native) codexHome = nativeHookLocations(native.environment).CODEX_HOME
     const current = () => authority.current() && (!native || native.current())
@@ -250,13 +256,14 @@ export function createAgentCreator({
       // An engine whose provider lives in a file gets a directory this daemon owns, never the
       // user's own dotfiles. The label is unique per creation, so two agents never share one.
       if (built.launch.configDir) {
-        const { envVar, files, pointAt, links } = built.launch.configDir
+        const { files, links } = built.launch.configDir
         try {
           const publication = native && publishConfig ? await publishConfig(label, files, links, current) : null
           if (publication && !native?.retain?.(publication.proof)) return stale()
           const dir = publication?.directory ?? await writeGridConfigDir(label, files, links)
-          // Pi is handed the directory; OpenCode's OPENCODE_CONFIG wants the file inside it.
-          gridLaunch.env[envVar] = pointAt ? join(dir, pointAt) : dir
+          const handOff = gridConfigHandOff(built.launch.configDir, dir)
+          Object.assign(gridLaunch.env, handOff.env)
+          gridLaunch.args = [...gridLaunch.args, ...handOff.args]
         } catch (error) {
           const detail = `could not write ${engine}'s grid configuration · ${error instanceof Error ? error.message : error}`
           console.warn(`[agent] create ${engine} refused · ${detail}`)
@@ -318,11 +325,15 @@ export function createAgentCreator({
     // The named agent takes the same argv slot on every relaunch (`buildLaunchOverrides` appends it
     // from the row's `agent`, after the grid's and the DSH's argv, exactly as here). The engine was
     // checked for a contract at the wire (AGENT_UNSUPPORTED, opencode v2 included), so this cannot throw.
-    const extraArgs = [...(gridLaunch?.args ?? []), ...dshArgs, ...(agent ? namedAgentArgs(engine, agent, native ? native.opencodeMajor : opencode ? await opencode.opencodeMajorVersion() : null) : [])]
+    // A harness another agent started says so in the pull requests it opens (lib/agentAttribution.ts), last, as every
+    // relaunch appends it (`buildLaunchOverrides`), and read from the person's settings where this launch reads them.
+    // What Harness tells the agent (its instructions, and the pull request line for one another agent started), last.
+    const told = agentLaunchArgs(engine, startedBy, { cwd, profile: codexHome, environment: native?.environment })
+    const extraArgs = joinedInstructions(engine, [...(gridLaunch?.args ?? []), ...dshArgs, ...(agent ? namedAgentArgs(engine, agent, native ? native.opencodeMajor : opencode ? await opencode.opencodeMajorVersion() : null) : []), ...told])
     // The first prompt is a launch option only — never part of `extraArgs`, which the registry row
     // carries into a relaunch (engineLaunch.ts, `firstPrompt`).
     const firstPrompt = prompt
-    const launchOptions = { ...(native ? { native } : {}), bypassPermission, ...(permissionMode ? { permissionMode } : {}), extraArgs: extraArgs.length ? extraArgs : undefined, installIfMissing, clearEnv, cwd, harnessNode: dsh ? true : undefined, ...(firstPrompt ? { firstPrompt } : {}), terminalHint: { machineName: terminalHintMachineName() } }
+    const launchOptions = { ...(native ? { native } : {}), bypassPermission, ...(permissionMode ? { permissionMode } : {}), extraArgs: extraArgs.length ? extraArgs : undefined, installIfMissing, clearEnv, cwd, harnessNode: dsh ? true : undefined, ...(firstPrompt ? { firstPrompt } : {}), ...(launchModel ? { launchModel } : {}), terminalHint: { machineName: terminalHintMachineName() } }
     const command = buildEngineCommandArgv(engine, launchOptions)
     const argv = buildEngineLaunchArgv(engine, launchOptions)
     // A tmux route is enough to stream its screen. Register it before looking for a process so both
@@ -364,6 +375,8 @@ export function createAgentCreator({
       permissionMode,
       defaultName: name,
       label: dshLabel,
+      startedBy: startedBy ?? null,
+      parentAgentId: parentAgentId ?? null,
     })
     if (!result.ok) return { ok: false, error: result.error, detail: result.detail }
     const { spawned, pending } = result

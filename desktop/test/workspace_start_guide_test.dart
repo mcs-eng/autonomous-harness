@@ -84,7 +84,11 @@ class _FirstApp extends AppNotifier {
   }
 
   @override
-  Future<void> probeDsh(String machineId, {bool force = false}) async {}
+  Future<void> probeDsh(
+    String machineId, {
+    bool force = false,
+    bool userAction = false,
+  }) async {}
   @override
   Future<Map<String, dynamic>> listRemoteFolder(
     String machineId,
@@ -359,7 +363,6 @@ void main() {
     await openHarnessPicker(tester);
     expect(find.byType(NewHarnessForm), findsNothing);
     expect(find.byKey(const ValueKey('swarm-search-input')), findsOneWidget);
-    // Search lists the session; this fork's Continue working list can too.
     expect(find.text('Existing work'), findsWidgets);
     expect(find.byType(WorkspaceWelcome), findsOneWidget);
     await key(tester, LogicalKeyboardKey.escape);

@@ -39,8 +39,6 @@ void main() {
           find.byKey(const ValueKey('swarm-search-preview')),
           findsOneWidget,
         );
-        // This fork's Continue working rows stay on the page under the
-        // command list; only search results must be absent.
         expect(
           find.ancestor(
             of: find.text('Agent 0'),

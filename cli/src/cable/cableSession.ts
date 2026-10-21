@@ -43,6 +43,11 @@ const PING_EVERY_MS = 5_000
 /** No bytes of any kind for this long → the handle is dead. Longer than the dial's own 15 s window, so a
  *  single late message cannot trip both sides at once and have each conclude the other left. */
 const SILENCE_MS = 20_000
+/** How often a connected port's traffic counters go to the dial's log. */
+const LINK_LOG_MS = 60_000
+/** Non-frame text kept per logging interval, and the shortest printable run worth keeping. */
+const NOISE_MAX = 200
+const NOISE_RUN_MIN = 4
 const REOPEN_EVERY_MS = 2_000
 // How long one attempt at opening the port may take before it is abandoned.
 //
@@ -261,6 +266,8 @@ import { withSelectedPassage, type SelectionCommand, type SelectionResult } from
 import type { VisitCommand, VisitResult } from './windowVisit.js'
 import type { FormCommand, FormResult } from './windowForm.js'
 import { deriveLongRecap, extendShortRecap } from '../lib/deviceRecap.js'
+import type { TurnStatsFields } from './turnStats.js'
+import type { Tier } from '../lib/notifyTier.js'
 
 export interface RouteDecision {
   agentId: string
@@ -433,6 +440,8 @@ export interface DeviceSettings {
   focusFace: boolean
   scrollReversed: boolean
   round: boolean
+  /** Harness Pro only: which interface the screen shows. Absent from round dials and older Pro firmware. */
+  uiSkin?: 'classic' | 'console'
   voiceLang: string
   /** Presence advertises companion.set support. Omitted by older firmware. */
   followCompanion?: boolean
@@ -515,6 +524,9 @@ export const openDialPort: PortOpener = async (onData, onClosed) => {
  * filled with defaults: a default is a value this computer invented, and the pane would then show a
  * setting the device does not have — the exact failure `settings.state` exists to prevent.
  */
+/** True when the device's settings carry a `uiSkin` at all (an older firmware has none and would ignore the patch). */
+const hasUiSkin = (value: unknown): boolean => typeof value === 'object' && value !== null && 'uiSkin' in value
+
 function readSettings(value: unknown): DeviceSettings | undefined {
   if (!value || typeof value !== 'object') return undefined
   const raw = value as Record<string, unknown>
@@ -535,6 +547,7 @@ function readSettings(value: unknown): DeviceSettings | undefined {
     scrollReversed: raw.scrollReversed as boolean,
     round: raw.round as boolean,
     voiceLang: raw.voiceLang,
+    ...(raw.uiSkin === 'classic' || raw.uiSkin === 'console' ? { uiSkin: raw.uiSkin as 'classic' | 'console' } : {}),
     ...(raw.companionProtocol === 2 ? {companionProtocol:2, companionDetails:readCompanionIdentity(raw.companionDetails)} : {}),
     ...(typeof raw.followCompanion === 'boolean' &&
         (raw.companion === null || typeof raw.companion === 'string')
@@ -556,6 +569,8 @@ const PET_TRANSIENT = new Set(['timeout', 'unreadable', 'memory', 'busy'])
 export class CableSession {
   private link: CablePort | null = null
   private decoder = new CableDecoder()
+  /** This port's traffic since it opened, logged once a minute and when it closes (see logLink). */
+  private traffic = { at: 0, tx: 0, txFrames: 0, rx: 0, rxFrames: 0, corrupt: 0, discarded: 0, run: '', noise: '' }
   private timer: NodeJS.Timeout | null = null
   private greetedMac: string | null = null
   /** This session has spoken with a real dial at least once. Never reset: a port that has been a dial
@@ -582,6 +597,8 @@ export class CableSession {
   private longRecap = false
   /** `activity: 'steps-v1'`: `action`, `elapsedSeconds` and `step` on turn.activity. */
   private stepsActivity = false
+  /** `stats: 'turn-v1'`: the `turn.stats` frame before turn.done. */
+  private statsTurn = false
   /** `player: 'library-v1'`: the paged `player.library`. */
   private playerCapable = false
   private playerOffset = 0
@@ -589,16 +606,24 @@ export class CableSession {
   private playerLibraryKey = ''
   private playerLibraryAt = 0
   private swarmsTrimmedKey = ''
+  /** `hello.board === 'pro'`: every JSON frame to it carries a `seq` (a USB loss on its path is silent, and a hole in
+   *  the count is how it notices). Per session: each welcome restarts it at 0. A round dial's frames stay as they were. */
+  private seqOn = false
+  private seq = 0
+  private resyncAt = 0
 
   /** For the greeting's log line: which capabilities this hello named, or nothing. */
   private capabilitiesNamed(): string {
-    const named = [this.swarmMembers && 'swarms', this.longRecap && 'recap', this.stepsActivity && 'activity', this.playerCapable && 'player']
+    const named = [this.swarmMembers && 'swarms', this.longRecap && 'recap', this.stepsActivity && 'activity', this.statsTurn && 'stats', this.playerCapable && 'player']
       .filter(Boolean)
     return named.length ? ` caps ${named.join(',')}` : ''
   }
 
   private resetCapabilities(): void {
-    this.swarmMembers = this.longRecap = this.stepsActivity = this.playerCapable = false
+    this.swarmMembers = this.longRecap = this.stepsActivity = this.statsTurn = this.playerCapable = false
+    this.seqOn = false
+    this.seq = 0
+    this.resyncAt = 0
     this.playerOffset = this.playerRequest = 0
     this.playerLibraryKey = ''
     this.playerLibraryAt = 0
@@ -786,6 +811,7 @@ export class CableSession {
     if (this.stopped) return
     // The firmware beats once a minute; the gap is marked in the dial's own log, where it is read.
     this.dialLog.tick(this.isConnected)
+    if (this.isConnected && Date.now() - this.traffic.at >= LINK_LOG_MS) this.logLink('link')
     if (!this.link?.isOpen) {
       await this.tryOpen()
       return
@@ -929,6 +955,10 @@ export class CableSession {
     if (opened.path !== this.foreignPort) this.foreignPort = null
     this.bytesSinceOpen = 0
     this.framesSinceOpen = 0
+    this.traffic = {
+      at: Date.now(), tx: 0, txFrames: 0, rx: 0, rxFrames: 0,
+      corrupt: this.decoder.corruptFrames, discarded: this.decoder.discardedBytes, run: '', noise: '',
+    }
     this.link = opened
     // Leftover bytes belong to a session that has ended; carrying them across would put a stale
     // half-frame in front of the first real frame of the new one.
@@ -957,6 +987,7 @@ export class CableSession {
   }
 
   private onClosed(why: string): void {
+    if (this.traffic.rx || this.traffic.tx) this.logLink('link at close')
     this.log(`cable: closed (${why})`)
     this.cancelFormVoice()
     this.cancelSearchVoice()
@@ -1019,6 +1050,43 @@ export class CableSession {
   static readonly BUDGET = { garbageBytes: 64 * 1024, frames: 2_000, decodeMs: 500 }
   private budget = { since: 0, garbage: 0, frames: 0, ms: 0 }
 
+  /**
+   * This port's counters in the dial's log, to read beside the firmware's own `alive` line: a gap between
+   * what one side wrote and the other decoded is the lossy link. Plus the printable runs of the bytes the
+   * decoder stepped over (at most NOISE_MAX characters a minute), so a device panic's text is kept.
+   */
+  private logLink(label: string): void {
+    const t = this.traffic
+    this.keepRun()
+    this.log(`cable: ${label} · tx ${t.tx} B in ${t.txFrames} frames · rx ${t.rx} B in ${t.rxFrames} frames · corrupt ${this.decoder.corruptFrames - t.corrupt} · discarded ${this.decoder.discardedBytes - t.discarded} B${t.noise ? ` · non-frame text: ${t.noise}` : ''}`)
+    t.at = Date.now()
+    t.noise = ''
+  }
+
+  /** Close the current run of printable discarded bytes into the minute's text, if it is long enough to read. */
+  private keepRun(): void {
+    const t = this.traffic
+    if (t.run.length >= NOISE_RUN_MIN && t.noise.length < NOISE_MAX) {
+      t.noise = `${t.noise}${t.noise ? ' | ' : ''}${t.run}`.slice(0, NOISE_MAX)
+    }
+    t.run = ''
+  }
+
+  private noted = (bytes: Uint8Array): void => {
+    for (const b of bytes) {
+      if (b >= 0x20 && b < 0x7f) {
+        if (this.traffic.run.length < NOISE_MAX) this.traffic.run += String.fromCharCode(b)
+      } else this.keepRun()
+    }
+  }
+
+  /** One frame to the dial, counted. */
+  private async put(link: CablePort, bytes: Uint8Array): Promise<void> {
+    await link.write(bytes)
+    this.traffic.tx += bytes.length
+    this.traffic.txFrames++
+  }
+
   private onBytes(chunk: Buffer): void {
     const started = performance.now()
     const discarded = this.decoder.discardedBytes
@@ -1047,8 +1115,11 @@ export class CableSession {
   private decode(chunk: Buffer, counted: () => void): void {
     this.lastRx = Date.now()
     this.bytesSinceOpen += chunk.length
+    this.traffic.rx += chunk.length
+    this.decoder.onDiscard = this.noted
     this.decoder.feed(chunk, (frame) => {
       counted()
+      this.traffic.rxFrames++
       this.framesSinceOpen += 1
       if (frame.type === CableType.Json) {
         let msg: Message
@@ -1106,7 +1177,10 @@ export class CableSession {
         this.swarmMembers = str('swarms') === 'members-v1'
         this.longRecap = str('recap') === 'long-v1'
         this.stepsActivity = str('activity') === 'steps-v1'
+        this.statsTurn = str('stats') === 'turn-v1'
         this.playerCapable = str('player') === 'library-v1'
+        this.seqOn = str('board') === 'pro'
+        this.seq = 0
         const mac = str('mac') ?? ''
         // Rule 1: every greeting is answered, but only an unfamiliar dial gets the full state.
         await this.send({
@@ -1126,6 +1200,8 @@ export class CableSession {
             'voice.draft',
             'agents.refresh',
             ...(this.playerCapable && this.host.playerLibrary ? ['player.library'] : []),
+            // Only a Pro numbers its frames and asks for `resync`; a round dial's feature list stays as it was.
+            ...(this.seqOn ? ['resync'] : []),
             ...(this.host.form ? ['form'] : []),
             ...(this.host.selectPassage ? ['selection'] : []),
             ...(this.host.visit ? ['visit'] : []),
@@ -1151,6 +1227,7 @@ export class CableSession {
         const settings = readSettings(msg.settings)
         const settingsChanged = JSON.stringify(settings) !== JSON.stringify(this.greetedSettings)
         this.greetedSettings = settings
+        this.skinReported = hasUiSkin(msg.settings)
         if (settingsChanged && mac === this.greetedMac && fw === this.greetedFw) this.report()
         if (mac !== this.greetedMac || fw !== this.greetedFw) {
           this.playerOffset = this.playerRequest = 0
@@ -1198,6 +1275,9 @@ export class CableSession {
         return
       case 'swarms.list':
         await this.syncSwarms(true)
+        return
+      case 'resync':
+        await this.resync()
         return
       case 'swarm.select':
         // Not answered here: the window switches, its desk changes, and the new `swarms` and ring
@@ -1539,6 +1619,7 @@ export class CableSession {
         // it hopeful — which is why the settings are taken even when `ok` is false.
         const settings = readSettings(msg.settings)
         if (settings) this.greetedSettings = settings
+        if (hasUiSkin(msg.settings)) this.skinReported = true
         if (msg.ok === false) this.log(`cable: device refused a settings change: ${str('error') ?? 'no reason given'}`)
         this.report()
         return
@@ -1748,7 +1829,7 @@ export class CableSession {
       candidate.version,
       async (slice) => {
         if (!this.link?.isOpen) throw new Error('port closed mid-transfer')
-        await this.link.write(encodeCableFrame(CableType.Fw, slice))
+        await this.put(this.link, encodeCableFrame(CableType.Fw, slice))
       },
       (line) => this.log(line),
       { offsets: this.greetedBoard === 'pro' && this.greetedOta === 'v1' },
@@ -1857,7 +1938,7 @@ export class CableSession {
           id,
           async (slice) => {
             if (!this.link?.isOpen) throw new Error('port closed mid-transfer')
-            await this.link.write(encodeCableFrame(CableType.Pet, slice))
+            await this.put(this.link, encodeCableFrame(CableType.Pet, slice))
           },
           (line) => this.log(line.replace('firmware', 'pet')),
         ),
@@ -2167,10 +2248,16 @@ export class CableSession {
    * `settings.state`, which arrives as a status update like any other. A caller that waited here would
    * be waiting on a device that may be asleep.
    */
+  private skinReported = false
+
   async setSettings(patch: DeviceSettingsPatch): Promise<boolean> {
     // `id` addresses the DEVICE; it is not one of its settings and must not be sent as one.
     const fields = Object.entries(patch).filter(([key, value]) => value !== undefined && key !== 'id' && key !== 'companion' && key !== 'companionDetails' && key !== 'companionProtocol')
     if (!fields.length) return true
+    if (patch.uiSkin !== undefined && !this.skinReported) {
+      this.log('cable: uiSkin not written — this device did not report one (older firmware)')
+      return false
+    }
     const sent = await this.send({ t: 'settings.set', ...Object.fromEntries(fields) })
     if (!sent) this.log('cable: settings change not written — the device is not on the wire')
     return sent
@@ -2179,7 +2266,8 @@ export class CableSession {
   private async send(msg: Message): Promise<boolean> {
     if (!this.link?.isOpen) return false
     try {
-      await this.link.write(encodeCableFrame(CableType.Json, Buffer.from(JSON.stringify(msg), 'utf8')))
+      const framed = this.seqOn ? { ...msg, seq: this.seq++ } : msg
+      await this.put(this.link, encodeCableFrame(CableType.Json, Buffer.from(JSON.stringify(framed), 'utf8')))
       return true
     } catch (err) {
       this.log(`cable: write failed (${(err as Error).message})`)
@@ -2391,6 +2479,24 @@ export class CableSession {
     // …and the drawer, which is the one thing a dial that has just greeted us is KNOWN to have lost:
     // its rows live in RAM. Last, because it names agents the pushes above put on the carousel.
     await this.replaceNotifications(this.host.listUnread())
+  }
+
+  /**
+   * A Pro saw a hole in `seq` (or a frame that failed its CRC): resend what a lost frame could have carried. The attach
+   * push minus the history replay, plus the open questions — a replayed `summary` is heavy, and a second burst on a link
+   * that just dropped bytes is what the rate limit (once per 2 s, here and on the device) is there to avoid.
+   */
+  private async resync(): Promise<void> {
+    const now = Date.now()
+    if (now - this.resyncAt < 2_000) return
+    this.resyncAt = now
+    await this.syncMachines(true)
+    await this.syncSwarms(true)
+    await this.syncAgents(true)
+    await this.replaceNotifications(this.host.listUnread())
+    for (const { agentId, id, questions } of this.questionInbox.open()) {
+      if (this.liveTurns.get(agentId) === 'question') await this.send({ t: 'question', agentId, ...this.whoIs(agentId), id, questions })
+    }
   }
 
   // ── swarms ────────────────────────────────────────────────────────────────────────────────────────
@@ -2690,6 +2796,18 @@ export class CableSession {
     if (!this.stepsActivity) return
     await this.send({ t: 'turn.activity', agentId, text: '', step })
   }
+  /** The agent's reply as it streams: its latest paragraph as `action`, for a `steps-v1` device's working screen. Nobody else is told. */
+  async turnReply(agentId: string, action: string): Promise<void> {
+    if (!this.stepsActivity || !action) return
+    await this.send({ t: 'turn.activity', agentId, text: '', action: clipUtf8(action, ACTION_MAX_BYTES) })
+  }
+  /** A connected device that wants `turn.stats`: the token reads are only worth doing for one. */
+  get wantsStats(): boolean { return this.statsTurn && this.isConnected }
+  /** The turn's test and commit counts, for a `stats: 'turn-v1'` device; nothing when none were seen. */
+  async turnStats(agentId: string, stats: TurnStatsFields): Promise<void> {
+    if (!this.statsTurn || !Object.keys(stats).length) return
+    await this.send({ t: 'turn.stats', agentId, ...stats })
+  }
   async turnDone(agentId: string): Promise<void> {
     this.liveTurns.delete(agentId)
     this.activityReads.delete(agentId)
@@ -2699,22 +2817,19 @@ export class CableSession {
   /**
    * A finished turn's recap.
    *
-   * `quiet` means the window already has this agent on screen: draw the tile,
-   * skip the notification drawer (the beep still sounds). `silent` means the
-   * turn was a sub-agent's: draw the tile, skip the beep AND the drawer — the
-   * main agent's own end is the one the person is waiting for. Extra fields
-   * rather than different frames, so firmware that predates them simply
-   * notifies as it always did instead of losing the recap.
+   * `tier` is how loudly to tell (lib/notifyTier.ts): `alert` beeps and wakes; `list` is a drawer entry only (`quiet`);
+   * `silent` draws the tile only (`silent`). `quiet`/`silent` ride along as well as
+   * `tier`, so firmware that predates `tier` still behaves. `subagent`: a sub-agent's end is not its main agent's.
    */
-  async summary(agentId: string, recap: string, text: string, quiet = false, silent = false, fullText?: string): Promise<void> {
-    if (!silent) this.liveTurns.delete(agentId)   // a sub-agent's end is not its main agent's
+  async summary(agentId: string, recap: string, text: string, tier: Tier = 'alert', fullText?: string, subagent = false): Promise<void> {
+    if (!subagent) this.liveTurns.delete(agentId)   // a sub-agent's end is not its main agent's
     this.activityReads.delete(agentId)
     this.activityEndedAt.set(agentId, Date.now())
     recap = extendShortRecap(recap, text)
     const who = this.whoIs(agentId)
     // The card carries the answer; the host is asked only when it did not, and not for long.
     const full = this.fullField(this.longRecap ? fullText ?? await this.storedFullText(agentId, text) : undefined)
-    await this.send(this.withinCap({ t: 'summary', agentId, ...who, recap, text, ...full, ...(quiet ? { quiet: true } : {}), ...(silent ? { silent: true } : {}) }))
+    await this.send(this.withinCap({ t: 'summary', agentId, ...who, recap, text, ...full, tier, ...(tier === 'list' ? { quiet: true } : {}), ...(tier === 'silent' ? { silent: true } : {}) }))
   }
 
   /**

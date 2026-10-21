@@ -74,6 +74,17 @@ const _agentMessagesKeywords = [
   'channel',
 ];
 
+/// What a person looking for a shared tab's commands may type.
+const _sharedTabKeywords = [
+  'shared tab',
+  'share',
+  'invite',
+  'people',
+  'member',
+  'collaborate',
+  'account',
+];
+
 /// Whether [id] is a command this window has now.
 bool harnessCommandActive(String id) =>
     harnessCommandById[id]?.daemon != true || daemonCommandsActive.value;
@@ -371,6 +382,19 @@ final harnessCommands = <HarnessCommand>[
     ],
   ),
   const HarnessCommand('agent.stop', 'Stop Harness', ShortcutGroup.actions),
+  // Stop keeps the conversation to reopen; Delete removes it for good.
+  const HarnessCommand(
+    'agent.delete',
+    'Delete Harness',
+    ShortcutGroup.actions,
+    keywords: ['remove', 'purge', 'forget', 'conversation'],
+  ),
+  const HarnessCommand(
+    'app.product_feedback',
+    'Rate task outcome',
+    ShortcutGroup.actions,
+    keywords: ['feedback', 'completed', 'useful', 'problem'],
+  ),
   const HarnessCommand('agent.fork', 'Fork Harness', ShortcutGroup.actions),
   const HarnessCommand(
     'agent.share',
@@ -495,7 +519,8 @@ final harnessCommands = <HarnessCommand>[
     action: ShortcutAction.orchestrate,
   ),
   // Agent Messages (docs/design/2026-10-10-agent-messages.md): the active
-  // tab's log, and its flag. Their native menu rows are File's.
+  // tab's log; its native menu row is File's. There is no turning it on or
+  // off for a tab: that is the account's, in Settings ▸ Experimental.
   const HarnessCommand(
     'agent_messages.show',
     'Show Agent Messages',
@@ -503,18 +528,84 @@ final harnessCommands = <HarnessCommand>[
     nativeAction: 'showAgentMessages',
     keywords: _agentMessagesKeywords,
   ),
+  // The active tab's Tab Activity sidebar, opened or closed: its native row
+  // is View's, which says Show or Hide as it stands.
   const HarnessCommand(
-    'agent_messages.toggle',
-    'Agent Messages: turn on or off for this tab',
+    'agent_messages.activity',
+    'Show Tab Activity',
     ShortcutGroup.actions,
-    nativeAction: 'toggleAgentMessages',
-    keywords: _agentMessagesKeywords,
+    nativeAction: 'toggleTabActivity',
+    extraKeys: ['cmd+shift+y'],
+    keywords: [
+      'tab activity',
+      'sidebar',
+      'hide',
+      'harnesses',
+      'tasks',
+      'leader',
+      'summary',
+    ],
+  ),
+  // The focused harness leads its tab, or stops: its native row is File's
+  // Make Leader / Remove Leader, which swaps its title.
+  const HarnessCommand(
+    'agent_messages.make_leader',
+    'Make Leader',
+    ShortcutGroup.actions,
+    keywords: ['lead', 'leader', 'agent messages', 'tasks'],
+  ),
+  const HarnessCommand(
+    'agent_messages.remove_leader',
+    'Remove Leader',
+    ShortcutGroup.actions,
+    keywords: ['lead', 'leader', 'agent messages', 'tasks'],
+  ),
+  // Shared tabs (1c): the active tab, by role, as its tab menu and File offer
+  // them; each is here so none needs a menu. Move Tab Here only in a native
+  // window, on another of the owner's computers.
+  const HarnessCommand(
+    'shared_tab.invite',
+    'Invite People…',
+    ShortcutGroup.actions,
+    nativeAction: 'invitePeople',
+    keywords: _sharedTabKeywords,
+  ),
+  const HarnessCommand(
+    'shared_tab.stop',
+    'Stop Sharing Tab',
+    ShortcutGroup.actions,
+    nativeAction: 'stopSharingTab',
+    keywords: _sharedTabKeywords,
+  ),
+  const HarnessCommand(
+    'shared_tab.leave',
+    'Leave Tab',
+    ShortcutGroup.actions,
+    nativeAction: 'leaveTab',
+    keywords: _sharedTabKeywords,
+  ),
+  const HarnessCommand(
+    'shared_tab.move_here',
+    'Move Tab Here',
+    ShortcutGroup.actions,
+    nativeAction: 'moveTabHere',
+    keywords: _sharedTabKeywords,
   ),
   const HarnessCommand(
     'app.customize',
-    'Customize Harness',
+    'Appearance',
     ShortcutGroup.actions,
     nativeAction: 'customize',
+    // It was Customize Harness; its panel's tabs are Status, Workspace, Wallpaper and Terminal.
+    keywords: [
+      'customize',
+      'theme',
+      'colors',
+      'palette',
+      'wallpaper',
+      'status',
+      'font',
+    ],
   ),
   const HarnessCommand(
     'pane.toggle_shading',
@@ -527,7 +618,7 @@ final harnessCommands = <HarnessCommand>[
     'app.store',
     'Harness Store',
     ShortcutGroup.actions,
-    extraKeys: ['cmd+s'],
+    extraKeys: ['cmd+ctrl+s'],
     keywords: ['install', 'browse harnesses', 'packages', 'extensions'],
     nativeAction: 'store',
   ),
@@ -597,6 +688,13 @@ final harnessCommands = <HarnessCommand>[
     'Pause quick start',
     ShortcutGroup.actions,
     keywords: ['hide guide', 'dismiss tutorial'],
+  ),
+  const HarnessCommand(
+    'super_tab.new',
+    'New Swarm',
+    ShortcutGroup.actions,
+    extraKeys: ['cmd+s'],
+    hidden: true,
   ),
   if (kDebugSurfaceEnabled)
     const HarnessCommand(
@@ -770,6 +868,15 @@ final harnessCommands = <HarnessCommand>[
     'Open the full New Harness form',
     ShortcutGroup.navigate,
     extraKeys: ['cmd+period'],
+    context: KeymapContext.picker,
+  ),
+  // Open Harness: the selected harness, running or stopped, deleted for good.
+  // ⌘⌫ is the search field's own delete-to-start, so not that.
+  const HarnessCommand(
+    'picker.delete',
+    'Delete the selected harness',
+    ShortcutGroup.actions,
+    extraKeys: ['cmd+shift+backspace'],
     context: KeymapContext.picker,
   ),
   // Launch and Project use arrows/Enter. Keep stable command identities for

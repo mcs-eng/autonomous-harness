@@ -13,6 +13,7 @@ import 'box_chrome.dart' show ReadlineKeys;
 import 'swarm_switcher.dart';
 import 'swarm_search_input.dart';
 import 'key_hints.dart';
+import 'machine_picker_extras.dart';
 
 /// A desktop command palette over the existing search and activation pipeline.
 /// Category buttons edit the same query as keyboard prefixes; no second index.
@@ -27,6 +28,7 @@ class DesktopSearchPanel extends StatelessWidget {
     required this.onRefocus,
     required this.previewBuilder,
     this.showsBack = false,
+    this.machineHooks,
   });
 
   final SwarmSearchController search;
@@ -39,6 +41,27 @@ class DesktopSearchPanel extends StatelessWidget {
   /// True puts a clickable Back before the scopes while a machine or project
   /// is open — the click for what Escape does.
   final bool showsBack;
+
+  /// What Machines needs beyond its rows: which computer this window shows, the account's device
+  /// notices, and Add machine · Add phone · History… under the list. Null leaves Machines its rows.
+  final MachinePickerHooks? machineHooks;
+
+  /// The least height the window needs for Machines' extras above and below its list: a window
+  /// too short for both keeps the list, and the extras come back with the room.
+  static const machineExtrasMinHeight = 560.0;
+
+  MachinePickerHooks? _machineHooks(BuildContext context) =>
+      MediaQuery.sizeOf(context).height >=
+          MediaQuery.textScalerOf(context).scale(machineExtrasMinHeight)
+      ? machineHooks
+      : null;
+
+  void _addMachine() {
+    search.setQuery('@');
+    final index = search.rows.indexWhere((row) => row.isCreate);
+    if (index >= 0) search.move(index - search.cursor);
+    onRefocus();
+  }
 
   static const maxWidth = 1120.0;
   static const maxHeight = 680.0;
@@ -74,8 +97,8 @@ class DesktopSearchPanel extends StatelessWidget {
       child: Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: maxWidth,
+          constraints: BoxConstraints(
+            maxWidth: search.harnessContext == null ? maxWidth : 680,
             maxHeight: maxHeight,
           ),
           child: DesktopDialogSurface(
@@ -84,6 +107,37 @@ class DesktopSearchPanel extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (search.harnessContext case final purpose?)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 20, 24, 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Tooltip(
+                          message: purpose.title,
+                          child: Text(
+                            purpose.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: DesktopChrome.heading(),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Tooltip(
+                          message: purpose.description,
+                          child: Text(
+                            purpose.description,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: DesktopChrome.text(
+                              size: 13,
+                              color: DesktopChrome.muted,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 if (search.split != null)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
@@ -138,27 +192,28 @@ class DesktopSearchPanel extends StatelessWidget {
                                 ),
                               ),
                       ),
-                      ListenableBuilder(
-                        listenable: search,
-                        builder: (context, _) => _toolbarButton(
-                          context,
-                          key: const ValueKey('search-toggle-preview'),
-                          tooltip: search.previewVisible
-                              ? 'Hide preview'
-                              : 'Show preview',
-                          isSelected: search.previewVisible,
-                          onPressed: search.supportsPreview
-                              ? () {
-                                  search.togglePreview();
-                                  onRefocus();
-                                }
-                              : null,
-                          icon: const AppPaneIcon(
-                            AppPaneSymbol.splitRight,
-                            size: 18,
+                      if (search.harnessContext == null)
+                        ListenableBuilder(
+                          listenable: search,
+                          builder: (context, _) => _toolbarButton(
+                            context,
+                            key: const ValueKey('search-toggle-preview'),
+                            tooltip: search.previewVisible
+                                ? 'Hide preview'
+                                : 'Show preview',
+                            isSelected: search.previewVisible,
+                            onPressed: search.supportsPreview
+                                ? () {
+                                    search.togglePreview();
+                                    onRefocus();
+                                  }
+                                : null,
+                            icon: const AppPaneIcon(
+                              AppPaneSymbol.splitRight,
+                              size: 18,
+                            ),
                           ),
                         ),
-                      ),
                       _toolbarButton(
                         context,
                         key: const ValueKey('search-close'),
@@ -169,41 +224,52 @@ class DesktopSearchPanel extends StatelessWidget {
                     ],
                   ),
                 ),
-                ListenableBuilder(
-                  listenable: search,
-                  builder: (context, _) => SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.fromLTRB(20, 2, 20, 14),
-                    child: Row(
-                      spacing: 6,
-                      children: [
-                        if (showsBack && search.canGoBack)
-                          DesktopPill(
-                            key: const ValueKey('search-back'),
-                            label: 'Back',
-                            leading: const Icon(AppIcons.chevronLeft, size: 14),
-                            capsule: true,
-                            quiet: true,
-                            onPressed: () {
-                              if (search.back()) onRefocus();
+                if (search.harnessContext == null)
+                  ListenableBuilder(
+                    listenable: search,
+                    builder: (context, _) => SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.fromLTRB(20, 2, 20, 14),
+                      child: Row(
+                        spacing: 6,
+                        children: [
+                          if (showsBack && search.canGoBack)
+                            DesktopPill(
+                              key: const ValueKey('search-back'),
+                              label: 'Back',
+                              leading: const Icon(
+                                AppIcons.chevronLeft,
+                                size: 14,
+                              ),
+                              capsule: true,
+                              quiet: true,
+                              onPressed: () {
+                                if (search.back()) onRefocus();
+                              },
+                            ),
+                          _SearchScopes(
+                            selected: _prefix,
+                            onRefocus: onRefocus,
+                            onChanged: (prefix) {
+                              final words = search.wordsQuery;
+                              search.setQuery(
+                                prefix.isEmpty
+                                    ? words
+                                    : '$prefix $words'.trimRight(),
+                              );
                             },
                           ),
-                        _SearchScopes(
-                          selected: _prefix,
-                          onRefocus: onRefocus,
-                          onChanged: (prefix) {
-                            final words = search.wordsQuery;
-                            search.setQuery(
-                              prefix.isEmpty
-                                  ? words
-                                  : '$prefix $words'.trimRight(),
-                            );
-                          },
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
-                ),
+                if (_machineHooks(context) case final hooks?)
+                  ListenableBuilder(
+                    listenable: search,
+                    builder: (context, _) => search.isMachineMode
+                        ? MachinePickerHeader(search: search, hooks: hooks)
+                        : const SizedBox.shrink(),
+                  ),
                 Flexible(
                   child: ListenableBuilder(
                     listenable: search,
@@ -213,7 +279,7 @@ class DesktopSearchPanel extends StatelessWidget {
                       onRefocus: onRefocus,
                       // Keep the dialog, editor, and footer stationary while a
                       // query gains a preview or changes to an empty result.
-                      fitRows: false,
+                      fitRows: search.harnessContext != null,
                       // The scope control already explains the empty search.
                       // Give results the full width until there is a preview.
                       showPreview: !search.showsTypeHints,
@@ -222,7 +288,52 @@ class DesktopSearchPanel extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (KeyHints.visibleOf(context)) ...[
+                if (_machineHooks(context) case final hooks?)
+                  ListenableBuilder(
+                    listenable: search,
+                    builder: (context, _) => search.isMachineMode
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Divider(height: 1, color: DesktopChrome.rim),
+                              MachinePickerFooter(
+                                search: search,
+                                hooks: hooks,
+                                onAddMachine: _addMachine,
+                              ),
+                            ],
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                if (search.harnessContext != null) ...[
+                  Divider(height: 1, color: DesktopChrome.rim),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24,
+                      vertical: 12,
+                    ),
+                    child: Row(
+                      children: [
+                        if (KeyHints.visibleOf(context))
+                          _hint(context, 'picker.cancel', 'Close'),
+                        const Spacer(),
+                        ListenableBuilder(
+                          listenable: search,
+                          builder: (context, _) => FilledButton(
+                            onPressed: search.canAccept
+                                ? () {
+                                    final choice = search.submit();
+                                    if (choice != null) onChoose(choice);
+                                  }
+                                : null,
+                            child: Text(search.actionLabel(search.selected)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ] else if (KeyHints.visibleOf(context)) ...[
                   Divider(height: 1, color: DesktopChrome.rim),
                   Padding(
                     padding: const EdgeInsets.symmetric(

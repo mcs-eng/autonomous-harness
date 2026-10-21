@@ -41,7 +41,7 @@ describe('test environment isolation', () => {
     expect(process.env.USERPROFILE).toBe(process.env.HOME)
     expect(homedir()).toBe(process.env.HOME)
     let account: string | undefined
-    try { account = userInfo().homedir } catch { /* no account entry for this user id: nothing to compare */ }
+    try { account = userInfo().homedir } catch { }
     if (account) expect(homedir()).not.toBe(account)
     for (const { settings } of [claude, codex]) {
       const file = join(defaultHookHome(settings), settings.file)

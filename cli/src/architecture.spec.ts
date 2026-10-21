@@ -419,7 +419,7 @@ describe('the daemon\'s shape', () => {
     // are read with the session stores' declarations (lib/engineHomes.ts), data as well.
     for (const entry of ['lib/engineLaunch.ts', 'lib/launchOverrides.ts', 'engines/launches.ts', 'engines/kit/launchArgs.ts',
       'engines/kit/launchStartup.ts', 'dsh/adapters.ts', 'engines/launchPrep.ts', 'engines/kit/folderTrust.ts',
-      'engines/kit/resumeRepair.ts', 'dsh/runtime.ts', 'lib/apiInstructions.ts']) {
+      'engines/kit/resumeRepair.ts', 'dsh/runtime.ts', 'lib/apiInstructions.ts', 'engines/kit/attribution.ts', 'lib/agentAttribution.ts']) {
       expect([...closureOf(entry).keys()].filter(file => /^engines\/(claude|codex)\//.test(file) && !contracts.has(file)
         && !SESSION_STORES.has(file) && file !== 'engines/codex/hookContract.ts'), entry).toEqual([])
     }
@@ -519,6 +519,28 @@ describe('the daemon\'s shape', () => {
     const edge = [...closure.keys()].filter((file) => EDGE.some((pattern) => pattern.test(file))).sort()
     expect(edge.filter((file) => !CORE_MAY_REACH[file]), 'The core reaches a service only through its link and manifest (core/api.ts), never its code: import it from the service, not the core.').toEqual([])
     expect(Object.keys(CORE_MAY_REACH).filter((file) => !closure.has(file)), 'No longer loaded by the core: remove it from CORE_MAY_REACH').toEqual([])
+  }, WALK_TIMEOUT_MS)
+
+  it('keeps short-lived CLI routes outside the full command graph', () => {
+    const routes = {
+      help: closureOf('cliUsage.ts'),
+      check: closureOf('dsh/checkCommand.ts'),
+      updateNoop: closureOf('lib/localUpdateNoop.ts'),
+      initialization: closureOf('cliInitialization.ts'),
+    }
+    console.info('[architecture] fast CLI closures (informational):', JSON.stringify(Object.fromEntries(
+      Object.entries(routes).map(([name, closure]) => [name, closure.size]),
+    )))
+    for (const [name, closure] of Object.entries(routes)) {
+      expect(closure.has('cli.ts'), `${name} must not initialize the full CLI`).toBe(false)
+      expect(closure.has('core/main.ts'), `${name} must not initialize the daemon core`).toBe(false)
+    }
+    expect(routes.help.has('dsh/command.ts')).toBe(false)
+    expect(routes.help.has('lib/engineBin.ts')).toBe(false)
+    expect(routes.help.has('lib/connectors/command.ts')).toBe(false)
+    expect(routes.check.has('dsh/materialize.ts')).toBe(false)
+    expect(routes.check.has('dsh/install.ts')).toBe(false)
+    expect(routes.updateNoop.has('lib/selfUpdate.ts')).toBe(false)
   }, WALK_TIMEOUT_MS)
 
   it('finds what it checks: imports of every kind, in every folder', () => {

@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harness/screens/swarm_menu_bus.dart';
 import 'package:harness/shared/theme/app_theme.dart';
-import 'package:harness/shared/widgets/app_menu.dart';
 import 'package:harness/widgets/linux_menu_bar.dart';
 
 /// The Linux menu bar's wiring.
@@ -90,6 +89,17 @@ void main() {
     fail('no tappable widget for $key');
   }
 
+  testWidgets('Settings remains reachable before the workspace is enabled', (
+    tester,
+  ) async {
+    await swarmMenuBus.send('update', {'enabled': false});
+    await pumpBar(tester);
+    await tap(tester, 'menu-bar-harness');
+    await tap(tester, 'menu-bar-settings');
+    expect(appActions, ['settings']);
+    expect(swarmCalls, isEmpty);
+  });
+
   testWidgets('stays off the screen when not visible', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -112,6 +122,9 @@ void main() {
     expect(appActions.last, 'showAbout');
 
     await tap(tester, 'menu-bar-harness');
+    // The panel it opens is Appearance, as Settings' rail calls it; "…" like Settings… beside it.
+    expect(find.text('Appearance…'), findsOneWidget);
+    expect(find.text('Customize Harness'), findsNothing);
     await tap(tester, 'menu-bar-customize');
     expect(swarmCalls.last.method, 'customize');
 
@@ -158,33 +171,100 @@ void main() {
     expect(swarmCalls.last.method, 'closeActive');
   });
 
-  testWidgets('Agent Messages rows act on the active tab', (tester) async {
-    swarmMenuBus.send('update', {'enabled': true, 'activeAgentMessages': true});
+  testWidgets('File shows the active tab\'s Agent Messages, with no on/off '
+      'row', (tester) async {
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'canShowAgentMessages': true,
+    });
     await pumpBar(tester);
 
     await tap(tester, 'menu-bar-file');
-    expect(
-      tester
-          .widget<AppMenuItem>(find.byKey(const Key('menu-bar-agent-messages')))
-          .selected,
-      isTrue,
-      reason: 'a checkmark while on',
-    );
-    await tap(tester, 'menu-bar-agent-messages');
-    expect(swarmCalls.last.method, 'toggleAgentMessages');
-    expect(swarmCalls.last.arguments, isNull, reason: 'the active tab');
-
-    await tap(tester, 'menu-bar-file');
+    // Whether agents may message is the account's (Settings ▸ Experimental):
+    // the tab's on/off was easy to hit by mistake (owner, 2026-10-12).
+    expect(find.byKey(const Key('menu-bar-agent-messages')), findsNothing);
+    expect(find.text('Agent Messages'), findsNothing);
     await tap(tester, 'menu-bar-show-agent-messages');
     expect(swarmCalls.last.method, 'showAgentMessages');
+    expect(swarmCalls.last.arguments, isNull, reason: 'the active tab');
 
-    // The Store tab has no Agent Messages: both rows go quiet.
+    // The Store tab has no log: the row goes quiet.
     swarmMenuBus.send('update', {'enabled': true});
     await tester.pump();
     await tap(tester, 'menu-bar-file');
-    expect(find.byKey(const Key('menu-bar-agent-messages')), findsNothing);
     expect(find.byKey(const Key('menu-bar-show-agent-messages')), findsNothing);
     expect(find.text('Show Agent Messages'), findsOneWidget);
+  });
+
+  testWidgets('File shares the active tab with other accounts by role', (
+    tester,
+  ) async {
+    const rows = {
+      'invitePeople': 'menu-bar-invite-people',
+      'stopSharingTab': 'menu-bar-stop-sharing-tab',
+      'moveTabHere': 'menu-bar-move-tab-here',
+      'leaveTab': 'menu-bar-leave-tab',
+    };
+    Future<void> offers(Map<String, bool> actions) async {
+      swarmMenuBus.send('update', {
+        'enabled': true,
+        'canShowAgentMessages': true,
+        'tabShareActions': actions,
+      });
+      await tester.pump();
+      await tap(tester, 'menu-bar-file');
+      for (final MapEntry(key: action, value: key) in rows.entries) {
+        expect(
+          find.byKey(Key(key)),
+          actions[action] == true ? findsOneWidget : findsNothing,
+          reason: action,
+        );
+      }
+      // Each row asks for its action, on the active tab. The menu is open
+      // for the first; each choice closes it.
+      for (final (index, action) in actions.keys.indexed) {
+        if (index > 0) await tap(tester, 'menu-bar-file');
+        await tap(tester, rows[action]!);
+        expect(swarmCalls.last.method, action);
+        expect(swarmCalls.last.arguments, isNull, reason: 'the active tab');
+      }
+    }
+
+    await pumpBar(tester);
+    // An unshared tab.
+    await offers({'invitePeople': true});
+    expect(find.text('Invite People'), findsNothing, reason: 'menu closed');
+    // A tab this account shares, from another of its computers.
+    await offers({
+      'invitePeople': true,
+      'stopSharingTab': true,
+      'moveTabHere': true,
+    });
+    // A tab this account was invited to.
+    await offers({'leaveTab': true});
+    // A daemon too old for shared tabs: none of them.
+    await offers({});
+    expect(find.text('Invite People'), findsNothing);
+    expect(find.text('Leave Tab'), findsNothing);
+    // Close File by choosing a row that opens nothing here.
+    await tap(tester, 'menu-bar-show-agent-messages');
+
+    // A modal is up: the rows stay, inert.
+    swarmMenuBus.send('update', {
+      'enabled': false,
+      'tabShareActions': {'invitePeople': true, 'stopSharingTab': true},
+    });
+    await tester.pump();
+    await tap(tester, 'menu-bar-file');
+    expect(find.byKey(const Key('menu-bar-invite-people')), findsNothing);
+    expect(find.text('Invite People'), findsOneWidget);
+    expect(find.text('Stop Sharing Tab'), findsOneWidget);
+
+    // Signed out or closed: the rows go with the rest of the state.
+    swarmMenuBus.state.clear();
+    await tester.pumpAndSettle();
+    expect(find.text('Invite People'), findsNothing);
+    expect(find.text('Stop Sharing Tab'), findsNothing);
   });
 
   testWidgets('View reaches both channels', (tester) async {
@@ -211,6 +291,39 @@ void main() {
       await tap(tester, key);
       expect(swarmCalls.last.method, action);
     }
+  });
+
+  testWidgets('View shows Tab Activity only where its toggle acts, titled by '
+      'whether it is open', (tester) async {
+    // Agent Messages alone (a phone-width window) is not enough.
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'canShowAgentMessages': true,
+    });
+    await pumpBar(tester);
+    await tap(tester, 'menu-bar-view');
+    expect(find.byKey(const Key('menu-bar-toggle-tab-activity')), findsNothing);
+    await tap(tester, 'menu-bar-view');
+
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'canShowAgentMessages': true,
+      'canShowTabActivity': true,
+    });
+    await tester.pump();
+    await tap(tester, 'menu-bar-view');
+    expect(find.text('Show Tab Activity'), findsOneWidget);
+    await tap(tester, 'menu-bar-toggle-tab-activity');
+    expect(swarmCalls.last.method, 'toggleTabActivity');
+
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'canShowTabActivity': true,
+      'tabActivityOpen': true,
+    });
+    await tester.pump();
+    await tap(tester, 'menu-bar-view');
+    expect(find.text('Hide Tab Activity'), findsOneWidget);
   });
 
   testWidgets('History navigates and reopens from the state', (tester) async {
@@ -284,6 +397,41 @@ void main() {
     expect(find.byKey(const Key('menu-bar-find-terminal')), findsNothing);
     await tap(tester, 'menu-bar-commands');
     expect(swarmCalls.last.method, 'commands');
+  });
+
+  testWidgets('File offers Make Leader or Remove Leader only where the pane can take it', (
+    tester,
+  ) async {
+    // Prose: the row is absent without an offer; with one its title says which.
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'paneActions': {'toggleLeader': false},
+    });
+    await pumpBar(tester);
+    await tap(tester, 'menu-bar-file');
+    expect(find.byKey(const Key('menu-bar-toggle-leader')), findsNothing);
+    await tap(tester, 'menu-bar-file');
+
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'paneActions': {'toggleLeader': true},
+      'leaderAction': 'make',
+    });
+    await tester.pump();
+    await tap(tester, 'menu-bar-file');
+    expect(find.text('Make Leader'), findsOneWidget);
+    await tap(tester, 'menu-bar-toggle-leader');
+    expect(swarmCalls.last.method, 'toggleLeader');
+
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'paneActions': {'toggleLeader': true},
+      'leaderAction': 'remove',
+    });
+    await tester.pump();
+    await tap(tester, 'menu-bar-file');
+    expect(find.text('Remove Leader'), findsOneWidget);
+    expect(find.text('Make Leader'), findsNothing);
   });
 
   testWidgets('rows show the chord the keymap gives their action', (

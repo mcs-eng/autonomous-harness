@@ -97,11 +97,6 @@ describe('isShellNoise', () => {
   })
 })
 
-/**
- * The daemon's own situation whenever it was not started from a terminal, and the hosted CI runner's:
- * SHELL is /bin/bash and there is no tty. Real bash, real rc files — the same exposure command.spec.ts
- * and materialize.spec.ts already have, pinned here at the seam that owns it.
- */
 describe('runDshCommand in an interactive login bash with no terminal', () => {
   const original = process.env.SHELL
   let dir: string

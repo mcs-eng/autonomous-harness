@@ -36,6 +36,10 @@ FILES = ('harness-tui', 'cli.mjs', 'notify.mjs')
 LIMIT = 64 * 1024 * 1024
 DOWNLOAD_CHUNK = 1024 * 1024
 RESTART_REQUIRED = Path('/run/harness-os-restart-required')
+DAEMON_UNIT = 'harness-daemon.service'
+DAEMON_STATUS = 'http://127.0.0.1:18473/api/status'
+# How long the unit's restarted daemon has to answer for itself before the update is rolled back.
+RUNTIME_ANSWER_SECONDS = 30
 KEEP_ON = 'Keep the computer on and plugged in until the system update finishes.'
 SYSTEM_LOCK = Path('/run/lock/hn-os.lock')
 BOOT_ID = Path('/proc/sys/kernel/random/boot_id')
@@ -498,13 +502,54 @@ def select(folder):
     sync_directory(STATE)
 
 
+def runtime_pids():
+    """The process serving the agent runtime, and harness-daemon.service's main process.
+
+    Either is None: nothing answers on the runtime's port, or the unit runs nothing.
+    """
+    try:
+        with urlopen(Request(DAEMON_STATUS), timeout=3) as response:
+            serving = json.loads(response.read(65536)).get('pid')
+    except (OSError, ValueError, AttributeError):
+        serving = None
+    main = run('systemctl', '--user', 'show', DAEMON_UNIT, '--property=MainPID', '--value', timeout=10)
+    return (serving if type(serving) is int and serving > 0 else None,
+            int(main) if main.isdigit() and int(main) > 0 else None)
+
+
 def restart(cli_changed):
     if cli_changed:
-        run('systemctl', '--user', 'restart', 'harness-daemon.service', timeout=180)
+        # Restarting the unit replaces only its own daemon. One serving beside it (an older CLI's
+        # sign-in restarted the daemon outside systemd) keeps the port: the unit's new core then fails
+        # until systemd gives up, and the old CLI goes on serving. Stop that one first, as `harness
+        # stop` stops any daemon: with signals, which the agents in tmux outlive.
+        serving, main = runtime_pids()
+        if serving is not None and serving != main:
+            run('/usr/bin/harness', 'stop', timeout=90)
+        run('systemctl', '--user', 'restart', DAEMON_UNIT, timeout=180)
+        # wait-runtime accepts whichever daemon answers. Activation needs the unit's own, and its
+        # /api/status can lag the socket wait-runtime saw by a few seconds (an Orange Pi answered at
+        # 4 s, after one check at once had already rolled the update back): ask until it answers.
         run('/usr/lib/harness-os/wait-runtime')
+        deadline = time.monotonic() + RUNTIME_ANSWER_SECONDS
+        serving, main = runtime_pids()
+        while (serving is None or serving != main) and time.monotonic() < deadline:
+            time.sleep(1)
+            serving, main = runtime_pids()
+        if serving is None or serving != main:
+            raise ValueError(f'The agent runtime is not running under {DAEMON_UNIT}.')
     # The terminal surface is separate from the processes that own agent PTYs.
     run('systemctl', '--user', 'restart', 'hn-screen.service')
     run('systemctl', '--user', 'is-active', '--quiet', 'hn-screen.service')
+
+
+def in_screen(pid):
+    """Whether this client runs in hn-screen.service: the OS screen, not SSH or this command."""
+    try:
+        return any(line.split(':', 2)[-1].endswith('/hn-screen.service')
+                   for line in (PROC / str(pid) / 'cgroup').read_text().splitlines())
+    except OSError:
+        return False
 
 
 def capture_view():
@@ -514,15 +559,7 @@ def capture_view():
                    '#{client_pid}\t#{session_id}\t#{window_id}\t#{pane_id}\t#{client_tty}', timeout=3)
         for row in rows.splitlines():
             parts = row.split('\t')
-            if len(parts) != 5 or not parts[0].isdigit():
-                continue
-            groups = Path('/proc') / parts[0] / 'cgroup'
-            try:
-                belongs = any(line.split(':', 2)[-1].endswith('/hn-screen.service')
-                              for line in groups.read_text().splitlines())
-            except OSError:
-                continue
-            if not belongs:
+            if len(parts) != 5 or not parts[0].isdigit() or not in_screen(parts[0]):
                 continue
             if all(re.fullmatch(pattern, value) for pattern, value in
                    zip([r'\$\d+', r'@\d+', r'%\d+', r'/dev/pts/\d+'], parts[1:])):
@@ -556,17 +593,20 @@ def restore_view(view):
 
 
 def screen_ready(target):
-    """Wait for an attached client executing the selected binary, not just foot."""
+    """Wait for the screen's own client executing the selected binary, not just foot."""
     deadline = time.monotonic() + 30
     observed = {}
     while time.monotonic() < deadline:
         try:
-            # list-clients deliberately includes the backing tmux connections.
-            # hn-list-clients identifies hn's own rendering clients instead.
-            clients = run('/usr/bin/hn', 'hn-list-clients', '-F', '#{client_pid}', timeout=3)
+            # hn-list-clients names hn's rendering clients, but has no rows when an hn started
+            # elsewhere first (over SSH, before anyone logged in at the screen): the screen's client
+            # then serves its own socket, and every update was judged failed and rolled back
+            # (2026-10-12, 2026-10-13). list-clients names it either way, beside the backing tmux
+            # connections and this command's own client; the screen's cgroup tells them apart.
+            clients = run('/usr/bin/hn', 'list-clients', '-F', '#{client_pid}', timeout=3)
             for pid in clients.splitlines():
-                if pid.isdigit():
-                    executable = Path('/proc') / pid / 'exe'
+                if pid.isdigit() and in_screen(pid):
+                    executable = PROC / pid / 'exe'
                     observed[pid] = str(executable.resolve())
                     if executable.samefile(target / 'harness-tui'):
                         write(STATE / 'screen.json', {'pid': int(pid), 'executable': observed[pid], 'target': str(target)})
@@ -844,7 +884,7 @@ def screen(window, message='', refresh=False, intent=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['check', 'screen', 'request', 'apply', 'rollback', 'status'], nargs='?', default='screen')
+    parser.add_argument('action', choices=['check', 'screen', 'request', 'apply', 'rollback', 'status', 'update'], nargs='?', default='screen')
     parser.add_argument('--feeds', type=Path, help='Explicit developer feed map; never used by the installed timer')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -869,6 +909,8 @@ def main(argv=None):
     elif args.action == 'check':
         check(read(args.feeds) if args.feeds else None)
         finish_approved_update()
+    elif args.action == 'update':
+        return update_from_terminal(read(args.feeds) if args.feeds else None)
     elif args.action == 'screen':
         with screen_registration():
             run_screen()
@@ -885,6 +927,50 @@ def main(argv=None):
                           'ready': str(prepared()) if prepared() else None,
                           'restart_required': RESTART_REQUIRED.exists(),
                           'system': system_channel(), 'check': read(STATE / 'check.json')}, indent=2))
+
+
+def daemon_version():
+    """The version the running agent runtime reports, or None when nothing answers."""
+    try:
+        with urlopen(Request(DAEMON_STATUS), timeout=3) as response:
+            version = json.loads(response.read(65536)).get('version')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return version if isinstance(version, str) and version else None
+
+
+def update_from_terminal(feeds=None):
+    """`harness update`: everything Super+u updates, from a terminal, and what runs afterwards.
+
+    The same check and the same single decision as the Updates screen (update_all): the OS package
+    first when one is out, then hn and the CLI, the daemon restarted on the new CLI.
+    """
+    if RESTART_REQUIRED.exists():
+        raise ValueError('Restart to finish the system update first: systemctl reboot')
+    print('Checking for updates…', flush=True)
+    check(feeds, progress=lambda line: print('  ' + line, flush=True) if line else None, force_system=True)
+    errors = read(STATE / 'check.json', {}).get('errors') or []
+    for error in errors:
+        print('  could not check: ' + str(error), flush=True)
+    ready = prepared()
+    if not system_channel().get('available') and not (ready and ready != selected()):
+        if errors:
+            raise ValueError('Some updates could not be checked. Try again.')
+        running = versions(selected())
+        print(f"Harness is up to date: hn {running.get('hn')}, CLI {running.get('cli')}, daemon {daemon_version() or 'not answering'}.")
+        return 0
+    print('Updating Harness… Your agents keep running.', flush=True)
+    update_all()
+    if read(RESTART_REQUIRED, {}).get('status') == 'ready':
+        print('The system is updated. Restart to finish: systemctl reboot '
+              '(hn and the CLI follow after the restart).')
+        return 0
+    running = versions(selected())
+    daemon = daemon_version()
+    print(f"Updated: hn {running.get('hn')}, CLI {running.get('cli')}, daemon {daemon or 'not answering'}.")
+    if daemon != running.get('cli'):
+        raise ValueError(f"The daemon runs {daemon or 'nothing'}, not CLI {running.get('cli')}. Open Updates (Super+u) to see why.")
+    return 0
 
 
 def run_screen():

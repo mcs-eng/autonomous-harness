@@ -6,16 +6,18 @@
  * the paired relay (`machine_select` naming it).
  */
 import { randomUUID } from 'node:crypto'
+import { localCredentialHeaders } from '../lib/localCredential.js'
 import { existsSync } from 'node:fs'
 import { WebSocket } from 'ws'
 import { env } from '../config/env.js'
 import { readAuthSession } from '../lib/authSession.js'
-import { computerId } from '../lib/daemonState.js'
+import { computerId, daemonUnreachableText } from '../lib/daemonState.js'
 import { localSocketPath } from '../lib/localSocket.js'
 import { paneOwner } from '../messages/command.js'
 
 export class AgentClientError extends Error {
-  constructor(readonly code: string, message: string) { super(message) }
+  /** [reason]: which limit or rule refused, for a refusal (`SPAWN_LIMIT`'s `OPEN_LIMIT`, `TURNED_OFF`'s `SWITCH_OFF`). */
+  constructor(readonly code: string, message: string, readonly reason?: string) { super(message) }
 }
 
 /** Which daemon: its port and data folder, and this machine's id as the daemon knows it. */
@@ -55,10 +57,13 @@ export function whereFor(pane: string | undefined, owner: typeof paneOwner = pan
   return { port: found?.port ?? env.PORT, dataDir: found?.dataDir ?? env.ADAPTER_DATA_DIR, machineId, harnessPane: !!found }
 }
 
-/** The Unix socket when the daemon has one (file permissions are its lock), else loopback TCP. */
+/** The Unix socket when the daemon has one (file permissions are its lock), else loopback TCP with the
+ *  daemon's local credential (lib/localCredential.ts). */
 export const connectSocket: Connect = (where) => {
   const path = localSocketPath(where.dataDir, where.port)
-  return path && existsSync(path) ? new WebSocket(`ws+unix://${path}:/api/local-ws`) : new WebSocket(`ws://127.0.0.1:${where.port}/api/local-ws`)
+  return path && existsSync(path)
+    ? new WebSocket(`ws+unix://${path}:/api/local-ws`)
+    : new WebSocket(`ws://127.0.0.1:${where.port}/api/local-ws`, { headers: localCredentialHeaders(where.dataDir) })
 }
 
 export const DEFAULT_TIMEOUT_MS = 20_000
@@ -76,7 +81,7 @@ export function openDaemon(where: Where, machineId: string = where.machineId, co
       waiting.clear()
       if (!ready) rejectOpen(error)
     }
-    socket.on('error', () => failAll(new AgentClientError('DAEMON_UNREACHABLE', 'Harness is not running here. Start it with `harness start`.')))
+    socket.on('error', (error) => failAll(new AgentClientError('DAEMON_UNREACHABLE', daemonUnreachableText(error, where.dataDir))))
     socket.on('close', (code) => failAll(code === 4404
       ? new AgentClientError('NO_PEER_LINK', 'That machine is not linked to this one. Run `harness link` first.')
       : new AgentClientError('DISCONNECTED', 'The connection to Harness closed.')))

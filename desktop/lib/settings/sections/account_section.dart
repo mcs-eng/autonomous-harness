@@ -29,7 +29,6 @@ class AccountSection extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Fork: the guest desk is what this fork's labels call local mode.
                 SettingRow(
                   title: 'Local mode',
                   detail: 'Not signed in. Sign in to reach your other machines',
@@ -62,8 +61,11 @@ class AccountSection extends StatelessWidget {
             : 'Your Harness sign-in on this computer.',
         child: SingleChildScrollView(
           child: SettingRow(
-            title:
-                profile?.displayName ?? (local ? 'Local session' : 'Signed in'),
+            // An account with no name is called by its email, and the email is
+            // the line under it: signing up by email showed the address twice.
+            title: profile != null && profile.displayName != profile.email
+                ? profile.displayName
+                : (local && profile == null ? 'Local session' : 'Signed in'),
             detail:
                 profile?.email ??
                 (local ? 'Loopback backend' : 'Profile unavailable'),

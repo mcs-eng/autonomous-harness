@@ -84,15 +84,33 @@ class SwarmMenuState extends ChangeNotifier {
   bool canGoBack = false;
   bool canGoForward = false;
 
-  /// Whether Agent Messages is on in the active tab; null where it has none
-  /// (the Store). File's Agent Messages row shows it as a checkmark.
-  bool? agentMessages;
+  /// Whether the active tab has an Agent Messages log to show: not the Store,
+  /// and not with an older CLI or backend. File's Show Agent Messages needs it.
+  bool canShowAgentMessages = false;
+
+  /// Whether View's Show/Hide Tab Activity would act on the active tab: the
+  /// workspace's own toggle condition (Agent Messages, not a phone width).
+  bool canShowTabActivity = false;
+
+  /// Whether the active tab's Tab Activity sidebar is open: View's row says
+  /// Hide Tab Activity then, Show Tab Activity otherwise.
+  bool tabActivityOpen = false;
+
+  /// What File offers about sharing the active tab with other accounts (1c),
+  /// by action (`invitePeople`, `stopSharingTab`, `moveTabHere`,
+  /// `leaveTab`): a row shows only for an action listed here.
+  /// SwarmTitlebar.swift hides and validates its rows from the same map.
+  Map<String, bool> tabShareActions = const {};
   List<SwarmMenuEntry> history = const [];
   List<SwarmMenuEntry> closedHistory = const [];
 
   /// The per-pane commands the focused pane can take right now: restart,
   /// share, the viewer and the composer. validateMenuItem reads the same map.
   Map<String, bool> paneActions = const {};
+
+  /// `make` or `remove`: which of Make Leader and Remove Leader File's
+  /// `toggleLeader` row says; null when the focused pane has neither.
+  String? leaderAction;
 
   /// Each menu action's (and keymap command's) shortcut, as the Keyboard
   /// Shortcuts sheet writes it.
@@ -109,13 +127,25 @@ class SwarmMenuState extends ChangeNotifier {
         canClosePane = args['canClosePane'] as bool? ?? false;
         canGoBack = args['canGoBack'] as bool? ?? false;
         canGoForward = args['canGoForward'] as bool? ?? false;
-        agentMessages = args['activeAgentMessages'] as bool?;
+        canShowAgentMessages = args['canShowAgentMessages'] as bool? ?? false;
+        canShowTabActivity = args['canShowTabActivity'] as bool? ?? false;
+        tabActivityOpen = args['tabActivityOpen'] as bool? ?? false;
+        tabShareActions = {
+          if (args['tabShareActions'] case final Map actions)
+            for (final MapEntry(:key, :value) in actions.entries)
+              if (key is String && value == true) key: true,
+        };
         history = _parseEntries(args['history'], closed: false);
         closedHistory = _parseEntries(args['closedHistory'], closed: true);
         paneActions = {
           if (args['paneActions'] case final Map actions)
             for (final MapEntry(:key, :value) in actions.entries)
               if (key is String && value is bool) key: value,
+        };
+        leaderAction = switch (args['leaderAction']) {
+          'make' => 'make',
+          'remove' => 'remove',
+          _ => null,
         };
       case 'keymapState':
         hints = _parseHints(args['contexts']);
@@ -134,10 +164,14 @@ class SwarmMenuState extends ChangeNotifier {
     canClosePane = false;
     canGoBack = false;
     canGoForward = false;
-    agentMessages = null;
+    canShowAgentMessages = false;
+    canShowTabActivity = false;
+    tabActivityOpen = false;
+    tabShareActions = const {};
     history = const [];
     closedHistory = const [];
     paneActions = const {};
+    leaderAction = null;
     notifyListeners();
   }
 

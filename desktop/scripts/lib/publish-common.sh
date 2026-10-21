@@ -2,8 +2,6 @@
 # Shared plumbing for desktop/scripts/publish-managed-{node,tmux,grid}-runtime.sh.
 # Source it, don't execute it. Each publisher keeps only what is genuinely its
 # own: version validation, archive production and validation, and its upload loop.
-
-# publish_require_tools <command>... — every named tool must be on PATH.
 publish_require_tools() {
   for command in "$@"; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -51,7 +49,6 @@ publish_init_env() {
   trap 'rm -rf "$WORK_DIR"' EXIT
 }
 
-# Fetch the current manifest into $SRC, starting from {} when none exists yet.
 publish_fetch_current_metadata() {
   if ! gcs_cp "gs://${GCS_BUCKET}/${METADATA_PATH}" "$SRC" 2>/dev/null; then
     printf '{}' > "$SRC"
@@ -92,7 +89,6 @@ with open(dst, "w") as f:
 PY
 }
 
-# Upload the merged manifest and print where it landed.
 publish_upload_metadata() {
   gcs_cp "$DST" "gs://${GCS_BUCKET}/${METADATA_PATH}" \
     'no-cache, no-store, must-revalidate' 'application/json'

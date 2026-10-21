@@ -1,22 +1,19 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../../shared/widgets/section_scaffold.dart';
 import '../../shared/widgets/setting_row.dart';
 import '../experimental_features.dart';
-import '../../companions/coding_memory_connection.dart';
-import '../../companions/coding_memory_settings.dart';
+import '../../state/app_state.dart';
+import 'privacy_section.dart' show ProductUsageSetting;
 
 class ExperimentalSection extends StatefulWidget {
-  const ExperimentalSection({
-    super.key,
-    this.store,
-    this.openCodingMemory,
-  });
+  const ExperimentalSection({super.key, this.store, this.notifier});
 
   final ExperimentalFeaturesStore? store;
-  final CodingMemoryConnection? Function()? openCodingMemory;
+  final AppNotifier? notifier;
 
   @override
   State<ExperimentalSection> createState() => _ExperimentalSectionState();
@@ -40,10 +37,12 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
   @override
   Widget build(BuildContext context) {
     final preferences = widget.store ?? _fallbackStore;
-    final features = ExperimentalFeature.values.where((f) => f.available);
+    final features = ExperimentalFeature.values.where(
+      (f) => f.available && f.visibleInSettings,
+    );
     return SectionScaffold(
       title: 'Experimental',
-      subtitle: 'Try features that are still taking shape. Account experiments sync across your devices; coding memory is local to this computer.',
+      subtitle: 'Try features that are still taking shape. Account experiments sync across your devices.',
       child: SingleChildScrollView(
         child: ListenableBuilder(
           listenable: preferences,
@@ -70,7 +69,7 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
                       ),
                   ],
                 ),
-              for (final feature in features)
+              for (final feature in features) ...[
                 SettingRow(
                   title: feature.label,
                   detail: feature.description,
@@ -80,13 +79,18 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
                       alignment: Alignment.centerLeft,
                       child: Switch(
                         key: ValueKey('experimental-${feature.id}'),
-                        value: preferences.enabled(feature),
+                        value: preferences.enabled(feature) != feature.inverted,
                         onChanged:
                             preferences.loaded &&
                                 !preferences.saving &&
                                 (preferences.isAvailable(feature) ||
                                     preferences.enabled(feature))
-                            ? (on) => unawaited(preferences.set(feature, on))
+                            ? (on) => unawaited(
+                                preferences.set(
+                                  feature,
+                                  on != feature.inverted,
+                                ),
+                              )
                             : null,
                       ),
                     ),
@@ -113,97 +117,13 @@ class _ExperimentalSectionState extends State<ExperimentalSection> {
                         )
                       : null,
                 ),
-              if (widget.openCodingMemory case final open?)
-                _CodingMemorySetting(
-                  open: open,
-                  companionEnabled: preferences.enabled(
-                    ExperimentalFeature.focusBarCreature,
-                  ),
-                ),
+              ],
+              if (!kIsWeb && widget.notifier != null)
+                ProductUsageSetting(notifier: widget.notifier!, compact: true),
             ],
           ),
         ),
       ),
     );
   }
-}
-
-class _CodingMemorySetting extends StatefulWidget {
-  const _CodingMemorySetting({
-    required this.open,
-    required this.companionEnabled,
-  });
-  final CodingMemoryConnection? Function() open;
-  final bool companionEnabled;
-  @override
-  State<_CodingMemorySetting> createState() => _CodingMemorySettingState();
-}
-
-class _CodingMemorySettingState extends State<_CodingMemorySetting> {
-  late final settings = CodingMemorySettings(() => widget.open());
-  @override
-  void initState() {
-    super.initState();
-    unawaited(settings.refresh());
-  }
-
-  @override
-  void didUpdateWidget(_CodingMemorySetting oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.companionEnabled != widget.companionEnabled) {
-      unawaited(settings.refresh());
-    }
-  }
-
-  @override
-  void dispose() {
-    settings.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: settings,
-    builder: (context, _) => SettingRow(
-      title: 'Coding memory',
-      detail: 'Let your companion learn coding preferences and project knowledge across supported agents on this computer. Uses the model selected in Companions.',
-      control: Semantics(
-        label: 'Coding memory',
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Switch(
-            key: const Key('experimental-coding-memory'),
-            value: settings.enabled,
-            onChanged: settings.loaded && !settings.saving
-                ? (value) => unawaited(settings.setEnabled(value))
-                : null,
-          ),
-        ),
-      ),
-      footer: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'For your account on this computer. Review memories and control learning and recall in Companions → Memories. Turning this off keeps saved memories.',
-          ),
-          if (!widget.companionEnabled)
-            const Text(
-              'Learning and recall are paused while Focus-bar creature is off.',
-            ),
-          if (settings.saving)
-            const Text('Saving…')
-          else if (!settings.loaded && settings.error == null)
-            const Text('Loading…'),
-          if (settings.error case final error?) ...[
-            const SizedBox(height: 8),
-            Semantics(liveRegion: true, child: Text(error)),
-            TextButton(
-              onPressed: settings.saving ? null : settings.refresh,
-              child: const Text('Refresh setting'),
-            ),
-          ],
-        ],
-      ),
-    ),
-  );
 }

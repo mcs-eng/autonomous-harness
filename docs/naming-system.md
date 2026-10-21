@@ -53,6 +53,9 @@ and **Browser**. Technical documentation may still call the terminal interface a
 | **A harness** in the workspace | A running agent session with its own conversation and working context. | Start three Codex harnesses. |
 | **A harness** in the Store | A reusable setup containing agent instructions, tools, and an optional viewer. | Install the Blender harness. |
 | **Tab** | A workspace group of harnesses. | Frontend and Backend tabs. |
+| **Swarm** | An invite-only collaborative tab containing projects, people, agents and contributed machines. | Open your company Swarm beside your regular tabs. |
+| **Project in a Swarm** | An initiative with its own lead, repository, sharing and workgroups. | Discuss Lamp OS with its lead; expand it to follow a workgroup. |
+| **Workgroup** | A numbered conversation for an independently assignable outcome within a project. | Follow #12 Offline editing. |
 | **Pane** | A visible view of a harness, terminal, or viewer. | Split right; close pane. |
 | **Terminal** | A shell for entering commands. | New terminal. |
 | **Project** | The files and working context for the work, on a particular computer. | Choose the website project. |
@@ -61,6 +64,7 @@ and **Browser**. Technical documentation may still call the terminal interface a
 | **Connections** | Service accounts available to agents running as the same local user on a Harness computer. | Open Connections; connect GitHub. |
 | **Viewer** | A surface for inspecting or interacting with work. | The game viewer; the HTML preview. |
 | **This computer** | The local execution machine. | Run on This computer. |
+| **Cloud** | An agent maker's own servers, as a place a harness runs beside the computers. A **cloud agent** runs there, reached through its maker's API rather than as a terminal program. | Devin Cloud runs in Devin's cloud; Fo runs only in Fo's cloud. |
 | **Store** | The catalog of reusable harnesses and viewers. | Install a harness from the Store. |
 | **Conversation** | An agent's conversation history, including histories started outside Harness. | Provider usage counts native conversations. |
 | **Recorded run** | A saved demonstration of a harness doing work. | Watch the recorded run in the Store. |
@@ -71,12 +75,23 @@ start, pause, or stop a running harness in the workspace. Keep **agent** for cho
 the agent software and describing the AI's actions. Preserve **New Harness** as the
 existing action name.
 
+A CLI agent keeps its name, and the same maker's cloud coding agent is that name
+plus **Cloud**: Codex and Codex Cloud, Devin and Devin Cloud. A personal agent with
+no CLI keeps its maker's name (Fo).
+
 A pane is a view, so closing a pane or tab closes views. **Stop Harness** ends the
 running harness. Adding harnesses to a tab groups them without a separate team
-setup. Turning on **Agent Messages** for a tab lets its harnesses message each
-other (`harness send`); it is off by default, per tab, and **Show Agent Messages**
-opens the tab's log. The word *tab* can also name the keyboard key or a
-browser tab; context distinguishes them.
+setup. A **Swarm** occupies one tab in that same tab bar. A person can belong to several Swarms.
+Its project names open their lead chats; a separate chevron reveals each project's workgroups.
+People, agents and machines belong to the Swarm. A project's **Public** visibility means everyone
+in that Swarm; **Private** means its owner and explicitly invited project members. Swarms themselves
+are invite-only. Public communities and a compute marketplace are outside this version.
+Cmd-S opens the existing lead creation form for a new Swarm and its first project; **+ Project**
+reuses that form inside the current Swarm. Store uses Cmd-Control-S. Existing ordinary tabs keep
+their behavior. The internal `superTab` identifiers, `harness super-tab` protocol and stored account
+settings remain compatible; the older internal `Swarm` layout class still represents an ordinary
+workspace tab. The word *tab* can also name the keyboard key or a browser tab; context
+distinguishes them.
 
 A project belongs to a computer; identical paths on different computers do not
 identify the same project. Use the actual project or computer name when that

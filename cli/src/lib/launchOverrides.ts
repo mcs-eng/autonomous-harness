@@ -12,7 +12,6 @@
  * probe and the config directory writer) are exactly the parts worth stubbing in a spec.
  */
 
-import { join } from 'node:path'
 import type { NativeLaunch, NativeLaunchResult, NativeLaunchSource } from '../engines/nativeLaunch.js'
 import type { AgentEngine } from '../engines/types.js'
 import { subscriptionModelLaunch } from './subscriptionModel.js'
@@ -20,6 +19,7 @@ import { ownLoginProviderArgs } from '../engines/launches.js'
 import { namedAgentArgs, supportsNamedAgent } from './engineLaunch.js'
 import { profileEnvironment } from './engineHomes.js'
 import {
+  gridConfigHandOff,
   gridConflictingEnvToClear,
   type GridEngineLaunch,
   type GridLaunchAnswer,
@@ -33,6 +33,7 @@ import { harnessEnvToClear } from '../dsh/launch.js'
 import type { DshLaunchAnswer } from '../dsh/launchWire.js'
 import { scmLaunchEnv } from '../scm/scmProjects.js'
 import type { ScmLaunchRecord } from '../scm/types.js'
+import { agentLaunchArgs, joinedInstructions, type StartedBy } from './agentAttribution.js'
 import type { CreationAuthority } from './agentCreationReceipt.js'
 import type { publishGridConfigDir } from './publishedGridConfig.js'
 import { nativeHookLocations } from '../engines/kit/nativeLocations.js'
@@ -102,6 +103,9 @@ export interface LaunchOverridesDeps {
   /** Prepare the saved harness context before restarting. Missing or broken packages refuse the
    * relaunch: starting a plain agent would silently change the user's chosen harness. */
   dshLaunch?: (dsh: string, workspace: string, engine: AgentEngine, runtimeKey: string) => Promise<DshLaunchAnswer>
+  /** Read an engine's settings for the pull request line (engines/launches.ts `attributionArgs`). A seam, like
+   *  `readCodexConfig`: absent ⇒ the real file. */
+  readAttribution?: (path: string) => string | null
 }
 
 /** Where the agent should come back: the registry row, or an override the desktop just sent. */
@@ -132,6 +136,8 @@ export interface LaunchSource extends NativeLaunchSource {
    * comes back as `harness-compute`, not as a general session with that agent's history.
    */
   agent?: string | null
+  /** `agent` when another agent started it (the row's `startedBy`): every relaunch keeps its pull request line. */
+  startedBy?: StartedBy | null
 }
 
 /** Fresh each time: callers hand `env` to tmux and may extend it, and a shared object would carry
@@ -271,6 +277,12 @@ export async function prepareLaunchOverrides(
     if (source.agent && supportsNamedAgent(engine, opencodeMajor)) {
       overrides = { ...overrides, extraArgs: [...overrides.extraArgs, ...namedAgentArgs(engine, source.agent, opencodeMajor)] }
     }
+    // What Harness tells the agent rides every relaunch, in the slot `agent_create` gave it: last. Read again each
+    // time, with the person's switches and settings as they are now.
+    const told = agentLaunchArgs(engine, source.startedBy, {
+      cwd: source.cwd ?? null, profile: source.codexHome, environment: native?.environment, read: deps.readAttribution,
+    })
+    if (told.length) overrides = { ...overrides, extraArgs: joinedInstructions(engine, [...overrides.extraArgs, ...told]) }
     return { ok: true, overrides: { ...overrides, ...(native ? { native, env: { ...overrides.env, ...native.environment } } : {}), clearEnv: [...overrides.clearEnv, ...harnessEnvToClear(overrides.env)] } }
   } }
 }
@@ -318,12 +330,13 @@ async function prepareBaseLaunchOverrides(
     if (!tmux.ok) return tmux
     return { ok: true, commit: async () => {
       const env: Record<string, string> = { ...built.launch.env }
+      const args = [...built.launch.args]
       if (built.launch.configDir) {
-        const { envVar, files, pointAt, links } = built.launch.configDir
+        const { files, links } = built.launch.configDir
         try {
-          const dir = await deps.writeGridConfigDir(configKey, files, links ?? [])
-          // Pi is handed the directory; OpenCode's OPENCODE_CONFIG wants the file inside it.
-          env[envVar] = pointAt ? join(dir, pointAt) : dir
+          const handOff = gridConfigHandOff(built.launch.configDir, await deps.writeGridConfigDir(configKey, files, links ?? []))
+          Object.assign(env, handOff.env)
+          args.push(...handOff.args)
         } catch (error) {
           const detail = `could not write ${engine}'s grid configuration · ${error instanceof Error ? error.message : error}`
           return { ok: false, error: 'GRID_CONFIG_FAILED', detail, ...(deps.native ? { unavailable: 'native' } : {}) }
@@ -335,7 +348,7 @@ async function prepareBaseLaunchOverrides(
         ok: true,
         overrides: {
           env,
-          extraArgs: [...built.launch.args],
+          extraArgs: args,
           clearEnv: gridConflictingEnvToClear({ env }),
           gridLaunchRecord: { override: built.override, webSearch: built.launch.webSearch },
           ...(built.launch.sessionModel ? { sessionModel: built.launch.sessionModel } : {}),

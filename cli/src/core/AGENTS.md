@@ -24,6 +24,10 @@ questions. Everything else is a service ([../services/AGENTS.md](../services/AGE
 ## Where things are
 
 - `agents/`: create, fork, restart, retarget, stop, resume, close, discovery, adoption, binding, the list.
+  `agents/cloud.ts`: agents a service owns, the cloud agents: listed with the rest from what the cloud
+  service publishes, their questions shown as a pane's are, the dial's turn cards made from what changes
+  (working, then what it said), and New Harness, words, an answer, a rename and Stop Harness for one handed
+  to its port (`cloudLink.ts` when it runs in its own process).
 - `transcripts/`: attach (bounded reads from the end), ingest, live tail, relaunch marks, normalizers.
   Claude Code/Codex live interpretation is injected through `Engine.live`; core keeps parser handles
   and immutable turn snapshots, never edits their engine state. Supervised Claude Code/Codex parsers
@@ -43,7 +47,7 @@ questions. Everything else is a service ([../services/AGENTS.md](../services/AGE
   worker through a revocable grant (`engines/questionControls.ts`).
   `deviceInput.ts`: the pane writer lock every write takes, and a device's queued turns behind it.
   `cardText.ts`: an engine's error, rewritten for a device's card.
-- `deliveries.ts`: delivered turns, the Wi-Fi device's, a team's and the orchestrator's: text written into an
+- `deliveries.ts`: delivered turns, the Wi-Fi device's, Agent Messages' and the orchestrator's: text written into an
   agent under a delivery id of its maker's, and what became of it, told back to that maker in its process.
 - `updateHandoff.ts`: the core handing over to a build the updater staged (exit 75, when the master asks),
   and a core with no master handing itself to one. `updaterBeside.ts`: the updater started beside a core whose
@@ -57,16 +61,28 @@ questions. Everything else is a service ([../services/AGENTS.md](../services/AGE
 - `api.ts`: the contract with services, their ports, fallbacks and requests. `serviceHost.ts`: services
   in this process. `serviceLinks.ts`: services in their own processes. `viewersLink.ts`: what the core
   keeps of the viewers when they run in theirs. `viewerStreams.ts`: a client's viewer stream and rendered
-  frames, handed to the viewers, and refused at once while they are down. `workspacesLink.ts`: what the core tells workspaces in
-  theirs. `messagesLink.ts`: which of Agent Messages' deliveries may be written, as its process last said.
+  frames, handed to the viewers, refused at once while they are down, and held while they first start. `workspacesLink.ts`: what the core tells workspaces in
+  theirs. `messagesLink.ts`: Agent Messages out of this process (the edge host): which of its deliveries may be
+  written, as it last said, the few things it may ask (`MESSAGES_QUERIES`: the agents, this daemon, the account
+  signed in here, the account's backend, its log's notice for the windows, shared tabs' keys and relay, whether its
+  harnesses work (`activity`, with a one-line summary of what each does when asked), and that a
+  roster changed), the desk's changes and changes to its switch (the account's, as the core keeps it), and the ask
+  for it as the core starts. Its backend ask is held to `MESSAGES_BACKEND_ROUTES`, an allowlist of method and
+  whole path (the tab listing and a tab's leader, and shared tabs' shares, rosters, invitations, members and moves): the process holds
+  no credential, so every route listed there is a route that process could call as the account. `tab_key` and
+  `tab_relay` pass one `TabKey` or `TabRelay` method a call to the gateway, which signs and seals and holds the
+  sockets; `observers` hands a changed roster to Share (`harness_share_rosters`).
   `monitorLink.ts`: the monitor's port, asked of its process. `recapsLink.ts`: the recaps in their process,
   told each turn's lifecycle and never waited on, and read back from what they last said
   (`turns/recaps.ts` is the core's whole side of them). `storeLink.ts`: what the Store in its
-  process tells the core. `modelsLink.ts`: what the core keeps of models in its process for frames and
+  process tells the core. `agentCleanupLink.ts`: the agent cleanup in its process, told every stop and the person
+  typing into a harness another agent started, and answered what it may close. `modelsLink.ts`: what the core keeps of models in its process for frames and
   keystrokes, and how it asks it the rest. `agentQueries.ts`: what a service in its own process may ask of the agents;
   `accountQueries.ts`: of the account (a token, and the fleet's lane's sealing), so it holds no credential.
   `experimentQueries.ts`: what an experiment acts on the core through; `experiments.ts`: which are on as the
-  core starts; `orchestratorLink.ts`: what the core keeps of the orchestrator in its own process;
+  core starts, by their saved state, and the account's agent experiments kept for this computer's launches
+  (`createAgentSettingsSync`, the one writer of `agent-settings.json`, which tells Agent Messages when its switch
+  changes); `orchestratorLink.ts`: what the core keeps of the orchestrator in its own process;
   `sharingLink.ts`: Share's observers' frames to its process; `terminalWatch.ts`: a read-only view of the
   agents' terminals, which Share shows its observers. `conversationQueries.ts`: the conversation facts the
   change-agent handoff in the edge host asks for, one at a time.
@@ -82,4 +98,5 @@ questions. Everything else is a service ([../services/AGENTS.md](../services/AGE
   that process is asked for, once there is a device (a dial's port in /dev, a paired Wi-Fi device).
   `modelsWake.ts`: when models' process is asked for as the core starts, once grid is in use here.
   `gatewayWake.ts`: when the gateway's process is asked for as the core starts, before it binds: signed in, or
-  anything paired here.
+  anything paired here. `viewersWake.ts`: when the viewers' process (the viewers and the Store) is asked for: a
+  harness here, or as the core starts, the release's own harnesses to put in place or viewer servers to stop.

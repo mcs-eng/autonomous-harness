@@ -15,6 +15,8 @@ import tempfile
 import time
 import urllib.request
 
+from account_fixture import signed_in_account
+
 ROOT = Path(__file__).resolve().parents[1]
 PORT = int(os.environ.get('HN_WELCOME_TEST_PORT', '19787'))
 assert 19780 <= PORT <= 19789
@@ -32,6 +34,9 @@ ENV.update(HOME=str(BASE), HN_TMPDIR=str(BASE), HN_SOCKET_NAME=PREFIX, PORT=str(
            TERM='xterm-256color', COLORTERM='truecolor', SHELL='/bin/sh', RUST_BACKTRACE='1',
            HARNESS_TUI_DESK='off', HARNESS_TUI_NOTIFY='off', HN_DESKTOP='off',
            MOCK_WELCOME='1', MOCK_NEW_UI='1', MOCK_RECONNECT='1')
+# Sign-in is required (#1276). The mock daemon says signed in; once it is stopped below, the
+# saved offline account is what lets a signed-in person reopen local work without a network.
+signed_in_account(ENV, BASE)
 OUTPUT = Path(os.environ['HN_WELCOME_OUTPUT']) if os.environ.get('HN_WELCOME_OUTPUT') else None
 if OUTPUT: OUTPUT.mkdir(parents=True, exist_ok=True)
 
@@ -69,6 +74,8 @@ def wait(fn, description, seconds=10):
 
 
 def shows(text): wait(lambda: text in screen(), text)
+# The folder browser's first row names the folder: "Use ~/projects", not "Use this folder".
+def shows_use(): wait(lambda: re.search(r'\bUse [~/]', screen()), 'Use <folder>')
 
 
 def keys(*args):
@@ -349,9 +356,9 @@ try:
     new_tab()
     choose('Agent', 'codex')
     choose('Machine', 'mock-remote')
-    choose('Project', 'open folder'); shows('Use this folder')
+    choose('Project', 'open folder'); shows_use()
     keys('C-l', 'C-a', 'C-k'); type_text('/srv/remote-project'); keys('Enter')
-    shows('Use this folder'); keys('Enter'); shows('[ remote-project ▾ ]'); shows('[ mock-remote ▾ ]')
+    shows_use(); keys('Enter'); shows('[ remote-project ▾ ]'); shows('[ mock-remote ▾ ]')
     shows('[x]'); click('Worktree'); click('New Harness'); shows('Mock codex (mock)')
     assert state()['created'][-1]['gitSource'] == '/srv/remote-project'
     assert hn('display', '-p', '#{pane_machine}') == 'mock-remote'
@@ -359,9 +366,9 @@ try:
     remote = 'mock0000000000000000000000000002'
     new_tab()
     choose('Machine', 'mock-remote')
-    choose('Project', 'open folder'); shows('Use this folder')
+    choose('Project', 'open folder'); shows_use()
     keys('C-l', 'C-a', 'C-k'); type_text('/srv/remote-project'); keys('Enter')
-    shows('Use this folder'); keys('Enter'); shows('[ remote-project ▾ ]'); shows('[x]')
+    shows_use(); keys('Enter'); shows('[ remote-project ▾ ]'); shows('[x]')
     state('reconnect', {'action': 'offline', 'machine': remote})
     wait(lambda: hn('display', '-p', '-t', remote_pane, '#{pane_agent_state}') == 'offline', 'remote disconnect reaches the client')
     count = len(state().get('created', []))

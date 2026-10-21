@@ -15,13 +15,58 @@ enum ExperimentalFeature {
     'share_button',
     'Share button',
     'Show Share in the top-right corner of the workspace.',
+  ),
+
+  /// What agents may do with Harness: the account's, on every computer it signs in to, each off
+  /// until turned on. They were each computer's Settings ▸ Agents until the owner made them
+  /// experiments of the account (2026-10-12). Each computer's daemon keeps a copy for its launches
+  /// (cli/src/lib/agentSettings.ts) and `harness settings` turns them from a terminal.
+  agentsStartAgents(
+    'agents_start_agents',
+    'Agents can start other agents',
+    'Turn on to let Claude Code and Codex start, wait for and close harnesses of their own; their '
+        'instructions say how. Off, each agent works alone.',
+  ),
+  agentPullRequestLine(
+    'agent_pull_request_line',
+    'Mark pull requests from agent-started harnesses',
+    'Turn on to have a harness another agent started add one line to the pull requests it opens: '
+        '🤝 Started by another agent in Harness.',
+  ),
+
+  /// Agent Messages (docs/design/2026-10-10-agent-messages.md). It replaced each tab's own switch,
+  /// a 💬 beside its × that was easy to hit by mistake and turned the tab off, failing a message
+  /// that was waiting (owner, 2026-10-12).
+  agentMessages(
+    'agent_messages',
+    'Agents in the same tab can message each other',
+    'Turn on to let Claude Code and Codex in one tab send each other messages with harness send. Invite people to a tab and their harnesses join it from their own computers.',
+  ),
+
+  /// Stored inverted (ruling T4): every account experiment is "off unless true", and the summary is
+  /// shared unless the person hides it. The switch shows it as "share", checked when this is off.
+  agentMessagesHideSummary(
+    'agent_messages_hide_summary',
+    'Share a one-line summary of what your harnesses are doing with people in your shared tabs',
+    'One line of at most 120 characters, for the harnesses listed in a shared tab.',
   );
 
   const ExperimentalFeature(this.id, this.label, this.description);
   final String id, label, description;
+
+  /// Super Tab owns coordination. Keep the old wire values readable for existing
+  /// clients and sessions, without asking people to assemble the feature here.
+  bool get visibleInSettings => this == focusBarCreature || this == shareButton;
+
+  /// The switch shows the opposite of the stored value.
+  bool get inverted => this == agentMessagesHideSummary;
   bool get available => switch (this) {
     focusBarCreature => !kIsWeb && !kViewerMode,
-    shareButton => true,
+    shareButton ||
+    agentsStartAgents ||
+    agentPullRequestLine ||
+    agentMessages ||
+    agentMessagesHideSummary => true,
   };
 }
 
@@ -114,18 +159,40 @@ class ExperimentalFeaturesStore extends ChangeNotifier {
   }
 
   Future<void> _read(int generation, int epoch) async {
+    Map<String, dynamic>? result;
     try {
-      final result = await _transport!.read();
-      if (!_current(generation) || epoch != _epoch) return;
+      result = await _transport!.read();
+    } catch (_) {}
+    if (!_current(generation) || epoch != _epoch) return;
+    final before = _shown();
+    try {
+      if (result == null) throw const FormatException('Unreadable');
       _apply(result);
       error = null;
       errorFeature = null;
     } catch (_) {
-      if (!_current(generation) || epoch != _epoch) return;
       error = 'Couldn’t read your account settings. Refresh to try again.';
     }
-    _notify();
+    // The fallback poll reads every 30 s and almost always finds nothing new.
+    // Every pane header, the workspace screen (a setState and a native menu
+    // sync) and search listen here, so notifying on each read rebuilt them
+    // twice a minute for every account, on the UI thread whose long frames
+    // production samples (Oct 17: 6.7% of Linux samples over 250 ms, macOS
+    // 0.25%). Only a read that changes what is shown notifies.
+    if (!listEquals(before, _shown())) _notify();
   }
+
+  /// Everything a listener can read after a read: a newer revision that
+  /// changes no choice changes nothing on screen.
+  List<Object?> _shown() => [
+    loaded,
+    error,
+    errorFeature,
+    for (final feature in ExperimentalFeature.values) ...[
+      _choices[feature],
+      _available[feature],
+    ],
+  ];
 
   void _apply(Map<String, dynamic> result) {
     final revision = result['revision'];
@@ -135,8 +202,11 @@ class ExperimentalFeaturesStore extends ChangeNotifier {
         revision is! int ||
         revision < 0 ||
         features is! Map ||
+        // An experiment a server does not name is one it predates (below), not a bad answer:
+        // the agents' three reached the app before every backend had them.
         ExperimentalFeature.values.any(
-          (feature) => features[feature.id] is! bool,
+          (feature) =>
+              features.containsKey(feature.id) && features[feature.id] is! bool,
         )) {
       throw const FormatException('Invalid account settings');
     }
@@ -192,4 +262,24 @@ class ExperimentalFeaturesStore extends ChangeNotifier {
     _poll?.cancel();
     super.dispose();
   }
+}
+
+/// One experiment's [ExperimentalFeaturesStore.choice] as a listenable: null
+/// until the account's settings are read. It notifies whenever the store does
+/// — when any experiment, its availability, a save or an error changes — so a
+/// listener compares with the value it last saw.
+class ExperimentChoice implements ValueListenable<bool?> {
+  const ExperimentChoice(this.store, this.feature);
+
+  final ExperimentalFeaturesStore store;
+  final ExperimentalFeature feature;
+
+  @override
+  bool? get value => store.choice(feature);
+
+  @override
+  void addListener(VoidCallback listener) => store.addListener(listener);
+
+  @override
+  void removeListener(VoidCallback listener) => store.removeListener(listener);
 }

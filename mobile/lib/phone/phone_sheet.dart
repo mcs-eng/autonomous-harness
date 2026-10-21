@@ -102,12 +102,43 @@ class PhoneSheetSection {
 /// caption, or a gap below the card before when it has none. An empty section is left out.
 ///
 /// The page behind stands on the app's sheet veil, dimmed and blurred — see [_PhoneSheetRoute].
+///
+/// [onShown] is handed the sheet's route as it is pushed, for a page that may have to take the
+/// sheet down itself: its rows are read once, as it opens, and something that ends under it — a
+/// Change agent — would otherwise leave it saying what is no longer true.
 Future<void> showPhoneSheet(
   BuildContext context, {
   required String title,
   List<PhoneSheetAction> actions = const [],
   List<PhoneSheetSection> sections = const [],
   String? titleBranch,
+  void Function(Route<void> route)? onShown,
+}) {
+  final route = phoneSheetRoute<void>(
+    context,
+    builder: (sheetContext) => SafeArea(
+      child: _TmuxMenu(
+        title: title,
+        branch: titleBranch,
+        actions: actions,
+        sections: sections,
+        onAction: (action) {
+          Navigator.of(sheetContext).pop();
+          action.onTap();
+        },
+      ),
+    ),
+  );
+  onShown?.call(route);
+  return Navigator.of(context, rootNavigator: true).push(route);
+}
+
+/// The route [showPhoneSheet] pushes, around content of the caller's own — for a sheet that is not
+/// a menu of actions. Push it on the root navigator; held, it can be taken away again
+/// ([NavigatorState.removeRoute]) when the page that opened it goes.
+ModalBottomSheetRoute<T> phoneSheetRoute<T>(
+  BuildContext context, {
+  required WidgetBuilder builder,
 }) {
   assert(debugCheckHasMediaQuery(context));
   assert(debugCheckHasMaterialLocalizations(context));
@@ -116,36 +147,23 @@ Future<void> showPhoneSheet(
   // same call; the veil is the only difference.
   final navigator = Navigator.of(context, rootNavigator: true);
   final localizations = MaterialLocalizations.of(context);
-  return navigator.push(
-    _PhoneSheetRoute<void>(
-      capturedThemes: InheritedTheme.capture(
-        from: context,
-        to: navigator.context,
-      ),
-      barrierLabel: localizations.scrimLabel,
-      barrierOnTapHint: localizations.scrimOnTapHint(
-        localizations.bottomSheetLabel,
-      ),
-      // The terminal's ground, a rounded top like every sheet New opens, no handle.
-      showDragHandle: false,
-      backgroundColor: Tty.of(context).ground,
-      isScrollControlled: true,
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(context).height * 0.85,
-      ),
-      builder: (sheetContext) => SafeArea(
-        child: _TmuxMenu(
-          title: title,
-          branch: titleBranch,
-          actions: actions,
-          sections: sections,
-          onAction: (action) {
-            Navigator.of(sheetContext).pop();
-            action.onTap();
-          },
-        ),
-      ),
+  return _PhoneSheetRoute<T>(
+    capturedThemes: InheritedTheme.capture(
+      from: context,
+      to: navigator.context,
     ),
+    barrierLabel: localizations.scrimLabel,
+    barrierOnTapHint: localizations.scrimOnTapHint(
+      localizations.bottomSheetLabel,
+    ),
+    // The terminal's ground, a rounded top like every sheet New opens, no handle.
+    showDragHandle: false,
+    backgroundColor: Tty.of(context).ground,
+    isScrollControlled: true,
+    constraints: BoxConstraints(
+      maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+    ),
+    builder: builder,
   );
 }
 
@@ -341,9 +359,9 @@ class _TmuxMenuState extends State<_TmuxMenu> {
   }
 }
 
-/// The route [showPhoneSheet] pushes: Material's own bottom sheet, standing on the app's sheet veil
-/// rather than a flat `black54` — the page dimmed to [kSheetVeilOpacity] and blurred at
-/// [kDialogVeilBlur], as it is under the search sheet.
+/// The route [showPhoneSheet] and [phoneSheetRoute] push: Material's own bottom sheet, standing on
+/// the app's sheet veil rather than a flat `black54` — the page dimmed to [kSheetVeilOpacity] and
+/// blurred at [kDialogVeilBlur], as it is under the search sheet.
 ///
 /// ⚠️ **Blurred, because what is behind these sheets is usually a live terminal.** Dimmed text is
 /// still text: under the flat tint its lines stayed legible — and moving — and the eye went on

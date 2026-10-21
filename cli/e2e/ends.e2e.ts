@@ -144,6 +144,32 @@ describe('how an agent\'s life ends', () => {
     client.close()
   })
 
+  it.each(engines)('%s: a queued Close keeps its intent while native history is held, then recovers', async engine => {
+    const d = await fresh()
+    const client = await LocalClient.connect(d)
+    const agent = await create(d, client, engine, `close-held-${engine}`)
+    await turn(client, agent.id, 'Keep this conversation through recovery')
+    expect(await close(client, agent, 'after_task')).toMatchObject({ deferred: true })
+    const paths = transcriptsOf(d, agent.sessionId)
+    expect(paths).toHaveLength(1)
+    const file = paths[0], original = readFileSync(file, 'utf8')
+    const lines = original.split('\n'), first = JSON.parse(lines[0])
+    if (engine === 'codex') first.payload.id = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+    else first.sessionId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+    lines[0] = JSON.stringify(first)
+    writeFileSync(file, lines.join('\n'))
+    // More than two idle checks: the same durable request must keep waiting.
+    await new Promise(resolve => setTimeout(resolve, 12_000))
+    expect(await row(client, agent.id)).toMatchObject({ status: 'active', sessionId: agent.sessionId,
+      closePlan: { state: 'waiting' } })
+    expect(client.frames.filter(frame => frame.type === 'agent_deleted' && frame.payload?.agentId === agent.id)).toHaveLength(0)
+    expect((await d.tmux.run('list-panes', '-a', '-F', '#{pane_id}')).trim().split('\n')).toContain(agent.tmuxPane)
+    writeFileSync(file, original)
+    await stopped(client, agent.id, 60_000)
+    expect(readFileSync(file, 'utf8')).toContain('Keep this conversation through recovery')
+    client.close()
+  })
+
   it.each(engines)('%s: closed after its task, it finishes the turn, then closes on its own', async (engine) => {
     const d = await fresh()
     const client = await LocalClient.connect(d)
@@ -272,10 +298,10 @@ describe('how an agent\'s life ends', () => {
     client.close()
   })
 
-  // A failed start (Claude Code that cannot reach Anthropic) keeps its pane on the shell it leaves,
-  // where its last screen says why: agent_deleted names that shell as `successor`. An agent that
-  // exits after doing work still ends as before (#262).
-  it('an agent that exits before any conversation hands its pane to the shell; one after a turn does not', async () => {
+  // An engine that exits keeps its pane on the shell it leaves: agent_deleted names that shell as
+  // `successor`. A failed start (Claude Code that cannot reach Anthropic) keeps its last screen, which
+  // says why; one after work keeps the terminal the pane says it is now (#600).
+  it('an agent that exits hands its pane to the shell, before any conversation and after a turn', async () => {
     const d = await fresh()
     const client = await LocalClient.connect(d)
     const early = await create(d, client, 'claude', 'exit-at-start')
@@ -291,7 +317,9 @@ describe('how an agent\'s life ends', () => {
     await turn(client, worked.id, 'a real first task')
     const ended = client.next((frame) => frame.type === 'agent_deleted' && frame.payload?.agentId === worked.id, 45_000, 'agent_deleted (after work)')
     client.send('message', { agentId: worked.id, content: '!exit' })
-    expect((await ended).payload?.successor).toBeUndefined()
+    const after = (await ended).payload?.successor as string | undefined
+    expect(after).toBeTruthy()
+    expect((await until('the shell after work', async () => (await row(client, after!)) ?? null, 30_000, 500)).engine).toBe('terminal')
   })
 
   it('a close for an agent that is not the one asked about changes nothing', async () => {

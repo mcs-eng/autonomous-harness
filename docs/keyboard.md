@@ -9,37 +9,38 @@ The defaults, in the workspace:
 
 | Keys | Action |
 |---|---|
-| ⌘T | New Swarm — opens the same quiet welcome page shown at startup. Use ⌘N to create a harness, ⌘P to open one, or ⌘S for the store |
+| ⌘T | New tab — opens the same quiet welcome page shown at startup. Use ⌘N to create a harness, ⌘P to open one, or ⌃⌘S for the Store |
 | ⌘O / Ctrl+O (Linux) | Open Project — the unified picker starts in projects (`#`), with projects containing open panes first and alphabetical order within each group |
 | ⌘P / Ctrl+P (Linux) | Open Harness — the unified picker for harnesses, machines (`@`), projects (`#`), agents (`&`), models (`:`), and Store (`*`). Opens in the current tab and tiles its panes, or focuses the harness if already here |
 | ⇧⌘P / Ctrl+Shift+P (Linux) | Search commands; from a selected picker result, search actions for that item |
 | ⌘R / ⌘D | Split right / down — open the New Pane picker with the requested direction, then choose an existing harness or create one |
 | ⌘N | New Harness — choose an Agent or Harness, Project, and Options, then activate New Harness. Lists filter as you type; Return chooses and Escape returns to the form. Project accepts a folder, a new project name, or a repository. Options include model, permissions, agent profile, branch, and worktree |
 | ⌘B | Boss mode: describe a task, it picks the harness |
-| ⌘W · ⇧⌘R | Close swarm · rename swarm |
+| ⌘W · ⇧⌘R | Close tab · rename tab |
 | ⇧⌘T | New terminal in the current project |
 | ⇧⌘N | Clone Harness — another harness like the focused pane's (same machine, project, harness, Codex profile, permission mode, named agent) with a fresh conversation. No dialog; fork minus the context |
-| ⇧⌘E | Restart Harness — the focused pane's harness starts again in place, resuming its conversation where the engine can. Asks first; the pane, its folder and its settings stay. (Not ⇧⌘R: that renames the swarm) |
-| ⌘1 … ⌘9 | Select swarm by position |
-| ⇧⌘] · ⇧⌘[ · ⌃Tab · ⌃⇧Tab | Next · previous swarm |
+| ⇧⌘E | Restart Harness — the focused pane's harness starts again in place, resuming its conversation where the engine can. Asks first; the pane, its folder and its settings stay. (Not ⇧⌘R: that renames the tab) |
+| ⌘1 … ⌘9 | Select tab by position |
+| ⇧⌘] · ⇧⌘[ · ⌃Tab · ⌃⇧Tab | Next · previous tab |
 | ⌘] · ⌘[ · ⌘Y | Forward · back through visited harnesses · full history |
 | ⌘H ⌘J ⌘K ⌘L · ⌘arrows | Focus the pane left · below · above · right |
 | ⇧⌘arrows | Move the focused pane |
 | ⌘⏎ · ⌘; · ⇧⌘W | Zoom or restore · last pane · close pane |
-| ⌘S | Harness Store |
+| ⌘S | New Swarm — the lead creation form, with engine, machine, project and project visibility |
+| ⌃⌘S | Harness Store |
 | ⌘M | Machines — connect another computer or set this computer's password |
 | ⌘I | Models — subscriptions, local models, shared models, and APIs |
 | ⇧⌘L | Layout palette |
 | ⌘F · ⌘G · ⇧⌘G | Find in terminal · next · previous match |
-| ⇧⌘F / Ctrl+Alt+F (Linux) / Alt+Shift+F (browser) | Toggle inactive pane shading. Off by default; also available in Customize Harness → Appearance |
+| ⇧⌘F / Ctrl+Alt+F (Linux) / Alt+Shift+F (browser) | Toggle inactive pane shading. Off by default; also available in Appearance → Workspace |
 | ⇧⌘I | Harnesses needing input |
 | ⌘, · ⌘/ | Settings · keyboard shortcuts |
 
-First launch and every New Swarm show the same “Follow your curiosity.” page with
+First launch and every new regular tab show the same “Follow your curiosity.” page with
 three clickable shortcuts: ⌘N to start a new harness, ⌘P to open a harness, and
-⌘S to browse the harness store. The hints follow the current keyboard bindings.
+⌃⌘S to browse the Harness Store. The hints follow the current keyboard bindings.
 
-A harness can have views in several swarms, with one view per swarm; closing a pane only removes that view.
+A harness can have views in several regular tabs, with one view per tab; closing a pane only removes that view.
 The view closes immediately, without a minimize animation.
 
 Cmd-P opens an empty search field. Cmd-O inserts an editable `#` for projects.
@@ -64,7 +65,7 @@ JSONC: `{ "version": 1, "bindings": [{ "keys": "cmd+k cmd+l", "command": "pane.f
 whole prefix; `when` is `workspace`, `terminal` or `picker`. The file is watched and reloaded on save;
 a bad edit keeps the last good keymap and says what was wrong. **Keyboard shortcuts (⌘/)** lists the
 effective bindings in searchable groups. Select a row and press Return to practice it without
-executing the action. The popup follows Customize Harness ▸ Terminal for its font and size.
+executing the action. The popup follows Appearance ▸ Terminal for its font and size.
 **Edit keyboard shortcuts** opens a commented config template with every command id.
 
 In both modes of the box the line is a readline: ⌃A ⌃E ⌃F ⌃B and ⌥←/→ move, ⌃W kills a word (stopping at `/`), ⌃U kills to the start, ⌃H and ⌃D delete a character each way, ⌃Y puts the last kill back. ⌃N/⌃J and ⌃P/⌃K move the highlight — ⌃K is "previous", as in fzf, not kill-line — ⌃M is Return and ⌃[ or ⌃G is Escape. Every entry of the box's bottom line is also a button.

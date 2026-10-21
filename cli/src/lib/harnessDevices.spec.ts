@@ -5,7 +5,7 @@ import { PNG } from 'pngjs'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { decodePack } from '../cable/pets/pack.js'
 import { PetStore } from '../cable/pets/store.js'
-import { harnessDevicesRequest, type HarnessDevicesService } from './harnessDevices.js'
+import { deviceSettingsPatchSchema, harnessDevicesRequest, type HarnessDevicesService } from './harnessDevices.js'
 import type { DialStatus, DeviceSettings } from '../cable/cableSession.js'
 import { encryptDownFrame, encryptRpcResult } from './e2ee/applicationFrames.js'
 import { ENCRYPTED_UP_TYPES } from './e2ee/core.js'
@@ -36,6 +36,12 @@ describe('owner device management', () => {
     const reply = await harnessDevicesRequest(service, 'harness_device_settings', { id: 'usb-b', patch: { brightness: 35 } })
     expect(set).toHaveBeenCalledExactlyOnceWith('usb-b', { brightness: 35 })
     expect(reply).toMatchObject({ ok: true, status: { devices: [{ settings: { brightness: 80 } }, { settings: { brightness: 80 } }, {}, {}] } })
+  })
+  it('validates a Pro\'s interface skin, and refuses the retired screen turn', async () => {
+    expect(deviceSettingsPatchSchema.safeParse({ screenTurned: true }).success).toBe(false)
+    expect(deviceSettingsPatchSchema.safeParse({ uiSkin: 'classic' }).success).toBe(true)
+    expect(deviceSettingsPatchSchema.safeParse({ uiSkin: 1 }).success).toBe(false)
+    expect(deviceSettingsPatchSchema.safeParse({ uiSkin: 'x' }).success).toBe(false)
   })
   it('refuses missing, disconnected, updating and invalid targets without a write', async () => {
     const { service, set } = fixture()

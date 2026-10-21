@@ -26,6 +26,7 @@ import { installOpencodePlugin } from '../../engines/nativeHooks.js'
 import type { NativeLaunch } from '../../engines/nativeLaunch.js'
 import { projectsRoot } from '../../lib/projectFolder.js'
 import { NativeFiles } from '../../engines/kit/nativeFiles.js'
+import { agentLaunchArgs } from '../../lib/agentAttribution.js'
 
 vi.mock('../../lib/projectFolder.js', async real => {
   const actual = await real<typeof import('../../lib/projectFolder.js')>()
@@ -72,6 +73,11 @@ vi.mock('../../engines/launchPrep.js', () => ({ folderTrust: (engine: string, pr
     ? { trusts: (path: string) => trust.claudeTrusts(path), record: (path: string) => trust.preTrustClaudeProject(path) }
     : engine === 'codex' ? { trusts: (path: string) => trust.codexTrusts(path, profile), record: (path: string) => trust.preTrustCodexProject(path, profile) } : null }))
 vi.mock('../../lib/createAgentPane.js', () => ({ createAndRegisterPane: vi.fn() }))
+// The pull request line (lib/agentAttribution.ts) reads the person's engine settings: never this machine's here.
+vi.mock('../../lib/agentAttribution.js', () => ({
+  agentLaunchArgs: vi.fn((_engine: string, startedBy: string | null | undefined) => startedBy === 'agent' ? ['--settings', '{"attribution":{}}'] : []),
+  joinedInstructions: vi.fn((_engine: string, args: string[]) => args),
+}))
 vi.mock('../../lib/engineBin.js', async (real) => ({ ...await real<object>(), enginePathOverride: vi.fn(() => null) }))
 vi.mock('../../lib/engineInstall.js', async (real) => ({ ...await real<object>(), engineInstallRecipe: vi.fn(() => ({ install: 'recipe' })) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({
@@ -283,6 +289,13 @@ describe('creating an agent', () => {
     const run = setup({ native: async () => ({ ok: true, launch }) })
     expect(await run.create(request({ engine: 'opencode', agent: 'named' }))).toMatchObject({ error: 'AGENT_UNSUPPORTED' })
     expect(await run.create(request())).toMatchObject({ unavailable: 'native', detail: expect.stringContaining('hooks') })
+    expect(createAndRegisterPane).not.toHaveBeenCalled()
+  })
+
+  it('refuses, with the engine\'s own reason, an engine that ran and failed instead of holding the creation', async () => {
+    const detail = 'Codex is installed but cannot run: /usr/bin/env: ‘node’: No such file or directory'
+    const broken = { ok: false, error: 'NATIVE_LAUNCH_HELD', unavailable: 'native', detail, refusal: 'ENGINE_CANNOT_RUN' } as const
+    expect(await setup({ native: async () => broken }).create(request())).toEqual({ ok: false, error: 'ENGINE_CANNOT_RUN', detail })
     expect(createAndRegisterPane).not.toHaveBeenCalled()
   })
 
@@ -614,6 +627,16 @@ describe('creating an agent', () => {
       expect(t.deps.gridLaunchMachine).toHaveBeenCalledWith('claude', undefined)
     })
 
+    it('launches with the model and effort it was given, as a launch option the registry row never keeps', async () => {
+      const { create } = setup()
+      await create(request({ launchModel: { model: 'opus', effort: 'high' } }))
+      const options = vi.mocked(buildEngineLaunchArgv).mock.calls[0][1] as Record<string, unknown>
+      expect(options).toMatchObject({ launchModel: { model: 'opus', effort: 'high' } })
+      expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).not.toHaveProperty('launchModel')
+      await create(request())
+      expect(vi.mocked(buildEngineLaunchArgv).mock.calls[1][1]).not.toHaveProperty('launchModel')
+    })
+
     it('opens as a named agent, with a first prompt, and does not install an engine with a path override', async () => {
       vi.mocked(enginePathOverride).mockReturnValueOnce('/opt/claude' as never)
       const { deps, create } = setup()
@@ -623,6 +646,19 @@ describe('creating an agent', () => {
       expect(options.terminalHint).toEqual({ machineName: 'this-mac' })
       expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).toMatchObject({ agent: 'reviewer', defaultName: 'Reviewer' })
       expect(deps.watchNewPane).toHaveBeenCalledWith('claude', pending, expect.anything(), ['claude'], undefined, undefined)
+    })
+
+    it('started by another agent: its pull request line after every other argument, and who started it on the row', async () => {
+      const { create } = setup()
+      const cwd = folder()
+      await create(request({ cwd, agent: 'reviewer', startedBy: 'agent', parentAgentId: 'lead-1' }))
+      expect(vi.mocked(agentLaunchArgs)).toHaveBeenCalledWith('claude', 'agent', { cwd, profile: null, environment: undefined })
+      expect((vi.mocked(buildEngineLaunchArgv).mock.calls[0][1] as Record<string, unknown>).extraArgs).toEqual(['--agent', 'reviewer', '--settings', '{"attribution":{}}'])
+      expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).toMatchObject({ startedBy: 'agent', parentAgentId: 'lead-1' })
+      // The person's: no line, and nothing recorded.
+      await create(request())
+      expect((vi.mocked(buildEngineLaunchArgv).mock.calls[1][1] as Record<string, unknown>).extraArgs).toBeUndefined()
+      expect(vi.mocked(createAndRegisterPane).mock.calls[1][0]).toMatchObject({ startedBy: null, parentAgentId: null })
     })
 
 

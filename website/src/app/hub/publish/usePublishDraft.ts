@@ -2,12 +2,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { readDraft, saveDraft, type HubDraft } from '@/lib/community/drafts';
 import { communityCategories, communityEngines } from '@/lib/community/contract';
+import { arrivedEnglish, noEnglish, type EnglishState } from '@/lib/community/translation';
 import type { HarnessSnapshot } from '@/lib/community/types';
+import { editDraft } from './publication';
 
-/** `originalOutput` is the fork's output as it arrived: kept here to compare against, never published. */
-export type PublishDraft = Omit<HarnessSnapshot, 'harnessName' | 'credits'> & { contextNote: string; originalOutput?: string };
+/**
+ * `originalOutput` is the fork's output as it arrived: kept here to compare against, never published.
+ * `english` is where the draft stands with its translation, never published either.
+ * `updateId` is your publication this draft is saved over, instead of publishing a new one.
+ */
+export type PublishDraft = Omit<HarnessSnapshot, 'harnessName' | 'credits'> & { contextNote: string; originalOutput?: string; english: EnglishState; updateId?: string };
 
-const fresh: PublishDraft = { title: '', description: '', category: 'Apps', engine: 'Codex', files: [], viewerPath: 'preview.html', conversation: [{ role: 'user', text: '' }], contextNote: '' };
+const uuid = /^[a-f0-9-]{36}$/;
+
+const fresh: PublishDraft = { title: '', description: '', category: 'Apps', engine: 'Codex', files: [], viewerPath: 'preview.html', conversation: [{ role: 'user', text: '' }], contextNote: '', english: noEnglish };
 
 /** A handed-off or imported bundle, kept within what the form can show and the Hub accepts. */
 function fromBundle(bundle: HubDraft): PublishDraft {
@@ -18,13 +26,9 @@ function fromBundle(bundle: HubDraft): PublishDraft {
     harnessId: bundle.harnessId, files: bundle.files || [], viewerPath: bundle.viewerPath || 'preview.html',
     conversation: bundle.conversation?.length ? bundle.conversation : fresh.conversation,
     forkedFrom: bundle.forkedFrom, cover: bundle.cover, contextNote: bundle.contextNote || '', originalOutput: bundle.originalOutput,
+    english: arrivedEnglish(bundle.english),
+    updateId: bundle.updateId && uuid.test(bundle.updateId) ? bundle.updateId : undefined,
   };
-}
-
-/** What the Hub stores: the draft without the note that was only for the person reviewing it. */
-export function toSnapshot(draft: PublishDraft): HarnessSnapshot {
-  const { title, description, category, engine, harnessId, files, viewerPath, conversation, cover, forkedFrom } = draft;
-  return { title, description, category, engine, ...(harnessId ? { harnessId } : {}), files, viewerPath, conversation, ...(cover ? { cover } : {}), ...(forkedFrom ? { forkedFrom } : {}) };
 }
 
 /**
@@ -32,7 +36,7 @@ export function toSnapshot(draft: PublishDraft): HarnessSnapshot {
  * it. `publicationId` makes a retried Publish return the same publication instead of a second one.
  */
 export function usePublishDraft() {
-  const [draft, setDraft] = useState(fresh), [ready, setReady] = useState(false), [saveError, setSaveError] = useState('');
+  const [draft, setDraft] = useState(fresh), [ready, setReady] = useState(false), [saveError, setSaveError] = useState(''), [loadError, setLoadError] = useState('');
   const draftId = useRef<string | null>(null), publicationId = useRef<string | null>(null), submitting = useRef(false);
   const update = useCallback((patch: Partial<PublishDraft>) => setDraft(value => ({ ...value, ...patch })), []);
   const applyBundle = useCallback((bundle: HubDraft) => {
@@ -42,11 +46,18 @@ export function usePublishDraft() {
 
   useEffect(() => {
     let disposed = false;
-    const query = new URLSearchParams(window.location.search).get('draft');
-    const id = query && /^[a-f0-9-]{36}$/.test(query) ? query : crypto.randomUUID();
+    const params = new URLSearchParams(window.location.search), query = params.get('draft'), edit = params.get('edit');
+    const id = query && uuid.test(query) ? query : crypto.randomUUID(), editId = edit && uuid.test(edit) ? edit : null;
     draftId.current = id; publicationId.current = crypto.randomUUID();
-    if (!query) window.history.replaceState(null, '', `/hub/publish?draft=${id}`);
-    void readDraft(id).then(saved => { if (!disposed && saved) applyBundle(saved); }).catch(() => { /* A fresh draft can still be composed. */ }).finally(() => { if (!disposed) setReady(true); });
+    if (!query) window.history.replaceState(null, '', `/hub/publish?draft=${id}${editId ? `&edit=${editId}` : ''}`);
+    // A saved draft wins; `?edit=<id>` otherwise opens that publication as it is now.
+    void readDraft(id).catch(() => undefined).then(async saved => {
+      if (disposed) return;
+      if (saved) return applyBundle(saved);
+      if (!editId) return;
+      try { const opened = await editDraft(editId); if (!disposed) setDraft(opened); }
+      catch (e) { if (!disposed) setLoadError(e instanceof Error ? e.message : 'This harness could not be opened for editing.'); }
+    }).finally(() => { if (!disposed) setReady(true); });
     return () => { disposed = true; };
   }, [applyBundle]);
 
@@ -69,5 +80,5 @@ export function usePublishDraft() {
       if (draftId.current) await saveDraft(draftId.current, null).catch(() => {});
     } finally { submitting.current = false; }
   }, []);
-  return { draft, update, applyBundle, saveError, publishOnce };
+  return { draft, update, applyBundle, saveError, loadError, publishOnce };
 }

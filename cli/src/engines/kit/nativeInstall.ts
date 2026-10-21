@@ -5,6 +5,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type Bi
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { buildEngineInstallationArgv } from '../../lib/engineLaunch.js'
 import type { EngineInstallRecipe } from '../../lib/engineInstall.js'
+import { failureReason } from '../../lib/failureReason.js'
 import { managedNodePath } from '../../lib/nodeRuntime.js'
 import { secureStateDirectory } from '../../lib/secureState.js'
 import type { AgentEngine } from '../types.js'
@@ -12,7 +13,7 @@ import { LAUNCH_LOCATION_VARIABLES } from './nativeLocations.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import { NativeFiles } from './nativeFiles.js'
 import { inspectHookFile, runHookPreparation } from './nativeHookFiles.js'
-import { NativePaths, verifyNativePathFacts, type NativePathFact } from './nativePaths.js'
+import { NativePaths, verifyNativePathFacts, withoutDevice, type NativePathFact } from './nativePaths.js'
 
 const LIMIT = 262_144
 // This is installation history, not launch history: ordinary launches never add
@@ -33,8 +34,19 @@ interface Claim {
 }
 interface Dispatch { token: string; claim: string; kind: 'run' | 'cancelled' }
 interface Result { token: string; claim: string; code: number | null; signal: string | null; notDispatched?: true; detail?: string }
-export type NativeInstallation = { complete: true } | { complete: false; detail: string }
+/** `running`: an installer is dispatched and has not settled. `failed`: this request's own installer settled with a
+ *  failure, and `detail` is why, in its output's words; it is never run again for this request. */
+export type NativeInstallation = { complete: true } | { complete: false; detail: string; running?: true; failed?: true }
 const hold = (detail: string): NativeInstallation => ({ complete: false, detail })
+const running = (detail: string): NativeInstallation => ({ complete: false, detail, running: true })
+// The helper ends its installer at 20 minutes and then records the result. A dispatch older than that with no result
+// is a helper that died (a reboot during an install): it is never replayed, and no longer said to be installing, which
+// `harness new` would otherwise wait on for minutes at every attempt.
+const INSTALLER_SETTLES_MS = 1_200_000 + 60_000
+const installing = (dispatched: { file: string } | undefined, detail: string): NativeInstallation => {
+  try { if (dispatched && Date.now() - lstatSync(dispatched.file).mtimeMs < INSTALLER_SETTLES_MS) return running(detail) } catch { /* A vanished record is not a live installer. */ }
+  return hold(detail)
+}
 
 /** Never read a growing journal file without a bound, or tighten foreign permissions to trust it. */
 function readRecord(file: string): { text: string; file: string; stamp: string; facts: NativePathFact[]; verify(): void } {
@@ -80,6 +92,7 @@ const [file,expected,testDeadline]=process.argv.slice(1),directory=path.dirname(
 const hash=s=>crypto.createHash('sha256').update(s).digest('hex');
 const id=s=>String(s.dev)+':'+String(s.ino)+':'+String(s.mode)+':'+String(s.uid);
 const ver=s=>id(s)+':'+String(s.size)+':'+String(s.mtimeNs)+':'+String(s.ctimeNs);
+const nodev=s=>s&&s.slice(s.indexOf(':')+1);
 function read(file){const fd=fs.openSync(file,C.O_RDONLY|C.O_NOFOLLOW|C.O_NONBLOCK);try{
  const s=fs.fstatSync(fd,{bigint:true});if(!s.isFile()||s.size>262144n||s.uid!==BigInt(process.getuid())||(s.mode&0o022n))throw Error('Unsafe installation record');
  const bytes=Buffer.alloc(Number(s.size));let offset=0;for(let calls=0;offset<bytes.length;calls++){
@@ -90,14 +103,14 @@ function read(file){const fd=fs.openSync(file,C.O_RDONLY|C.O_NOFOLLOW|C.O_NONBLO
 const directoryFd=fs.openSync(directory,C.O_RDONLY|C.O_DIRECTORY|C.O_NOFOLLOW),directoryId=id(fs.fstatSync(directoryFd,{bigint:true}));
 const text=read(file);if(hash(text)!==expected)throw Error('Changed installation claim');
 const claim=JSON.parse(text),authorityText=read(claim.authority),authority=JSON.parse(authorityText),dispatchText=read(claim.witness),dispatch=JSON.parse(dispatchText);
-if(authority.directory!==directoryId||read(file+'.dispatch')!==dispatchText||dispatch.kind!=='run'||dispatch.token!==claim.token||dispatch.claim!==expected)throw Error('Unconfirmed installer dispatch');
+if(nodev(authority.directory)!==nodev(directoryId)||read(file+'.dispatch')!==dispatchText||dispatch.kind!=='run'||dispatch.token!==claim.token||dispatch.claim!==expected)throw Error('Unconfirmed installer dispatch');
 try{fs.lstatSync(file+'.result');throw Error('Installer already settled')}catch(e){if(e.code!=='ENOENT')throw e}
 function current(){
  if(id(fs.lstatSync(directory,{bigint:true}))!==directoryId||read(file)!==text||read(claim.authority)!==authorityText||read(claim.witness)!==dispatchText||read(file+'.dispatch')!==dispatchText)throw Error('Changed installation authority');
  for(const p of claim.previous)if(hash(read(p.file))!==p.digest)throw Error('Changed installation predecessor');
  for(const r of claim.routes){let s;try{s=fs.lstatSync(r.path,{bigint:true})}catch(e){if(e.code!=='ENOENT')throw e;s=null}
-  if((s?id(s):null)!==r.identity)throw Error('Changed installation target');
-  if(r.alias&&(!s||ver(s)!==r.alias.version||fs.readlinkSync(r.path)!==r.alias.target))throw Error('Changed installation alias');}
+  if(nodev(s?id(s):null)!==nodev(r.identity))throw Error('Changed installation target');
+  if(r.alias&&(!s||nodev(ver(s))!==nodev(r.alias.version)||fs.readlinkSync(r.path)!==r.alias.target))throw Error('Changed installation alias');}
 }
 function publish(value){
  current();const temporary=file+'.'+claim.token+'.result-tmp',result=file+'.result';
@@ -186,7 +199,7 @@ export function createNativeInstallations({ directory, node = managedNodePath, d
         authority = readRecord(authorityFile)
       }
       const genesis = JSON.parse(authority.text) as Authority
-      if (genesis.version !== 1 || genesis.directory !== directoryId) return hold('The engine installation history was replaced; its previous owner is still unconfirmed.')
+      if (genesis.version !== 1 || withoutDevice(genesis.directory) !== withoutDevice(directoryId)) return hold('The engine installation history was replaced; its previous owner is still unconfirmed.')
       const stamp = directoryStamp(directory)
       // NativeFiles retains iterator acquisition and ancestor evidence, including ABA route swaps.
       const entries = new NativeFiles().entries(directory), names = entries.filter(name => /^\d{8}\.json$/.test(name)).sort()
@@ -234,11 +247,16 @@ export function createNativeInstallations({ directory, node = managedNodePath, d
           || (result.notDispatched !== true && (result.code === null) === (result.signal === null))
           || (result.notDispatched !== undefined && (result.notDispatched !== true || result.code !== null || result.signal !== null))
           || (marker.kind === 'cancelled' && result.notDispatched !== true)) throw Error('Invalid installation result')
-        if (claim.engine === engine && !result.notDispatched && (result.code !== 0 || result.signal !== null)) {
-          return hold('The engine installer stopped before it was ready. Its saved result requires repair confirmation before any launch of this engine.')
-        }
+        // A settled failure is certain, not an uncertain dispatch. This request's own is never run again: its
+        // launch is refused with the installer's words. Another request's no longer holds every later launch of
+        // the engine, as it did with nothing that could release it: a person asking again is a new attempt, with
+        // an installer of its own (a fresh Ubuntu VM, 2026-10-12, where one failed install would have ended
+        // every later `harness new` of that engine).
         if (claim.request === request && !result.notDispatched) {
-          if (result.code !== 0 || result.signal !== null) return hold('The engine installer stopped before it was ready. Its saved result prevents an uncertain replay; repair the installation before continuing.')
+          if (result.code !== 0 || result.signal !== null) {
+            return { complete: false, failed: true, detail: failureReason(typeof result.detail === 'string' ? result.detail : '',
+              result.signal ? `its installer was stopped (${result.signal})` : `its installer exited with status ${result.code}`) }
+          }
           complete = true
         }
         lastResult = { file: `${file}.result`, record: resultRecord }
@@ -283,7 +301,7 @@ export function createNativeInstallations({ directory, node = managedNodePath, d
       }
       if (complete && !pending) return { complete: true }
       if (query) return pending && (pending.claim.engine === engine || pending.claim.request === request)
-        ? hold('Waiting for the saved installer to settle. An executable appearing before completion is not installation authority.')
+        ? installing(pending.slot, 'Waiting for the saved installer to settle. An executable appearing before completion is not installation authority.')
         : complete ? { complete: true } : null
       if (!pending && names.length >= MAX_INSTALLATIONS) return hold('The engine installation history is full. Its saved records need review before another installation.')
       // HOME gets a fresh budget after history enumeration and yields.
@@ -302,7 +320,7 @@ export function createNativeInstallations({ directory, node = managedNodePath, d
       const claimCurrent = () => { try { authority!.verify(); claimed.verify(); verifyNativePathFacts(claim.routes); return physical() } catch { return false } }
       const result = JSON.stringify({ token: claim.token, claim: hash, code: null, signal: null, notDispatched: true } satisfies Result)
       if (pending?.slot) {
-        return hold('Waiting for the dispatched installer result. An uncertain dispatch is never repeated.')
+        return installing(pending.slot, 'Waiting for the dispatched installer result. An uncertain dispatch is never repeated.')
       }
       // A missing outside witness with an inside sentinel is a lost history, not a new dispatch.
       if (maybe(`${file}.dispatch`)) return hold('The installer dispatch witness is missing; its previous worker may still own the installation.')
@@ -320,8 +338,13 @@ export function createNativeInstallations({ directory, node = managedNodePath, d
       }
       if (!dispatchCurrent()) return hold('Waiting to confirm the installer claim.')
       dispatch(runtime, file, hash)
-      return hold('Installing the required engine. The saved launch continues after installation is confirmed.')
-    } catch { return hold('Waiting to confirm durable engine installation ownership.') }
+      return running('Installing the required engine. The saved launch continues after installation is confirmed.')
+    } catch (error) {
+      // Any failed check lands here, and the person sees only this line. Without the reason in the log, a hold
+      // that never cleared could only be traced by hand over many round trips with the user (2026-10-19).
+      console.warn(`[native-install] ${engine} held:`, error instanceof Error ? error.message : error)
+      return hold('Waiting to confirm durable engine installation ownership.')
+    }
   }
   const ensure = async (engine: AgentEngine, recipe: EngineInstallRecipe, environment: Record<string, string>, request: string, current: () => boolean): Promise<NativeInstallation> =>
     (await examine(engine, recipe, environment, request, current))!

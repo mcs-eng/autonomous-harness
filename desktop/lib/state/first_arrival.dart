@@ -155,6 +155,8 @@ class FirstArrival {
     Duration machineWait = const Duration(seconds: 30),
     Duration indexWait = const Duration(seconds: 15),
     Duration starterWait = const Duration(minutes: 3),
+    // As long as a create waits for an agent's download beside setup (`agentPrefetchWait`).
+    Duration installWait = const Duration(minutes: 10),
   }) {
     if (_inFlight case final inFlight?) return inFlight;
     if (!pending) return Future.value(false);
@@ -164,6 +166,7 @@ class FirstArrival {
       machineWait: machineWait,
       indexWait: indexWait,
       starterWait: starterWait,
+      installWait: installWait,
     );
     _inFlight = run;
     return run.whenComplete(() => _inFlight = null);
@@ -177,6 +180,7 @@ class FirstArrival {
     required Duration machineWait,
     required Duration indexWait,
     required Duration starterWait,
+    required Duration installWait,
   }) async {
     _running = true;
     final started = _now();
@@ -200,8 +204,12 @@ class FirstArrival {
       if (machine == null) return stop('this computer never answered');
       if (!current()) return stop('the person took over');
       final machineId = machine.machine.machineId;
-      final sessions = await recentSessions(app, machineId, budget: indexWait);
-      await app.probeEngines(machineId);
+      // The conversation index and installed engines are independent. A new
+      // computer may still be indexing: do not put its engine probe behind it.
+      final (sessions, _) = await (
+        recentSessions(app, machineId, budget: indexWait),
+        app.probeEngines(machineId),
+      ).wait;
       final installed = {
         for (final engine in const ['claude', 'codex', 'opencode'])
           if (machine.engines[engine]?.installed == true) engine,
@@ -224,7 +232,14 @@ class FirstArrival {
       if (!current()) return stop('the person took over');
       tabs.add(app.activeSwarmId);
       opened = plan.fresh.isNotEmpty
-          ? await _openFresh(app, machineId, plan, starterWait, current)
+          ? await _openFresh(
+              app,
+              machineId,
+              plan,
+              starterWait,
+              installWait,
+              current,
+            )
           : await _openSessions(app, machineId, plan.tabs, tabs, current);
       return opened;
     } finally {
@@ -358,6 +373,7 @@ class FirstArrival {
     String machineId,
     FirstArrivalPlan plan,
     Duration starterWait,
+    Duration installWait,
     bool Function() current,
   ) async {
     final String folder;
@@ -384,6 +400,11 @@ class FirstArrival {
         permissionMode: kDefaultPermissionMode,
         swarmId: tabId,
         placement: HarnessPlacement.currentTab,
+        // Setup is often still downloading the agent, and the machine then holds the harness
+        // until it is installed and starts it by itself. Asked once, this was told so, opened
+        // nothing, and the three harnesses started with no pane anywhere: the first workspace
+        // was an empty tab with "Harnesses 3" under it (a fresh Ubuntu VM, 2026-10-12).
+        attempt: AgentCreationAttempt(holdWait: installWait),
       );
       if (error != null) _log('first arrival: $engine not started: $error');
       // OpenCode the full height on the left, the other two stacked on the right. Applied as soon

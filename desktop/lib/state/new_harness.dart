@@ -16,6 +16,7 @@ import '../core/launch_setup.dart';
 import '../core/dsh_catalog.dart';
 import '../core/harness_catalog.dart';
 import '../core/first_task.dart';
+import '../core/guest_folders.dart';
 import '../core/models.dart';
 import '../usage/models_menu_controller.dart';
 import '../core/fuzzy_match.dart';
@@ -30,6 +31,7 @@ import 'app_state.dart';
 import 'attached_task_delivery.dart';
 import 'harness_placement.dart';
 import 'harness_attachments.dart';
+import 'harness_launch_integration.dart';
 import 'pane_arrangement.dart';
 
 /// Agent folders live on the machine that runs the agent. That machine is POSIX
@@ -72,24 +74,31 @@ class NewHarnessProject {
   const NewHarnessProject.fresh([this.name])
     : folder = null,
       repository = null,
-      generated = null;
+      generated = null,
+      exact = false;
   NewHarnessProject.generated(ProjectFolderRequest request)
     : name = request.name,
       generated = request,
       folder = null,
-      repository = null;
-  const NewHarnessProject.folder(String this.folder)
+      repository = null,
+      exact = false;
+  const NewHarnessProject.folder(String this.folder, {this.exact = false})
     : name = null,
       repository = null,
       generated = null;
   const NewHarnessProject.clone(GitHubRepository this.repository)
     : name = null,
       folder = null,
-      generated = null;
+      generated = null,
+      exact = false;
   final String? name;
   final String? folder;
   final GitHubRepository? repository;
   final ProjectFolderRequest? generated;
+
+  /// The person picked this very folder (browsed or typed): a worktree stays
+  /// itself instead of showing as its repository.
+  final bool exact;
   bool get isNew => folder == null;
 
   @override
@@ -99,11 +108,13 @@ class NewHarnessProject {
       other.generated?.generatedAt == generated?.generatedAt &&
       other.generated?.generatedLabel == generated?.generatedLabel &&
       other.folder == folder &&
+      other.exact == exact &&
       other.repository?.url == repository?.url;
   @override
   int get hashCode => Object.hash(
     name,
     folder,
+    exact,
     repository?.url,
     generated?.generatedAt,
     generated?.generatedLabel,
@@ -296,6 +307,7 @@ class NewHarnessDraft {
     this.profile,
     this.profileChosen = false,
     this.attempt,
+    this.integration,
     this.error,
     this.dismissalWarningShown = false,
     this.projectsByMachine = const {},
@@ -317,6 +329,7 @@ class NewHarnessDraft {
   final LocalCodexProfile? profile;
   final bool profileChosen;
   final AgentCreationAttempt? attempt;
+  final HarnessLaunchIntegration? integration;
   final String? error;
   // The visible "Escape again" message must keep the same meaning if the
   // unresolved prompt is dismissed and then restored.
@@ -425,7 +438,9 @@ class NewHarnessController extends ChangeNotifier {
     ModelsMenuController? modelUsage,
     Random? random,
     this.attachments,
+    HarnessLaunchIntegration? integration,
   }) : _random = random ?? Random(),
+       integration = draft?.integration ?? integration,
        placement =
            placement ?? (split == null ? HarnessPlacement.currentTab : null),
        _targetId = swarmId ?? app.activeSwarmId,
@@ -538,27 +553,32 @@ class NewHarnessController extends ChangeNotifier {
           .then((_) => _adoptAccountAgent()),
     );
     final initialMachine = _machineId;
-    unawaited(
-      app.probeDsh(initialMachine, force: true).then((_) {
-        // Store and remembered choices can open before the machine's catalog
-        // arrives. Resolve their preferred engine once compatibility is known.
-        // An inherited session, draft, or explicit user choice keeps its engine.
-        if (_disposed ||
-            locked ||
-            _selectionTouched ||
-            draft != null ||
-            (engine != null && !isHarnessId(engine)) ||
-            _machineId != initialMachine ||
-            _harnessId == null) {
-          return;
-        }
-        _engine = _initialEngine(null);
-        _restorePermissionMode();
-        _refresh();
-      }),
-    );
-    unawaited(_ensureHome(_machineId));
-    unawaited(_refreshGeneratedProject());
+    // A guest is listed no harnesses or folders there (asGuest): nothing to ask.
+    if (!asGuest) {
+      unawaited(
+        app.probeDsh(initialMachine, force: true).then((_) {
+          // Store and remembered choices can open before the machine's catalog
+          // arrives. Resolve their preferred engine once compatibility is known.
+          // An inherited session, draft, or explicit user choice keeps its engine.
+          if (_disposed ||
+              locked ||
+              _selectionTouched ||
+              draft != null ||
+              (engine != null && !isHarnessId(engine)) ||
+              _machineId != initialMachine ||
+              _harnessId == null) {
+            return;
+          }
+          _engine = _initialEngine(null);
+          _restorePermissionMode();
+          _refresh();
+        }),
+      );
+      unawaited(_ensureHome(_machineId));
+      unawaited(_refreshGeneratedProject());
+    } else {
+      _startAsGuest();
+    }
   }
 
   final AppNotifier app;
@@ -627,8 +647,63 @@ class NewHarnessController extends ChangeNotifier {
           _machine?.dsh.entries ?? const <DshEntry>[],
           _harnessId!,
         );
-  List<String> get compatibleEngines => _harnessId == null
-      ? [for (final engine in allEngines) engine.id, kTerminalEngine]
+
+  /// A machine shared with this account: this person is a guest there, with a space of
+  /// their own (docs/plans/2026-10-19-guest-machine-sharing-plan.md). Its daemon starts
+  /// Claude Code or Codex in that space, on its owner's plans, and lists a guest no
+  /// folders, harnesses, models or profiles, so none are asked for or offered.
+  bool get asGuest => _machine?.machine.isSharedMachine == true;
+
+  /// Where a guest may start there (asGuest): its workspace and the folders the owner shares, as the
+  /// machine last said; null until it has.
+  GuestFolders? _guestFolders;
+
+  /// A guest starts in its workspace until it picks a folder the owner shares.
+  void _startAsGuest() {
+    _project = const NewHarnessProject.fresh();
+    // An agent a guest cannot start there (OpenCode, a Store harness) gives way to Claude Code.
+    if (_harnessId != null || !compatibleEngines.contains(_engine)) {
+      _harnessId = null;
+      _engine = compatibleEngines.first;
+      _restorePermissionMode();
+    }
+    _guestFolders = null;
+    final id = _machineId;
+    unawaited(
+      app.guestFolders(id).then((folders) {
+        if (_disposed || id != _machineId) return;
+        _guestFolders = folders;
+        _refresh();
+      }),
+    );
+  }
+
+  /// A guest's Project: its workspace, or one of the folders the owner shares.
+  List<NewHarnessOption> _guestPlaces() => [
+    NewHarnessOption(
+      id: guestWorkspaceId,
+      title: 'My workspace',
+      detail: 'Your own folder on $machineLabel',
+      project: const NewHarnessProject.fresh(),
+    ),
+    for (final folder in _guestFolders?.folders ?? const <GuestFolder>[])
+      NewHarnessOption(
+        id: '$guestFolderId${folder.path}',
+        title: p.basename(folder.path),
+        detail:
+            '${folder.path} · ${folder.write ? 'you can edit it' : 'read only'}',
+        project: NewHarnessProject.folder(folder.path, exact: true),
+      ),
+  ];
+
+  List<String> get compatibleEngines => asGuest
+      ? const ['claude', 'codex']
+      : _harnessId == null
+      ? [
+          for (final engine in allEngines) engine.id,
+          for (final agent in cloudAgents) agent.id,
+          kTerminalEngine,
+        ]
       : selectedHarness?.supportedEngines ??
             [knownHarnessBase[canonicalHarnessId(_harnessId!)] ?? 'claude'];
 
@@ -739,10 +814,14 @@ class NewHarnessController extends ChangeNotifier {
   bool refreshingBranches = false;
   String? branchRefreshError;
   DateTime? _branchesCheckedAt;
-  bool get isGitProject => _gitProject.isGit && !isTerminal;
-  bool get canUseWorktree => isGitProject && !checkingGit;
+  bool get isGitProject => _gitProject.isGit && !isTerminal && !isCloud;
+
+  /// A worktree the person picked: the harness works in it, on its branch.
+  bool get inWorktree => _project.exact && _gitProject.mainFolder != null;
+  bool get canUseWorktree => isGitProject && !checkingGit && !inWorktree;
   bool get worktree =>
       isGitProject &&
+      !inWorktree &&
       (_worktree ??
           (_desktopChoices
               ? app.agentPreference.successfulWorktree ?? true
@@ -757,7 +836,7 @@ class NewHarnessController extends ChangeNotifier {
   /// Fresh desktop work starts on main, with or without a worktree. A retry
   /// must instead keep the branch of the folder its first attempt prepared.
   bool get _defaultsToMain =>
-      _desktopChoices && _attempt?.preparedFolder == null;
+      _desktopChoices && _attempt?.preparedFolder == null && !inWorktree;
   String? get branchRef {
     if (_branchRef != null) return _branchRef;
     if (_defaultsToMain) {
@@ -935,7 +1014,8 @@ class NewHarnessController extends ChangeNotifier {
     branchRefreshError = null;
     _branchesCheckedAt = null;
     _gitFuture = null;
-    if (key.$2 != null && !key.$3 && !checking) {
+    // A guest's harness starts in its own space: no folder of theirs to read Git in (asGuest).
+    if (key.$2 != null && !key.$3 && !checking && !asGuest) {
       _gitFuture = _readGitProject(key);
     }
   }
@@ -976,7 +1056,9 @@ class NewHarnessController extends ChangeNotifier {
     // A worktree is a temporary folder, so the launcher shows its repository.
     // With Worktree off its branch stays chosen and Start reopens that
     // worktree; otherwise new work starts from the repository's own branch.
-    if (info.mainFolder case final main? when _project.folder == key.$2) {
+    // One the person picked stays itself ([inWorktree]).
+    if (info.mainFolder case final main?
+        when _project.folder == key.$2 && !_project.exact) {
       if (!_defaultsToMain &&
           _worktree == false &&
           _branchRef == null &&
@@ -1074,7 +1156,8 @@ class NewHarnessController extends ChangeNotifier {
   }
 
   Future<void> refreshModels() async {
-    if (_disposed) return;
+    // A guest's harness runs on its owner's plans: no grid or saved API to pick.
+    if (_disposed || asGuest) return;
     final request = ++_modelRequest;
     final machine = _machineId;
     _loadingModels = true;
@@ -1218,6 +1301,7 @@ class NewHarnessController extends ChangeNotifier {
     profile: _profile,
     profileChosen: _profileChosen,
     attempt: _attempt,
+    integration: integration,
     error: error,
     dismissalWarningShown: _warnedAboutClosing,
     projectsByMachine: Map.unmodifiable({
@@ -1330,17 +1414,18 @@ class NewHarnessController extends ChangeNotifier {
       _settingsModes.any((mode) => mode.id == _permissionFor(_settingsEngine))
       ? _permissionFor(_settingsEngine)
       : kDefaultPermissionMode;
-  bool get takesTask => takesFirstTask(_base);
+  bool get takesTask => isCloud || takesFirstTask(_base);
   bool get taskTooLong => task.trim().length > kFirstTaskMaxLength;
   List<PermissionMode> get _modes =>
-      isTerminal ? const [] : permissionModesOf(_base);
+      isTerminal || isCloud ? const [] : permissionModesOf(_base);
   bool get hasModes => _modes.isNotEmpty;
   String get mode =>
       _modes.any((mode) => mode.id == _mode) ? _mode : kDefaultPermissionMode;
   String get modeLabel =>
       _modes.where((m) => m.id == mode).firstOrNull?.label ?? mode;
-  bool get usesProfile => _base == 'codex' && _model == null;
-  bool get hasProfile => _baseOf(_settingsEngine) == 'codex';
+  // A guest's Codex runs on its owner's subscription, through the relay: no CODEX_HOME of its own to pick (asGuest).
+  bool get usesProfile => !asGuest && _base == 'codex' && _model == null;
+  bool get hasProfile => !asGuest && _baseOf(_settingsEngine) == 'codex';
   bool get supportsProfiles =>
       hasProfile && _machine?.engines['codex']?.supportsCodexHome == true;
   String? get profileHelp => supportsProfiles
@@ -1398,11 +1483,13 @@ class NewHarnessController extends ChangeNotifier {
   List<NewHarnessField> get fields => [
     NewHarnessField.harness,
     NewHarnessField.agent,
-    if (!isTerminal) NewHarnessField.model,
+    if (!isTerminal && !asGuest) NewHarnessField.model,
     NewHarnessField.machine,
-    NewHarnessField.projectMenu,
+    // A guest picks only among the folders the owner shares, when there are any.
+    if (!asGuest || (_guestFolders?.folders.isNotEmpty ?? false))
+      NewHarnessField.projectMenu,
     if (advancedOpen) ...[
-      if (isGitProject) NewHarnessField.branch,
+      if (isGitProject && !asGuest) NewHarnessField.branch,
       if (hasModes) NewHarnessField.mode,
       if (usesProfile) NewHarnessField.profile,
     ],
@@ -1444,8 +1531,45 @@ class NewHarnessController extends ChangeNotifier {
 
   MachineState? get _machine => app.stateOf(_machineId);
   bool get isTerminal => isTerminalEngine(_engine);
+
+  /// A cloud agent (Fo, Devin Cloud, Cursor Cloud): it runs on its maker's
+  /// servers, so it takes no folder, model, approvals or branch here — a coding
+  /// one takes a GitHub repository, and Devin Cloud an ACU limit.
+  bool get isCloud => _harnessId == null && isCloudAgentId(_engine);
+
+  /// The GitHub repository a cloud coding agent works on: the one chosen to
+  /// clone, else the chosen folder's own remote; null when neither is on GitHub.
+  String? get cloudRepository {
+    final cloned = _project.repository?.url;
+    if (cloned != null) return cloned;
+    final folder = _project.folder;
+    final machine = _machine;
+    if (folder == null || machine == null) return null;
+    for (final agent in machine.agents) {
+      final project = machine.projectOf(agent);
+      final remote = project?.remote;
+      if (remote != null &&
+          remote.contains('github.com') &&
+          (project!.cwd == folder || project.root == folder)) {
+        return remote;
+      }
+    }
+    return null;
+  }
+
+  /// Devin Cloud's ACU limit for the session: low by default, since it bills
+  /// while it works.
+  int acuLimit = 5;
+  static const acuLimits = [2, 5, 10, 20];
+  void setAcuLimit(int value) {
+    acuLimit = value;
+    notifyListeners();
+  }
+
   bool get needsProject =>
+      !asGuest &&
       !isTerminal &&
+      !isCloud &&
       _project.folder == null &&
       _project.repository == null &&
       projectFolderSlug(_project.name ?? '') == null;
@@ -1464,6 +1588,21 @@ class NewHarnessController extends ChangeNotifier {
         message: 'This machine is unavailable. Choose a machine.',
       );
     }
+    if (isCloud) {
+      if (cloudAgentTakesRepository(_engine) && cloudRepository == null) {
+        return (
+          field: NewHarnessField.projectMenu,
+          message: 'Choose a GitHub repository for $agentLabel.',
+        );
+      }
+      if (task.trim().isEmpty) {
+        return (
+          field: NewHarnessField.task,
+          message: 'Tell $agentLabel what to do.',
+        );
+      }
+      return null;
+    }
     if (_harnessId != null && !_offered(_harnessId!)) {
       return (
         field: NewHarnessField.harness,
@@ -1473,6 +1612,7 @@ class NewHarnessController extends ChangeNotifier {
     final engineState = machine.engines[_engine];
     if (!compatibleEngines.contains(_engine) ||
         (_rememberedAgent &&
+            !asGuest &&
             !_selectionTouched &&
             engineState?.installed == false &&
             // The product default installs on Create; one that cannot be
@@ -1540,6 +1680,7 @@ class NewHarnessController extends ChangeNotifier {
 
   String get projectLabel {
     final project = _project;
+    if (asGuest) return project.folder ?? 'My workspace';
     if (project.folder case final folder?) return tildePath(folder);
     if (project.repository case final repo?) return '~/harnesses/${repo.name}';
     if (isTerminal) return '~';
@@ -1849,6 +1990,8 @@ class NewHarnessController extends ChangeNotifier {
   static const newProjectId = 'project:name';
   static const createBranchId = 'branch:create:';
   static const existingProjectId = 'project:existing';
+  static const guestWorkspaceId = 'project:guest-workspace';
+  static const guestFolderId = 'project:guest-folder:';
   static const repositoryId = 'project:repository';
   static const storeId = 'agent:store';
   static const codingId = 'harness:coding';
@@ -1913,35 +2056,37 @@ class NewHarnessController extends ChangeNotifier {
     }
   }
 
-  List<NewHarnessOption> _projectMenu() => [
-    if (!_desktopChoices)
-      const NewHarnessOption(
-        id: repositoryId,
-        synthetic: true,
-        title: 'Clone Repository',
-        detail: 'Paste a GitHub repository URL',
-      ),
-    const NewHarnessOption(
-      id: existingProjectId,
-      synthetic: true,
-      title: 'Open Folder',
-      detail: 'Enter a path or browse folders',
-    ),
-    const NewHarnessOption(
-      id: newProjectId,
-      synthetic: true,
-      title: 'New Folder',
-      detail: 'Name a new folder',
-    ),
-    if (_desktopChoices)
-      const NewHarnessOption(
-        id: repositoryId,
-        synthetic: true,
-        title: 'GitHub',
-        detail: 'Clone a GitHub repository',
-      ),
-    ..._ranked(_recentProjects()),
-  ];
+  List<NewHarnessOption> _projectMenu() => asGuest
+      ? _guestPlaces()
+      : [
+          if (!_desktopChoices)
+            const NewHarnessOption(
+              id: repositoryId,
+              synthetic: true,
+              title: 'Clone Repository',
+              detail: 'Paste a GitHub repository URL',
+            ),
+          const NewHarnessOption(
+            id: existingProjectId,
+            synthetic: true,
+            title: 'Open Folder',
+            detail: 'Enter a path or browse folders',
+          ),
+          const NewHarnessOption(
+            id: newProjectId,
+            synthetic: true,
+            title: 'New Folder',
+            detail: 'Name a new folder',
+          ),
+          if (_desktopChoices)
+            const NewHarnessOption(
+              id: repositoryId,
+              synthetic: true,
+              title: 'GitHub',
+              detail: 'Clone a GitHub repository',
+            ),
+          ..._ranked(_recentProjects()),
+        ];
 
   /// Takes the highlighted row as this field's answer and moves along.
   void accept([NewHarnessOption? row]) {
@@ -2025,7 +2170,7 @@ class NewHarnessController extends ChangeNotifier {
   /// The folder the system chooser (or the remote browser) came back with.
   void setFolder(String folder) {
     if (locked) return;
-    _project = NewHarnessProject.folder(folder);
+    _project = NewHarnessProject.folder(folder, exact: true);
     field = NewHarnessField.launch;
     _cycle = null;
     query = field == NewHarnessField.task ? task : '';
@@ -2198,6 +2343,10 @@ class NewHarnessController extends ChangeNotifier {
     _listing = null;
     _pathKey = null;
     unawaited(app.probeEngines(id, force: true));
+    // A guest is listed no harnesses or folders there, only where it may start (asGuest).
+    if (app.stateOf(id)?.machine.isSharedMachine == true) {
+      return _startAsGuest();
+    }
     unawaited(app.probeDsh(id, force: true));
     unawaited(_ensureHome(id));
     unawaited(_refreshGeneratedProject());
@@ -2652,7 +2801,8 @@ class NewHarnessController extends ChangeNotifier {
     options = switch (field) {
       NewHarnessField.harness => [
         ..._harnessOptions(),
-        if (offersStore) _store,
+        // A guest starts nothing from the Store there (asGuest).
+        if (offersStore && !asGuest) _store,
       ],
       NewHarnessField.launch ||
       NewHarnessField.task ||
@@ -2898,6 +3048,13 @@ class NewHarnessController extends ChangeNotifier {
   }
 
   List<NewHarnessOption> _harnessOptions() {
+    // A guest there starts Claude Code or Codex, nothing from the Store (asGuest).
+    if (asGuest) {
+      return _ranked([
+        for (final id in compatibleEngines)
+          NewHarnessOption(id: id, title: labelOf(id), engine: id),
+      ]);
+    }
     final machine = _machine;
     final harnesses = machine != null && machine.dsh.loaded
         ? [
@@ -2951,6 +3108,9 @@ class NewHarnessController extends ChangeNotifier {
             'amp',
             'kilo',
             'devin',
+            'devin-cloud',
+            'cursor-cloud',
+            'fo',
             'pi',
             'hermes',
             'commandcode',
@@ -2969,7 +3129,9 @@ class NewHarnessController extends ChangeNotifier {
           ])
             if (isHarnessId(id)
                 ? _offered(id)
-                : engines.contains(id) || id == kTerminalEngine)
+                : engines.contains(id) ||
+                      isCloudAgentId(id) ||
+                      id == kTerminalEngine)
               isHarnessId(id) ? operationId(id) : id,
         })
           isHarnessId(id)
@@ -3138,7 +3300,10 @@ class NewHarnessController extends ChangeNotifier {
             title:
                 '${machine.machine.displayName}:${names[name]! > 1 ? tildePath(folder, id) : name}',
             detail: location(folder, id),
-            project: NewHarnessProject.folder(folder),
+            project: NewHarnessProject.folder(
+              folder,
+              exact: folder == _project.folder && _project.exact,
+            ),
             machineId: id,
             enabled: _machineUsable(machine),
             why: machine.needsLink ? 'Link required' : 'Offline',
@@ -3274,7 +3439,7 @@ class NewHarnessController extends ChangeNotifier {
           id: 'project:$parent',
           title: p.basename(parent),
           detail: 'Use ${location(parent)}',
-          project: NewHarnessProject.folder(parent),
+          project: NewHarnessProject.folder(parent, exact: true),
           synthetic: true,
         ),
     ];
@@ -3290,7 +3455,7 @@ class NewHarnessController extends ChangeNotifier {
           id: 'project:$folder',
           title: name,
           detail: location(folder),
-          project: NewHarnessProject.folder(folder),
+          project: NewHarnessProject.folder(folder, exact: true),
         ),
       );
     }
@@ -3413,15 +3578,78 @@ class NewHarnessController extends ChangeNotifier {
   /// never came back may have worked, and asking again must ask the machine
   /// what happened to THAT request rather than start a second harness.
   AgentCreationAttempt? _attempt;
+  final HarnessLaunchIntegration? integration;
+  String get actionLabel => integration?.actionLabel ?? 'New Harness';
+  bool get needsAttachmentReview =>
+      integration?.needsAttachmentReview?.call() == true;
+  String get pendingActionLabel =>
+      needsAttachmentReview ? 'Review files' : 'Check status';
 
   /// The person has been told a typed task will not be sent, and pressed again.
   bool _dropAccepted = false;
 
   /// A reply was lost; Return now checks on it instead of creating again.
-  bool get checking => _attempt?.awaitingConfirmation == true;
+  bool get checking =>
+      _attempt?.awaitingConfirmation == true || integration?.pending == true;
   bool get canCancelPending => _attempt?.canCancelPending == true;
 
+  /// The folder a new project's typed name found already there
+  /// (`PROJECT_EXISTS`), with the project and machine it was refused for.
+  (String, NewHarnessProject, String)? _existing;
+
+  /// That folder, while the same name on the same machine is still the
+  /// choice: what "Use the existing folder" starts in ([useExistingFolder]).
+  /// A name somebody chose is never quietly changed, so nothing starts there
+  /// until they press it; the refusal alone left them to retype the name as
+  /// a path (PROJECT_EXISTS was 4 of 7 failed starts on Oct 18).
+  String? get existingFolder => switch (_existing) {
+    (final folder, final project, final machine)
+        when !busy && project == _project && machine == _machineId =>
+      folder,
+    _ => null,
+  };
+
+  /// Switches Project to [existingFolder] on the same machine and starts the
+  /// harness there, as if the person had picked that folder.
+  Future<NewHarnessOutcome> useExistingFolder({bool? resendAttachments}) {
+    final folder = existingFolder;
+    if (folder == null || locked) return Future.value(NewHarnessOutcome.failed);
+    _existing = null;
+    _project = NewHarnessProject.folder(folder, exact: true);
+    if (_desktopChoices) _syncGitProject();
+    error = null;
+    notifyListeners();
+    return create(resendAttachments: resendAttachments);
+  }
+
+  /// The check [followHeld] is making. Nobody pressed for it, so it shows
+  /// nothing until it has an answer.
+  Future<NewHarnessOutcome>? _following;
+
+  /// Asks after a request the machine holds, without the person pressing
+  /// Check status. The machine starts a held harness by itself (an agent it is
+  /// installing, a model waking). The line said "Installing Kilo. The harness
+  /// starts once it is installed." and stayed after Kilo had started, with no
+  /// pane, until Check status was pressed (desktop 1.2.65, a fresh Ubuntu VM,
+  /// 2026-10-12). Created once it has started; failed while it still waits,
+  /// or when it was refused, which the line then says.
+  Future<NewHarnessOutcome> followHeld() {
+    if (_following case final check?) return check;
+    if (_disposed || busy || !canCancelPending) {
+      return Future.value(NewHarnessOutcome.failed);
+    }
+    final check = create(quiet: true);
+    _following = check;
+    return check.whenComplete(() => _following = null);
+  }
+
   Future<void> cancelPending() async {
+    // A check nobody pressed for is let finish: it holds `busy` for a moment
+    // without saying so, and a Cancel pressed just then must still count.
+    if (_following case final check?) {
+      await check;
+      if (_disposed) return;
+    }
     if (busy || !canCancelPending) return;
     busy = true;
     notifyListeners();
@@ -3466,9 +3694,31 @@ class NewHarnessController extends ChangeNotifier {
     return !endCompletion();
   }
 
-  Future<NewHarnessOutcome> create() async {
+  /// [quiet] is [followHeld]'s: a check on a held request that changes
+  /// nothing on screen until it has an answer.
+  Future<NewHarnessOutcome> create({
+    bool quiet = false,
+    bool? resendAttachments,
+  }) async {
     if (busy || linkingProfile) {
       return NewHarnessOutcome.failed;
+    }
+    final resume =
+        resendAttachments != null && integration?.resolveAttachments != null
+        ? () => integration!.resolveAttachments!(resendAttachments)
+        : integration?.resume;
+    if (resume != null) {
+      busy = true;
+      status = 'Checking on the harness…';
+      notifyListeners();
+      try {
+        await resume();
+        busy = false;
+        integration!.pending = false;
+        return NewHarnessOutcome.created;
+      } catch (failure) {
+        return _fail(failure.toString());
+      }
     }
     if (!checking && usesProfile && _profile != null) {
       if (loadingProfiles) {
@@ -3495,6 +3745,12 @@ class NewHarnessController extends ChangeNotifier {
       focusField(choice.field);
       return _fail(choice.message);
     }
+    if (integration != null && (isCloud || !takesTask)) {
+      return _fail(
+        'Choose an agent that runs on a machine, such as Claude Code or Codex.',
+      );
+    }
+    if (isCloud) return _createCloud();
     if (!checking) {
       _syncGitProject();
       if (gitError != null) retryGitProject();
@@ -3569,26 +3825,34 @@ class NewHarnessController extends ChangeNotifier {
       return NewHarnessOutcome.failed;
     }
     final choice = _engine;
-    var harness = _harnessId;
+    // A guest starts the engine itself, in its own space, on the owner's plans (asGuest).
+    var harness = asGuest ? null : _harnessId;
+    final model = asGuest ? null : _model;
     final terminal = isTerminalEngine(choice);
     final base = choice;
     // The daemon's launch installs a missing engine inside its new terminal.
     // A cached availability probe must not block that first launch.
     final recheck = checking;
     if (!recheck) {
-      _attempt = AgentCreationAttempt();
+      _attempt = AgentCreationAttempt(
+        background: integration != null,
+        beforeSubmit: integration?.beforeSubmit,
+      );
+      _existing = null;
       _warnedAboutClosing = false;
       _installing = null;
     }
     final attempt = _attempt!;
     busy = true;
-    error = null;
-    status = recheck ? 'Checking on the harness…' : 'Starting harness…';
-    notifyListeners();
-    if (_model != null && !recheck) {
+    if (!(quiet && recheck)) {
+      error = null;
+      status = recheck ? 'Checking on the harness…' : 'Starting harness…';
+      notifyListeners();
+    }
+    if (model != null && !recheck) {
       await refreshModels();
       if (_disposed) return NewHarnessOutcome.failed;
-      if (!_modelAvailable(_model!)) {
+      if (!_modelAvailable(model)) {
         return _fail(
           'The selected model is unavailable for $agentLabel on $machineLabel. Choose a model or use your subscription.',
         );
@@ -3638,6 +3902,15 @@ class NewHarnessController extends ChangeNotifier {
         permissionMode != null && permissionModeApproves(permissionMode);
     final folder = _project.folder;
     final firstMessage = task.trim();
+    String launchMessage = firstMessage;
+    if (integration case final destination?) {
+      try {
+        launchMessage = destination.preparedPrompt ??= await destination
+            .prepare(_machineId, firstMessage);
+      } catch (failure) {
+        return _fail(failure.toString());
+      }
+    }
     // Files ride into the live terminal after creation, and the task follows
     // them there (see deliverAttachedTask), so neither is a launch argument.
     final files = takesTask
@@ -3648,32 +3921,46 @@ class NewHarnessController extends ChangeNotifier {
         'Update Harness CLI on $machineLabel to attach files, or remove them.',
       );
     }
+    if (integration?.stageAttachments case final stage? when !recheck) {
+      try {
+        await stage(files, launchMessage);
+      } catch (failure) {
+        return _fail(failure.toString());
+      }
+    }
     final launchSetup = LaunchSetup(
       engine: base,
       harnessId: harness,
       permissionMode: permissionMode ?? kDefaultPermissionMode,
-      model: _model,
-      profile: base == 'codex' && _model == null ? _profile : null,
+      model: model,
+      profile: base == 'codex' && model == null && !asGuest ? _profile : null,
       profileMachineId: _machineId,
     );
+    // Working in a picked worktree says nothing about the next harness's.
     final launchedWorktree =
-        _recoveredWorktreePreference ?? (isGitProject ? worktree : null);
+        _recoveredWorktreePreference ??
+        (isGitProject && !inWorktree ? worktree : null);
     final failure = await app.createAgent(
       _machineId,
       engine: base,
-      folder: terminal ? folder : folder ?? '',
-      projectFolder: projectFolderRequest,
+      // A guest's harness starts in its workspace, or a folder the owner shares (asGuest).
+      folder: asGuest
+          ? (_project.folder ?? '')
+          : (terminal ? folder : folder ?? ''),
+      projectFolder: asGuest ? null : projectFolderRequest,
       swarmId: _targetId,
       split: split,
       placement: effectivePlacement,
       bypassPermission: bypass,
       permissionMode: permissionMode,
-      codexHome: base == 'codex' && _model == null ? _profile?.path : null,
-      model: _model,
+      codexHome: base == 'codex' && model == null && !asGuest
+          ? _profile?.path
+          : null,
+      model: model,
       dsh: harness,
       // Sent exactly as written; an agent that cannot take one is never sent it.
-      prompt: takesTask && files.isEmpty && firstMessage.isNotEmpty
-          ? firstMessage
+      prompt: takesTask && files.isEmpty && launchMessage.isNotEmpty
+          ? launchMessage
           : null,
       // A new project named by the person, or after its task, names the agent
       // too — until the engine titles the session. So does a first message
@@ -3691,8 +3978,25 @@ class NewHarnessController extends ChangeNotifier {
     // Before the disposed check: on an empty tab the new pane replaces this
     // box as soon as it opens, disposing it while createAgent returns — and
     // the files still have to follow the harness there.
-    if (failure == null && files.isNotEmpty) {
-      _deliverFiles(attempt.agentId, files, firstMessage);
+    final destination = integration;
+    if (failure == null && attempt.agentId != null && destination != null) {
+      destination.pending = true;
+      try {
+        if (!destination.completed) {
+          await destination.complete(_machineId, attempt.agentId!);
+          destination.completed = true;
+        }
+        destination.pending = false;
+      } catch (problem) {
+        return _fail(
+          'Harness started. Could not join the conversation: $problem',
+        );
+      }
+    }
+    if (failure == null &&
+        files.isNotEmpty &&
+        destination?.stageAttachments == null) {
+      _deliverFiles(attempt.agentId, files, launchMessage);
     }
     // Creation can replace an embedded form before this future returns. Save
     // the confirmed choices even if that form has already been disposed.
@@ -3708,19 +4012,62 @@ class NewHarnessController extends ChangeNotifier {
     }
     if (_disposed) return NewHarnessOutcome.failed;
     if (failure != null) {
+      if (!checking) integration?.preparedPrompt = null;
       // A folder already made for this attempt is the project now: a retry
       // goes into it rather than making a second one beside it.
       if (!checking && attempt.preparedFolder != null) {
         _recoveredWorktreePreference = launchedWorktree;
-        _project = NewHarnessProject.folder(attempt.preparedFolder!);
+        _project = NewHarnessProject.folder(
+          attempt.preparedFolder!,
+          // A picked worktree prepared in place is still the one picked.
+          exact: _project.exact && attempt.preparedFolder == _project.folder,
+        );
         _gitKey = (_machineId, _project.folder, isTerminal);
         _worktree = false;
         _branchRef = null;
         _gitProject = const GitProjectInfo();
         _gitFuture = _readGitProject(_gitKey!);
       }
+      final project = _project;
+      _existing =
+          attempt.refusal == 'PROJECT_EXISTS' &&
+              project.isNew &&
+              project.repository == null &&
+              project.generated == null &&
+              project.name != null
+          ? switch (attempt.existingFolder) {
+              final folder? => (folder, project, _machineId),
+              null => null,
+            }
+          : null;
       return _fail(failure);
     }
+    busy = false;
+    status = null;
+    return NewHarnessOutcome.created;
+  }
+
+  /// A cloud harness: made by the cloud service on this machine (CLI
+  /// services/cloud.ts), which starts it at its maker; no folder, no install.
+  Future<NewHarnessOutcome> _createCloud() async {
+    busy = true;
+    error = null;
+    status = 'Starting $agentLabel…';
+    notifyListeners();
+    final failure = await app.createCloudHarness(
+      _machineId,
+      engine: _engine,
+      prompt: task.trim(),
+      repositoryUrl: cloudAgentTakesRepository(_engine)
+          ? cloudRepository
+          : null,
+      acuLimit: _engine == 'devin-cloud' ? acuLimit : null,
+      swarmId: _targetId,
+      split: split,
+      placement: effectivePlacement,
+    );
+    if (_disposed) return NewHarnessOutcome.failed;
+    if (failure != null) return _fail(failure);
     busy = false;
     status = null;
     return NewHarnessOutcome.created;
@@ -3758,7 +4105,7 @@ class NewHarnessController extends ChangeNotifier {
     busy = false;
     status = null;
     error = message;
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     return NewHarnessOutcome.failed;
   }
 

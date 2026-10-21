@@ -8,30 +8,34 @@
  * Moved verbatim out of the socket's request switch (docs/design/2026-10-03-harnessd.md), with the
  * receipts the socket used to hold.
  */
-import { readdir } from 'node:fs/promises'
+import { readdir, rmdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute } from 'node:path'
 import type { BackendSocket } from '../../backendSocket.js'
+import type { Asker } from '../api.js'
 import { installedDsh } from '../../dsh/installed.js'
 import { DSH_ID_RE, dshSupportedEngines } from '../../dsh/manifest.js'
 import { folderTrust } from '../../engines/launchPrep.js'
+import type { NativeLaunchResult, NativeLaunchSource } from '../../engines/nativeLaunch.js'
 import * as opencodeLaunch from '../../engines/launchControl.js'
 import { ENGINES, isTerminalEngine, type AgentEngine } from '../../engines/types.js'
-import { AgentCreationReceiptError, creationFingerprint, validCreationId, type AgentCreationOutcome, type AgentCreationReceipts, type AgentCreationStatus } from '../../lib/agentCreationReceipt.js'
+import { AgentCreationReceiptError, creationFingerprint, validCreationId, type AgentCreationOutcome, type AgentCreationReceipts, type AgentCreationStatus, type CreationAuthority } from '../../lib/agentCreationReceipt.js'
 import type { AgentFrame } from '../../lib/agentFrame.js'
 import { engineLabel } from '../../lib/agentNames.js'
 import {
   AGENT_NAME_RE, FirstPromptUnsupportedError, MAX_FIRST_PROMPT_CHARS, NamedAgentUnsupportedError, permissionModeApproves,
-  permissionModeFlags, supportsFirstPrompt, supportsNamedAgent,
+  permissionModeFlags, supportsFirstPrompt, supportsNamedAgent, unsupportedLaunchModelFlag,
 } from '../../lib/engineLaunch.js'
 import { parseGridLaunchOverride, type GridLaunchOverride } from '../../lib/gridLaunchWire.js'
+import { parseLaunchModel } from '../../lib/launchModel.js'
 import { parseNewAgentModel, type NewAgentModel } from '../../lib/newAgentModel.js'
 import { parseProjectFolder, prepareProjectFolder, projectsRoot, ProjectFolderError, type ProjectFolder } from '../../lib/projectFolder.js'
 import type { ScmLaunchRecord } from '../../scm/types.js'
-import type { RegisteredSession } from '../../lib/registry.js'
+import { parentAgentIdOf, type RegisteredSession } from '../../lib/registry.js'
 import { buildHarnessSessionLabel } from '../../lib/harnessSessionLabel.js'
 import type { LaunchAuthority, LaunchPreparation } from '../../lib/launchPreparation.js'
 import { createPendingLaunches } from './pendingLaunches.js'
+import type { GuestCreate } from './guestCreate.js'
 
 /** Creates an agent (core/agents/create.ts). The orchestrator creates through the same one. */
 export type CreateAgent = NonNullable<BackendSocket['onCreateAgent']>
@@ -51,10 +55,13 @@ export type ResumeAgent = (agentId: string, permissionMode?: string) => ReturnTy
 
 export interface LaunchRequestDeps {
   /** The receipts of launches asked for with a `creationId`. */
-  receipts: Pick<AgentCreationReceipts, 'run' | 'status' | 'has' | 'runIntent' | 'pendingIntents' | 'pendingIntent' | 'cancelIntent'>
+  receipts: Pick<AgentCreationReceipts, 'run' | 'status' | 'creator' | 'has' | 'runIntent' | 'pendingIntents' | 'pendingIntent' | 'cancelIntent'>
   /** Each launch, read when a request comes in: null on a machine that cannot launch agents. */
   createAgent: () => CreateAgent | null
   prepareCreate?: (input: Parameters<CreateAgent>[0], authority: LaunchAuthority, context?: { local: boolean }) => Promise<LaunchPreparation<Awaited<ReturnType<CreateAgent>>>>
+  /** The engine itself made ready, installed first when it is missing (engines/prepareNativeLaunch.ts): what a new
+   *  project waits for before its folder is made. */
+  prepareEngine?: (engine: CreateInput['engine'], source: NativeLaunchSource, authority: Pick<CreationAuthority, 'id' | 'current'>) => Promise<NativeLaunchResult>
   forkAgent: () => ForkAgent | null
   resumeAgent: () => ResumeAgent | null
   restartAgent: () => RestartAgent | null
@@ -65,12 +72,14 @@ export interface LaunchRequestDeps {
    *  machine (core/api.ts `ModelsPort.launchTarget`). Null or a rejection holds a durable model request;
    *  resolving the semantic choice may renew service-owned credentials, but never dispatches a launch. */
   modelTarget: (selection: NewAgentModel) => Promise<GridLaunchOverride | null>
+  /** A guest's New Harness, as the guest's own OS user (core/agents/guestCreate.ts); null where there is none. */
+  guestCreate?: () => GuestCreate | null
 }
 
 type Reply = (result: Record<string, unknown>) => void
+type CreateInput = Parameters<CreateAgent>[0]
 
-export function createLaunchRequests({ receipts, createAgent, prepareCreate, forkAgent, resumeAgent, restartAgent, byAgent, toProject, modelTarget }: LaunchRequestDeps) {
-  type CreateInput = Parameters<CreateAgent>[0]
+export function createLaunchRequests({ receipts, createAgent, prepareCreate, prepareEngine, forkAgent, resumeAgent, restartAgent, byAgent, toProject, modelTarget, guestCreate }: LaunchRequestDeps) {
   const validateInstalled = async (input: CreateInput, known?: ReturnType<typeof installedDsh>): Promise<{ error: string; detail: string } | null> => {
     if (input.dsh) {
       const installed = known ?? installedDsh(input.dsh)
@@ -92,15 +101,20 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
     }
     const { dsh, resumeSessionId } = input
     let preparedFolder: string | undefined
+    /** A new project's folder, which this made empty: removed again if nothing starts in it. */
+    let made: string | undefined
     let scmLaunchRecord: ScmLaunchRecord | null = null
     if (projectFolder) {
       try {
         preparedFolder = await prepareProjectFolder(projectFolder, { label: (dsh ? installedDsh(dsh)?.manifest.name : null) ?? engineLabel(input.engine),
           onPrepared: prepared => { scmLaunchRecord = prepared.scmLaunchRecord } })
+        if (projectFolder.source === 'new') made = preparedFolder
       }
       catch (error) {
         return { state: 'failed', error: error instanceof ProjectFolderError ? error.code : 'PROJECT_PREPARATION_FAILED',
-          detail: error instanceof ProjectFolderError ? error.message : 'Could not prepare the project folder.' }
+          detail: error instanceof ProjectFolderError ? error.message : 'Could not prepare the project folder.',
+          // The folder a typed name found already there: the apps offer to start in it, and `harness new` names it.
+          ...(error instanceof ProjectFolderError && error.folder ? { existingFolder: error.folder } : {}) }
       }
       // Only a folder this daemon just made EMPTY is one the engine need not ask about. A clone or
       // the person's own repo is theirs to answer for (engines/kit/folderTrust.ts); a worktree gets only
@@ -138,6 +152,10 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
     // tmux may have executed before a timeout; registration cleanup is best-effort.
     // Neither can prove that no process started, so never encourage another launch.
     if (result.error === 'SPAWN_FAILED' || result.error === 'REGISTRATION_FAILED') return { state: 'unconfirmed' }
+    // A new project's folder that nothing started in goes again while it is still empty: left, it made the same
+    // `harness new codex scratch1` refuse its own name ("already exists", a fresh Ubuntu VM, 2026-10-12). rmdir
+    // removes only an empty folder, so anything put there meanwhile stays, and the folder is then reported.
+    if (made && await rmdir(made).then(() => true, () => false)) preparedFolder = undefined
     return { state: 'failed', error: result.error, ...(preparedFolder ? { preparedFolder } : {}), ...(result.detail ? { detail: result.detail.slice(0, 2000) } : {}) }
   }
 
@@ -148,7 +166,10 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
       if (!prepareCreate || typeof saved.local !== 'boolean' || !saved.input || typeof saved.input !== 'object'
         || typeof saved.label !== 'string' || !/^harness-[a-z0-9-]+$/.test(saved.label)) return null
       const input = structuredClone(saved.input) as CreateInput
-      if (!ENGINES.includes(input.engine) || typeof input.cwd !== 'string' || input.resumeSessionId) return null
+      const projectFolder = (saved.projectFolder ?? null) as ProjectFolder | null
+      if (!ENGINES.includes(input.engine) || typeof input.cwd !== 'string' || input.resumeSessionId
+        || (projectFolder !== null && typeof projectFolder.source !== 'string')) return null
+      const { local, label } = saved
       if (saved.selection) {
         authority.hold(modelHold)
         const target = await modelTarget(saved.selection as NewAgentModel)
@@ -157,11 +178,35 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
         input.grid = target
         authority.hold(launchHold)
       }
-      const ready = await prepareCreate(input, { ...authority, label: saved.label }, { local: saved.local })
+      // An engine Harness is installing for this launch holds it under `install`, which `harness new` waits longer
+      // for than any other hold (lib/newCommand.ts): installs take a minute on a fresh computer.
+      const held = (ready: { installing?: boolean; unavailable?: string; detail?: string }) =>
+        authority.hold({ service: ready.installing ? 'install' : ready.unavailable!, detail: ready.detail ?? 'Waiting for launch preparation.' })
+      const refused = (ready: { error: string; detail?: string }) => async (): Promise<AgentCreationOutcome> =>
+        ({ state: 'failed', error: ready.error, ...(ready.detail ? { detail: ready.detail.slice(0, 2000) } : {}) })
+      if (projectFolder) {
+        // A new project waits for its engine before its folder is made, so a launch still waiting for an install leaves
+        // nothing behind when it is cancelled or the install fails. It used to be refused at once, folder made, saying
+        // "the saved launch continues after installation" of a launch that was over (a fresh Ubuntu VM, 2026-10-12).
+        // The folder, the engine's final preparation and the launch are then one claimed effect, as they always were
+        // for a project: a refusal there is its outcome, never a hold.
+        const engine = prepareEngine ? await prepareEngine(input.engine, input, authority) : null
+        if (!authority.current()) return null
+        if (engine && !engine.ok) {
+          if (engine.refusal) return refused({ error: engine.refusal, detail: engine.detail })
+          held(engine); return null
+        }
+        const invoke: CreateAgent = async (prepared) => {
+          const ready = await prepareCreate(prepared, { ...authority, label }, { local })
+          return ready.ok ? ready.dispatch() : { ok: false, error: ready.error, ...(ready.detail ? { detail: ready.detail } : {}) }
+        }
+        return () => executeCreate(input, projectFolder, local, invoke)
+      }
+      const ready = await prepareCreate(input, { ...authority, label }, { local })
       if (!authority.current()) return null
       if (!ready.ok) {
-        if (ready.unavailable) { authority.hold({ service: ready.unavailable, detail: ready.detail ?? 'Waiting for launch preparation.' }); return null }
-        return async () => ({ state: 'failed', error: ready.error, ...(ready.detail ? { detail: ready.detail.slice(0, 2000) } : {}) })
+        if (ready.unavailable) { held(ready); return null }
+        return refused(ready)
       }
       return async () => {
         if (!authority.current()) return { state: 'unconfirmed' }
@@ -196,29 +241,68 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
       const session = byAgent(status.agentId)
       return session
         ? { state: 'created', agent: await toProject(session), ...(status.level ? { level: status.level } : {}), ...(status.resumed !== undefined ? { resumed: status.resumed } : {}) }
-        : { state: 'unavailable' }
+        : { state: 'unavailable', createdAgentId: status.agentId }
     }
     // A recorded refusal is a completed outcome. Keep it separate from transport/dispatch errors
     // so clients can distinguish "safe to correct the choices" from "outcome still unknown".
     if (status.state === 'failed') {
-      return { state: 'failed', ...(status.preparedFolder ? { preparedFolder: status.preparedFolder } : {}), failure: { code: status.error, ...(status.detail ? { detail: status.detail } : {}) } }
+      return { state: 'failed', ...(status.preparedFolder ? { preparedFolder: status.preparedFolder } : {}), failure: { code: status.error,
+        ...(status.detail ? { detail: status.detail } : {}), ...(status.existingFolder ? { existingFolder: status.existingFolder } : {}) } }
     }
     return status
   }
 
+  /** A guest sees only its own creations. For anyone else's id it hears what an unknown id gets, so the
+   *  answer does not tell whether the id exists. The owner administers the machine and sees them all. */
+  const hiddenFrom = (asker: Pick<Asker, 'local' | 'guest'>, creationId: string): boolean => {
+    if (asker.guest === undefined) return false
+    // Damaged evidence for this id is hidden the same way; the guest's own retry still meets it in `run`.
+    try { return receipts.creator(creationId) !== asker.guest }
+    catch (error) { if (error instanceof AgentCreationReceiptError) return true; throw error }
+  }
+
   /** Answers `agent_create_status`: what became of the launch a `creationId` names. */
-  const createStatus = async (payload: Record<string, unknown>, reply: Reply): Promise<void> => {
+  const createStatus = async (payload: Record<string, unknown>, asker: Pick<Asker, 'local' | 'guest'>, reply: Reply): Promise<void> => {
     const creationId = payload.creationId
     if (!validCreationId(creationId)) { reply({ error: 'INVALID_CREATION_ID' }); return }
     try {
+      if (hiddenFrom(asker, creationId)) { reply({ creationId, state: 'missing' }); return }
       reply({ creationId, ...await creationStatusPayload(receipts.status(creationId)) })
     } catch (error) {
       reply({ error: error instanceof AgentCreationReceiptError ? error.code : 'INTERNAL' })
     }
   }
 
-  /** Answers `agent_create`. `asker.local` says the frame came from this machine. */
-  const create = async (payload: Record<string, unknown>, asker: { local: boolean }, reply: Reply): Promise<void> => {
+  /** A guest's `agent_create`: its own launch, never the owner's (core/agents/guestCreate.ts). A `creationId` keeps a
+   *  receipt as the owner's launches do, so a status check or a retry finds the same harness. */
+  const createForGuest = async (payload: Record<string, unknown>, guest: string, reply: Reply): Promise<void> => {
+    const launch = guestCreate?.()
+    if (!launch) { reply({ error: 'GUEST_NOT_ALLOWED' }); return }
+    const creationId = payload.creationId
+    if (creationId !== undefined && !validCreationId(creationId)) { reply({ error: 'INVALID_CREATION_ID' }); return }
+    if (creationId === undefined) {
+      const result = await launch(payload, guest)
+      reply(result.ok ? { agent: await toProject(result.session) } : { error: result.error, ...(result.detail ? { detail: result.detail } : {}) })
+      return
+    }
+    try {
+      const fingerprint = creationFingerprint({ guest, engine: payload.engine, name: payload.name })
+      void receipts.run(creationId, fingerprint, async () => {
+        const result = await launch(payload, guest)
+        return result.ok ? { state: 'created', agentId: result.session.agentId }
+          : { state: 'failed', error: result.error, ...(result.detail ? { detail: result.detail } : {}) }
+      }, guest).then(async (status) => {
+        reply({ creationId, ...await creationStatusPayload(status) })
+      }).catch(() => reply({ error: 'INTERNAL' }))
+    } catch (error) {
+      reply({ error: error instanceof AgentCreationReceiptError ? error.code : 'INTERNAL' })
+    }
+  }
+
+  /** Answers `agent_create`. `asker.local` says the frame came from this machine; `asker.guest`, that a guest
+   *  of a machine shared with them asks (core/guestPolicy.ts). */
+  const create = async (payload: Record<string, unknown>, asker: Pick<Asker, 'local' | 'guest'>, reply: Reply): Promise<void> => {
+    if (asker.guest !== undefined) { await createForGuest(payload, asker.guest, reply); return }
     const engine = payload.engine as AgentEngine | undefined
     const cwd = payload.cwd
     if (typeof engine !== 'string' || !ENGINES.includes(engine)) { reply({ error: 'INVALID_ENGINE' }); return }
@@ -251,6 +335,21 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
     const grid = parseGridLaunchOverride(payload.grid)
     if (grid.state === 'invalid') { reply({ error: 'INVALID_GRID', detail: grid.reason }); return }
     if (terminal && grid.state === 'ok') { reply({ error: 'INVALID_GRID', detail: 'a terminal has no engine to point at a grid' }); return }
+    // A model and effort for this session alone, as flags (lib/launchModel.ts). Refused, never ignored: a daemon that
+    // dropped them would start the agent on the engine's own model and look like it worked, so a caller that gets
+    // LAUNCH_MODEL_UNSUPPORTED switches the model after the start instead. A grid picks its own model.
+    const launchModel = parseLaunchModel(engine, payload)
+    if (launchModel.state === 'invalid') { reply({ error: 'INVALID_LAUNCH_MODEL', detail: launchModel.detail }); return }
+    if (launchModel.state === 'unsupported') { reply({ error: 'LAUNCH_MODEL_UNSUPPORTED', detail: launchModel.detail }); return }
+    if (launchModel.state === 'ok' && (grid.state === 'ok' || model.state === 'ok')) {
+      reply({ error: 'INVALID_LAUNCH_MODEL', detail: 'a grid chooses its own model' }); return
+    }
+    // A Claude Code too old for the flags would print its help in the new pane. Refused here, before any receipt, so the
+    // caller creates the agent without them and switches the model afterwards, as it did before the flags.
+    if (launchModel.state === 'ok') {
+      const missing = await unsupportedLaunchModelFlag(engine, launchModel.launchModel)
+      if (missing) { reply({ error: 'LAUNCH_MODEL_UNSUPPORTED', detail: `The ${engine} on this machine does not support ${missing}; update ${engine} to launch it with a model.` }); return }
+    }
     // Same validation the desktop app already applies client-side (`Agent._safeCodexHome`) —
     // repeated here because a client's own check is not a guarantee about what actually
     // arrives on the wire.
@@ -324,7 +423,7 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
       if (typeof payload.resumeSessionId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$/.test(payload.resumeSessionId)) {
         reply({ error: 'INVALID_SESSION', detail: 'resumeSessionId must be a session id' }); return
       }
-      if (terminal || projectFolder || grid.state === 'ok' || model.state === 'ok' || dsh || prompt || agent) {
+      if (terminal || projectFolder || grid.state === 'ok' || model.state === 'ok' || launchModel.state === 'ok' || dsh || prompt || agent) {
         reply({ error: 'INVALID_SESSION', detail: 'a resumed conversation takes no new folder, grid, harness, prompt or agent' }); return
       }
       resumeSessionId = payload.resumeSessionId
@@ -335,6 +434,20 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
         reply({ error: 'INVALID_SESSION', detail: 'takeOver is idle, now or wait, with a resumeSessionId' }); return
       }
       takeOver = payload.takeOver
+    }
+    // Another agent started it (`harness new` from its pane, agentClient/commands.ts `agentOrigin`): its pull requests
+    // say so (lib/agentAttribution.ts). Refused, not ignored, when it is anything else: absent is the person.
+    if (payload.startedBy !== undefined && payload.startedBy !== null && payload.startedBy !== 'agent') {
+      reply({ error: 'INVALID_STARTED_BY', detail: 'startedBy is agent, or absent for the person' }); return
+    }
+    // Which harness here that agent is (`harness new` or `harness_start` from its pane): the windows open the new one
+    // beside it and say who started it. Only with `startedBy: 'agent'`, and only an agent id; one this machine does not
+    // know is left out rather than refused, so a harness that just closed does not stop its child from starting.
+    let parentAgentId: string | null = null
+    if (payload.parentAgentId !== undefined && payload.parentAgentId !== null) {
+      parentAgentId = payload.startedBy === 'agent' ? parentAgentIdOf(payload.parentAgentId) : null
+      if (!parentAgentId) { reply({ error: 'INVALID_STARTED_BY', detail: 'parentAgentId is the agent id of the harness that started it, with startedBy agent' }); return }
+      if (!byAgent(parentAgentId)) parentAgentId = null
     }
     const input = {
       engine,
@@ -350,6 +463,10 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
       agent,
       resumeSessionId,
       takeOver,
+      // Only when set: a person's create keeps the fingerprint its receipt was recorded with before the field.
+      ...(payload.startedBy === 'agent' ? { startedBy: 'agent' as const } : {}),
+      ...(launchModel.state === 'ok' ? { launchModel: launchModel.launchModel } : {}),
+      ...(parentAgentId ? { parentAgentId } : {}),
     }
     const fingerprintInput = model.state === 'ok' ? { ...input, modelSelection: model.selection } : input
     if (creationId !== undefined) {
@@ -359,13 +476,16 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
       const create = onCreateAgent
       try {
         const fingerprint = creationFingerprint(projectFolder ? { ...fingerprintInput, projectFolder } : fingerprintInput)
-        const durableNative = !!prepareCreate && !projectFolder && !resumeSessionId
-        if (!durableNative && model.state !== 'ok' && !receipts.has(creationId, fingerprint)) {
+        // A new project too, which waits for its engine as any other create does (above).
+        const durableNative = !!prepareCreate && !resumeSessionId
+        // A new project is refused at once for a harness or named agent it cannot have, as it always was, rather than
+        // after its engine is installed and its folder made.
+        if ((!durableNative || projectFolder) && model.state !== 'ok' && !receipts.has(creationId, fingerprint)) {
           const refusal = await validateInstalled(input, installed)
           if (refusal) { reply(refusal); return }
         }
         const operation = durableNative
-          ? pending.start(creationId, fingerprint, { kind: 'native-create-v1', input,
+          ? pending.start(creationId, fingerprint, { kind: 'native-create-v1', input, ...(projectFolder ? { projectFolder } : {}),
             selection: model.state === 'ok' ? model.selection : null, label: buildHarnessSessionLabel(engine), local: asker.local }, model.state === 'ok' ? modelHold : launchHold)
           : model.state === 'ok'
           ? pending.start(creationId, fingerprint, { kind: 'model-create-v1', input, selection: model.selection, projectFolder, local: asker.local }, modelHold)
@@ -478,9 +598,13 @@ export function createLaunchRequests({ receipts, createAgent, prepareCreate, for
     reply({ agent: await toProject(result.session), level: result.level })
   }
 
-  const cancelCreate = async (payload: Record<string, unknown>, reply: Reply): Promise<void> => {
+  const cancelCreate = async (payload: Record<string, unknown>, asker: Pick<Asker, 'local' | 'guest'>, reply: Reply): Promise<void> => {
     if (!validCreationId(payload.creationId)) { reply({ error: 'INVALID_CREATION_ID' }); return }
-    try { reply({ creationId: payload.creationId, ...await creationStatusPayload(receipts.cancelIntent(payload.creationId)) }) }
+    try {
+      // A guest cancels nothing of another's, and leaves no cancelled mark for an id that is not its own.
+      if (hiddenFrom(asker, payload.creationId)) { reply({ creationId: payload.creationId, state: 'missing' }); return }
+      reply({ creationId: payload.creationId, ...await creationStatusPayload(receipts.cancelIntent(payload.creationId)) })
+    }
     catch (error) { reply({ error: error instanceof AgentCreationReceiptError ? error.code : 'INTERNAL' }) }
   }
 

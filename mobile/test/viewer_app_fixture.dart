@@ -13,12 +13,14 @@ import 'package:harness_mobile/core/local_key_value_store.dart';
 import 'package:harness_mobile/core/machine_cache.dart';
 import 'package:harness_mobile/core/models.dart';
 import 'package:harness_mobile/core/snapshot_store.dart';
+import 'package:harness_mobile/measurement/product_measurement.dart';
 import 'package:harness_mobile/notify/system_notices.dart';
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/state/desk_sync.dart';
 import 'package:harness_mobile/state/pane_layout_store.dart';
 import 'package:harness_mobile/terminal/terminal_binary.dart';
 import 'package:harness_mobile/terminal/terminal_session.dart';
+import 'package:harness_mobile/viewer/device_ack.dart';
 import 'package:harness_mobile/viewer/direct_auth.dart';
 import 'package:harness_mobile/viewer/direct_auth_api.dart';
 import 'package:harness_mobile/viewer/direct_link.dart';
@@ -68,6 +70,9 @@ class ScriptedConn extends PagerConn {
   final List<Uint8List> binaries = [];
   int redials = 0;
 
+  /// Request type → how long its last request was willing to wait for the reply.
+  final Map<String, Duration> timeouts = {};
+
   /// The request types asked, in order.
   List<String> get asked => [for (final (type, _) in requests) type];
 
@@ -95,6 +100,7 @@ class ScriptedConn extends PagerConn {
     Duration timeout = const Duration(seconds: 20),
   }) async {
     requests.add((type, payload));
+    timeouts[type] = timeout;
     final answer = answers[type];
     if (answer == null) return {};
     return await answer(payload);
@@ -141,6 +147,41 @@ class FakeApi extends ApiClient {
   Future<List<Machine>> machines() {
     machineFetches++;
     return onMachines();
+  }
+
+  // No acknowledgements ("It's mine" said on another device) unless a test serves some: never the network.
+  @override
+  Future<List<Object?>?> deviceAcks(int since) async => null;
+
+  @override
+  Future<bool> postDeviceAck(DevAck ack) async => false;
+
+  /// The account's product-usage choice, and every report sent under it — what a test that counts
+  /// usage reads back. Never the network.
+  Map<String, dynamic> usageChoice = const {'enabled': true, 'revision': 0};
+  final List<Map<String, dynamic>> usageReports = [];
+
+  /// What each read or save of the choice asked: null for a read, the setting for a save.
+  final List<bool?> usageChoiceAsks = [];
+
+  @override
+  Future<Map<String, dynamic>> productUsageSettings({bool? enabled}) async {
+    usageChoiceAsks.add(enabled);
+    if (enabled != null) {
+      usageChoice = {
+        'enabled': enabled,
+        'revision': (usageChoice['revision'] as int) + 1,
+      };
+    }
+    return Map.of(usageChoice);
+  }
+
+  @override
+  Future<Map<String, dynamic>> productUsageReport(
+    Map<String, dynamic> report,
+  ) async {
+    usageReports.add(jsonDecode(jsonEncode(report)) as Map<String, dynamic>);
+    return {'accepted': true};
   }
 
   /// Answers `/api/auth/me` in place of [profile] when set — held open, or
@@ -432,6 +473,7 @@ ViewerRig viewerApp({
   MachineCache? machineCache,
   LocalKeyValueStore? storage,
   Duration turnActivityTimeout = const Duration(seconds: 12),
+  ProductMeasurement? productMeasurement,
 }) {
   final session = AuthSession(storage: MemoryKeyValueStore());
   final viewer = FakeViewer(session);
@@ -451,6 +493,7 @@ ViewerRig viewerApp({
         machineCache ??
         (storage == null ? null : MachineCache(store: MemorySnapshotStore())),
     turnActivityTimeout: turnActivityTimeout,
+    productMeasurement: productMeasurement,
     connectionForTest: (machineId) =>
         conns.putIfAbsent(machineId, ScriptedConn.new),
   );
@@ -480,10 +523,12 @@ Future<ViewerRig> signedInWith(
   bool noTakeover = true,
   LocalKeyValueStore? storage,
   Duration turnActivityTimeout = const Duration(seconds: 12),
+  ProductMeasurement? productMeasurement,
 }) async {
   final rig = viewerApp(
     storage: storage,
     turnActivityTimeout: turnActivityTimeout,
+    productMeasurement: productMeasurement,
   );
   rig.api.onMachines = () async => [
     for (final id in agents.keys) remoteMachine(id),

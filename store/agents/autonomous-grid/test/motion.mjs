@@ -1,4 +1,3 @@
-// Browser regression against fictional telemetry. Uses the same opt-in browser runtime as browser.mjs.
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,7 +18,6 @@ try {
   browser=await chromium.launch({headless:true,...(process.env.GRID_TEST_BROWSER?{executablePath:process.env.GRID_TEST_BROWSER}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:900},reducedMotion:'no-preference'});
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
-  // Optional baseline script lets the regression demonstrate failure before the fix.
   if(process.env.GRID_TEST_APP)await page.route('**/app.js',route=>readFile(process.env.GRID_TEST_APP,'utf8').then(body=>route.fulfill({contentType:'text/javascript',body})));
   await page.addInitScript(()=>{
     const queued=new Map();let next=0;
@@ -27,7 +25,6 @@ try {
       const callbacks=[...queued.values()];queued.clear();
       for(const callback of callbacks)callback(performance.now());
     }};
-    // Advance browser animation frames explicitly so cancellation is deterministic.
     window.requestAnimationFrame=callback=>{const id=++next;queued.set(id,callback);return id;};
     window.cancelAnimationFrame=id=>queued.delete(id);
     const clear=CanvasRenderingContext2D.prototype.clearRect;

@@ -12,6 +12,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { createAgentForker, type ForkAgentDeps } from './fork.js'
 import type { NativeLaunch } from '../../engines/nativeLaunch.js'
 import { createLaunchHelpers } from './launch.js'
+import { GUEST_HARNESS_REFUSAL } from '../guestPolicy.js'
 
 vi.mock('../../dsh/installed.js', () => ({ installedDsh: vi.fn(() => undefined) }))
 
@@ -193,6 +194,8 @@ describe('forking an agent', () => {
   it('refuses without tmux, an agent, a folder, or with a grid or a turn in progress', async () => {
     expect(await setup(source(), { tmuxBackend: null }).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
     expect(await setup(null).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'AGENT_NOT_FOUND' })
+    // A guest's harness: a fork would start as the owner, with the guest's conversation.
+    expect(await setup(source({ guest: 'kim@acme.io' })).fork({ agentId: 'a1', name: null, prompt: null })).toEqual(GUEST_HARNESS_REFUSAL)
     expect(await setup(source({ cwd: undefined })).fork({ agentId: 'a1', name: null, prompt: null })).toMatchObject({ error: 'CWD_NOT_FOUND', detail: expect.stringContaining('no working folder') })
     expect(await setup(source({ cwd: join(root, 'file') })).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'CWD_NOT_FOUND' })
     expect(await setup(source({ cwd: join(root, 'gone') })).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'CWD_NOT_FOUND' })
@@ -268,10 +271,12 @@ describe('forking an agent', () => {
       ok: true as const,
       overrides: { env: { CODEX_HOME: '/codex', MODEL_ENV: 'x' }, extraArgs: ['-c', 'model_provider="openai"', '-m', 'gpt-6'], clearEnv: ['HARNESS_DSH'] },
     }))
-    const row = source({ engine: 'codex', codexHome: '/codex', subscriptionModel: 'gpt-6', dsh: 'blender', agent: 'reviewer' } as Partial<RegisteredSession>)
+    const row = source({ engine: 'codex', codexHome: '/codex', subscriptionModel: 'gpt-6', dsh: 'blender', agent: 'reviewer', startedBy: 'agent' } as Partial<RegisteredSession>)
     await setup(row, { relaunchOverrides }).fork({ agentId: 'a1', name: null, prompt: null })
-    // The harness's runtime is the fork's own and so is its named agent: neither is rebuilt from the row.
-    expect(relaunchOverrides).toHaveBeenCalledWith(row, expect.objectContaining({ codexHome: '/codex', subscriptionModel: 'gpt-6', dsh: null, agent: null }), expect.any(Function), undefined, expect.stringContaining('harness-codex-'))
+    // The harness's runtime is the fork's own and so is its named agent: neither is rebuilt from the row. The fork
+    // is the forker's, not the agent's that started its source: it carries no pull request line for that.
+    expect(relaunchOverrides).toHaveBeenCalledWith(row, expect.objectContaining({ codexHome: '/codex', subscriptionModel: 'gpt-6', dsh: null, agent: null, startedBy: null }), expect.any(Function), undefined, expect.stringContaining('harness-codex-'))
+    expect(vi.mocked(createAndRegisterPane).mock.calls[0][0]).not.toHaveProperty('startedBy')
     expect(vi.mocked(buildEngineLaunchArgv).mock.calls[0][1]).toMatchObject({
       extraArgs: ['-c', 'model_provider="openai"', '-m', 'gpt-6', '--dsh', '--agent', 'reviewer'],
       // What the harness's launch provides is never cleared under it.

@@ -2,9 +2,8 @@
 # GT911 touch). Build:
 #
 #   . ~/esp/esp-idf-5.5.4/export.sh
-#   idf.py -B build -DPROJECT_VER=0.0.99-pod -DPOD_PANEL_TURN=180 build
+#   idf.py -B build -DPROJECT_VER=0.0.99-pod build
 #
-# POD_PANEL_TURN=180: every Pro panel is mounted upside down (owner, 2026-10-11), so release images use it too (picture and touch turn together).
 # Dev builds are safe from the daemon's OTA: a `-pod` version fails its plain X.Y.Z rule, so it is never offered an image.
 cmake_minimum_required(VERSION 3.16)
 

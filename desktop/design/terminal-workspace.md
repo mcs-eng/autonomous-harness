@@ -24,6 +24,24 @@ the session, using the existing confirmation when it is working. A tab close
 applies this rule separately to each session. Recheck remaining views after
 any wait for inspection or confirmation, before requesting a stop.
 
+Super Tab terminals are views of shared work. Their close control says **Hide
+terminal**; it dismisses the local view without inspecting, prompting to stop,
+or stopping the agent. The close shortcut and closing the Super Tab follow the
+same rule. The agent remains in its conversation and its terminal can be reopened.
+The coordinating agent is labeled **Lead** throughout the Super Tab, including
+its terminal header; its first message is not its name.
+Super Tab membership protects an agent from automatic idle and parent cleanup,
+including while the host is offline and while the Super Tab is paused. Membership
+only in archived conversations does not, and protection lapses after a week without a
+confirmed roster (for example after sign-out). If the agent is already stopped,
+only **Open terminal** (in Participants or on a message) resumes its saved conversation; a restored
+or revisited terminal selection closes instead, so an explicit stop stays stopped.
+
+A Lead routes each delegation with `harness super-tab route`. The decision appears in the
+conversation as one row (who, how — Jev's confidence or the policy order — and why); owners and
+collaborators can **Change** it with a reason, which tells the Lead to hand the task over.
+Settings ▸ Routing holds the account's policy; a Super Tab's **Routing** overrides single fields.
+
 ## Keep the workspace structure
 
 Tabs remain compact and content-sized, adding one at a time until the row fills.
@@ -84,7 +102,7 @@ All panes stay at full contrast by default. **Cmd+Shift+F** toggles shading on
 and off while working (**Ctrl+Alt+F** on Linux; **Alt+Shift+F** in the browser).
 When enabled, panes outside the current focus receive the approved 30%
 neutral-gray veil; Graphite's inactive background is RGB 64,64,64.
-Customize Harness → Appearance → **Shade inactive panes** toggles this veil
+Appearance → Workspace → **Shade inactive panes** toggles this veil
 through the same saved preference and shows the current shortcut, including
 remaps. **Toggle pane shading** is also available in the command search and
 keyboard shortcuts. Turning it off leaves

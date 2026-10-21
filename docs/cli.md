@@ -71,10 +71,13 @@ per-engine home directories); [`cli/README.md`](../cli/README.md) has the full t
 
 ## Automation
 
-The app is one client of the daemon. Anything on the same computer can be another: the loopback
+The app is one client of the daemon. Any process of the same OS user can be another: the loopback
 WebSocket at `ws://127.0.0.1:18473/api/local-ws` takes a `machine_select` frame first
 (`{ machineId, localProtocolVersion: 1 }`, no `Origin` header), then request frames with a `requestId`
-and answers them with `<type>_result`. Selecting one of your other machines proxies the request
+and answers them with `<type>_result`. Since 0.4.21 every loopback request (REST and this WebSocket)
+shows the daemon's local credential, `X-Harness-Local: <credential>` (or `Authorization: Bearer
+<credential>`): the contents of the 0600 `hook-credential` file in `ADAPTER_DATA_DIR`
+(`~/.harness/cli/data`). Without it the daemon answers 401; `/api/status` then gives only its public fields. Selecting one of your other machines proxies the request
 through this daemon's link to it.
 
 What it answers: `agents_list`, `agent_create`, `agent_restart`, `agent_retarget`, `agent_delete`,
@@ -124,27 +127,73 @@ the hook it installs.
 `harness new` makes a session from a shell, in the words the app's box uses, over this same socket:
 
 ```
-harness new                          claude, in the current directory
-harness new codex @mini ~/code/auth  codex, on the machine called mini, in that folder
-harness new codex my-game            codex, in a new project ~/harnesses/my-game
+harness new                                   claude, in the current directory
+harness new codex --machine mini ~/code/auth  codex, on the machine called mini, in that folder
+harness new codex my-game                     codex, in a new project ~/harnesses/my-game
 harness new --plan --prompt "fix the flaky login test"
 ```
 
-Words may come in any order: `@` marks the machine (id, name, or an unambiguous start of a word in
-it), a path looks like a path, the first other word is the agent and a second names a new project.
-`--mode auto|ask|plan|full`, `--name`, `--new [name]` and `--json` are the rest. There is still no
+Words may come in any order: a path looks like a path, the first other word is the agent and a
+second names a new project. `--machine <name>` picks the machine (id, name, or an unambiguous start
+of a word in it); `@mini`, the old way, is refused with what to type instead. `--mode
+auto|ask|plan|full`, `--name`, `--new [name]` and `--json` are the rest. There is still no
 `harness split`: panes are arranged in the app.
+
+`harness ps`, `show`, `wait` and `close` take `--machine <name>` too, to read, wait for or close a
+harness on another of your machines: `harness new claude --machine office --name check -- …`, then
+`harness wait --machine office check` and `harness show --machine office check`.
+
+A cloud agent starts the same way: `harness new devin-cloud --machine office --repo acme/api -- <task>`.
+`--repo` takes `owner/name` or a GitHub address; Cursor Cloud needs one, Devin Cloud works without.
+`--acu-limit <n>` caps Devin Cloud's spend (5 when left out). `show` and `wait` read it from the cloud: its
+state, what it said after the last thing it was told, and its links (`links` in JSON). `harness reply <name> --
+<words>` says the person's answer, or what to do next, to a cloud harness; an agent does not.
+
+`harness whoami` says, for an agent, where it is and what it may do before it acts (`--json` gives the same as
+`context`); the top of an agent's `harness ps` begins with it, and `harness mcp` puts it in its instructions:
+
+```
+You: <agent> "<name>" (<id>), inside Harness, on <machine>.
+Can start harnesses: <yes, or no and why>. <who can change it, and the command>
+Yours: <open> open of <max> · <starts> of <max starts> starts in the last <minutes> minutes · other machines: <machine> (<state>), …
+```
+
+Run by the person, it prints the first line only: `You: the person, on <machine>.`
+
+Every agent verb ends with what to run next, in one shape (`--json` gives the same as `next`, and `new` and `close`
+add `effect`, what changed):
+
+```
+<name> on <machine>: starting. <agent>, in <folder>.
+The person sees it in Harness, beside you.
+Next: harness wait <name>  (until it has answered; then read it: harness show <name>)
+```
+
+`show` names `close` for an idle harness of the agent's own, `wait` for a working one, and the person for one that
+needs the person; `close` says how many of the agent's own are still open; an agent's `ps` ends with its idle one to
+read, its busy ones to wait for, or a start, and shows its own first and at most 15 rows (`--all` shows every one).
+A harness waiting on a question or a permission is shown as `needs the person` (JSON keeps `needs-input` and adds
+`needsPerson: true`). A refusal (`SPAWN_LIMIT`, `TURNED_OFF`, `NOT_YOURS`) exits 5, with `code`, `reason` and
+`next` in its JSON. `harness help agents` prints the commands, states, exit codes and rules on one screen, and
+`harness --help` starts with it when an agent runs it.
 
 ## Your devices
 
 Signing in is what makes a device trusted: every computer and app signed in to the account adds its
 key to the account's device key log, and the others trust it with no password. Nothing asks you to
 confirm a device; instead every device shows you each one it did not know before.
-`harness devices` is this machine's view, the same one Settings ▸ Your devices shows in the app.
+`harness devices` is this machine's view, the same one Machines shows in the app (Computers, and
+Phones & apps).
 
 - **New.** A device added after this machine joined the account is flagged `new` (an OS notification
-  in the apps) and stays flagged across restarts until you look: `harness devices dismiss` marks every
-  one seen, `dismiss <#|fp>` just one; opening Your devices does the same in the apps.
+  in the apps) and stays flagged across restarts until you confirm it on one of your trusted devices,
+  or review it on each. Confirming is "It's mine" in the apps, or `harness devices dismiss <#|fp>`
+  here: it marks that device seen here and tells your other devices, which stop flagging it and show
+  where it was confirmed (`harness devices show`: `confirmed on <device>`). Each device checks that
+  confirmation itself: it counts only when signed by a device that device already trusts — not one
+  that is itself new, suspended or removed there — and it never lifts a suspension. Reviewing
+  (`harness devices dismiss` with no device, or opening Your devices in the apps) marks every one seen
+  on that device only.
 - **Already on your account.** The first time a device reads the log it announces nothing; the apps
   show the devices that were already there once, until you press Got it.
 - **Joined and left before you looked.** A new device that was removed before you saw it stays listed,

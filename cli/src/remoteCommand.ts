@@ -14,6 +14,8 @@
  * an offline machine is listed but cannot be taken: there is nothing there to open a shell on.
  */
 import { randomUUID } from 'node:crypto'
+import { localCredentialHeaders } from './lib/localCredential.js'
+import { env } from './config/env.js'
 import { emitKeypressEvents } from 'node:readline'
 import { WebSocket } from 'ws'
 import { TMUX_PANE_RE } from './lib/terminalHandoff.js'
@@ -45,6 +47,8 @@ export interface RemoteCommandDeps {
   /** The daemon's loopback port, and whether it is up at all. */
   port: number
   daemonRunning: () => boolean
+  /** What to say when the daemon cannot be reached: stopped, or kept out by a sandbox (lib/unreachable.ts). */
+  unreachable?: () => string
   listMachines: () => Promise<RemoteMachineChoice[]>
   /** Whether this computer holds [machineId]'s peer pin (`harness link list`). */
   isLinked: (machineId: string) => boolean
@@ -144,7 +148,8 @@ export class LoopbackClient {
   private readonly socket: LoopbackSocket
   private readonly opened: Promise<void>
 
-  constructor(url: string, connect: (url: string) => LoopbackSocket = (target) => new WebSocket(target) as unknown as LoopbackSocket) {
+  constructor(url: string, connect: (url: string) => LoopbackSocket = (target) =>
+    new WebSocket(target, { headers: localCredentialHeaders(env.ADAPTER_DATA_DIR) }) as unknown as LoopbackSocket) {
     this.socket = connect(url)
     this.opened = new Promise((resolve, reject) => {
       this.socket.on('open', () => resolve())
@@ -292,7 +297,7 @@ export async function remoteCommand(deps: RemoteCommandDeps): Promise<number> {
   }
   if (!deps.input.isTTY || !output.isTTY) { error('`harness remote` needs a terminal to choose a machine in.'); return 1 }
   if (!deps.localMachineId) { error('Not signed in. Run `harness login`.'); return 1 }
-  if (!deps.daemonRunning()) { error('The Harness daemon is not running. Run `harness start`.'); return 1 }
+  if (!deps.daemonRunning()) { error(deps.unreachable?.() ?? 'The Harness daemon is not running. Run `harness start`.'); return 1 }
   let machines: RemoteMachineChoice[]
   try { machines = await deps.listMachines() } catch (failure) {
     error(failure instanceof Error ? failure.message : String(failure))

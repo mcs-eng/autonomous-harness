@@ -11,8 +11,15 @@ abstract final class AppIcons {
   static const double controlSize = 20;
   static const double featureSize = 24;
 
-  /// A quiet close mark in tabs and pane headers, inside the full click target.
-  static const double closeSize = 12;
+  /// The close mark in tabs and pane headers, inside the full click target.
+  /// 14: its stroke matches the 13pt regular text beside it (1.1pt, measured),
+  /// as the native tab's × takes the title's size and weight.
+  static const double closeSize = 14;
+
+  /// The close mark's ink at rest, as a share of the foreground: full, as the
+  /// text beside it (owner, 2026-10-20). The native tab's × reads the same
+  /// value (`HarnessControlSymbols.closeInk`).
+  static const double closeInk = 1;
 
   static const aArrowDown = LucideIcons.aArrowDown400;
   static const aArrowUp = LucideIcons.aArrowUp400;
@@ -63,11 +70,13 @@ abstract final class AppIcons {
   static const copy = LucideIcons.copy400;
   static const copyPlus = LucideIcons.copyPlus400;
   static const cornerDownLeft = LucideIcons.cornerDownLeft400;
+  static const reply = LucideIcons.reply400;
   static const cpu = LucideIcons.cpu400;
   static const database = LucideIcons.database400;
   static const dot = LucideIcons.dot400;
   static const download = LucideIcons.download400;
   static const ellipsis = LucideIcons.ellipsis400;
+  static const ellipsisVertical = LucideIcons.ellipsisVertical400;
   static const externalLink = LucideIcons.externalLink400;
   static const eye = LucideIcons.eye400;
   static const eyeOff = LucideIcons.eyeOff400;
@@ -93,6 +102,7 @@ abstract final class AppIcons {
   static const gamepad2 = LucideIcons.gamepad2400;
   static const gauge = LucideIcons.gauge400;
   static const gitBranch = LucideIcons.gitBranch400;
+  static const gitPullRequest = LucideIcons.gitPullRequest400;
   static const globe = LucideIcons.globe400;
   static const hand = LucideIcons.hand400;
   static const heart = LucideIcons.heart400;
@@ -154,6 +164,7 @@ abstract final class AppIcons {
   static const shieldOff = LucideIcons.shieldOff400;
   static const slidersHorizontal = LucideIcons.slidersHorizontal400;
   static const smartphone = LucideIcons.smartphone400;
+  static const smartphoneNfc = LucideIcons.smartphoneNfc400;
   static const snowflake = LucideIcons.snowflake400;
   static const sparkles = LucideIcons.sparkles400;
   static const square = LucideIcons.square400;
@@ -173,6 +184,7 @@ abstract final class AppIcons {
   static const unplug = LucideIcons.unplug400;
   static const usb = LucideIcons.usb400;
   static const user = LucideIcons.user400;
+  static const users = LucideIcons.users400;
   static const waypoints = LucideIcons.waypoints400;
   static const zap = LucideIcons.zap400;
 }

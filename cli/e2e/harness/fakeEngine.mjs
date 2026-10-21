@@ -45,7 +45,10 @@
 // rewriting its wrapper: `version` is what it reports and writes, `without` lists the flags and
 // subcommands that release no longer has, `updateAvailable` (Codex) names a newer release it asks to update
 // to before it starts, and `startDelayMs` is how long it takes, once started, before
-// it draws or announces anything (an engine's first run after an update). `firstHookDelayMs` is how long
+// it draws or announces anything (an engine's first run after an update). `unreadableDescriptorMs` is how long,
+// once started, it holds a descriptor the daemon's process reader has no name for, as Codex 0.162.1 did for its
+// first seconds in a clean macOS VM (2026-10-12): every read of its process was refused until then ("the native
+// control descriptor type is unavailable"). `firstHookDelayMs` is how long
 // its first SessionStart takes to reach the daemon once the engine is up: the hook command starting on a
 // loaded machine, while the daemon has already found the engine and its conversation. `root` is the
 // test's throwaway root, the only place whose hooks it will run, and `hookLog` where it notes every hook
@@ -61,7 +64,7 @@
 // child in the same process group and terminal (`codexWrapper`).
 import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -114,6 +117,23 @@ async function codexWrapper(config) {
   else process.exit(ended.code ?? 1)
 }
 
+/**
+ * A descriptor the daemon's process reader cannot classify, held for [ms] (`unreadableDescriptorMs`). Which one the real
+ * Codex held is not known; what the daemon met is: a descriptor of a kind its reader refuses. On macOS that is a
+ * symbolic link opened as itself (O_SYMLINK: a vnode of a type the reader has no name for, the same refusal); on Linux a
+ * network namespace, whose target (`net:[…]`) is no path, socket, pipe or anonymous inode.
+ */
+function holdUnreadableDescriptor(config, ms) {
+  let fd
+  if (process.platform === 'darwin') {
+    const link = join(config.root, `unreadable-descriptor-${process.pid}`)
+    if (!within(config.root, link)) throw new Error('unreadable descriptor outside its throwaway home')
+    symlinkSync('nothing', link)
+    fd = openSync(link, constants.O_RDONLY | constants.O_SYMLINK)
+  } else fd = openSync('/proc/self/ns/net', 'r')
+  setTimeout(() => closeSync(fd), ms).unref()
+}
+
 export async function run(engine, config = {}, { native = false } = {}) {
   if (engine === 'codex' && !native) return codexWrapper(config)
   const args = process.argv.slice(2)
@@ -151,7 +171,7 @@ export async function run(engine, config = {}, { native = false } = {}) {
         ]
       : [
           'Usage: claude [options] [command] [prompt]', '', 'Arguments:', '  prompt  Your prompt', '',
-          '  --model <model>', '  --permission-mode <mode>  (choices: "acceptEdits", "auto", "bypassPermissions", "default", "plan")',
+          '  --model <model>', '  --effort <level>', '  --permission-mode <mode>  (choices: "acceptEdits", "auto", "bypassPermissions", "default", "plan")',
           '  --dangerously-skip-permissions', '  -r, --resume [value]', '  --fork-session', '  --session-id <uuid>', '',
         ]).filter((line) => !line.split(/[^A-Za-z0-9-]+/).some((word) => without.has(word))).join('\n'))
     return
@@ -165,6 +185,8 @@ export async function run(engine, config = {}, { native = false } = {}) {
       : `error: unexpected argument '${refused}' found\n\nUsage: codex [OPTIONS] [PROMPT]\n\nFor more information, try '--help'.\n`)
     process.exit(engine === 'claude' ? 1 : 2)
   }
+  // Every launch's argv, for a test to read what an agent was started with.
+  if (config.root) appendFileSync(join(config.root, 'launch-argv'), `${JSON.stringify({ engine, args })}\n`)
   // The process table shows it as it shows the real CLI: named `claude` or `codex`, with the command line
   // it was started with, both of which discovery reads (tmux.ts: a resume typed into a pane names its
   // conversation on that command line). The title used to be the name alone, so no argument was ever on
@@ -177,6 +199,7 @@ export async function run(engine, config = {}, { native = false } = {}) {
   // terminal still in line mode keeps at most 1 KiB of a line, so a paste that arrived before the
   // engine was ready lost the rest of itself (measured: 1,018 of 2,406 characters).
   process.stdin.setRawMode?.(true)
+  if (config.unreadableDescriptorMs) holdUnreadableDescriptor(config, config.unreadableDescriptorMs)
   // Slow to start, as an engine is on its first run after an update: the process is there and holds
   // the terminal, and nothing is drawn, announced or read until it is ready.
   // October 6 sibling-conversation incident: hold startup before this process has a transcript, while
@@ -268,6 +291,23 @@ export async function run(engine, config = {}, { native = false } = {}) {
   // refuses before its TUI is up (codex-rs app-server thread_processor.rs) until `codex unarchive <id>`
   // moves it back under `sessions/`.
   if (engine === 'codex' && resumed && !fork) {
+    // Codex 0.163.0 keeps a failed thread's writer in its shared app-server. A --no-daemon resume
+    // stays alive on this lock screen without opening the conversation or sending SessionStart
+    // (2026-10-19). A live terminal process alone therefore cannot prove that a restart succeeded.
+    const writer = join(codexHome, 'app-server-daemon', 'fake-writer.json')
+    const locked = () => args.includes('--no-daemon') && existsSync(writer)
+      && JSON.parse(readFileSync(writer, 'utf8')).threadId === resumed
+    if (locked()) {
+      process.stdout.write('This conversation is open in another app\r\nClose it there and press R to continue here.\r\n')
+      process.stdin.setRawMode?.(true)
+      process.stdin.resume()
+      await new Promise(resolve => {
+        const retry = data => {
+          if (/r/i.test(String(data)) && !locked()) { process.stdin.off('data', retry); resolve() }
+        }
+        process.stdin.on('data', retry)
+      })
+    }
     const holds = (dir) => {
       let names = []
       try { names = readdirSync(dir, { withFileTypes: true }) } catch { return false }
@@ -1735,9 +1775,10 @@ export async function run(engine, config = {}, { native = false } = {}) {
 }
 
 /** The options both CLIs read a value after, and Codex's `resume <id>` and `fork <id>`: the word after one is not a
- *  prompt. */
+ *  prompt. `--settings <file-or-json>` carries the pull request line of a harness another agent started
+ *  (lib/agentAttribution.ts), last on a relaunch, where no first message follows it. */
 const TAKES_VALUE = new Set(['--model', '-m', '--permission-mode', '--resume', '-r', '--session-id', '--append-system-prompt',
-  '--mcp-config', '--effort', '-c', '--config', '-s', '--sandbox', '-a', '--ask-for-approval', 'resume', 'fork'])
+  '--mcp-config', '--effort', '--settings', '-c', '--config', '-s', '--sandbox', '-a', '--ask-for-approval', 'resume', 'fork'])
 
 /** The prompt at the end of the command line, when there is one. */
 function firstPromptOf(args) {

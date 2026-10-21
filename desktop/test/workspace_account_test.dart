@@ -4,10 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
-import 'package:harness/screens/login_screen.dart';
+import 'package:harness/widgets/sign_in_step.dart';
 import 'package:harness/settings/settings_screen.dart';
 import 'package:harness/settings/settings_section.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
+import 'package:harness/shared/widgets/setting_row.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/account_menu.dart';
 import 'package:harness/widgets/workspace_account_button.dart';
@@ -28,6 +29,7 @@ Future<void> _capture(WidgetTester tester, String name) =>
 
 final _search = find.byKey(const ValueKey('swarm-search-button'));
 final _bell = find.byKey(const ValueKey('workspace-notifications-button'));
+final _phone = find.byKey(const ValueKey('swarm-add-phone-button'));
 final _devices = find.byKey(const ValueKey('swarm-devices-button'));
 final _store = find.byKey(const ValueKey('swarm-store-button'));
 final _signIn = find.byKey(const ValueKey('swarm-sign-in-button'));
@@ -44,7 +46,6 @@ Future<void> _mountMenu(
   WidgetTester tester, {
   String name = 'Dee Example',
   String email = 'dee@example.com',
-  bool showAddPhone = true,
   void Function(AccountMenuChoice?)? onChoice,
 }) async {
   tester.view.devicePixelRatio = 1;
@@ -62,7 +63,6 @@ Future<void> _mountMenu(
                 context,
                 name: name,
                 email: email,
-                showAddPhone: showAddPhone,
               );
               onChoice?.call(choice);
             },
@@ -80,7 +80,7 @@ Future<void> _mountMenu(
 void main() {
   setUpAll(() => loadCaptureFonts(_captureDir));
 
-  testWidgets('not signed in, the row ends in Sign in, after three icons', (
+  testWidgets('not signed in, the row ends in Sign in, after its icons', (
     tester,
   ) async {
     final app = createApp()..signedIn = false;
@@ -92,20 +92,20 @@ void main() {
     // Where this app draws the row it carries the bell too; on a Mac that is
     // in the menu bar.
     final order = [
-      for (final control in [_search, _bell, _devices, _store, _signIn])
+      for (final control in [_search, _bell, _phone, _devices, _store, _signIn])
         tester.getCenter(control).dx,
     ];
     expect(
       order,
       [...order]..sort(),
-      reason: 'Search, Devices, Store, Sign in',
+      reason: 'Search, Add Phone, Devices, Store, Sign in',
     );
     // The only control in the row with a word on it.
     expect(
       find.descendant(of: _signIn, matching: find.text('Sign in')),
       findsOneWidget,
     );
-    for (final icon in [_search, _devices, _store]) {
+    for (final icon in [_search, _phone, _devices, _store]) {
       expect(
         find.descendant(of: icon, matching: find.byType(Text)),
         findsNothing,
@@ -113,7 +113,8 @@ void main() {
     }
     // Icons sit side by side; nothing is drawn between them and Sign in.
     expect(tester.getRect(_search).right, tester.getRect(_bell).left);
-    expect(tester.getRect(_bell).right, tester.getRect(_devices).left);
+    expect(tester.getRect(_bell).right, tester.getRect(_phone).left);
+    expect(tester.getRect(_phone).right, tester.getRect(_devices).left);
     expect(tester.getRect(_devices).right, tester.getRect(_store).left);
     expect(
       tester.getRect(_signIn).left - tester.getRect(_store).right,
@@ -124,12 +125,12 @@ void main() {
       1280 - grid.AppDesktop.tabBarTrailingInset,
     );
     expect(find.byTooltip('Sign in to Harness'), findsOneWidget);
-    expect(find.byTooltip('Explore Harness Store · ⌘S'), findsOneWidget);
+    expect(find.byTooltip('Explore Harness Store · ⌃⌘S'), findsOneWidget);
     await _capture(tester, 'tab-row-sign-in');
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets(
-    'Sign in opens the sign-in over the desk, and closes back to it',
+    'Sign in uses the onboarding page and stays until an account arrives',
     (tester) async {
       final app = createApp()..signedIn = false;
       addTearDown(app.dispose);
@@ -138,11 +139,11 @@ void main() {
       await tester.tap(_signIn);
       await tester.pump();
       await tester.pump();
-      expect(find.byType(LoginScreen), findsOneWidget);
+      expect(find.byType(SignInStep), findsOneWidget);
       expect(find.text('Continue with Google'), findsOneWidget);
       // The quiet way in is on this sign-in too — as words, not as one more
       // button the width of the two above it.
-      final email = find.byKey(const Key('login-continue-email'));
+      final email = find.byKey(const Key('sign-in-step-email'));
       expect(email, findsOneWidget);
       expect(
         find.ancestor(
@@ -159,11 +160,15 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byKey(const Key('login-close-button')));
+      expect(find.byKey(const Key('login-close-button')), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(find.byType(SignInStep), findsOneWidget);
+      app.signedIn = true;
+      app.notifyListeners();
       await tester.pump();
       await tester.pump();
-      expect(find.byType(LoginScreen), findsNothing);
-      expect(_signIn, findsOneWidget);
+      expect(find.byType(SignInStep), findsNothing);
     },
   );
 
@@ -261,6 +266,48 @@ void main() {
     }
   });
 
+  testWidgets('Settings says who is signed in, and an email only once', (
+    tester,
+  ) async {
+    for (final (name, lines) in [
+      ('Dee Example', ['Dee Example', 'dee@example.com']),
+      // Signed up by email: the account is called by its address, which is
+      // the line under the title already.
+      (null, ['Signed in', 'dee@example.com']),
+    ]) {
+      final app = createApp()
+        ..currentUser = CurrentUserProfile(
+          name: name,
+          email: 'dee@example.com',
+        );
+      await mount(tester, app);
+      await tester.tap(_avatar);
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('account-menu-settings')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      Finder said(String text) => find.descendant(
+        of: find.byType(SettingsScreen),
+        matching: find.text(text),
+      );
+      for (final line in lines) {
+        expect(said(line), findsOneWidget, reason: '$name: $line');
+      }
+      // Both are the same raised row: one with no second line is drawn bare.
+      expect(
+        tester.widget<SettingRow>(find.byType(SettingRow)).detail,
+        'dee@example.com',
+      );
+      Navigator.of(tester.element(find.byType(SettingsScreen))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+    }
+  });
+
   testWidgets('the native tab row is told which of the two to draw', (
     tester,
   ) async {
@@ -317,7 +364,7 @@ void main() {
     expect(find.text('dee@example.com'), findsOneWidget);
     final rows = [
       'Add Phone',
-      'Customize Harness',
+      'Appearance',
       'Notifications',
       'Settings',
       'Sign out',
@@ -405,29 +452,25 @@ void main() {
     expect(_menu, findsNothing);
   });
 
-  testWidgets('an account with a phone is not offered one; an account with '
-      'no name says its email once', (tester) async {
-    await _mountMenu(tester, name: '', showAddPhone: false);
-    expect(find.text('Add Phone'), findsNothing);
-    expect(find.text('Customize Harness'), findsOneWidget);
+  testWidgets('an account with no name says its email once; Add Phone is '
+      'the first row whatever the account has', (tester) async {
+    await _mountMenu(tester, name: '');
     expect(find.text('dee@example.com'), findsOneWidget);
+    // It was hidden once the account had a phone, which the menu learned only
+    // by being opened: there at the first click and gone at the second.
+    expect(find.text('Add Phone'), findsOneWidget);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
     await tester.pump();
     expect(_menu, findsNothing);
-    // Down now lands on what is first.
     AccountMenuChoice? chosen;
-    await _mountMenu(
-      tester,
-      showAddPhone: false,
-      onChoice: (value) => chosen = value,
-    );
+    await _mountMenu(tester, onChoice: (value) => chosen = value);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
     await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
     await tester.pump();
-    expect(chosen, AccountMenuChoice.customize);
+    expect(chosen, AccountMenuChoice.addPhone);
   });
 
   test('the one letter an account wears', () {

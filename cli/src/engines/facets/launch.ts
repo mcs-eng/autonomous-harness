@@ -89,12 +89,42 @@ export interface StartupContract {
 }
 
 /**
+ * The screen Harness runs an engine's TUI on: the terminal's own scrollback, or a full-screen alternate screen of
+ * the engine's. Every launch Harness makes applies it (kit/launchScreen.ts), whatever the person's own settings say,
+ * so one engine looks the same on every computer. An engine that declares none runs as the person set it up.
+ *
+ * Why: one pane is driven by a desktop window and a phone in turn, and each takeover resizes it. In the scrollback
+ * the history is the viewer's own and scrolls natively, and Find, selection and the phone's long-press reach all of
+ * it; full screen, the engine pins its prompt to the foot of the pane and owns scrolling. The scrollback serves an
+ * engine that lays its history out again cleanly when the pane narrows: Codex does, so Harness runs it there
+ * (codex/launch.ts). Claude Code does not (it printed part of its conversation twice), and Harness leaves its screen
+ * to the person's own setting. The keyframe re-wraps a history kept in the scrollback by word (lib/historyRewrap.ts).
+ */
+export interface ScreenContract {
+  /** Argv given to every launch, ahead of the launch's own extra arguments. */
+  args?: readonly string[]
+  /** Variables exported after the person's rc files, so neither their shell nor their profile can undo them. */
+  environment?: Readonly<Record<string, string>>
+  /** Variables removed after the person's rc files: those that would choose the other screen. */
+  clearEnvironment?: readonly string[]
+  /**
+   * How the engine answers a resize in the scrollback, where it does so by printing its transcript again: within
+   * `withinMs` of the resize it writes `clears` (it has cleared the screen and the scrollback), then the transcript,
+   * which the first `ends` after the clear closes. A keyframe taken right after a resize waits for that print to end,
+   * so a viewer never draws the cleared screen in between (lib/tmuxStream.ts `snapshot`). The end is read off the
+   * output, not inferred from a pause in it: an engine at work animates its status line without one.
+   */
+  resizeRepaint?: { clears: string; ends: string; withinMs: number }
+}
+
+/**
  * Where an engine keeps its own settings for a launch made now. `setting`: the folder a daemon setting names,
  * unless the person's shell moves it, unless the agent has a profile of its own (Codex's CODEX_HOME).
- * `variable`: the folder a variable the person's shell sets names, else their home folder (Claude Code's
- * CLAUDE_CONFIG_DIR). Resolved by lib/engineHomes.ts `launchHomeOf`.
+ * `variable`: the folder a variable the person's shell sets names, else their home folder, or `folder` in it
+ * (Claude Code's CLAUDE_CONFIG_DIR: `.claude.json` is in the home folder itself, `settings.json` in `~/.claude`).
+ * Resolved by lib/engineHomes.ts `launchHomeOf`.
  */
-export type LaunchHome = { setting: FolderSetting } | { variable: string; otherwise: 'home' }
+export type LaunchHome = { setting: FolderSetting } | { variable: string; otherwise: 'home' | { folder: string } }
 
 /**
  * An engine's answer to "do you trust this folder?", which it asks the first time it opens one, kept in `file`
@@ -139,12 +169,87 @@ export interface ResumeRepairContract {
   names: { file: string; history: string; items: string }
 }
 
+/**
+ * How an engine is told to add a line to the pull requests it opens: a harness another agent started says so
+ * (lib/agentAttribution.ts). Applied by kit/attribution.ts on each launch of one, its relaunches included. The
+ * person's choices stay theirs: the engine's own line is kept beside it, an instruction of theirs is never
+ * replaced, and where they hid the engine's attribution nothing is added.
+ */
+export type AttributionContract = SettingAttribution | InstructionAttribution
+
+/**
+ * An engine with a setting for the text it adds to a pull request, in JSON settings files that a settings object
+ * on its command line overrides key by key (Claude Code's `attribution.pr` and `--settings`, 2.1.296). The
+ * setting's text replaces the engine's own line, so it is given the line the engine would have added, then ours.
+ */
+export interface SettingAttribution {
+  kind: 'setting'
+  /** The person's settings files, lowest precedence first: `file` in `home`, then each of `folder` in the harness's folder. */
+  home: LaunchHome
+  file: string
+  folder: readonly string[]
+  /** The setting: an object at `key` whose `field` is the pull request's text. `false` at `key` hides every line. */
+  key: string
+  field: string
+  /**
+   * An older setting that, `false`, hides every line while `key` sets none of `until` (Claude Code's
+   * `includeCoAuthoredBy`). Setting `field` would end that and bring back the engine's commit line, so a person
+   * who set it gets nothing added.
+   */
+  legacy?: { key: string; until: readonly string[] }
+  /** The engine's own line, where the person set no text. */
+  own: string
+  /** The argv; `{settings}` is the settings object, as JSON. */
+  args: readonly string[]
+  /**
+   * The same line as an instruction (`{line}`), told with Harness's instructions (`harnessInstructions` `append`)
+   * whenever the setting is given: a setting is only a default, which the agent drops once its task spells out the
+   * pull request's body.
+   */
+  instruction?: string
+}
+
+/**
+ * An engine with no setting for its attribution's text, which it gives its model as an instruction (Codex 0.162.1:
+ * `<git_attribution>` in the developer message), and which takes more instructions in a config key `-c` sets
+ * (`developer_instructions`). `-c` replaces the person's own value, so theirs comes first and ours after it; one
+ * that cannot be read exactly, or one a folder's own config sets, is left alone and nothing is added.
+ */
+export interface InstructionAttribution {
+  kind: 'instruction'
+  /** The person's config: `file` in the agent's profile, else the home `home` names. */
+  home: LaunchHome
+  file: string
+  /** A folder's own config, looked for in the harness's folder and each folder above it, up to the home folder. */
+  folder: string
+  /** The top-level key the instructions are in. */
+  key: string
+  /** What the model is told; `{line}` is the line. */
+  instruction: string
+  /** The argv; `{value}` is the instructions, as a JSON string, which TOML reads as the same string. */
+  args: readonly string[]
+}
+
+/**
+ * The flags that give ONE session its model and effort, so that nothing is written to the person's own engine
+ * settings (Claude Code's `/model` and `/effort` commands are saved there as the new default). `{value}` in an
+ * argument is the model or the effort. `efforts` are the levels the effort flag takes; any other is refused.
+ * Applied by lib/launchModel.ts.
+ */
+export interface ModelArgsContract {
+  model: readonly string[]
+  effort: readonly string[]
+  efforts: readonly string[]
+}
+
 /** Literal argv contracts copied from the existing launch paths. No engine version behavior changes. */
 export interface EngineLaunch {
   permissionModes: Readonly<Record<string, readonly string[]>>
   bypassPermission: string[]
   firstPromptArgs: readonly string[]
   resumeArgs: string[]
+  /** How a new session is launched with a model and effort of its own, for this session only. */
+  modelArgs?: ModelArgsContract
   forkArgs: { lead: string[]; after?: string[] }
   instructionFiles: readonly string[]
   contextArgs?: ContextArgsTemplate
@@ -152,10 +257,26 @@ export interface EngineLaunch {
   sharedServer?: SharedServerContract
   ownProvider?: OwnProviderContract
   startup?: StartupContract
+  /** The screen the engine's TUI runs on, where Harness chooses it; applied to every launch (kit/launchScreen.ts). */
+  screen?: ScreenContract
   /** The instruction file Harness writes its own notes into (a harness's bootstrap, the saved APIs); else AGENTS.md. */
   instructionFile?: string
   /** The line, in that file, that has the engine read `file` too (Claude Code's `@AGENTS.md` import). */
   instructionImport?: { file: string; line: string }
   trust?: TrustContract
   resumeRepair?: ResumeRepairContract
+  attribution?: AttributionContract
+  /** How the engine is told, as it starts, that it runs in Harness and how to use it (lib/agentAttribution.ts). */
+  harnessInstructions?: HarnessInstructionsContract
+}
+
+/**
+ * Where an engine takes a few lines of instructions on its command line: appended to its system prompt (`append`,
+ * Claude Code's `--append-system-prompt`; `{text}` is the text), or beside its attribution instruction, in the one
+ * config value both live in (`attribution`, Codex's `developer_instructions`: a second `-c` of the same key would
+ * replace the first, and the person's own value).
+ */
+export type HarnessInstructionsContract = ({ kind: 'append'; args: readonly string[] } | { kind: 'attribution' }) & {
+  /** Said after Harness's instructions to this engine's agents alone: what about the engine changes how they use them. */
+  also?: string
 }

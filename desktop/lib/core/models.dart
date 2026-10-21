@@ -102,6 +102,37 @@ class SharedHarness {
 bool sameMachineId(String a, String b) =>
     a.replaceAll('-', '').toLowerCase() == b.replaceAll('-', '').toLowerCase();
 
+/// A whole machine another account shares with this one (backend lib/machineAccess.ts): its owner
+/// named this account's address ([via] `email`), or shared it with everyone at their domain and this
+/// account added it ([via] `domain`, [added]). This account is a guest there: a space of its own, its
+/// own harnesses on the owner's plans, nothing of the owner's (docs/plans/2026-10-19-guest-machine-sharing-plan.md);
+/// unlike [Machine.isShared], one harness shared to watch.
+class MachineShare {
+  final String ownerName;
+  final String ownerEmail;
+  final String via;
+  final bool added;
+
+  const MachineShare({
+    required this.ownerName,
+    required this.ownerEmail,
+    required this.via,
+    required this.added,
+  });
+
+  bool get viaDomain => via == 'domain';
+
+  factory MachineShare.fromJson(Map<String, dynamic> j) => MachineShare(
+    ownerName: j['ownerName'] as String? ?? '',
+    ownerEmail: j['ownerEmail'] as String? ?? '',
+    via: j['via'] == 'domain' ? 'domain' : 'email',
+    added: j['added'] == true,
+  );
+
+  /// Who shared it, as a person reads it: their name, or their address.
+  String get owner => ownerName.isNotEmpty ? ownerName : ownerEmail;
+}
+
 class Machine {
   final String machineId;
 
@@ -117,6 +148,9 @@ class Machine {
   final List<SharedHarness> sharedHarnesses;
   final String? status;
 
+  /// Set when another account shares this whole machine with this one; null for the account's own.
+  final MachineShare? machineShare;
+
   const Machine({
     required this.machineId,
     this.apiKey = '',
@@ -129,7 +163,12 @@ class Machine {
     this.ownerName,
     this.sharedHarnesses = const [],
     this.status,
+    this.machineShare,
   });
+
+  /// Another account's machine, shared with this one: this account is a guest there, with its own space and
+  /// harnesses; the machine is managed (renamed, removed, shared on) by its owner alone.
+  bool get isSharedMachine => machineShare != null;
 
   String get displayName => (name != null && name!.isNotEmpty)
       ? name!
@@ -172,6 +211,9 @@ class Machine {
         SharedHarness.fromJson(Map<String, dynamic>.from(row as Map)),
     ],
     status: j['status'] as String?,
+    machineShare: j['share'] is Map
+        ? MachineShare.fromJson(Map<String, dynamic>.from(j['share'] as Map))
+        : null,
   );
 
   Machine copyWith({String? name}) => Machine(
@@ -186,6 +228,7 @@ class Machine {
     ownerName: ownerName,
     sharedHarnesses: sharedHarnesses,
     status: status,
+    machineShare: machineShare,
   );
 }
 
@@ -287,6 +330,75 @@ class AgentOutputStats {
   @override
   int get hashCode =>
       Object.hash(linesAdded, linesRemoved, pullRequestsCreated, updatedAt);
+}
+
+/// What a cloud agent's frame says beyond an agent's usual one (CLI
+/// lib/cloudAgents.ts `CloudFrameBlock`): where it runs, where it is, what it
+/// is doing, its links at its maker (the session, a pull request) and how many
+/// messages its conversation holds, which the chat pane reads again when it moves.
+class AgentCloud {
+  final String place;
+
+  /// `starting`, `working`, `needs_input`, `idle`, `failed` or `stopped`.
+  final String state;
+  final String? activity;
+  final List<({String label, String url})> links;
+  final int messages;
+
+  const AgentCloud({
+    required this.place,
+    required this.state,
+    this.activity,
+    this.links = const [],
+    this.messages = 0,
+  });
+
+  bool get working => state == 'working' || state == 'starting';
+
+  /// The pull request among its links, for the footer; null with none.
+  ({String label, String url})? get pullRequest {
+    for (final link in links) {
+      if (RegExp(r'^https://github\.com/[^/]+/[^/]+/pull/\d+$')
+          .hasMatch(link.url))
+        return link;
+    }
+    return null;
+  }
+
+  static AgentCloud fromJson(Object? raw) {
+    final j = raw is Map ? raw : const {};
+    String? text(Object? value, int max) =>
+        value is String && value.trim().isNotEmpty
+        ? (value.length > max ? value.substring(0, max) : value)
+        : null;
+    final links = <({String label, String url})>[];
+    if (j['links'] is List) {
+      for (final link in j['links'] as List) {
+        if (link is! Map) continue;
+        final label = text(link['label'], 80), url = text(link['url'], 2048);
+        if (label != null && url != null && url.startsWith('https://')) {
+          links.add((label: label, url: url));
+        }
+      }
+    }
+    const states = {
+      'starting',
+      'working',
+      'needs_input',
+      'idle',
+      'failed',
+      'stopped',
+    };
+    final state = j['state'];
+    final messages = j['messages'];
+    return AgentCloud(
+      place: text(j['place'], 80) ?? 'The cloud',
+      state: state is String && states.contains(state) ? state : 'idle',
+      activity: text(j['activity'], 200),
+      links: links,
+      messages: messages is int && messages >= 0 ? messages : 0,
+    );
+  }
 }
 
 class Agent {
@@ -422,6 +534,13 @@ class Agent {
   /// or null for a general session.
   final String? namedAgent;
 
+  /// A cloud agent's harness (`location: 'cloud'`): it runs on its maker's
+  /// servers and has no terminal, so its pane is a chat pane. Null for every
+  /// agent that runs on a computer (docs/design/2026-10-11-cloud-agents.md).
+  final AgentCloud? cloud;
+
+  bool get isCloud => cloud != null;
+
   const Agent({
     this.activity,
     required this.id,
@@ -470,9 +589,28 @@ class Agent {
     this.permissionMode,
     this.bypassPermission,
     this.namedAgent,
+    this.cloud,
   });
 
   bool get isStopped => status == 'stopped';
+
+  /// Whether this is still the session a close reviewed as [reviewed]: the
+  /// same registration in the same conversation, or one that had no
+  /// conversation when it was reviewed and has bound its first since.
+  ///
+  /// Codex binds none for its first seconds, so a pane closed just after it
+  /// started was reviewed unbound and had bound one by the time the person
+  /// pressed Stop. Read as a change, that Stop was answered "The session
+  /// changed. Check it before closing." and the harness kept running (clean
+  /// macOS VM, Desktop 1.2.65, Codex 0.162.1, 2026-10-12). The close still
+  /// names the identity it reviewed, no conversation, and the daemon accepts
+  /// that only from a harness still starting — not one resumed, typed into a
+  /// terminal or older than a minute (cli `closeAgentService.ts` `matches`).
+  /// A different conversation once one was bound is always a change.
+  bool continuesSession(Agent reviewed) =>
+      createdAt == reviewed.createdAt &&
+      (sessionId == reviewed.sessionId ||
+          (reviewed.sessionId?.isEmpty ?? true));
 
   /// Exact saved-conversation resume is currently implemented for these engines.
   bool get canResumeConversation =>
@@ -639,6 +777,7 @@ class Agent {
           ? j['bypassPermission'] as bool
           : null,
       namedAgent: _safeNamedAgent(j['namedAgent']),
+      cloud: j['location'] == 'cloud' ? AgentCloud.fromJson(j['cloud']) : null,
     );
   }
 
@@ -697,6 +836,7 @@ class Agent {
     permissionMode: permissionMode,
     bypassPermission: bypassPermission,
     namedAgent: namedAgent,
+    cloud: cloud,
   );
 
   /// A mode id as `PERMISSION_MODES` spells them (`acceptEdits`, `readOnly`):

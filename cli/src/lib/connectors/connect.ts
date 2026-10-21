@@ -35,7 +35,7 @@ export function customCode(name: string, taken: Set<string>): string {
   return validateCode(code)
 }
 
-interface Flow { connector: string, state: 'pending' | 'connected' | 'failed', error: string, cancel: boolean }
+interface Flow { connector: string, state: 'pending' | 'connected' | 'failed', error: string, cancel: boolean, signIn: SignIn }
 
 /** Browser sign-ins in progress, each finishing on its own. */
 export class Flows {
@@ -45,7 +45,7 @@ export class Flows {
   async start(code: string, signIn: SignIn, label?: string): Promise<{ flow: string, authorize_url: string | null }> {
     const authorize = await signIn.prepare()
     const flow = randomBytes(12).toString('base64url')
-    const record: Flow = { connector: code, state: 'pending', error: '', cancel: false }
+    const record: Flow = { connector: code, state: 'pending', error: '', cancel: false, signIn }
     // One sign-in per service: a newer one replaces a forgotten tab.
     for (const other of this.items.values()) if (other.connector === code && other.state === 'pending') other.cancel = true
     this.items.set(flow, record)
@@ -63,6 +63,15 @@ export class Flows {
     const record = this.items.get(flow)
     if (!record) throw new ConnectorError('This sign-in has ended. Try again.')
     return { connector: record.connector, state: record.state, error: record.error }
+  }
+
+  /** A browser redirect caught on another device (the phone), for this computer's own sign-in. */
+  deliver(flow: string, url: string): { connector: string, state: string } {
+    const record = this.items.get(flow)
+    if (!record || record.state !== 'pending' || record.cancel) throw new ConnectorError('This sign-in has ended. Try again.')
+    if (!record.signIn.deliver) throw new ConnectorError('This service finishes its sign-in on its own.')
+    try { record.signIn.deliver(url) } catch { throw new ConnectorError('This is not the sign-in address. Try again.') }
+    return { connector: record.connector, state: record.state }
   }
 
   get pending(): boolean { return [...this.items.values()].some(flow => flow.state === 'pending') }
@@ -83,7 +92,7 @@ export function cards(vault: Store, offered: Record<string, GatewayRow>): { conn
   for (const [code, token] of Object.entries(tokens)) {
     if (code in known) continue
     const custom = token.source === 'custom'
-    result.push({ ...vault.status(code, code, token), description: token.mcp_entry?.url ?? '', auth: custom ? 'custom' : token.source ?? 'dcr', custom, reason: '' })
+    result.push({ ...vault.status(code, code, token), description: token.mcp_entry?.url ?? token.api_entry?.origin ?? '', auth: custom ? 'custom' : token.source ?? 'dcr', custom, reason: '' })
   }
   return { connections: result, signed_in: signedIn }
 }
@@ -101,6 +110,22 @@ export async function addCustom(vault: Store, flows: Flows, data: Record<string,
     return { connector: code, state: 'connected' }
   }
   return { connector: code, ...(await flows.start(code, new LocalSignIn(vault, url), name)) }
+}
+
+/**
+ * A key-only connection: a service's own API, called with a key by Harness's cloud agents through the bridge
+ * (`/<key>/<code>/api/…`, bridge.ts). Kept from every agent's MCP configuration (`transport: none`): the key is
+ * for the cloud agent the service starts, not a tool for the agents on this computer.
+ */
+export function addApiKey(vault: Store, data: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
+  const name = text(data.name, 64).trim()
+  const origin = new URL(cleanUrl(typeof data.url === 'string' ? data.url.trim() : data.url)).origin
+  const key = text(data.key, 4096).trim()
+  if (!name) throw new ConnectorError('Give the service a name.')
+  if (!key) throw new ConnectorError('Paste the API key.')
+  const code = customCode(name, new Set([...Object.keys(vault.tokens()), ...Object.keys(services())]))
+  finish(vault, code, { access_token: key, token_type: 'Bearer', api_entry: { origin }, transport: 'none', obtained_at: Math.floor(Date.now() / 1000) }, name, env)
+  return { connector: code, state: 'connected' }
 }
 
 export { CODE }

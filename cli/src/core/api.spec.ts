@@ -1,11 +1,22 @@
 import { describe, expect, it, vi } from 'vitest'
 import { projectDisplayName, type RegisteredSession } from '../lib/registry.js'
-import { CONVERSATIONS_OFF, ACCOUNT_BACKEND_OFF, AGENT_ACTIONS_OFF, createCoreApi, DAEMON_UNKNOWN, DELIVERIES_OFF, DEVICES_FALLBACKS, emptyPorts, LANE_OFF, LONG_ANSWERS, MODELS_OFF, STORE_OFF, MODELS_REQUESTS, MONITOR_OFF, OBSERVER_KEY_OFF, ORCHESTRATOR_FALLBACKS, RECAPS_FALLBACKS, resolveAgent, SHARING_FALLBACKS, MESSAGES_FALLBACKS, TERMINALS_OFF, WIFI_FALLBACKS, WIFI_OFF, type CoreApiDeps } from './api.js'
+import { CLOUD_DOWN, CLOUD_FALLBACKS, CONNECTOR_VAULT_OFF, CONVERSATIONS_OFF, ACCOUNT_BACKEND_OFF, accountIdentity, AGENT_ACTIONS_OFF, AGENT_CLEANUP_FALLBACKS, createCoreApi, DAEMON_UNKNOWN, DELIVERIES_OFF, DEVICES_FALLBACKS, emptyPorts, LANE_OFF, LONG_ANSWERS, MODELS_OFF, STORE_OFF, MODELS_REQUESTS, MONITOR_OFF, OBSERVER_KEY_OFF, ORCHESTRATOR_FALLBACKS, RECAPS_FALLBACKS, resolveAgent, SHARED_MACHINES_FALLBACKS, SHARED_MACHINES_OFF, SHARING_FALLBACKS, MESSAGES_FALLBACKS, TAB_KEY_OFF, TAB_RELAY_OFF, TERMINALS_OFF, WIFI_FALLBACKS, WIFI_OFF, type CoreApiDeps } from './api.js'
 import { FAIL, readFallback } from './serviceHost.js'
 
 const row = (agentId: string) => ({ agentId, sessionId: `s-${agentId}`, engine: 'claude', cwd: '/work/app' }) as RegisteredSession
 
 describe('the core API services stand on', () => {
+  it('exposes an optional native-turn observer without importing feature state', () => {
+    const nativeTurns = vi.fn(async () => null)
+    expect(createCoreApi({ ...coreDeps(), nativeTurns }).transcripts.nativeTurns).toBe(nativeTurns)
+    expect(createCoreApi(coreDeps()).transcripts.nativeTurns).toBeUndefined()
+  })
+  it('carries the existing native creation-status provider without inventing one for an older core', async () => {
+    const creationStatus = vi.fn(async (creationId: string) => ({ creationId, state: 'cancelled' as const }))
+    const core = createCoreApi({ ...coreDeps(), creationStatus })
+    expect(await core.agents.creationStatus!('creation-fixture-1234')).toEqual({ creationId: 'creation-fixture-1234', state: 'cancelled' })
+    expect(createCoreApi(coreDeps()).agents.creationStatus).toBeUndefined()
+  })
   it('gives a service with no lane of the core\'s nothing to seal with, and never its frame back in the clear', async () => {
     await expect(LANE_OFF.hello('m', 'pub')).rejects.toThrow(/no E2EE identity/)
     expect(await LANE_OFF.welcome('m', {})).toBe(false)
@@ -15,10 +26,32 @@ describe('the core API services stand on', () => {
     expect(LANE_OFF.drop('m')).toBeUndefined()
   })
 
+  it('gives a service with no tab key of the core\'s no signature or session, and never its frame back in the clear', async () => {
+    const link = { sharedTabId: 't', machineId: 'm', peerPub: 'p' }
+    await expect(TAB_KEY_OFF.publicKey()).rejects.toThrow(/no E2EE identity/)
+    await expect(TAB_KEY_OFF.signRoster('t', 1, '{}')).rejects.toThrow(/no E2EE identity/)
+    await expect(TAB_KEY_OFF.signKeyChange('t', 'p')).rejects.toThrow(/no E2EE identity/)
+    await expect(TAB_KEY_OFF.hello(link)).rejects.toThrow(/no E2EE identity/)
+    expect(await TAB_KEY_OFF.welcome(link, {})).toBe(false)
+    expect(await TAB_KEY_OFF.accept(link, {})).toEqual({ refused: true })
+    expect(await TAB_KEY_OFF.seal(link, { type: 'message' })).toEqual({ lost: true })
+    expect(await TAB_KEY_OFF.open(link, { type: 'message' })).toEqual({ lost: true })
+    expect(TAB_KEY_OFF.drop(link)).toBeUndefined()
+    expect(ACCOUNT_BACKEND_OFF.tabKey).toBe(TAB_KEY_OFF)
+  })
+
+  it('gives a service with no tab relay of the core\'s nothing opened and nothing sent', async () => {
+    await expect(TAB_RELAY_OFF.open('t')).resolves.toBeUndefined()
+    expect(await TAB_RELAY_OFF.send('t', 'm', {})).toBe(false)
+    expect(TAB_RELAY_OFF.close('t')).toBeUndefined()
+    expect(ACCOUNT_BACKEND_OFF.tabRelay).toBe(TAB_RELAY_OFF)
+  })
+
   it('gives a service with no delivery of the core\'s nothing to write, take back or hear', async () => {
     expect(DELIVERIES_OFF.deliver('a', 'hello', 'd1')).toBeUndefined()
     expect(DELIVERIES_OFF.cancelDelivery('d1')).toBe(false)
     expect(DELIVERIES_OFF.onDelivery(() => {})()).toBeUndefined()
+    expect(await DELIVERIES_OFF.leaseDeliveries('test', {})).toBe(false)
   })
 
   it('resolves an agent in a service\'s own copy as the registry does: by agent id, then session id', () => {
@@ -63,8 +96,11 @@ describe('the core API services stand on', () => {
       windows: vi.fn(),
       daemon: { command: 'harness', port: 18473, machineId: () => 'machine-1', autonomousEnv: 'prod' },
       observerKey: OBSERVER_KEY_OFF,
+      tabKey: TAB_KEY_OFF,
+      tabRelay: TAB_RELAY_OFF,
+      connectorVault: CONNECTOR_VAULT_OFF,
       observer: vi.fn(() => true),
-      turns: { send: vi.fn(), stop: vi.fn(), recent: vi.fn(async () => []), asks: vi.fn(async () => []), deliver: vi.fn(), cancelDelivery: vi.fn(() => true), onDelivery: vi.fn(() => () => {}) },
+      turns: { send: vi.fn(), stop: vi.fn(), recent: vi.fn(async () => []), asks: vi.fn(async () => []), deliver: vi.fn(), cancelDelivery: vi.fn(() => true), onDelivery: vi.fn(() => () => {}), leaseDeliveries: vi.fn(async () => false) },
       questions: { answer: vi.fn(), answerReviewed: vi.fn(async () => true) },
       machine: { id: vi.fn(() => 'machine-1'), computerId: vi.fn(() => 'computer-1'), name: vi.fn(() => 'Studio') },
       activityText: vi.fn(async () => 'Reading 3 files'),
@@ -89,11 +125,21 @@ describe('the core API services stand on', () => {
     expect(core.conversations).toBe(CONVERSATIONS_OFF)
     const conversations = { ...CONVERSATIONS_OFF }
     expect(createCoreApi({ ...deps, conversations }).conversations).toBe(conversations)
+    // The cloud agents' doors, only from a core that offers them.
+    expect(core.cloud).toBeUndefined()
+    const cloud = { publish: vi.fn(), ask: vi.fn(), unask: vi.fn() }
+    expect(createCoreApi({ ...deps, cloud }).cloud).toBe(cloud)
+    expect(core.agents.cloud).toBeUndefined()
+    const rows = [{ agentId: 'cloud_1' }] as RegisteredSession[]
+    expect(createCoreApi({ ...deps, cloudRows: () => rows }).agents.cloud!()).toBe(rows)
     expect(core.dataDir).toBe('/data')
     expect(await core.terminals.open({ argv: ['/bin/zsh'], cwd: '/work' })).toEqual({ ok: false, error: 'SERVICE_UNAVAILABLE' })
     const terminals = { ...TERMINALS_OFF, open: vi.fn(async () => ({ ok: true as const, agentId: 'shell' })), watch: TERMINALS_OFF.watch }
     expect(createCoreApi({ ...deps, terminals }).terminals).toBe(terminals)
     expect(core.agents.all().map((s) => s.agentId)).toEqual(['live', 'stopped'])
+    expect(await core.agents.stopped!('live')).toBe(false)
+    expect(await core.agents.stopped!('unknown')).toBe(false)
+    expect(await core.agents.stopped!('stopped')).toBe(true)
     expect(core.agents.live().map((s) => s.agentId)).toEqual(['live'])
     expect(core.agents.displayName).toBe(projectDisplayName)
     expect(core.transcripts.databaseHistory).toBe(deps.databaseHistory)
@@ -122,6 +168,8 @@ describe('the core API services stand on', () => {
     expect(core.account.backend).toBe(deps.backend)
     expect(core.account.onNotice).toBe(deps.onNotice)
     expect(core.account.observerKey).toBe(deps.observerKey)
+    expect(core.account.tabKey).toBe(deps.tabKey)
+    expect(core.account.tabRelay).toBe(deps.tabRelay)
     expect(core.clients.observer).toBe(deps.observer)
     // What a device or another machine asks of an agent here: the core's own handlers, as they are.
     expect(core.agents.runtimeProfile).toBe(deps.runtimeProfile)
@@ -137,6 +185,14 @@ describe('the core API services stand on', () => {
     // What the devices ask of the core: this computer, the sign-in, a pane's footer, the windows.
     expect(core.machine).toBe(deps.machine)
     expect(core.agents.activityText).toBe(deps.activityText)
+    // Agent Messages asks whether harnesses work; a core that was not given the reader reports none.
+    await expect(core.agents.activity(['a1'])).resolves.toEqual({})
+    const activity = vi.fn(async () => ({ a1: 'working' as const }))
+    await expect(createCoreApi({ ...deps, activity }).agents.activity(['a1'])).resolves.toEqual({ a1: 'working' })
+    // The same for the one-line summaries (ruling T2): none from a core that was not given the reader.
+    await expect(core.agents.summaries(['a1'])).resolves.toEqual({})
+    const summaries = vi.fn(async () => ({ a1: 'Fix the login' }))
+    await expect(createCoreApi({ ...deps, summaries }).agents.summaries(['a1'])).resolves.toEqual({ a1: 'Fix the login' })
     expect(core.account.signedIn).toBe(deps.signedIn)
     expect(core.account.environment).toBe(deps.environment)
     expect(core.account.machines).toBe(deps.machines)
@@ -144,6 +200,34 @@ describe('the core API services stand on', () => {
     expect(core.clients.devicesChanged).toBe(deps.devicesChanged)
     expect(core.clients.dialWatching).toBe(deps.dialWatching)
     expect(core.transcripts.lastTurn).toBe(deps.lastTurn)
+  })
+
+  it('closes for the agent cleanup only a harness another agent started, the conversation it is now, and keeps it', async () => {
+    // Whatever the cleanup asks, from its own process or this one, the core decides what it may close
+    // (services/agentCleanup.ts): a harness the person started is never one.
+    const started = { ...row('kid'), startedBy: 'agent' as const, registeredAt: Date.parse('2026-10-12T08:00:00Z') }
+    const mine = { ...row('mine'), registeredAt: 0 }
+    const deps = coreDeps()
+    const byAgent = vi.fn((agentId: string) => (agentId === 'kid' ? started : agentId === 'mine' ? mine : undefined))
+    const closeAgent = vi.fn(async () => ({ closed: true as const }))
+    const activityAt = vi.fn(async () => 1_234)
+    const core = createCoreApi({ ...deps, registry: { ...deps.registry, byAgent } as unknown as CoreApiDeps['registry'], closeAgent, activityAt })
+    expect(await core.agents.closeStarted!('kid', 'idle')).toEqual({ closed: true })
+    expect(closeAgent).toHaveBeenCalledWith({ agentId: 'kid', sessionId: 's-kid', createdAt: '2026-10-12T08:00:00.000Z', mode: 'idle' })
+    expect(await core.agents.closeStarted!('mine', 'now')).toEqual({ error: 'NOT_AGENT_STARTED' })
+    expect(await core.agents.closeStarted!('gone', 'now')).toEqual({ error: 'AGENT_CHANGED' })
+    expect(closeAgent).toHaveBeenCalledTimes(1)
+    expect(await core.agents.lastActivity!('kid')).toBe(1_234)
+    expect(activityAt).toHaveBeenCalledWith(started)
+    expect(await core.agents.lastActivity!('gone')).toBeNull()
+    // A core built without a close or a clock closes nothing and knows no time.
+    const bare = createCoreApi({ ...deps, registry: { ...deps.registry, byAgent } as unknown as CoreApiDeps['registry'] })
+    expect(await bare.agents.closeStarted!('kid', 'now')).toEqual({ error: 'UNSUPPORTED' })
+    expect(await bare.agents.lastActivity!('kid')).toBeNull()
+  })
+
+  it('tells the agent cleanup nothing while it is off: every harness is left open, as before it', () => {
+    expect(AGENT_CLEANUP_FALLBACKS).toEqual({ closed: undefined, typed: undefined, stop: undefined })
   })
 
   it('lets the recaps send a turn\'s cards and recaps, and nothing else, down those doors', () => {
@@ -245,8 +329,13 @@ describe('the core API services stand on', () => {
     expect(MESSAGES_FALLBACKS.canWrite).toBe(false)
   })
 
+  it('falls back, when cloud agents fail, to refusing each call with a reason a person reads', () => {
+    for (const fallback of Object.values(CLOUD_FALLBACKS)) expect(readFallback(fallback)).toEqual({ deferred: true, value: CLOUD_DOWN })
+    expect(CLOUD_DOWN.detail).toContain('Cloud agents are not running here')
+  })
+
   it('starts with every port empty: a service fills its own when it starts', () => {
-    expect(emptyPorts()).toEqual({ usage: null, store: null, search: null, viewers: null, models: null, workspaces: null, messages: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null })
+    expect(emptyPorts()).toEqual({ usage: null, store: null, search: null, viewers: null, models: null, workspaces: null, messages: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null, agentCleanup: null, cloud: null, superTabs: null, sharedMachines: null })
     expect(emptyPorts()).not.toBe(emptyPorts())
   })
 
@@ -284,9 +373,32 @@ describe('the core API services stand on', () => {
     expect(DAEMON_UNKNOWN.machineId()).toBe('')
   })
 
-  it('gives a service that reads no backend an unavailable answer, and no notice to hear', async () => {
+  it('gives a service that reads no backend an unavailable answer, no account and no notice to hear', async () => {
     expect(await ACCOUNT_BACKEND_OFF.backend('GET', '/api/agent-messages')).toEqual({ status: 503, body: { error: 'SERVICE_UNAVAILABLE' } })
+    expect(await ACCOUNT_BACKEND_OFF.identity()).toBeNull()
     expect(ACCOUNT_BACKEND_OFF.onNotice(() => {})()).toBeUndefined()
+  })
+
+  it('reads the account signed in here through the core\'s sign-in, once it is known, and again until it is', async () => {
+    const me = (user: unknown, status = 200) => ({ status, body: { success: status === 200, data: { user } } })
+    const backend = vi.fn<CoreApiDeps['backend']>()
+      .mockRejectedValueOnce(new Error('down'))
+      .mockResolvedValueOnce({ status: 502, body: { error: 'BACKEND_UNREACHABLE' } })
+      .mockResolvedValueOnce(me({ id: 'u-alice' }))
+      .mockResolvedValueOnce(me({ id: '', email: 'alice@x.io' }))
+      .mockResolvedValueOnce(me({ id: 'u-alice', email: '' }))
+      .mockResolvedValueOnce({ status: 200, body: { success: true } })
+      .mockResolvedValueOnce(me({ id: 'u-alice', email: 'alice@x.io', name: 'Alice' }))
+    const identity = accountIdentity(backend)
+    for (let i = 0; i < 6; i++) expect(await identity()).toBeNull()
+    expect(await identity()).toEqual({ accountId: 'u-alice', email: 'alice@x.io' })
+    // Known now: a sign-in to another account starts a new core, so it is never read again.
+    expect(await identity()).toEqual({ accountId: 'u-alice', email: 'alice@x.io' })
+    expect(backend).toHaveBeenCalledTimes(7)
+    expect(backend).toHaveBeenCalledWith('GET', '/api/auth/me')
+    // The core's own: createCoreApi reads it through the backend it is handed.
+    const core = createCoreApi({ ...coreDeps(), backend: vi.fn(async () => me({ id: 'u-bob', email: 'bob@y.io' })) })
+    expect(await core.account.identity()).toEqual({ accountId: 'u-bob', email: 'bob@y.io' })
   })
 
   it('watches no terminal and signs nothing for a service without the core\'s terminals or key', async () => {
@@ -297,6 +409,8 @@ describe('the core API services stand on', () => {
     expect(TERMINALS_OFF.watch.onOutput(() => {})()).toBeUndefined()
     await expect(OBSERVER_KEY_OFF.publicKey()).rejects.toThrow('no E2EE identity')
     await expect(OBSERVER_KEY_OFF.signWelcome('m', 's', 'p', 'e')).rejects.toThrow('no E2EE identity')
+    await expect(CONNECTOR_VAULT_OFF.seal('{}')).rejects.toThrow('no E2EE identity')
+    expect(await CONNECTOR_VAULT_OFF.open({})).toBeNull()
     expect(SHARING_FALLBACKS).toEqual({ observer: undefined, linkDown: undefined, stop: undefined })
   })
 
@@ -307,5 +421,13 @@ describe('the core API services stand on', () => {
   it('answers the monitor\'s fallbacks while it is off: no readings, nothing measured to forget', async () => {
     await expect(MONITOR_OFF.resources()).rejects.toThrow('the monitor service is unavailable')
     expect(await MONITOR_OFF.storage([], true)).toEqual(new Map())
+  })
+
+  it('answers a guest\'s New Harness while shared machines is off: guest access unavailable, in words, and nothing to stop', async () => {
+    expect(await SHARED_MACHINES_OFF.guestLaunch({ email: 'kim@acme.io', engine: 'claude', bypassPermission: true }))
+      .toEqual({ ok: false, error: 'GUEST_UNAVAILABLE', detail: expect.stringMatching(/Sharing isn't running/) })
+    expect(SHARED_MACHINES_OFF.stop()).toBeUndefined()
+    expect(SHARED_MACHINES_FALLBACKS.stop).toBeUndefined()
+    expect(LONG_ANSWERS.sharedMachines).toEqual({ guestLaunch: 2 * 60_000, shared_machines: 11 * 60_000 })
   })
 })
