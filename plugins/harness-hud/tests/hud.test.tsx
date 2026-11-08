@@ -223,3 +223,19 @@ test('a rejected TaskUpdate leaves the todo; /clear and /resume start the lists 
     await cleared.unmount()
   }
 })
+
+test('burn follows the engine start, which /clear moves', async ($, on) => {
+  const hour = 3_600_000
+  const clock = mock.clock(on, { now: 2 * hour })
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  // The engine's session started over at a /clear one hour in; its total is $6.
+  on('session.usage', () => ({ value: { startedAt: hour, context: { window: 200_000 }, rateLimits: [], cost: { usd: 6 } } }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: [], cost: { usd: 6 }, changed: ['cost'] })
+  expect(clock.now()).toBe(2 * hour)
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /\$6\.00\/h/ })).toBeDefined()
+  await pane.unmount()
+})

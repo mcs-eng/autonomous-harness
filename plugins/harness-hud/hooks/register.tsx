@@ -366,6 +366,9 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     const ran = await next(e)
     await applyUsage($, e, e.changed.includes('context'))
+    // The engine's own start, read fresh each time: /clear starts it over, and the call is free.
+    const { startedAt } = await $.session.usage()
+    await update($, meter, m => (m.startedAt === startedAt ? m : { ...m, startedAt }))
     if (e.changed.includes('context')) await refreshBreakdown($)
     return ran
   })
