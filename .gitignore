@@ -44,6 +44,7 @@ AGENTS.local.md
 
 .cursor/
 .cursorignore
+!.cursor/rules/public-repo.mdc
 .windsurf/
 .codeium/
 .continue/

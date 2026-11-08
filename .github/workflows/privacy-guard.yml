@@ -1,0 +1,73 @@
+name: Privacy guard
+
+# Scans the pull request title, body, every commit message in base..head, and
+# the added lines of the diff. The term list is the PRIVATE_TERMS repository
+# secret (newline- or comma-separated). It is not stored in this repository.
+# A match fails the job and prints only the location and a masked length,
+# never the term.
+#
+# Trust model: this runs on pull_request_target, so the workflow file and the
+# scanner both come from the base branch. The pull request's commits are
+# fetched as data and only read by git; no code from the pull request is
+# checked out or run, so a pull request cannot edit the scanner or this
+# workflow to print the secret. Do not add a step that checks out or runs
+# pull request code here.
+#
+# Draft pull requests are included. opened, edited, and synchronize run while
+# a pull request is still a draft; ready_for_review runs when it is marked
+# ready. This workflow does not skip drafts.
+#
+# Fork pull requests do not get the term list. Their logs are public, and the
+# reported location of a match would let an outsider confirm a guessed term.
+# The scan job only runs for same-repository pull requests, so a fork run
+# never receives the secret at all (not even for log masking). Forks get the
+# fork-notice job, which warns and passes. An unset or empty PRIVATE_TERMS value warns and passes too.
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacy-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fork-notice:
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "::warning::Fork pull request; privacy scan skipped (the term list is not shared with forks)"
+  scan:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # pull_request_target checks out the base branch, which is trusted.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch the pull request commits as data
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags "$REPO_URL" "$BASE_REF"
+          git fetch --no-tags "$REPO_URL" "pull/${PR_NUMBER}/head"
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+      - name: Scan for private terms
+        env:
+          PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/privacy-guard.py --pull-request

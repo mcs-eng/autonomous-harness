@@ -160,3 +160,16 @@ that starts a process or testing on Windows.
 - Prove it by recording the windows in the person's session on the signed build; SSH cannot see windows.
 - On a Windows problem, read how the Mac path solves it and do the same the Windows way. A new Windows mistake goes
   into the rules with a test.
+
+## Public repository
+
+This repository is public. Do not name machines, task boards, internal repositories, users, network
+names, or the agents and tools that did the work in code, commit messages, or pull request text. Use
+generic wording such as "a Windows 11 host". Test evidence describes the operating system and
+runtime only.
+
+The term list is never stored here. Hosted scans read the `PRIVATE_TERMS` Actions secret, and fork
+pull requests get no term list. Install the local commit check with
+`git config core.hooksPath scripts/hooks`; it reads `$PRIVATE_TERMS_FILE`,
+`~/.config/privacy-guard/private-terms.txt`, or `~/.config/private-terms.txt`, and does nothing when
+none exists.

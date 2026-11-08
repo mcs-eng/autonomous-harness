@@ -312,3 +312,13 @@ understand it. A pull request that adds one needs to argue for it.
 tests only — never its end-to-end path. Its unit tests replay a **recorded** turn; do not replace
 those fixtures with hand-written JSON. Two real bugs in that mapper were invisible to invented
 fixtures and obvious the moment a real turn was replayed.
+
+## Private terms stay out of the repository
+
+This repository is public. The guard in `scripts/privacy-guard.py` rejects private terms in pull
+request text, commit messages, paths, and changed files, and CI runs it on every pull request. The
+term list is never committed. Hosted runs read the `PRIVATE_TERMS` Actions secret.
+
+Install the local commit check with `git config core.hooksPath scripts/hooks`; it reads
+`$PRIVATE_TERMS_FILE`, `~/.config/privacy-guard/private-terms.txt`, or
+`~/.config/private-terms.txt`, and does nothing when none exists.
