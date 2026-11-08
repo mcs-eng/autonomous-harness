@@ -120,7 +120,7 @@ class AgentPicker extends StatefulWidget {
   static const recentLength = 6;
 
   /// The engines that fill the list while there is nothing of your own on it.
-  static const quickAgents = ['claude', 'codex', 'opencode'];
+  static const quickAgents = ['claude', 'codex'];
 
   /// The bar's and the panel's corner.
   static const radius = 24.0;
