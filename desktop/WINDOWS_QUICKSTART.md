@@ -729,6 +729,16 @@ into them); `launch-argv` keeps upstream's override records, whose former call
 order its spec pins on purpose.
 This is a source change; it does not update an installed desktop or daemon.
 
+## Footer subscription figures without HOME
+
+The footer's Claude and Codex remaining-allowance figures read each CLI's token
+from the home folder. That lookup now uses `USERPROFILE` when `HOME` is absent;
+a set `HOME`, even an empty one, still wins as before. Windows sets only
+`USERPROFILE`, so an app started from Explorer or the Start menu found no token,
+counted both accounts as signed out and drew no figures. Upstream made the same
+fix in its Windows port and later moved usage reading into the CLI; an upstream
+sync supersedes this change.
+
 ## Harness HUD for Claude Code
 
 This fork adds `plugins/harness-hud`, a Claude Code mod (a hooks module) listed in the
