@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyTaskResult, burn, clean, pace, parseFleet, parseVerdict, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
+import { applyTaskResult, burn, clean, forecastLabel, pace, parseFleet, parseVerdict, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
 
 // Fictional fixture: no real machine, folder or person.
 const PS = JSON.stringify({
@@ -29,6 +29,12 @@ test('helpers forecast, parse and label', async () => {
   // Two growth samples, 10k and 20k: the median is 15k, so 60k of room is 4 turns.
   expect(turnsLeft([10_000, 20_000, 40_000], 40_000, 100_000)).toBe(4)
   expect(turnsLeft([10_000], 10_000, 130_000)).toBe(undefined)
+  // No compaction point (auto-compaction off): the forecast speaks of a full window, never compaction.
+  expect(turnsLeft([175_000, 185_000, 195_000], 195_000, 200_000)).toBe(0)
+  expect(forecastLabel(0, false)).toBe('  context nearly full')
+  expect(forecastLabel(3, false)).toBe('  ~3 turns to full')
+  expect(forecastLabel(0, true)).toBe('  compacting soon')
+  expect(forecastLabel(1, true)).toBe('  ~1 turn to compact')
   expect(turnsLeft([30_000, 20_000], 20_000, 130_000)).toBe(undefined)
 
   const hour = 3_600_000

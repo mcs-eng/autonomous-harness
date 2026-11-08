@@ -55,6 +55,16 @@ export function level(percent: number | undefined): 'success' | 'warning' | 'err
 }
 
 /**
+ * The forecast in words: toward compaction when the engine reported a compaction point, else
+ * toward a full window, which is all that can be said when auto-compaction is off or unknown.
+ */
+export function forecastLabel(left: number | undefined, hasCompactPoint: boolean): string {
+  if (left === undefined) return ''
+  if (left === 0) return hasCompactPoint ? '  compacting soon' : '  context nearly full'
+  return `  ~${left} turn${left === 1 ? '' : 's'} to ${hasCompactPoint ? 'compact' : 'full'}`
+}
+
+/**
  * Turns left before the context reaches `limit`, from the median growth of the
  * last few turns. Undefined when there is not enough history or no growth.
  */

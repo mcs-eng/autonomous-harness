@@ -23,6 +23,7 @@ import {
   toolName,
   toolStats,
   turnsLeft,
+  forecastLabel,
 } from './hud'
 
 const PANE = 'harness-hud'
@@ -180,7 +181,7 @@ async function drawHud($: $, Box: any, Text: any, cols: number, isWorking: boole
       <Text color={level(pct)} bold> {pct === undefined ? '--' : `${pct}%`}</Text>
       <Text dimColor> {tokens(me.tokens)}/{tokens(me.window)}</Text>
       {left !== undefined && (
-        <Text color={left <= 3 ? 'warning' : 'subtle'}>{left === 0 ? '  compacting soon' : `  ~${left} turn${left === 1 ? '' : 's'} to ${me.compactAt ? 'compact' : 'full'}`}</Text>
+        <Text color={left <= 3 ? 'warning' : 'subtle'}>{forecastLabel(left, me.compactAt !== undefined)}</Text>
       )}
       {me.limits.map(l => {
         const p = pace(l, t)
@@ -485,7 +486,7 @@ export const register: Register = on => {
         <Text dimColor wrap="truncate-end">
           {tokens(me.tokens)} of {tokens(me.window)}
           {me.compactAt !== undefined ? ` · compacts at ${tokens(me.compactAt)}` : ''}
-          {left !== undefined ? ` · ~${left} turns left` : ''}
+          {left !== undefined ? ` ·${forecastLabel(left, me.compactAt !== undefined).slice(1)}` : ''}
         </Text>
         {me.history.length > 1 && (
           <Text>
