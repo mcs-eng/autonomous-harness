@@ -185,7 +185,7 @@ void main() {
       );
       expect(
         rows.indexOf(kTerminalEngine),
-        lessThan(rows.indexOf('opencode')),
+        lessThan(rows.indexOf('codex')),
         reason: 'every machine has a shell: it comes before the engines this one lacks',
       );
       expect(
