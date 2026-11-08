@@ -728,3 +728,13 @@ are re-recorded on hosted Linux CI (a Windows recording writes Windows paths
 into them); `launch-argv` keeps upstream's override records, whose former call
 order its spec pins on purpose.
 This is a source change; it does not update an installed desktop or daemon.
+
+## Harness HUD for Claude Code
+
+This fork adds `plugins/harness-hud`, a Claude Code mod (a hooks module) listed in the
+repository's plugin marketplace beside `harness`. It draws a band above the Claude Code
+prompt with the context fill and a turns-to-compaction forecast, rate-limit pace, cost,
+running tools, subagents and todos, and a Harness line with the workspace's
+`.harness/verdict.json` and the other harnesses from `harness ps --json`. `/hud` opens a
+detail pane. It changes nothing in the app, the CLI or the daemon. The plugin's
+[README](../plugins/harness-hud/README.md) has the install lines and the checks.
