@@ -12,6 +12,13 @@
       "description": "Start, wait for, read and close other coding agents through Harness: the harness skill and Harness's MCP server.",
       "category": "development",
       "tags": ["agents", "parallel", "codex", "claude-code", "orchestration"]
+    },
+    {
+      "name": "harness-hud",
+      "source": "./plugins/harness-hud",
+      "description": "A heads-up display above the Claude Code prompt: context and compaction forecast, rate-limit pace, cost, live tools, agents and todos, the harness verdict and the other harnesses on this machine.",
+      "category": "development",
+      "tags": ["hud", "statusline", "context", "claude-code"]
     }
   ]
 }

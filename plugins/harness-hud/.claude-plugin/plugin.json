@@ -1,0 +1,9 @@
+{
+  "name": "harness-hud",
+  "version": "0.1.0",
+  "description": "A heads-up display above the prompt: context and compaction forecast, rate-limit pace, cost, live tools, agents and todos, plus the OpenHarness verdict and the other harnesses on this machine.",
+  "types": "./types/index.d.ts",
+  "author": { "name": "mcs-eng" },
+  "license": "MIT",
+  "keywords": ["hud", "statusline", "context", "harness"]
+}

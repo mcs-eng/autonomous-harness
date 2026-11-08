@@ -97,6 +97,43 @@ void main() {
     },
   );
 
+  test(
+    'finds both tokens under USERPROFILE when HOME is unset, as on Windows',
+    () async {
+      final profile = Directory.systemTemp.createTempSync('usage-profile-');
+      addTearDown(() => profile.deleteSync(recursive: true));
+      Directory('${profile.path}/.claude').createSync();
+      File('${profile.path}/.claude/.credentials.json').writeAsStringSync(
+        '{"claudeAiOauth":{"accessToken":"claude-token","expiresAt":4102444800000}}',
+      );
+      Directory('${profile.path}/.codex').createSync();
+      File('${profile.path}/.codex/auth.json').writeAsStringSync(
+        jsonEncode({
+          'tokens': {'access_token': 'codex-token'},
+        }),
+      );
+      final credentials = UsageCredentials(
+        environment: {'USERPROFILE': profile.path},
+        // No Keychain answers, so the file is what is read on every platform.
+        runProcess: (executable, args) async =>
+            ProcessResult(0, 44, '', 'not found'),
+      );
+
+      expect((await credentials.claude())?.accessToken, 'claude-token');
+      expect((await credentials.codex())?.accessToken, 'codex-token');
+
+      // HOME, whenever it is set, still wins, even empty: only its absence falls back.
+      for (final setHome in ['${profile.path}/elsewhere', '']) {
+        final withHome = UsageCredentials(
+          environment: {'HOME': setHome, 'USERPROFILE': profile.path},
+          runProcess: (executable, args) async =>
+              ProcessResult(0, 44, '', 'not found'),
+        );
+        expect(await withHome.codex(), isNull);
+      }
+    },
+  );
+
   test('falls back to the OS username when USER is unset, and to Claude Code\'s placeholder when it is unusable', () {
     expect(
       UsageCredentials.keychainAccount(const {}, username: 'macbookpro'),
