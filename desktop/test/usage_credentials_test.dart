@@ -121,6 +121,16 @@ void main() {
 
       expect((await credentials.claude())?.accessToken, 'claude-token');
       expect((await credentials.codex())?.accessToken, 'codex-token');
+
+      // HOME, whenever it is set, still wins, even empty: only its absence falls back.
+      for (final setHome in ['${profile.path}/elsewhere', '']) {
+        final withHome = UsageCredentials(
+          environment: {'HOME': setHome, 'USERPROFILE': profile.path},
+          runProcess: (executable, args) async =>
+              ProcessResult(0, 44, '', 'not found'),
+        );
+        expect(await withHome.codex(), isNull);
+      }
     },
   );
 
