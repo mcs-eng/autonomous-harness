@@ -67,7 +67,8 @@ export function turnsLeft(history: readonly number[], current: number | undefine
   }
   if (deltas.length === 0) return undefined
   deltas.sort((a, b) => a - b)
-  const median = deltas[Math.floor(deltas.length / 2)] ?? 0
+  const mid = Math.floor(deltas.length / 2)
+  const median = deltas.length % 2 === 1 ? (deltas[mid] ?? 0) : ((deltas[mid - 1] ?? 0) + (deltas[mid] ?? 0)) / 2
   if (median <= 0) return undefined
   return Math.max(0, Math.floor((limit - current) / median))
 }
@@ -89,14 +90,26 @@ export function limitLabel(kind: string): string {
 }
 
 /** Dollars per hour since the session started; undefined in its first minutes. */
-export function burn(meter: Meter, now: number): number | undefined {
-  const hours = (now - meter.startedAt) / HOUR
-  if (meter.usd === undefined || hours < 0.05) return undefined
-  return meter.usd / hours
+/**
+ * What this session has spent since it started or was last cleared. The engine's total may or may
+ * not start over at /clear, so a total below the baseline taken there is read as already reset.
+ */
+export function spent(meter: Meter): number | undefined {
+  if (meter.usd === undefined) return undefined
+  const base = meter.usdBase ?? 0
+  return meter.usd >= base ? meter.usd - base : meter.usd
 }
 
-// C0 and C1 controls (ESC among them) and the bidi overrides, which could restyle or reorder the terminal.
-const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+export function burn(meter: Meter, now: number): number | undefined {
+  const hours = (now - meter.startedAt) / HOUR
+  const usd = spent(meter)
+  if (usd === undefined || hours < 0.05) return undefined
+  return usd / hours
+}
+
+// C0 and C1 controls (ESC among them) and every bidi control (the Arabic letter mark, the LRM/RLM
+// marks, the embeddings, overrides and isolates), which could restyle or reorder the terminal.
+const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
 
 /** Text from outside the mod (files, tools, other programs), safe to draw: no control characters, capped. */
 export function clean(text: string, max = 200): string {

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyTaskUpdate, clean, pace, parseFleet, parseVerdict, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
+import { applyTaskUpdate, burn, clean, pace, parseFleet, parseVerdict, spent, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
 
 // Fictional fixture: no real machine, folder or person.
 const PS = JSON.stringify({
@@ -26,6 +26,8 @@ const VERDICT = JSON.stringify({
 
 test('helpers forecast, parse and label', async () => {
   expect(turnsLeft([10_000, 20_000, 30_000], 30_000, 130_000)).toBe(10)
+  // Two growth samples, 10k and 20k: the median is 15k, so 60k of room is 4 turns.
+  expect(turnsLeft([10_000, 20_000, 40_000], 40_000, 100_000)).toBe(4)
   expect(turnsLeft([10_000], 10_000, 130_000)).toBe(undefined)
   expect(turnsLeft([30_000, 20_000], 20_000, 130_000)).toBe(undefined)
 
@@ -57,6 +59,7 @@ test('helpers forecast, parse and label', async () => {
 
   // Outside text loses escapes and bidi overrides before it is drawn.
   expect(clean('a\u001b[2Jb\u202ec\u0007')).toBe('a[2Jbc')
+  expect(clean('ready\u061c-123')).toBe('ready-123')
   expect(clean('x'.repeat(300), 10)).toBe(`${'x'.repeat(9)}…`)
   expect(parseVerdict(JSON.stringify({ ready: true, summary: 'ok\u001b]0;title\u0007' }))?.summary).toBe('ok]0;title')
 })
@@ -176,4 +179,39 @@ test('the band yields when switched off', async ($, on) => {
     expect((await drawn.find({ type: 'Text' }))?.text).toBe('engine')
     await drawn.unmount()
   }
+})
+
+test('cost and burn count from a /clear, whether or not the engine total starts over', async () => {
+  const hour = 3_600_000
+  const meter = { model: '', window: 1, history: [], limits: [], startedAt: hour, usd: 5, usdBase: 4 }
+  expect(spent(meter)).toBe(1)
+  expect(burn(meter, 2 * hour)).toBe(1)
+  // The engine reset its total at the clear: what it reports is all since then.
+  expect(spent({ ...meter, usd: 0.5 })).toBe(0.5)
+})
+
+test('a rejected TaskUpdate leaves the todo, and /clear starts the lists over', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.list', () => ({ value: [] }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [], cost: { usd: 2 } } }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('tool.call', (_, e) =>
+    e.tool === 'TaskCreate'
+      ? { result: { task: { id: '1', subject: 'Ship it' } } }
+      : { result: { success: false, taskId: '1', updatedFields: [], error: 'update rejected' } },
+  )
+
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Ship it', description: 'd' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /Todos {2}0\/1/ })).toBeDefined()
+  await pane.unmount()
+
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  const cleared = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await cleared.find({ type: 'Text', text: /No tool calls yet/ })).toBeDefined()
+  expect(await cleared.find({ type: 'Text', text: /Todos/ })).toBe(undefined)
+  await cleared.unmount()
 })

@@ -8,6 +8,7 @@ import {
   bar,
   burn,
   clean,
+  spent,
   duration,
   fleetSummary,
   level,
@@ -198,7 +199,7 @@ async function drawHud($: $, Box: any, Text: any, cols: number, isWorking: boole
       {me.usd !== undefined && (
         <Text>
           <Text dimColor>  {me.limits.length > 0 ? 'api≈' : ''}</Text>
-          <Text dimColor={me.limits.length > 0}>{money(me.usd)}</Text>
+          <Text dimColor={me.limits.length > 0}>{money(spent(me))}</Text>
           {rate !== undefined && <Text dimColor> {money(rate)}/h</Text>}
         </Text>
       )}
@@ -330,10 +331,23 @@ export const register: Register = on => {
     return ran
   })
 
-  on('session.end', ($, e, next) => {
-    for (const t of timers.splice(0)) t.cancel()
-    return next(e)
-  })
+  on('session.end', async ($, e, next) => {
+    if (e.reason !== 'clear') {
+      for (const t of timers.splice(0)) t.cancel()
+      return next(e)
+    }
+    // /clear ends the conversation with no session.start after it: keep the timers, and start the
+    // session's own figures over from the moment the engine now counts from.
+    const ran = await next(e)
+    const clearedAt = await $.clock.now()
+    const usage = await $.session.usage()
+    await update($, meter, m => ({ ...m, startedAt: clearedAt, usdBase: usage.cost?.usd, history: [] }))
+    await update($, tools, () => [])
+    await update($, todos, () => [])
+    await applyUsage($, usage, false)
+    await refreshAgents($)
+    return ran
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'hud' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
@@ -400,7 +414,10 @@ export const register: Register = on => {
           await update($, todos, list => [...list.filter(t => t.id !== todo.id), todo])
         }
       } else if (tool === 'TaskUpdate') {
-        await update($, todos, list => applyTaskUpdate(list, e))
+        // A rejected update answers `success: false` without being an error result.
+        if ((ran.result as { success?: unknown } | undefined)?.success !== false) {
+          await update($, todos, list => applyTaskUpdate(list, e))
+        }
       } else if (tool === 'Agent' || tool === 'Task') {
         await refreshAgents($)
       }
@@ -506,7 +523,7 @@ export const register: Register = on => {
           )
         })}
         <Text dimColor>
-          {me.usd !== undefined ? `${money(me.usd)} this session` : 'No cost ledger'}
+          {me.usd !== undefined ? `${money(spent(me))} this session` : 'No cost ledger'}
           {rate !== undefined ? ` · ${money(rate)}/h` : ''}
           {me.startedAt > 0 ? ` · ${duration(t - me.startedAt)} elapsed` : ''}
         </Text>
