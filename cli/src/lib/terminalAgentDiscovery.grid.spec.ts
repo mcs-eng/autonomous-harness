@@ -129,6 +129,25 @@ describe('grid assignment on the live terminal discovery path', () => {
     expect(probe.agents[0].gridProcess).toBeUndefined()
   })
 
+  it("reads a bare-title Codex's launcher for model evidence only when the launcher's own argv is faithful", async () => {
+    // The child's boundaries say nothing about its parent's: the launcher's flattened text could be prompt text.
+    const command = 'zsh -lic . /d/launch/1.sh harness-engine /work /bin/codex -c model_providers.grid.base_url=https://grid.example/relay/v1 -m chosen'
+    const launcher = (faithful: boolean): ProcessRow => ({ ...row(10, 1, 'zsh', command), ...(faithful ? { nativeArgv: command.split(' ') } : {}) })
+    const child: ProcessRow = { ...row(30, 10, 'codex', 'codex'), nativeArgv: ['codex'] }
+    readProcessEnv.mockResolvedValue({})
+    const probe = async (rows: ProcessRow[]) => {
+      processRows.mockResolvedValue(rows)
+      const result = await probeTerminalAgents([backendWith('tmux', 'tmux', [{ runtime: TMUX_RUNTIME, rootPid: 10, cwd: '/work' }])], ['tmux'], 999)
+      expect(result.agents.map((agent) => agent.engine)).toEqual(['codex'])
+      return result.agents[0]
+    }
+    const flattened = await probe([launcher(false), child])
+    expect(flattened.gridProcess).toBeUndefined()
+    expect(flattened.grid).toBeUndefined()
+    const faithful = await probe([launcher(true), child])
+    expect(faithful.gridProcess?.args).toContain('model_providers.grid.base_url=https://grid.example/relay/v1')
+  })
+
   it('does not probe when the process table is unavailable', async () => {
     processRows.mockResolvedValue(null)
     const probe = await probeTerminalAgents(

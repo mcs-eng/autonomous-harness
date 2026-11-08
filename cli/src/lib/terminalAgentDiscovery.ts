@@ -285,8 +285,13 @@ export async function probeTerminalAgents(
     // Codex's provider flags and -m are read only from boundary-faithful argv, as exact option tokens:
     // flattened `ps` text can hold a prompt with flag-shaped words. Without them a Codex grid stays unknown.
     const row = enrichedRows.find((candidate) => sameProcessIdentity(candidate, agent.processIdentity))
-    const codexBlind = agent.engine === 'codex' && !agent.argsBoundaryFaithful
     const launched = row ? launchArgs(enrichedRows, row) : agent.args
+    // The faithfulness that counts is that of the row whose argv is read: the parent launcher's when
+    // launchArgs read through to it, since a bare-title child's own boundaries say nothing about it.
+    const source = !row ? undefined : launched === row.args ? row
+      : enrichedRows.find((candidate) => candidate.pid === row.parentPid)
+    const faithful = row ? !!source && processArgvIsBoundaryFaithful(source) : agent.argsBoundaryFaithful
+    const codexBlind = agent.engine === 'codex' && !faithful
     const evidence = gridAssignmentEvidence('', agent.engine, await readProcessEnv(agent.processIdentity),
       codexBlind ? '' : gridModelEvidenceArgs(agent.engine, launched))
     if (evidence) agent.gridProcess = evidence
