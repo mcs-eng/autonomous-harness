@@ -32,9 +32,10 @@ class AccountSection extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // The guest desk is what these labels call local mode.
                 SettingRow(
-                  title: 'Not signed in',
-                  detail: 'Sign in to reach your other machines',
+                  title: 'Local mode',
+                  detail: 'Not signed in. Sign in to reach your other machines',
                   control: FilledButton(
                     key: const Key('settings-sign-in-button'),
                     // Straight back to the desk once the account lands.

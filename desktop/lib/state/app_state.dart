@@ -9577,6 +9577,22 @@ class AppNotifier extends ChangeNotifier {
     loginBrowserError = null;
   }
 
+  /// The login screen's way back to this computer without an account — the
+  /// guest desk, which these labels call local mode.
+  ///
+  /// A desktop window meets the login screen only when a sign-in was cancelled
+  /// or failed, or when the CLI could not answer the startup check. This asks
+  /// the CLI again and continues as a launch does: signed out, onto the guest
+  /// desk; signed in after all (a `harness login` in a terminal meanwhile),
+  /// onto the account's.
+  Future<void> continueWithoutAccount() async {
+    if (_disposed || viewer != null || signingIn || signingOut) return;
+    _invalidateAuthWork();
+    _lastError = null;
+    _lastErrorRetryable = true;
+    await _continueAfterEnvironmentReady();
+  }
+
   /// Reopens the current authorization URL without creating another login.
   Future<void> openLoginBrowser() async {
     final url = pendingAuthorizeUrl;

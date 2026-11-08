@@ -102,6 +102,7 @@ class SignInStep extends StatelessWidget {
     this.signOutError,
     this.onRetrySignOut,
     this.recovery,
+    this.onContinueWithoutAccount,
     this.readyLine = (lead: 'Sign in to continue.', name: null, rest: ''),
   });
 
@@ -133,6 +134,10 @@ class SignInStep extends StatelessWidget {
   final String? signOutError;
   final VoidCallback? onRetrySignOut;
   final Widget? recovery;
+
+  /// The quiet way back to this computer's desk without an account. Null where
+  /// there is no desk to go back to, or where this page was opened from one.
+  final Future<void> Function()? onContinueWithoutAccount;
 
   /// The bottom bar's line while nothing is under way
   /// ([signInStepReadyParts]).
@@ -340,10 +345,25 @@ class SignInStep extends StatelessWidget {
               ),
             ),
           if (recovery case final recovery?) recovery,
+          _continueLocallyButton(),
         ],
       ),
     ),
   );
+
+  /// The quiet way back to this computer's desk; nothing where this page does
+  /// not offer one.
+  Widget _continueLocallyButton() {
+    final continueLocally = onContinueWithoutAccount;
+    if (continueLocally == null) return const SizedBox.shrink();
+    return Center(
+      child: TextButton(
+        key: const Key('use-without-account-button'),
+        onPressed: () => unawaited(continueLocally()),
+        child: const Text('Use this computer without an account'),
+      ),
+    );
+  }
 
   /// The ways in beside Google and Apple: their size and type, in the app's
   /// own colours — a raised card fill for the browser page's other ways, an
@@ -512,9 +532,21 @@ class _ReadyBar extends StatelessWidget {
 /// The sign-in step bound to the app: shown by RootShell between setup and the
 /// first workspace (see [AppNotifier.signInStepShowing]).
 class SignInStepScreen extends StatefulWidget {
-  const SignInStepScreen({super.key, required this.app});
+  const SignInStepScreen({
+    super.key,
+    required this.app,
+    this.offerLocalMode = false,
+  });
 
   final AppNotifier app;
+
+  /// Offer the quiet way back to this computer's desk without an account.
+  ///
+  /// The wall offers it: a window that met this page because a sign-in was
+  /// cancelled or failed, or the CLI could not answer, can still use this
+  /// computer. The sheet over a desk does not — its own close already goes
+  /// back to that desk, and a second door there would be a rival to signing in.
+  final bool offerLocalMode;
 
   @override
   State<SignInStepScreen> createState() => _SignInStepScreenState();
@@ -602,6 +634,9 @@ class _SignInStepScreenState extends State<SignInStepScreen> {
               ): app.cancelLogin,
           },
           child: SignInStep(
+            onContinueWithoutAccount: widget.offerLocalMode
+                ? widget.app.continueWithoutAccount
+                : null,
             onSignIn: (provider) => unawaited(app.signInFromStep(provider)),
             onApprove: app.canSignInWithPhone && app.canSignInWithCode
                 ? (method) => unawaited(app.approveFromStep(method))

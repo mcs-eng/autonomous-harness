@@ -512,7 +512,9 @@ class _RootShellState extends ConsumerState<RootShell>
         // Every signed-out desktop launch requires an account before opening
         // the workspace, including computers that already have Harness.
         final signInStep = !touring && app.signInStepShowing;
-        if (signInStep) screen = SignInStepScreen(app: app);
+        if (signInStep) {
+          screen = SignInStepScreen(app: app, offerLocalMode: true);
+        }
         // Preserve the fragment pin while dialogs navigate; an OAuth callback can restore it later.
         if (kIsWeb) _sharedLocation ??= SharedAgentLocation.parse(Uri.base);
         final shared = _sharedLocation;

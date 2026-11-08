@@ -61,7 +61,9 @@ class LoginScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Every native entry uses the same page as onboarding, including expired sessions.
-    if (!kIsWeb) return SignInStepScreen(app: notifier);
+    if (!kIsWeb) {
+      return SignInStepScreen(app: notifier, offerLocalMode: true);
+    }
     grid.AppTheme.watch(context);
     return CallbackShortcuts(
       bindings: {
