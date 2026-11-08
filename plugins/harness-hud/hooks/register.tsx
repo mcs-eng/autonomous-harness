@@ -1,12 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, ContextRow, HarnessInfo, HudMode, Meter, Repo, Todo, ToolRun } from '../types'
+import type { AgentRow, ContextRow, HudMode, HudPlace, Meter, Repo, Todo, ToolRun } from '../types'
 import {
   activePhase,
   applyTaskUpdate,
   bar,
   burn,
+  clean,
   duration,
   fleetSummary,
   level,
@@ -27,6 +28,7 @@ import {
 const PANE = 'harness-hud'
 
 const mode = atom({ plugin: 'harness-hud', key: 'mode' } as const, 'full')
+const place = atom({ plugin: 'harness-hud', key: 'place' } as const, 'below')
 const now = atom({ plugin: 'harness-hud', key: 'now' } as const, 0)
 const meter = atom({ plugin: 'harness-hud', key: 'meter' } as const, { model: '', window: 0, history: [], limits: [], startedAt: 0 }, { shape: 'meter-1' })
 const tools = atom({ plugin: 'harness-hud', key: 'tools' } as const, [], { shape: 'tools-1' })
@@ -55,14 +57,17 @@ const timers: { cancel: () => void }[] = []
 async function refreshRepo($: $) {
   try {
     const cwd = await $.session.cwd()
-    const branch = await $.process.run(['git', 'branch', '--show-current'], { cwd, timeoutMs: 4000 })
+    // A repository's own config can name programs git runs (core.fsmonitor); turn those off so
+    // opening a session in an untrusted checkout runs nothing of the checkout's choosing.
+    const safe = ['git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false']
+    const branch = await $.process.run([...safe, 'branch', '--show-current'], { cwd, timeoutMs: 4000 })
     if (branch.exitCode !== 0) {
       await update($, repo, () => ({ dirty: 0 }))
       return
     }
-    const status = await $.process.run(['git', 'status', '--porcelain'], { cwd, timeoutMs: 4000 })
+    const status = await $.process.run([...safe, 'status', '--porcelain'], { cwd, timeoutMs: 4000 })
     const dirty = status.exitCode === 0 ? status.stdout.split('\n').filter(l => l.trim()).length : 0
-    const next: Repo = { branch: branch.stdout.trim() || '(detached)', dirty }
+    const next: Repo = { branch: clean(branch.stdout.trim(), 60) || '(detached)', dirty }
     await update($, repo, () => next)
   } catch {
     // git missing: the HUD shows no branch.
@@ -97,7 +102,7 @@ async function refreshFleet($: $) {
 async function refreshAgents($: $) {
   try {
     const list = await $.agent.list()
-    const rows: AgentRow[] = list.map(a => ({ id: a.id, description: a.description, type: a.type, status: a.status }))
+    const rows: AgentRow[] = list.map(a => ({ id: a.id, description: clean(a.description, 120), type: clean(a.type, 60), status: a.status }))
     await update($, agents, () => rows)
   } catch {
     // Listing agents is best effort.
@@ -155,16 +160,150 @@ async function applyUsage($: $, usage: { context: { tokens?: number; window: num
   toasted.limit = limitMark
 }
 
+/** The HUD's lines, for whichever site draws them. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function drawHud($: $, Box: any, Text: any, cols: number, isWorking: boolean, m: HudMode) {
+      const t = Math.max(await read($, now), await $.clock.now())
+  const me = await read($, meter)
+  const r = await read($, repo)
+  const hx = await read($, harness)
+
+  const pct = me.percent
+  const barWidth = cols >= 130 ? 12 : cols >= 100 ? 10 : 6
+  const left = turnsLeft(me.history, me.tokens, me.compactAt ?? me.window)
+  const rate = burn(me, t)
+
+  const line1 = (
+    <Text wrap="truncate-end">
+      <Text color="claude" bold>{me.model || 'Claude'}</Text>
+      <Text dimColor>  ctx </Text>
+      <Text color={level(pct)}>{bar(pct ?? 0, barWidth)}</Text>
+      <Text color={level(pct)} bold> {pct === undefined ? '--' : `${pct}%`}</Text>
+      <Text dimColor> {tokens(me.tokens)}/{tokens(me.window)}</Text>
+      {left !== undefined && (
+        <Text color={left <= 3 ? 'warning' : 'subtle'}>{left === 0 ? '  compacting soon' : `  ~${left} turn${left === 1 ? '' : 's'} to ${me.compactAt ? 'compact' : 'full'}`}</Text>
+      )}
+      {me.limits.map(l => {
+        const p = pace(l, t)
+        const isHot = p !== undefined && p > 100
+        return (
+          <Text>
+            <Text dimColor>  {limitLabel(l.kind)} </Text>
+            <Text color={isHot ? 'warning' : level(l.percent)}>{Math.round(l.percent)}%</Text>
+            {l.resetsAt !== undefined && <Text dimColor> ↺{duration(l.resetsAt - t)}</Text>}
+            {isHot && <Text color="warning"> →{p}%</Text>}
+          </Text>
+        )
+      })}
+      {me.usd !== undefined && (
+        <Text>
+          <Text dimColor>  {me.limits.length > 0 ? 'api≈' : ''}</Text>
+          <Text dimColor={me.limits.length > 0}>{money(me.usd)}</Text>
+          {rate !== undefined && <Text dimColor> {money(rate)}/h</Text>}
+        </Text>
+      )}
+      {r.branch !== undefined && (
+        <Text>
+          <Text dimColor>  ⎇ </Text>
+          <Text color="suggestion">{r.branch}</Text>
+          {r.dirty > 0 && <Text color="warning"> ±{r.dirty}</Text>}
+        </Text>
+      )}
+    </Text>
+  )
+
+  if (m === 'compact') return <Box flexDirection="column">{line1}</Box>
+
+  const runs = await read($, tools)
+  const stats = toolStats(runs)
+  const ag = await read($, agents)
+  const td = await read($, todos)
+  const live = ag.filter(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting')
+  const doneTodos = td.filter(x => x.status === 'completed').length
+  const current = td.find(x => x.status === 'in_progress')
+
+  const line2 = (
+    <Text wrap="truncate-end">
+      {stats.running.length > 0 ? (
+        stats.running.slice(0, 2).map((run, i) => (
+          <Text>
+            {i > 0 && <Text dimColor>, </Text>}
+            <Text color="warning">▶ </Text>
+            <Text bold>{toolName(run.tool)}</Text>
+            {run.label !== '' && <Text dimColor> {run.label}</Text>}
+            <Text color="subtle"> {duration(t - run.startedAt)}</Text>
+          </Text>
+        ))
+      ) : (
+        <Text dimColor>{isWorking ? '◇ thinking' : '◇ idle'}</Text>
+      )}
+      {stats.running.length > 2 && <Text dimColor> +{stats.running.length - 2}</Text>}
+      <Text dimColor>  ✓ {stats.done} tools</Text>
+      {stats.failed > 0 && <Text color="error"> ✗ {stats.failed}</Text>}
+      {stats.counts.length > 0 && (
+        <Text dimColor> ({stats.counts.slice(0, 3).map(([n, c]) => `${n}×${c}`).join(' ')})</Text>
+      )}
+      {live.length > 0 && (
+        <Text>
+          <Text dimColor>  agents </Text>
+          <Text color="claude">{live.length}</Text>
+          <Text dimColor>: {live.slice(0, 2).map(a => a.description || a.type).join(', ')}</Text>
+        </Text>
+      )}
+      {td.length > 0 && (
+        <Text>
+          <Text dimColor>  todo </Text>
+          <Text color={doneTodos === td.length ? 'success' : 'text'}>{doneTodos}/{td.length}</Text>
+          {current && <Text dimColor> ▸ {current.active ?? current.content}</Text>}
+        </Text>
+      )}
+    </Text>
+  )
+
+  const v = hx.verdict
+  const phase = v ? activePhase(v) : undefined
+  const hasHarnessLine = hx.dsh !== undefined || v !== undefined || (hx.fleet !== undefined && hx.fleet.siblings.length > 0)
+  const line3 = hasHarnessLine && (
+    <Text wrap="truncate-end">
+      <Text color="merged" bold>Harness</Text>
+      {hx.dsh !== undefined && <Text dimColor> {hx.dsh}</Text>}
+      {v !== undefined && (
+        <Text>
+          <Text>  </Text>
+          <Text color={v.ready ? 'success' : 'warning'}>{v.ready ? '● ready' : '○ not ready'}</Text>
+          {phase && <Text dimColor> · {phase.name}</Text>}
+          {v.errors > 0 && <Text color="error"> ✗{v.errors}</Text>}
+          {v.warnings > 0 && <Text color="warning"> !{v.warnings}</Text>}
+          {v.summary && <Text dimColor> · {v.summary}</Text>}
+        </Text>
+      )}
+      {hx.fleet !== undefined && hx.fleet.siblings.length > 0 && (
+        <Text dimColor>  fleet {fleetSummary(hx.fleet)}</Text>
+      )}
+    </Text>
+  )
+
+  return (
+    <Box flexDirection="column">
+      {line1}
+      {line2}
+      {line3}
+    </Box>
+  )
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const ran = await next(e)
     await $.command.register({
       name: 'hud',
       description: 'Harness HUD: open the detail pane, or set the band to full, compact or off',
-      argumentHint: '[full|compact|off|close]',
+      argumentHint: '[full|compact|off|below|above|close]',
     })
     const saved = await $.store.get('mode')
     if (saved === 'full' || saved === 'compact' || saved === 'off') await update($, mode, () => saved)
+    const where = await $.store.get('place')
+    if (where === 'below' || where === 'above') await update($, place, () => where)
     const usage = await $.session.usage()
     const model = prettyModel(await $.session.model())
     await update($, meter, m => ({ ...m, model, startedAt: usage.startedAt }))
@@ -204,13 +343,19 @@ export const register: Register = on => {
       await $.store.set('mode', value)
       return { text: `HUD band: ${value}.` }
     }
+    if (arg === 'below' || arg === 'above') {
+      const value: HudPlace = arg
+      await update($, place, () => value)
+      await $.store.set('place', value)
+      return { text: `HUD drawn ${value} the prompt.` }
+    }
     if (arg === 'close') {
       await $.ui.close({ id: PANE })
       return { text: 'HUD pane closed.' }
     }
     await Promise.all([refreshBreakdown($), refreshFleet($), refreshVerdict($), refreshAgents($)])
     await $.ui.open({ id: PANE, title: 'HUD' })
-    return { text: 'HUD pane opened. /hud full|compact|off sets the band; /hud close closes the pane.' }
+    return { text: 'HUD pane opened. /hud full|compact|off sets the band, /hud below|above moves it, /hud close closes the pane.' }
   })
 
   on('session.measure', async ($, e, next) => {
@@ -251,7 +396,7 @@ export const register: Register = on => {
       } else if (tool === 'TaskCreate') {
         const task = (ran.result as { task?: { id?: unknown; subject?: unknown } } | undefined)?.task
         if (typeof task?.id === 'string' && typeof task.subject === 'string') {
-          const todo: Todo = { id: task.id, content: task.subject, status: 'pending' }
+          const todo: Todo = { id: task.id, content: clean(task.subject), status: 'pending' }
           await update($, todos, list => [...list.filter(t => t.id !== todo.id), todo])
         }
       } else if (tool === 'TaskUpdate') {
@@ -284,135 +429,22 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const m = await read($, mode)
-    if (m === 'off' || e.props.hasSurvey) return next(e)
-
+    if (m === 'off' || e.props.hasSurvey || (await read($, place)) !== 'above') return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const cols = e.props.bodyColumns
-    const t = Math.max(await read($, now), await $.clock.now())
-    const me = await read($, meter)
-    const r = await read($, repo)
-    const hx = await read($, harness)
+    return drawHud($, Box, Text, e.props.bodyColumns, e.props.isWorking, m)
+  })
 
-    const pct = me.percent
-    const barWidth = cols >= 130 ? 12 : cols >= 100 ? 10 : 6
-    const left = turnsLeft(me.history, me.tokens, me.compactAt ?? me.window)
-    const rate = burn(me, t)
-
-    const line1 = (
-      <Text wrap="truncate-end">
-        <Text color="claude" bold>{me.model || 'Claude'}</Text>
-        <Text dimColor>  ctx </Text>
-        <Text color={level(pct)}>{bar(pct ?? 0, barWidth)}</Text>
-        <Text color={level(pct)} bold> {pct === undefined ? '--' : `${pct}%`}</Text>
-        <Text dimColor> {tokens(me.tokens)}/{tokens(me.window)}</Text>
-        {left !== undefined && (
-          <Text color={left <= 3 ? 'warning' : 'subtle'}>{left === 0 ? '  compacting soon' : `  ~${left} turn${left === 1 ? '' : 's'} to ${me.compactAt ? 'compact' : 'full'}`}</Text>
-        )}
-        {me.limits.map(l => {
-          const p = pace(l, t)
-          const isHot = p !== undefined && p > 100
-          return (
-            <Text>
-              <Text dimColor>  {limitLabel(l.kind)} </Text>
-              <Text color={isHot ? 'warning' : level(l.percent)}>{Math.round(l.percent)}%</Text>
-              {l.resetsAt !== undefined && <Text dimColor> ↺{duration(l.resetsAt - t)}</Text>}
-              {isHot && <Text color="warning"> →{p}%</Text>}
-            </Text>
-          )
-        })}
-        {me.usd !== undefined && (
-          <Text>
-            <Text dimColor>  </Text>
-            <Text>{money(me.usd)}</Text>
-            {rate !== undefined && <Text dimColor> {money(rate)}/h</Text>}
-          </Text>
-        )}
-        {r.branch !== undefined && (
-          <Text>
-            <Text dimColor>  ⎇ </Text>
-            <Text color="suggestion">{r.branch}</Text>
-            {r.dirty > 0 && <Text color="warning"> ±{r.dirty}</Text>}
-          </Text>
-        )}
-      </Text>
-    )
-
-    if (m === 'compact') return <Box flexDirection="column">{line1}</Box>
-
-    const runs = await read($, tools)
-    const stats = toolStats(runs)
-    const ag = await read($, agents)
-    const td = await read($, todos)
-    const live = ag.filter(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting')
-    const doneTodos = td.filter(x => x.status === 'completed').length
-    const current = td.find(x => x.status === 'in_progress')
-
-    const line2 = (
-      <Text wrap="truncate-end">
-        {stats.running.length > 0 ? (
-          stats.running.slice(0, 2).map((run, i) => (
-            <Text>
-              {i > 0 && <Text dimColor>, </Text>}
-              <Text color="warning">▶ </Text>
-              <Text bold>{toolName(run.tool)}</Text>
-              {run.label !== '' && <Text dimColor> {run.label}</Text>}
-              <Text color="subtle"> {duration(t - run.startedAt)}</Text>
-            </Text>
-          ))
-        ) : (
-          <Text dimColor>{e.props.isWorking ? '◇ thinking' : '◇ idle'}</Text>
-        )}
-        {stats.running.length > 2 && <Text dimColor> +{stats.running.length - 2}</Text>}
-        <Text dimColor>  ✓ {stats.done} tools</Text>
-        {stats.failed > 0 && <Text color="error"> ✗ {stats.failed}</Text>}
-        {stats.counts.length > 0 && (
-          <Text dimColor> ({stats.counts.slice(0, 3).map(([n, c]) => `${n}×${c}`).join(' ')})</Text>
-        )}
-        {live.length > 0 && (
-          <Text>
-            <Text dimColor>  agents </Text>
-            <Text color="claude">{live.length}</Text>
-            <Text dimColor>: {live.slice(0, 2).map(a => a.description || a.type).join(', ')}</Text>
-          </Text>
-        )}
-        {td.length > 0 && (
-          <Text>
-            <Text dimColor>  todo </Text>
-            <Text color={doneTodos === td.length ? 'success' : 'text'}>{doneTodos}/{td.length}</Text>
-            {current && <Text dimColor> ▸ {current.active ?? current.content}</Text>}
-          </Text>
-        )}
-      </Text>
-    )
-
-    const v = hx.verdict
-    const phase = v ? activePhase(v) : undefined
-    const hasHarnessLine = hx.dsh !== undefined || v !== undefined || (hx.fleet !== undefined && hx.fleet.siblings.length > 0)
-    const line3 = hasHarnessLine && (
-      <Text wrap="truncate-end">
-        <Text color="merged" bold>Harness</Text>
-        {hx.dsh !== undefined && <Text dimColor> {hx.dsh}</Text>}
-        {v !== undefined && (
-          <Text>
-            <Text>  </Text>
-            <Text color={v.ready ? 'success' : 'warning'}>{v.ready ? '● ready' : '○ not ready'}</Text>
-            {phase && <Text dimColor> · {phase.name}</Text>}
-            {v.errors > 0 && <Text color="error"> ✗{v.errors}</Text>}
-            {v.warnings > 0 && <Text color="warning"> !{v.warnings}</Text>}
-            {v.summary && <Text dimColor> · {v.summary}</Text>}
-          </Text>
-        )}
-        {hx.fleet !== undefined && hx.fleet.siblings.length > 0 && (
-          <Text dimColor>  fleet {fleetSummary(hx.fleet)}</Text>
-        )}
-      </Text>
-    )
-
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const m = await read($, mode)
+    if (m === 'off' || (await read($, place)) !== 'below') return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const hint = await next(e)
+    const cols = e.viewport?.columns ?? 120
+    const hud = await drawHud($, Box, Text, cols, e.props.isWorking, m)
     return (
       <Box flexDirection="column">
-        {line1}
-        {line2}
-        {line3}
+        {hint}
+        {hud}
       </Box>
     )
   })

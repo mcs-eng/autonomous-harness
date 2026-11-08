@@ -1,5 +1,7 @@
 export type HudMode = 'full' | 'compact' | 'off'
 
+export type HudPlace = 'below' | 'above'
+
 export type Limit = { kind: string; percent: number; resetsAt?: number }
 
 export type Meter = {
@@ -60,6 +62,7 @@ declare module 'claude-code' {
   interface PluginState {
     'harness-hud': {
       mode: HudMode
+      place: HudPlace
       now: number
       meter: Shaped<Meter>
       tools: Shaped<ToolRun[]>

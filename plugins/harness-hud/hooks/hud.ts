@@ -95,15 +95,30 @@ export function burn(meter: Meter, now: number): number | undefined {
   return meter.usd / hours
 }
 
+// C0 and C1 controls (ESC among them) and the bidi overrides, which could restyle or reorder the terminal.
+const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+
+/** Text from outside the mod (files, tools, other programs), safe to draw: no control characters, capped. */
+export function clean(text: string, max = 200): string {
+  const plain = text.replace(UNSAFE, '').replace(/[\t\n\r]+/g, ' ')
+  return plain.length > max ? `${plain.slice(0, max - 1)}…` : plain
+}
+
 function field(input: unknown, key: string): string | undefined {
   if (typeof input !== 'object' || input === null) return undefined
   const value = (input as Record<string, unknown>)[key]
-  return typeof value === 'string' ? value : undefined
+  return typeof value === 'string' ? clean(value, 1000) : undefined
 }
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/)
   return parts[parts.length - 1] || path
+}
+
+function raw(input: unknown, key: string): string | undefined {
+  if (typeof input !== 'object' || input === null) return undefined
+  const value = (input as Record<string, unknown>)[key]
+  return typeof value === 'string' ? value : undefined
 }
 
 /** A few words saying what a tool call is doing. */
@@ -113,7 +128,7 @@ export function toolLabel(tool: string, input: unknown): string {
   switch (tool) {
     case 'Bash':
     case 'PowerShell':
-      return short((field(input, 'command') ?? '').split('\n')[0] ?? '', 36)
+      return short(clean((raw(input, 'command') ?? '').split('\n')[0] ?? ''), 36)
     case 'Read':
     case 'Write':
     case 'Edit':
@@ -212,7 +227,7 @@ export function parseVerdict(text: string): Verdict | undefined {
   const findings = Array.isArray(v.findings) ? v.findings : []
   return {
     ready: v.ready === true,
-    summary: typeof v.summary === 'string' ? v.summary : undefined,
+    summary: typeof v.summary === 'string' ? clean(v.summary) : undefined,
     phases,
     errors: findings.filter(f => field(f, 'severity') === 'error').length,
     warnings: findings.filter(f => field(f, 'severity') === 'warning').length,

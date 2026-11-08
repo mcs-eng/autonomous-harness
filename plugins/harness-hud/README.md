@@ -1,12 +1,11 @@
 # Harness HUD for Claude Code
 
 A heads-up display for Claude Code sessions, in the spirit of claude-hud, built as a Claude Code mod (a hooks
-module) rather than a status-line script. It draws a band of up to three lines above the prompt and a detail
-pane on request. It knows about Harness: the domain harness's verdict and the other harnesses running on the
+module) rather than a status-line script. It draws up to three lines under the prompt (or above it) and a detail pane on request. It knows about Harness: the domain harness's verdict and the other harnesses running on the
 machine.
 
 ```
-Opus 5.5  ctx ██████░░░░ 61% 122k/200k  ~6 turns to compact  5h 42% ↺1h12m  7d 18%  $1.84 $2.10/h  ⎇ main ±3
+Opus 5.5  ctx ██████░░░░ 61% 122k/200k  ~6 turns to compact  5h 42% ↺1h12m  7d 18%  api≈$1.84 $2.10/h  ⎇ main ±3
 ▶ Bash npm test 12s  ✓ 14 tools ✗ 1 (Read×6 Edit×4 Bash×3)  agents 2: Explore auth, review diff  todo 3/7 ▸ Writing tests
 Harness autonomous/marp  ○ not ready · Draft !1 · 10 slides so far  fleet 1 working, 1 idle
 ```
@@ -17,8 +16,10 @@ Harness autonomous/marp  ○ not ready · Draft !1 · 10 slides so far  fleet 1 
   and a forecast of how many turns remain before auto-compaction. The forecast takes the median growth of the
   last few turns and measures it against the compaction point from Claude Code's own context breakdown. Then
   each rate-limit window with its reset countdown, plus a pace warning (`→140%`) when use so far projects past
-  the limit before the window resets. Session cost and the hourly burn rate. Git branch and the number of
-  changed files.
+  the limit before the window resets. Session cost and the hourly burn rate: Claude Code's own `/cost`
+  total, the tokens used priced at API rates. On a subscription (whenever rate-limit windows are reported)
+  it is dimmed and marked `api≈`, because it shows what the session would cost on the API, not what the
+  subscription bills. Git branch and the number of changed files.
 - **Line 2, activity.** Running tools with what they are working on and how long they have run, finished and
   failed tool counts with the busiest tools, running subagents, and todo progress with the current item. It
   reads both `TodoWrite` and the `TaskCreate`/`TaskUpdate` task list.
@@ -38,8 +39,10 @@ transcript), the todo list, the verdict's phases, and the other harnesses with t
 | `/hud full` | three-line band (the default) |
 | `/hud compact` | one-line band |
 | `/hud off` | no band |
+| `/hud below` | draw the HUD under the prompt, after the hint line (the default) |
+| `/hud above` | draw it above the prompt instead |
 
-The band setting is remembered across sessions.
+Both settings are remembered across sessions.
 
 ## Install
 

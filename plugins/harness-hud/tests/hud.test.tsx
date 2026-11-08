@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyTaskUpdate, pace, parseFleet, parseVerdict, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
+import { applyTaskUpdate, clean, pace, parseFleet, parseVerdict, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
 
 // Fictional fixture: no real machine, folder or person.
 const PS = JSON.stringify({
@@ -54,6 +54,22 @@ test('helpers forecast, parse and label', async () => {
 
   expect(toolLabel('Bash', { command: 'npm test\nmore' })).toBe('npm test')
   expect(toolLabel('Edit', { file_path: 'C:\\work\\src\\app.ts' })).toBe('app.ts')
+
+  // Outside text loses escapes and bidi overrides before it is drawn.
+  expect(clean('a\u001b[2Jb\u202ec\u0007')).toBe('a[2Jbc')
+  expect(clean('x'.repeat(300), 10)).toBe(`${'x'.repeat(9)}…`)
+  expect(parseVerdict(JSON.stringify({ ready: true, summary: 'ok\u001b]0;title\u0007' }))?.summary).toBe('ok]0;title')
+})
+
+const ran = (stdout: string) => ({
+  value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+})
+
+const hud = (args: string) => ({
+  command: 'hud',
+  args,
+  origin: { kind: 'composer' } as const,
+  presentation: { isFullscreen: true, columns: 160 },
 })
 
 const BAND = {
@@ -61,6 +77,14 @@ const BAND = {
   component: 'AbovePrompt',
   requestId: 'band',
   props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 160, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+} as const
+
+const HINT = {
+  plugin: 'harness-hud',
+  component: 'PromptHint',
+  requestId: 'hint',
+  props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+  viewport: { columns: 160, rows: 40 },
 } as const
 
 const PANE = {
@@ -93,18 +117,35 @@ test('the band and pane show context, tools, verdict and fleet on every surface'
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('process.run', (_, e) =>
     e.argv[0] === 'harness'
-      ? { value: { exitCode: 0, stdout: PS, stderr: '' } }
+      ? ran(PS)
       : e.argv.includes('branch')
-        ? { value: { exitCode: 0, stdout: 'feature/hud\n', stderr: '' } }
-        : { value: { exitCode: 0, stdout: ' M a.ts\n', stderr: '' } },
+        ? ran('feature/hud\n')
+        : ran(' M a.ts\n'),
   )
   on('tool.call', () => ({ result: {} }))
+  // Stands for the engine's own drawing of every site the mod passes on.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine line</Text>
+  })
 
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await $.session.measure({ ...usage, changed: ['context', 'rateLimits', 'cost'] })
   await $.tool.call({ tool: 'Bash', command: 'npm test' })
-  await $.command.run({ command: 'hud', args: '' })
+  await $.command.run(hud(''))
 
+  for (const surface of ['terminal', 'desktop'] as const) {
+    // Below the prompt by default: the engine's hint line first, then the HUD.
+    const hint = await $.ui.mount({ ...HINT, surface })
+    expect(await hint.find({ type: 'Text', text: /engine line/ })).toBeDefined()
+    expect(await hint.find({ type: 'Text', text: /25%/ })).toBeDefined()
+    await hint.unmount()
+    const empty = await $.ui.mount({ ...BAND, surface })
+    expect(await empty.find({ type: 'Text', text: /25%/ })).toBe(undefined)
+    await empty.unmount()
+  }
+
+  await $.command.run(hud('above'))
   for (const surface of ['terminal', 'desktop'] as const) {
     const band = await $.ui.mount({ ...BAND, surface })
     expect(await band.find({ type: 'Text', text: /Opus 5\.5/ })).toBeDefined()
@@ -129,8 +170,10 @@ test('the band yields when switched off', async ($, on) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine</Text>
   })
-  await $.command.run({ command: 'hud', args: 'off' })
-  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await band.find({ type: 'Text' }))?.text).toBe('engine')
-  await band.unmount()
+  await $.command.run(hud('off'))
+  for (const site of [BAND, HINT]) {
+    const drawn = await $.ui.mount({ ...site, surface: 'terminal' })
+    expect((await drawn.find({ type: 'Text' }))?.text).toBe('engine')
+    await drawn.unmount()
+  }
 })
