@@ -15,6 +15,7 @@ import 'dart:io';
 
 import 'package:cryptography/dart.dart';
 
+import '../core/backend_path.dart' show resolveHomeDirectory;
 import '../core/runtime_platform.dart';
 
 /// A token, and when it stops working.
@@ -50,7 +51,9 @@ class UsageCredentials {
   /// Overridden by tests so nothing shells out to the real `security`.
   final Future<ProcessResult> Function(String, List<String>)? runProcess;
 
-  String? get _home => home ?? RuntimePlatform.environment['HOME'];
+  /// `HOME`, then `USERPROFILE`: Windows sets only the latter, so an app started from Explorer or
+  /// the Start menu found no token, reported both accounts signed out, and the footer hid them.
+  String? get _home => home ?? resolveHomeDirectory(_env);
   Map<String, String> get _env => environment ?? RuntimePlatform.environment;
 
   /// The Keychain SERVICE Claude Code writes its OAuth token under — its own rule, read off
