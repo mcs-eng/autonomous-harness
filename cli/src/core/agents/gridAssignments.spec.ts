@@ -6,7 +6,14 @@ import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.j
 import { createGridAssignments } from './gridAssignments.js'
 
 vi.mock('../../lib/processEnv.js', () => ({ readProcessEnv: vi.fn(async () => ({ ANTHROPIC_BASE_URL: 'https://grid.example/relay' })) }))
-vi.mock('../../lib/tmux.js', () => ({ processRows: vi.fn(async () => []), processArgvIsBoundaryFaithful: vi.fn(() => true), launchArgs: vi.fn(() => '') }))
+vi.mock('../../lib/tmux.js', async (importActual) => ({
+  argvTokens: vi.fn((args: string) => args.split(' ')),
+  engineProcessMatchScore: vi.fn((row: { args: string }) => row.args.startsWith('node ') ? 4 : 0),
+  gridModelEvidenceArgs: vi.fn((_engine: string, args: string) => args),
+  processRows: vi.fn(async () => []),
+  processArgvIsBoundaryFaithful: vi.fn(() => true),
+  launchArgs: vi.fn((await importActual<typeof import('../../lib/tmux.js')>()).launchArgs),
+}))
 const assignment = { baseUrl: 'https://grid.example/relay', model: 'chosen' }
 const row = (id = 'a'): RegisteredSession => ({ agentId: id, engine: 'claude', sessionId: 'session', registeredAt: 1, boundAt: 2,
   active: true, primaryRuntimeKey: 'tmux:%1', processIdentity: { pid: 123, startMarker: 'start', executable: 'claude' },
@@ -227,6 +234,51 @@ it('refreshes a Pi whose ps title is one word from its parent launcher, without 
   await flush()
   expect(vi.mocked(launchArgs)).toHaveBeenCalledOnce()
   expect(s.pending[0].processes).toEqual([{ key: expect.any(String), engine: 'pi', env: {}, args: '-e /c/grid-provider.ts --model grid/chosen' }])
+})
+
+it('refresh uses a faithful daemon launcher when the engine replaced its argv with a bare title', async () => {
+  const s = setup()
+  const identity = { ...s.rows[0].processIdentity!, executable: '/bin/codex' }
+  s.rows[0].engine = 'codex'
+  s.rows[0].processIdentity = identity
+  vi.mocked(readProcessEnv).mockResolvedValue({})
+  const parent = { pid: 100, parentPid: 1, startMarker: 'parent', executable: 'sh',
+    args: 'sh harness-engine /work /bin/codex -c model_providers.grid.base_url=https://grid.example/relay/v1 -m chosen' }
+  vi.mocked(processRows).mockResolvedValue([{ ...identity, parentPid: 100, args: 'codex' }, parent])
+  vi.mocked(processArgvIsBoundaryFaithful).mockImplementation(row => row.pid === 100)
+  s.service.refresh(s.rows[0])
+  await flush()
+  expect(s.pending[0].processes[0].args).toContain('model_providers.grid.base_url')
+  s.answer()
+  await flush()
+  // The same launcher text without faithful boundaries is not evidence.
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(false)
+  s.service.refresh(s.rows[0])
+  await flush()
+  expect(s.models.gridAssignments).toHaveBeenCalledOnce()
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(true)
+  vi.mocked(readProcessEnv).mockResolvedValue({ ANTHROPIC_BASE_URL: 'https://grid.example/relay' })
+  vi.mocked(processRows).mockResolvedValue([])
+})
+
+it('refresh uses a faithful Codex wrapper after its native child replaces its argv', async () => {
+  const s = setup()
+  const identity = { ...s.rows[0].processIdentity!, executable: 'codex' }
+  s.rows[0].engine = 'codex'
+  s.rows[0].processIdentity = identity
+  vi.mocked(readProcessEnv).mockResolvedValue({})
+  const parent = { pid: 100, parentPid: 1, startMarker: 'parent', executable: 'node',
+    args: 'node /opt/codex/bin/codex -c model_providers.grid.base_url=https://grid.example/relay/v1 -m chosen' }
+  vi.mocked(processRows).mockResolvedValue([{ ...identity, parentPid: 100,
+    args: 'codex -c model_providers.grid.base_url=https://untrusted.example/relay/v1 -m prompt' }, parent])
+  vi.mocked(processArgvIsBoundaryFaithful).mockImplementation(row => row.pid === 100)
+  s.service.refresh(s.rows[0])
+  await flush()
+  expect(s.pending[0].processes[0].args).toContain('model_providers.grid.base_url')
+  expect(s.pending[0].processes[0].args).not.toContain('untrusted.example')
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(true)
+  vi.mocked(readProcessEnv).mockResolvedValue({ ANTHROPIC_BASE_URL: 'https://grid.example/relay' })
+  vi.mocked(processRows).mockResolvedValue([])
 })
 
 it('marks only a local profile launch with its own endpoint, on discovery and on refresh', async () => {

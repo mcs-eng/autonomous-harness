@@ -10,6 +10,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { findCorroboratedResumeSession, findLiveSession, findResumedTranscript } from '../../lib/sessionRepair.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
 import { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
+import { faithfulArgsFromCmdline } from '../../lib/tmux.js'
 import { createBinding, statBirthMs, type BindDeps, type RegisteredMeta } from './bind.js'
 
 vi.mock('../../engines/identities.js', () => ({ transcriptOf: vi.fn(), processSessionOf: vi.fn() }))
@@ -741,6 +742,17 @@ describe('binding a running process to its session', () => {
       await run.binding.bindObservedAgent(observed({ resumeSessionId: 'faithful-r' } as Partial<DiscoveredTerminalAgent>))
       expect(findCorroboratedResumeSession).not.toHaveBeenCalled()
       expect(run.deps.registry.register).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'faithful-r' }))
+    })
+
+    it.each([
+      ['opencode', faithfulArgsFromCmdline('opencode --session ses_05e335115ffeM05DT5hJHeN3Vp'.padEnd(160) + '\0\0\0')!, 'ses_05e335115ffeM05DT5hJHeN3Vp'],
+      ['pi', faithfulArgsFromCmdline('pi --session-id 53d3843c-724e-47ff-ae3a-9fedfa328bba'.padEnd(160) + '\0\0\0')!, '53d3843c-724e-47ff-ae3a-9fedfa328bba'],
+    ] as const)('binds an exact %s process-title session without an optional store reader', async (engine, args, resumeSessionId) => {
+      const run = setup()
+      vi.mocked(run.deps.registry.byProcess).mockReturnValue(agent({ engine, sessionId: '' }))
+      await run.binding.bindObservedAgent(observed({ engine, args, resumeSessionId, argsBoundaryFaithful: false }))
+      expect(findCorroboratedResumeSession).not.toHaveBeenCalled()
+      expect(run.deps.registry.register).toHaveBeenCalledWith(expect.objectContaining({ sessionId: resumeSessionId }))
     })
 
     it('never binds a resume id from flattened prompt text unless the store corroborates it (P1 security)', async () => {
