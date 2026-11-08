@@ -143,6 +143,30 @@ export function argvTokens(args: string): string[] {
   return tokens
 }
 
+/**
+ * The argv fragment models may inspect for Codex grid assignment. Read only exact option tokens from
+ * boundary-preserving argv: regexing the display string can find provider flags inside one quoted
+ * positional prompt and disclose that prompt fragment to the models process.
+ */
+export function gridModelEvidenceArgs(engine: RegisteredSession['engine'], args: string): string {
+  if (engine !== 'codex') return args
+  const tokens = argvTokens(args)
+  const evidence: string[] = []
+  const provider = /^model_providers\.[A-Za-z0-9_-]+\.base_url=(?:"[^"]+"|\S+)$/
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]
+    if (token === '--') break
+    const config = token === '-c' ? tokens[++index]
+      : token.startsWith('-c=') ? token.slice(3) : undefined
+    if (config && provider.test(config)) evidence.push(config)
+    if (token === '-m') {
+      const model = tokens[++index]
+      if (model && /^\S+$/.test(model)) evidence.push('-m', model)
+    }
+  }
+  return evidence.join(' ')
+}
+
 /** Discovery only needs a command prefix. Do not tokenize a shell script or
  * prompt suffix once per candidate engine. Keep the same token grammar as
  * argvTokens, but stop scanning as soon as the consumer has enough evidence. */
@@ -1040,6 +1064,10 @@ function heuristicEngineProcessMatchScore(
   // Command Code rewrites argv/comm to a session title, which becomes its only long-lived marker.
   if (engine === 'commandcode' && (/^\s*⌘(?:\s|$)/.test(row.executable) || /^\s*⌘(?:\s|$)/.test(row.args))) return 3
 
+  // OpenCode and Pi publish their identity by replacing the process title. At that point `comm`
+  // and argv[0] no longer name the launcher, so the exact closed title is the process signature.
+  if (processTitleSessionId(engine, row.args)) return 3
+
   // Cursor's launcher can retain argv[0]=agent while the Node package path appears later in argv.
   if (engine === 'cursor' && hasCursorPackageEntrypoint(row.args)) return 3
 
@@ -1400,6 +1428,27 @@ export function resumeSessionId(engine: RegisteredSession['engine'], args: strin
     }
   }
   return null
+}
+
+/**
+ * A session id an engine publishes by replacing its whole process title. These exact, closed shapes
+ * are safe even when `ps` cannot preserve argv boundaries: any extra token makes the text ordinary
+ * flattened argv again, where a prompt could contain flag-shaped words.
+ */
+export function processTitleSessionId(engine: RegisteredSession['engine'], args: string): string | null {
+  const split = argvTokens(args)
+  // Linux exposes a Node process.title rewrite as one argv element; the safe serializer quotes that
+  // whole element because it contains spaces. The rewritten argv region can retain trailing NULs,
+  // which the boundary-faithful serializer preserves as empty argv elements. Interpret the first
+  // token as the title only when every remainder is empty; any non-empty suffix is ordinary argv.
+  const rewritten = split.length > 0 && split.slice(1).every(token => token === '') ? split[0] : null
+  const title = (rewritten ?? args).trim()
+  const exact = engine === 'opencode'
+    ? /^opencode\s+(?:--session|-s)\s+(ses_[A-Za-z0-9]+)$/
+    : engine === 'pi'
+      ? /^pi\s+(?:--session|--session-id)\s+([0-9a-f][0-9a-f-]{7,})$/i
+      : null
+  return exact?.exec(title)?.[1] ?? null
 }
 
 /**

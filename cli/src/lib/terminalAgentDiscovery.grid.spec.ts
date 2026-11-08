@@ -17,12 +17,14 @@ import type { TerminalRootObservation, TerminalRuntimeRef } from './terminalType
 const probeGatewayRuntime = vi.hoisted(() => vi.fn())
 const readProcessEnv = vi.hoisted(() => vi.fn())
 const processRows = vi.hoisted(() => vi.fn())
+const processArgvIsBoundaryFaithful = vi.hoisted(() => vi.fn((row: ProcessRow) => Boolean(row.nativeArgv)))
 
 vi.mock('./gatewayRuntime.js', () => ({ probeGatewayRuntime }))
 vi.mock('./processEnv.js', () => ({ readProcessEnv }))
 vi.mock('./tmux.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('./tmux.js')>(),
   processRows,
+  processArgvIsBoundaryFaithful,
 }))
 
 const { probeTerminalAgents } = await import('./terminalAgentDiscovery.js')
@@ -54,7 +56,10 @@ describe('grid assignment on the live terminal discovery path', () => {
   it('reports the grid for every pane, from the process rather than the pane', async () => {
     processRows.mockResolvedValue([
       row(10, 1, 'bash'), row(30, 10, 'claude'),
-      row(20, 1, 'bash'), row(40, 20, 'codex', 'codex -c model_providers.grid.base_url="https://grid.example/relay/v1" -m chosen'),
+      row(20, 1, 'bash'), {
+        ...row(40, 20, 'codex', 'codex -c model_providers.grid.base_url="https://grid.example/relay/v1" -m chosen'),
+        nativeArgv: ['codex', '-c', 'model_providers.grid.base_url=https://grid.example/relay/v1', '-m', 'chosen'],
+      },
     ])
     readProcessEnv.mockResolvedValue({ ANTHROPIC_BASE_URL: ASSIGNMENT.baseUrl, ANTHROPIC_MODEL: ASSIGNMENT.model, API_KEY: 'secret' })
 
@@ -104,6 +109,47 @@ describe('grid assignment on the live terminal discovery path', () => {
     const unknown = await probe([launcher(''), row(30, 10, 'pi', 'pi       ')])
     expect(unknown.gridProcess).toBeUndefined()
     expect(unknown.grid).toBeUndefined()
+  })
+
+  it('does not treat flags in flattened Codex prompt text as model evidence', async () => {
+    processRows.mockResolvedValue([
+      row(10, 1, 'bash'),
+      row(30, 10, 'codex', 'codex inspect -c model_providers.grid.base_url=https://evil.invalid/v1 -m prompt'),
+    ])
+    readProcessEnv.mockResolvedValue({})
+
+    const probe = await probeTerminalAgents(
+      [backendWith('tmux', 'tmux', [{ runtime: TMUX_RUNTIME, rootPid: 10, cwd: '/work' }])],
+      ['tmux'],
+      999,
+    )
+
+    expect(probe.agents[0]).toMatchObject({ argsBoundaryFaithful: false })
+    expect(probe.agents[0].grid).toBeUndefined()
+    expect(probe.agents[0].gridProcess).toBeUndefined()
+  })
+
+  it("reads a bare-title Codex's launcher for model evidence only when the launcher's own argv is faithful", async () => {
+    // The child's boundaries say nothing about its parent's: the launcher's flattened text could be prompt text.
+    const command = 'zsh -lic . /d/launch/1.sh harness-engine /work /bin/codex -c model_providers.grid.base_url=https://grid.example/relay/v1 -m chosen'
+    const launcher = (faithful: boolean): ProcessRow => ({ ...row(10, 1, 'zsh', command), ...(faithful ? { nativeArgv: command.split(' ') } : {}) })
+    const child: ProcessRow = { ...row(30, 10, 'codex', 'codex'), nativeArgv: ['codex'] }
+    readProcessEnv.mockResolvedValue({})
+    const probe = async (rows: ProcessRow[]) => {
+      processRows.mockResolvedValue(rows)
+      const result = await probeTerminalAgents([backendWith('tmux', 'tmux', [{ runtime: TMUX_RUNTIME, rootPid: 10, cwd: '/work' }])], ['tmux'], 999)
+      expect(result.agents.map((agent) => agent.engine)).toEqual(['codex'])
+      return result.agents[0]
+    }
+    const flattened = await probe([launcher(false), child])
+    expect(flattened.gridProcess).toBeUndefined()
+    expect(flattened.grid).toBeUndefined()
+    const faithful = await probe([launcher(true), child])
+    expect(faithful.gridProcess?.args).toContain('model_providers.grid.base_url=https://grid.example/relay/v1')
+    // A faithful parent that is not its launcher proves nothing about a child whose own argv is flattened.
+    const unrelated = await probe([{ ...row(10, 1, 'bash'), nativeArgv: ['bash'] }, row(30, 10, 'codex', 'codex')])
+    expect(unrelated.gridProcess).toBeUndefined()
+    expect(unrelated.grid).toBeUndefined()
   })
 
   it('does not probe when the process table is unavailable', async () => {

@@ -396,7 +396,7 @@ function publicStatus(status: Record<string, unknown>): Record<string, unknown> 
   return out
 }
 
-export function startHookServer(
+export async function startHookServer(
   port: number,
   handlers: HookServerHandlers,
   options: HookServerOptions = {},
@@ -1215,6 +1215,16 @@ export function startHookServer(
   const server = http.createServer(handle)
   server.once('close', () => admissions.close())
 
+  // In multi-user mode this private socket is also the per-data-folder ownership claim. Claim it
+  // before TCP: two cores for the same folder must not split the elections, with one owning the
+  // configured port and the other owning the socket/pid authority. Different users have different
+  // socket paths, so a genuine cross-user TCP collision can still fall back below.
+  const socketPath = options.socketPath
+  const ownedSocket = options.allowPortFallback && socketPath
+    ? await listenLocalSocket(handle, socketPath)
+    : null
+  if (ownedSocket) console.log(`[hooks] listening on ${socketPath}`)
+
   return new Promise((resolve, reject) => {
     let fellBack = false
     const failed = (err: NodeJS.ErrnoException): void => {
@@ -1231,6 +1241,7 @@ export function startHookServer(
       } else {
         console.error('[hooks] listen failed:', err)
       }
+      ownedSocket?.closeSync()
       reject(err)
     }
     server.once('error', failed)
@@ -1238,7 +1249,7 @@ export function startHookServer(
       const actual = (server.address() as AddressInfo).port
       hosts = loopbackHosts(actual)
       console.log(`[hooks] listening on 127.0.0.1:${actual} (SessionStart/SessionEnd callbacks)`)
-      const socketPath = options.socketPath
+      if (ownedSocket) { resolve({ server, port: actual, localSocket: ownedSocket }); return }
       if (!socketPath) { resolve({ server, port: actual, localSocket: null }); return }
       // The private socket is mandatory when opting into multi-user startup. A duplicate daemon
       // must not survive on a random port while another one owns this user's socket.
@@ -1259,6 +1270,12 @@ export function startHookServer(
         },
       )
     })
-    server.listen(port, '127.0.0.1')
+    // A bad port throws here instead of emitting 'error'; the socket claimed above must not outlive it.
+    try {
+      server.listen(port, '127.0.0.1')
+    } catch (err) {
+      ownedSocket?.closeSync()
+      throw err
+    }
   })
 }

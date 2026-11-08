@@ -33,3 +33,12 @@ it('starts two OS-user services independently even when both request the same TC
   await expect(start(a, configuredPort, first.port, 'duplicate')).rejects.toThrow(/already serving/)
   expect((await localDaemonStatus(a, configuredPort))?.machineId).toBe('account-a')
 })
+
+it('releases the claimed socket when the configured port cannot be listened on at all', async () => {
+  const dir = directory(), configuredPort = 19419
+  // 65536 makes listen throw synchronously; the socket was already claimed for this data folder.
+  await expect(start(dir, configuredPort, 65536, 'bad-port')).rejects.toThrow()
+  const next = await start(dir, configuredPort, 0, 'after')
+  expect(next.localSocket).not.toBeNull()
+  expect((await localDaemonStatus(dir, configuredPort))?.machineId).toBe('after')
+})

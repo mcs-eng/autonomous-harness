@@ -17,10 +17,12 @@ import {
   ambiguousAgentProcess,
   engineProcessMatchScore,
   enrichProcessRows,
+  gridModelEvidenceArgs,
   launchArgs,
   processRows,
   processTreePids,
   processArgvIsBoundaryFaithful,
+  processTitleSessionId,
   resumeSessionId,
   type ProcessRow,
 } from './tmux.js'
@@ -178,7 +180,7 @@ function rootOwner(
       cwd: root.cwd,
       processIdentity: processIdentityOf(row),
       args: row.args,
-      resumeSessionId: resumeSessionId(engine, row.args),
+      resumeSessionId: resumeSessionId(engine, row.args) ?? processTitleSessionId(engine, row.args),
       // Flattened `ps` args cannot prove bypass state or a resume id out of prompt text
       // (review cycle-6, P1 security); only /proc-cmdline-reconstructed rows carry real
       // argv boundaries. Set here once so every consumer reads the same evidence flag.
@@ -280,11 +282,21 @@ export async function probeTerminalAgents(
     agent.gateway = runtime.kind
     // Only the marker read is core work. Models classifies it after reconciliation, without blocking binding.
     // Read from how it was launched, which for Pi is its launcher's command line (tmux.ts `launchArgs`).
+    // Codex's provider flags and -m are read only from boundary-faithful argv, as exact option tokens:
+    // flattened `ps` text can hold a prompt with flag-shaped words. Without them a Codex grid stays unknown.
     const row = enrichedRows.find((candidate) => sameProcessIdentity(candidate, agent.processIdentity))
+    const launched = row ? launchArgs(enrichedRows, row) : agent.args
+    // The faithfulness that counts is that of the row whose argv is read: the parent launcher's only when
+    // launchArgs read through to it, the process's own otherwise (an unrelated parent proves nothing).
+    const fromParent = !!row && launched !== '' && launched !== row.args
+    const source = fromParent ? enrichedRows.find((candidate) => candidate.pid === row.parentPid) : row
+    const faithful = row ? !!source && processArgvIsBoundaryFaithful(source) : agent.argsBoundaryFaithful
+    const codexBlind = agent.engine === 'codex' && !faithful
+    const codexArgs = fromParent ? launched : row ? row.args : agent.args
     const evidence = gridAssignmentEvidence('', agent.engine, await readProcessEnv(agent.processIdentity),
-      row ? launchArgs(enrichedRows, row) : agent.args)
+      agent.engine !== 'codex' ? launched : codexBlind ? '' : gridModelEvidenceArgs(agent.engine, codexArgs))
     if (evidence) agent.gridProcess = evidence
-    else if (evidence === null) agent.grid = null
+    else if (evidence === null && !codexBlind) agent.grid = null
     // And, for Codex, the profile it runs under — a fact about the process the row cannot otherwise learn.
     agent.codexHome = await probeProfileHome(agent.processIdentity, agent.engine)
     // Hermes's declared profile is read eagerly from the same verified process environment.

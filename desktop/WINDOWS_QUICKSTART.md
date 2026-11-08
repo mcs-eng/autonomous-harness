@@ -748,3 +748,28 @@ running tools, subagents and todos, and a Harness line with the workspace's
 `.harness/verdict.json` and the other harnesses from `harness ps --json`. `/hud` opens a
 detail pane. It changes nothing in the app, the CLI or the daemon. The plugin's
 [README](../plugins/harness-hud/README.md) has the install lines and the checks.
+
+## November 8 branch reconciliation
+
+Four branches that had drifted from main were checked against it. Two carry
+nothing new: the privacy-guard salvage branch is already in main through PR #52,
+and the October 10 homes-flake branch was a measurement, marked not for merge.
+From the other two, main now takes:
+
+- The October 16 overnight CLI fixes. OpenCode and Pi sessions bind from the
+  session id they publish as their whole process title. Codex's provider flags
+  and model are read for grid assignment only from argv with real boundaries,
+  so a flag-shaped word in a prompt is never passed to models, and a Codex
+  agent with no such argv stays unknown instead of being marked off-grid. A
+  daemon in multi-user mode claims its private socket before its port. Pi's
+  macOS case still resolves through its parent launcher, as upstream wrote it.
+- The agent picker no longer fills a short list with OpenCode. Upstream keeps
+  it there; the engine probe counts OpenCode's config folder as installed, so
+  the entry showed on machines with no OpenCode to run. Installed and recently
+  used engines still rank first.
+
+Not taken: the overlay branch's sign-in page button **Use this computer
+without an account**, which main removed on October 20 with upstream #1276,
+and its commit-msg hook path change, which main's hook does not need (a term
+is rejected and a clean message passes from Git Bash on Windows 11).
+This is a source change; it does not update an installed desktop or daemon.
