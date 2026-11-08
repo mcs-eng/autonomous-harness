@@ -146,6 +146,10 @@ describe('grid assignment on the live terminal discovery path', () => {
     expect(flattened.grid).toBeUndefined()
     const faithful = await probe([launcher(true), child])
     expect(faithful.gridProcess?.args).toContain('model_providers.grid.base_url=https://grid.example/relay/v1')
+    // A faithful parent that is not its launcher proves nothing about a child whose own argv is flattened.
+    const unrelated = await probe([{ ...row(10, 1, 'bash'), nativeArgv: ['bash'] }, row(30, 10, 'codex', 'codex')])
+    expect(unrelated.gridProcess).toBeUndefined()
+    expect(unrelated.grid).toBeUndefined()
   })
 
   it('does not probe when the process table is unavailable', async () => {

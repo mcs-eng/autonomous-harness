@@ -1270,6 +1270,12 @@ export async function startHookServer(
         },
       )
     })
-    server.listen(port, '127.0.0.1')
+    // A bad port throws here instead of emitting 'error'; the socket claimed above must not outlive it.
+    try {
+      server.listen(port, '127.0.0.1')
+    } catch (err) {
+      ownedSocket?.closeSync()
+      throw err
+    }
   })
 }
