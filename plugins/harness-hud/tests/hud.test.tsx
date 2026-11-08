@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyTaskUpdate, burn, clean, pace, parseFleet, parseVerdict, spent, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
+import { applyTaskResult, burn, clean, pace, parseFleet, parseVerdict, todosFromWrite, toolLabel, turnsLeft } from '../hooks/hud'
 
 // Fictional fixture: no real machine, folder or person.
 const PS = JSON.stringify({
@@ -50,9 +50,16 @@ test('helpers forecast, parse and label', async () => {
 
   const list = todosFromWrite({ newTodos: [{ content: 'Write tests', status: 'in_progress', activeForm: 'Writing tests' }] })
   expect(list?.[0]?.active).toBe('Writing tests')
-  const tasks = applyTaskUpdate([{ id: '1', content: 'Ship', status: 'pending' }], { taskId: '1', status: 'completed' })
+  const pending = [{ id: '1', content: 'Ship', status: 'pending' as const }]
+  const ok = (to: string) => ({ success: true, taskId: '1', updatedFields: ['status'], statusChange: { from: 'pending', to } })
+  const tasks = applyTaskResult(pending, ok('completed'))
   expect(tasks[0]?.status).toBe('completed')
-  expect(applyTaskUpdate(tasks, { taskId: '1', status: 'deleted' })).toEqual([])
+  expect(applyTaskResult(tasks, ok('deleted'))).toEqual([])
+  // A hook rewrote the request to in_progress: the result's own status wins.
+  expect(applyTaskResult(pending, ok('in_progress'))[0]?.status).toBe('in_progress')
+  // Refused, or reporting no status change: nothing moves.
+  expect(applyTaskResult(pending, { success: false, taskId: '1', updatedFields: [], error: 'no' })[0]?.status).toBe('pending')
+  expect(applyTaskResult(pending, { success: true, taskId: '1', updatedFields: ['subject'] })[0]?.status).toBe('pending')
 
   expect(toolLabel('Bash', { command: 'npm test\nmore' })).toBe('npm test')
   expect(toolLabel('Edit', { file_path: 'C:\\work\\src\\app.ts' })).toBe('app.ts')
@@ -181,16 +188,14 @@ test('the band yields when switched off', async ($, on) => {
   }
 })
 
-test('cost and burn count from a /clear, whether or not the engine total starts over', async () => {
+test('burn is the engine total over the time since the session started', async () => {
   const hour = 3_600_000
-  const meter = { model: '', window: 1, history: [], limits: [], startedAt: hour, usd: 5, usdBase: 4 }
-  expect(spent(meter)).toBe(1)
-  expect(burn(meter, 2 * hour)).toBe(1)
-  // The engine reset its total at the clear: what it reports is all since then.
-  expect(spent({ ...meter, usd: 0.5 })).toBe(0.5)
+  const meter = { model: '', window: 1, history: [], limits: [], startedAt: hour, usd: 5 }
+  expect(burn(meter, 3 * hour)).toBe(2.5)
+  expect(burn(meter, hour + 60_000)).toBe(undefined)
 })
 
-test('a rejected TaskUpdate leaves the todo, and /clear starts the lists over', async ($, on) => {
+test('a rejected TaskUpdate leaves the todo; /clear and /resume start the lists over', async ($, on) => {
   mock.clock(on)
   mock.store(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -209,9 +214,12 @@ test('a rejected TaskUpdate leaves the todo, and /clear starts the lists over', 
   expect(await pane.find({ type: 'Text', text: /Todos {2}0\/1/ })).toBeDefined()
   await pane.unmount()
 
-  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
-  const cleared = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await cleared.find({ type: 'Text', text: /No tool calls yet/ })).toBeDefined()
-  expect(await cleared.find({ type: 'Text', text: /Todos/ })).toBe(undefined)
-  await cleared.unmount()
+  for (const reason of ['clear', 'resume'] as const) {
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Ship it', description: 'd' })
+    await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })
+    const cleared = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await cleared.find({ type: 'Text', text: /No tool calls yet/ })).toBeDefined()
+    expect(await cleared.find({ type: 'Text', text: /Todos/ })).toBe(undefined)
+    await cleared.unmount()
+  }
 })

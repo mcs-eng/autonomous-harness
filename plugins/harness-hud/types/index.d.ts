@@ -15,8 +15,6 @@ export type Meter = {
   history: number[]
   limits: Limit[]
   usd?: number
-  /** The cost total when the session was last cleared; what is spent since is usd less this. */
-  usdBase?: number
   startedAt: number
 }
 

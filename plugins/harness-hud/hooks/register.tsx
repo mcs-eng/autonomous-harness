@@ -4,11 +4,10 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { AgentRow, ContextRow, HudMode, HudPlace, Meter, Repo, Todo, ToolRun } from '../types'
 import {
   activePhase,
-  applyTaskUpdate,
+  applyTaskResult,
   bar,
   burn,
   clean,
-  spent,
   duration,
   fleetSummary,
   level,
@@ -53,7 +52,6 @@ function prettyModel(id: string): string {
 let toasted = { context: 0, limit: 0 }
 let hasHarnessCli = true
 let lastAgentPoll = 0
-const timers: { cancel: () => void }[] = []
 
 async function refreshRepo($: $) {
   try {
@@ -199,7 +197,7 @@ async function drawHud($: $, Box: any, Text: any, cols: number, isWorking: boole
       {me.usd !== undefined && (
         <Text>
           <Text dimColor>  {me.limits.length > 0 ? 'api≈' : ''}</Text>
-          <Text dimColor={me.limits.length > 0}>{money(spent(me))}</Text>
+          <Text dimColor={me.limits.length > 0}>{money(me.usd)}</Text>
           {rate !== undefined && <Text dimColor> {money(rate)}/h</Text>}
         </Text>
       )}
@@ -311,8 +309,7 @@ export const register: Register = on => {
     await applyUsage($, usage, false)
     await Promise.all([refreshRepo($), refreshVerdict($), refreshAgents($), refreshBreakdown($)])
 
-    timers.push(
-      $.clock.every(1000, () => {
+    $.clock.every(1000, () => {
         void (async () => {
           const t = await $.clock.now()
           const runs = await read($, tools)
@@ -324,28 +321,22 @@ export const register: Register = on => {
           }
           if (hasAgents || runs.some(r => r.endedAt === undefined)) await update($, now, () => t)
         })()
-      }),
-      $.clock.every(30_000, () => void Promise.all([refreshFleet($), refreshVerdict($)])),
-      $.clock.after(50, () => void refreshFleet($)),
-    )
+    })
+    $.clock.every(30_000, () => void Promise.all([refreshFleet($), refreshVerdict($)]))
+    $.clock.after(50, () => void refreshFleet($))
     return ran
   })
 
+  // Timers are never cancelled here: a reload or the process's exit already ends them, and /clear or
+  // /resume end a conversation with no session.start after it. Those two only empty the mod's own
+  // lists, which belonged to the conversation that ended; usage figures stay the engine's.
   on('session.end', async ($, e, next) => {
-    if (e.reason !== 'clear') {
-      for (const t of timers.splice(0)) t.cancel()
-      return next(e)
-    }
-    // /clear ends the conversation with no session.start after it: keep the timers, and start the
-    // session's own figures over from the moment the engine now counts from.
     const ran = await next(e)
-    const clearedAt = await $.clock.now()
-    const usage = await $.session.usage()
-    await update($, meter, m => ({ ...m, startedAt: clearedAt, usdBase: usage.cost?.usd, history: [] }))
-    await update($, tools, () => [])
-    await update($, todos, () => [])
-    await applyUsage($, usage, false)
-    await refreshAgents($)
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      await update($, meter, m => ({ ...m, history: [] }))
+      await update($, tools, () => [])
+      await update($, todos, () => [])
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -414,10 +405,8 @@ export const register: Register = on => {
           await update($, todos, list => [...list.filter(t => t.id !== todo.id), todo])
         }
       } else if (tool === 'TaskUpdate') {
-        // A rejected update answers `success: false` without being an error result.
-        if ((ran.result as { success?: unknown } | undefined)?.success !== false) {
-          await update($, todos, list => applyTaskUpdate(list, e))
-        }
+        // Only what the result says happened: a rejected or rewritten update reports its own outcome.
+        await update($, todos, list => applyTaskResult(list, ran.result))
       } else if (tool === 'Agent' || tool === 'Task') {
         await refreshAgents($)
       }
@@ -523,7 +512,7 @@ export const register: Register = on => {
           )
         })}
         <Text dimColor>
-          {me.usd !== undefined ? `${money(spent(me))} this session` : 'No cost ledger'}
+          {me.usd !== undefined ? `${money(me.usd)} this session` : 'No cost ledger'}
           {rate !== undefined ? ` · ${money(rate)}/h` : ''}
           {me.startedAt > 0 ? ` · ${duration(t - me.startedAt)} elapsed` : ''}
         </Text>

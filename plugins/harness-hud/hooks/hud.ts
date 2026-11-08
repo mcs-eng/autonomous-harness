@@ -89,22 +89,11 @@ export function limitLabel(kind: string): string {
   return LIMIT_LABEL[kind] ?? kind
 }
 
-/** Dollars per hour since the session started; undefined in its first minutes. */
-/**
- * What this session has spent since it started or was last cleared. The engine's total may or may
- * not start over at /clear, so a total below the baseline taken there is read as already reset.
- */
-export function spent(meter: Meter): number | undefined {
-  if (meter.usd === undefined) return undefined
-  const base = meter.usdBase ?? 0
-  return meter.usd >= base ? meter.usd - base : meter.usd
-}
-
+/** The engine's cost total over the time since the session started; undefined in its first minutes. */
 export function burn(meter: Meter, now: number): number | undefined {
   const hours = (now - meter.startedAt) / HOUR
-  const usd = spent(meter)
-  if (usd === undefined || hours < 0.05) return undefined
-  return usd / hours
+  if (meter.usd === undefined || hours < 0.05) return undefined
+  return meter.usd / hours
 }
 
 // C0 and C1 controls (ESC among them) and every bidi control (the Arabic letter mark, the LRM/RLM
@@ -203,21 +192,19 @@ export function todosFromWrite(result: unknown): Todo[] | undefined {
   })
 }
 
-export function applyTaskUpdate(list: readonly Todo[], input: unknown): Todo[] {
-  const id = field(input, 'taskId')
-  if (!id) return [...list]
-  const status = field(input, 'status')
-  if (status === 'deleted') return list.filter(t => t.id !== id)
-  return list.map(t => {
-    if (t.id !== id) return t
-    const next: Todo = { ...t }
-    const subject = field(input, 'subject')
-    const active = field(input, 'activeForm')
-    if (subject) next.content = subject
-    if (active) next.active = active
-    if (status === 'pending' || status === 'in_progress' || status === 'completed') next.status = status
-    return next
-  })
+/**
+ * A TaskUpdate as its result reports it: the status it changed to (`statusChange.to`), never the
+ * status that was asked for, which a hook may have rewritten or the tool refused.
+ */
+export function applyTaskResult(list: readonly Todo[], result: unknown): Todo[] {
+  if (typeof result !== 'object' || result === null) return [...list]
+  const r = result as { success?: unknown; taskId?: unknown; statusChange?: unknown }
+  if (r.success !== true || typeof r.taskId !== 'string') return [...list]
+  const id = r.taskId
+  const to = field(r.statusChange, 'to')
+  if (to === 'deleted') return list.filter(t => t.id !== id)
+  if (to !== 'pending' && to !== 'in_progress' && to !== 'completed') return [...list]
+  return list.map(t => (t.id === id ? { ...t, status: to } : t))
 }
 
 export function parseVerdict(text: string): Verdict | undefined {
