@@ -281,6 +281,30 @@ it('refresh uses a faithful Codex wrapper after its native child replaces its ar
   vi.mocked(processRows).mockResolvedValue([])
 })
 
+it('refresh leaves a Codex grid as it was when no faithful argv can be read', async () => {
+  // Codex is classified from argv alone: argv that cannot be read is not evidence of being off-grid.
+  const s = setup()
+  const identity = { ...s.rows[0].processIdentity!, executable: '/bin/codex' }
+  s.rows[0].engine = 'codex'
+  s.rows[0].processIdentity = identity
+  s.rows[0].grid = assignment
+  vi.mocked(readProcessEnv).mockResolvedValue({})
+  const parent = { pid: 100, parentPid: 1, startMarker: 'parent', executable: 'sh',
+    args: 'sh harness-engine /work /bin/codex -c model_providers.grid.base_url=https://grid.example/relay/v1 -m chosen' }
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(false)
+  for (const rows of [[{ ...identity, parentPid: 100, args: 'codex' }, parent], [{ ...identity, parentPid: 100, args: 'codex exec a prompt' }], []]) {
+    vi.mocked(processRows).mockResolvedValue(rows)
+    s.service.refresh(s.rows[0])
+    await flush()
+  }
+  expect(s.models.gridAssignments).not.toHaveBeenCalled()
+  expect(s.registry.updateProcessIdentity).not.toHaveBeenCalled()
+  expect(s.rows[0].grid).toEqual(assignment)
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(true)
+  vi.mocked(readProcessEnv).mockResolvedValue({ ANTHROPIC_BASE_URL: 'https://grid.example/relay' })
+  vi.mocked(processRows).mockResolvedValue([])
+})
+
 it('marks only a local profile launch with its own endpoint, on discovery and on refresh', async () => {
   const s = setup()
   const local = 'http://127.0.0.1:8090/v1'

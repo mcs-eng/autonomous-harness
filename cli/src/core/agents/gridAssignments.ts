@@ -23,11 +23,14 @@ function trustedBaseUrl(session: RegisteredSession): string | undefined {
  * its parent launcher's validated command line, which names the engine token itself. Without either source
  * the executable alone is offered, so environment- and config-backed launches still classify.
  */
-async function faithfulArgs(identity: NonNullable<RegisteredSession['processIdentity']>, engine: RegisteredSession['engine']): Promise<string> {
+async function faithfulArgs(identity: NonNullable<RegisteredSession['processIdentity']>, engine: RegisteredSession['engine']): Promise<string | undefined> {
   const safe = (args: string) => gridModelEvidenceArgs(engine, args)
+  // Codex's grid evidence is argv alone. Where no faithful argv can be read, its grid is not known
+  // (undefined), which must never be reported as off-grid; other engines still classify by environment.
+  const unknown = engine === 'codex' ? undefined : identity.executable
   const rows = await processRows()
   const row = rows?.find(candidate => sameProcessIdentity(candidate, identity))
-  if (!rows || !row) return identity.executable
+  if (!rows || !row) return unknown
   if (processArgvIsBoundaryFaithful(row)) return safe(row.args)
   const parent = rows.find(candidate => candidate.pid === row.parentPid)
   const parentFaithful = !!parent && processArgvIsBoundaryFaithful(parent)
@@ -35,10 +38,10 @@ async function faithfulArgs(identity: NonNullable<RegisteredSession['processIden
   // names the model flags after the child has replaced its title; process matching proves this is
   // the same engine's wrapper, not an arbitrary parent command.
   if (parent && parentFaithful && engineProcessMatchScore(parent, engine) > 0) return safe(parent.args)
-  // Codex's grid evidence is argv alone, so its launcher is read only with faithful boundaries:
-  // flattened prompt text must never become model evidence.
-  if (engine === 'codex' && !parentFaithful) return identity.executable
-  return /\s/.test(row.args.trim()) ? identity.executable : safe(launchArgs(rows, row)) || identity.executable
+  // Its launcher is read only with faithful boundaries: flattened prompt text must never become model evidence.
+  if (engine === 'codex' && !parentFaithful) return undefined
+  if (/\s/.test(row.args.trim())) return unknown
+  return safe(launchArgs(rows, row)) || unknown
 }
 
 export interface GridAssignmentsDeps {
@@ -117,6 +120,7 @@ export function createGridAssignments({ models, registry, revision, announce, wa
       if (!owner) return
       const identity = session.processIdentity
       void Promise.all([readProcessEnv(identity), faithfulArgs(identity, session.engine)]).then(([env, args]) => {
+        if (args === undefined) { owner.done(); return }
         const process = env
           ? gridAssignmentProcess(owner.key, session.engine, env, args, trustedBaseUrl(session))
           : gridAssignmentEvidence(owner.key, session.engine, null, args)
