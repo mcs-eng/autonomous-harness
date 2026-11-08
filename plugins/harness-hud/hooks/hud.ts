@@ -85,11 +85,12 @@ export function turnsLeft(history: readonly number[], current: number | undefine
 
 /**
  * Where a rate-limit window will land at its reset if use keeps its pace so far.
- * Undefined for windows of unknown length or too early in the window to say.
+ * Undefined for windows of unknown length, too early in the window to say, or already reset (the
+ * reading is the last response's, so it can outlive its window).
  */
 export function pace(limit: Limit, now: number): number | undefined {
   const length = WINDOW_MS[limit.kind]
-  if (length === undefined || limit.resetsAt === undefined) return undefined
+  if (length === undefined || limit.resetsAt === undefined || now >= limit.resetsAt) return undefined
   const elapsed = length - (limit.resetsAt - now)
   if (elapsed < length * 0.1 || elapsed <= 0) return undefined
   return Math.round((limit.percent / elapsed) * length)

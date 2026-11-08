@@ -41,6 +41,9 @@ test('helpers forecast, parse and label', async () => {
   // 40% used with 1h of the 5h window gone: on pace for 200%.
   expect(pace({ kind: 'five_hour', percent: 40, resetsAt: 4 * hour }, 0)).toBe(200)
   expect(pace({ kind: 'spend_limit', percent: 40, resetsAt: hour }, 0)).toBe(undefined)
+  // A reading that outlived its window says nothing about pace.
+  expect(pace({ kind: 'five_hour', percent: 100, resetsAt: 10 * hour }, 11 * hour)).toBe(undefined)
+  expect(pace({ kind: 'five_hour', percent: 100, resetsAt: 10 * hour }, 10 * hour)).toBe(undefined)
 
   const fleet = parseFleet(PS)
   expect(fleet?.self).toBe('this one')
