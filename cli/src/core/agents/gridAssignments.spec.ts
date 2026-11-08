@@ -305,6 +305,25 @@ it('refresh leaves a Codex grid as it was when no faithful argv can be read', as
   vi.mocked(processRows).mockResolvedValue([])
 })
 
+it('refresh still classifies an environment-backed engine whose argv cannot be read', async () => {
+  // Flattened argv, or a bare title with no launcher above it: the environment alone is still evidence.
+  const s = setup()
+  const identity = s.rows[0].processIdentity!
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(false)
+  for (const [index, args] of ['claude -p some prompt words', 'claude'].entries()) {
+    vi.mocked(processRows).mockResolvedValueOnce([{ ...identity, parentPid: 1, args }])
+    s.service.refresh(s.rows[0])
+    await flush()
+    expect(s.pending[index].processes).toEqual([expect.objectContaining({ engine: 'claude',
+      env: { ANTHROPIC_BASE_URL: 'https://grid.example/relay' } })])
+    s.answer(index, assignment)
+    await flush()
+  }
+  expect(s.models.gridAssignments).toHaveBeenCalledTimes(2)
+  vi.mocked(processArgvIsBoundaryFaithful).mockReturnValue(true)
+  vi.mocked(processRows).mockResolvedValue([])
+})
+
 it('marks only a local profile launch with its own endpoint, on discovery and on refresh', async () => {
   const s = setup()
   const local = 'http://127.0.0.1:8090/v1'
